@@ -130,5 +130,21 @@ tts:
   provider_config_version: 3B.0
   # Test-only mock modes: valid, provider_error, timeout, empty_audio, malformed_response.
   mock_mode: valid
+audio_composition:
+  # Goal 3C reads existing ProductionPlan + TTS artifacts and creates audio only.
+  # It never starts a new video/ASS/subtitle render and never changes the plan.
+  enabled: false
+  cache_enabled: true
+  sample_rate: 48000
+  output_format: wav
+  ducking_enabled: true
+  duck_level: 0.35             # Original source remains audible under narration.
+  duck_attack_seconds: 0.08
+  duck_release_seconds: 0.20
+  preserve_original_events: true
+  narration_target_lufs: -16.0
+  narration_true_peak_db: -1.5
+  narration_lra: 11.0
+  engine_version: 3C.0
 min_selected_clip_distance_seconds: 8
 optional_visual_features: false

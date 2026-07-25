@@ -65,7 +65,7 @@ python -m app process --input ".\input\test-video.mp4" --config config.yaml
 
 ## Чего пока нет
 
-Это не SaaS и не полный аналог OpusClip. Здесь нет интерфейса, аккаунтов, публикации в соцсети, облачной базы, оплаты, TTS/новой озвучки, музыки, B-roll, face/speaker tracking и сложного видеоредактора.
+Это не SaaS и не полный аналог OpusClip. Здесь нет интерфейса, аккаунтов, публикации в соцсети, облачной базы, оплаты, музыки, B-roll, face/speaker tracking и сложного видеоредактора. TTS и отдельная локальная audio composition реализованы как изолированные production-этапы, но voice cloning и генерация музыки намеренно отсутствуют.
 
 Не поддерживаются обход DRM, paywall, авторизации или технических ограничений видеоплатформ. Используйте только видео и публичные ссылки, на обработку которых у вас есть права.
 
@@ -461,6 +461,64 @@ report не записываются.
 mix, ducking, извлечение original dialogue, музыка/effects, выравнивание
 timeline по фактической речи, регенерация/render субтитров, ASS changes, video
 render, voice cloning и translation. Это будет предметом отдельного Goal 3C.
+
+## Production Audio Engine (Goal 3C)
+
+Goal 3C — отдельный, локальный этап после уже созданных `ProductionPlan` и TTS
+artifacts. Он **не** меняет план, text/факты, видео, ASS или субтитры и не
+запускает Whisper, TTS либо видеорендер. По умолчанию
+`audio_composition.enabled: false`, поэтому прежняя команда `process` работает
+как раньше.
+
+```text
+ProductionPlan + tts-result.json + source media + transcript timestamps
+  → WAV narration: loudness normalisation
+  → extracted original dialogue WAV
+  → source bed under narration with attack/release ducking
+  → deterministic narration → dialogue → pause timeline
+  → mixed_audio.wav + Audio Project artifacts
+```
+
+Запустите изолированную сборку после создания плана и TTS:
+
+```powershell
+# Не запускает FFmpeg video render, Whisper или новый TTS request.
+python -m app process --input ".\input\smoke-test.mp4" --audio-only
+
+# Принудительно переизвлекает dialogue/source-bed и normalised narration cache.
+python -m app process --input ".\input\smoke-test.mp4" --audio-only --recompute-audio
+```
+
+Настройки находятся в секции `audio_composition` конфигурации. Доступны WAV
+PCM s16le, mono, 48 kHz по умолчанию; `duck_level`, `duck_attack_seconds` и
+`duck_release_seconds` задают читаемое приглушение исходного звука под
+narration. Музыка и effects имеют отдельные пустые tracks-плейсхолдеры: Goal 3C
+не генерирует и не подставляет их.
+
+Результаты хранятся отдельно от MP4:
+
+```text
+output/<source>/audio/
+  audio-project.json
+  audio-manifest.json
+  audio-summary.txt
+  mixed_audio.wav
+  segments/narration/*.wav
+  segments/dialogue/*.wav
+  segments/silence/*.wav
+```
+
+`audio-project.json` содержит typed timeline с фактическими путями, SHA-256,
+длительностями, `fact_id`, source timestamps и speaker для dialogue clips.
+Кэш извлечённого dialogue и source-bed расположен в `work/audio-cache/` и перед
+использованием проверяется через `ffprobe` (для dialogue также SHA-256).
+`report.json.audio` фиксирует tracks, ducking, counts, duration, cache,
+validation и только безопасные сообщения ошибок.
+
+`--audio-only` сохраняет существующие MP4 и `render.json`: Goal 3C создаёт
+только аудиоартефакты. Он может собрать доступные dialogue clips даже если TTS
+раньше завершился typed fallback; в этом случае статус будет `partial`, а не
+ложный успешный narration.
 
 ## Тесты
 

@@ -331,6 +331,47 @@ class TTSConfig:
 
 
 @dataclass(slots=True)
+class AudioCompositionConfig:
+    """Goal 3C audio-only composition settings; disabled to preserve legacy process runs."""
+
+    enabled: bool = False
+    cache_enabled: bool = True
+    sample_rate: int = 48000
+    output_format: str = "wav"
+    ducking_enabled: bool = True
+    duck_level: float = 0.35
+    duck_attack_seconds: float = 0.08
+    duck_release_seconds: float = 0.20
+    preserve_original_events: bool = True
+    narration_target_lufs: float = -16.0
+    narration_true_peak_db: float = -1.5
+    narration_lra: float = 11.0
+    engine_version: str = "3C.0"
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool):
+            raise ClipEngineError("audio_composition.enabled и cache_enabled должны быть true или false.")
+        if not isinstance(self.ducking_enabled, bool) or not isinstance(self.preserve_original_events, bool):
+            raise ClipEngineError("audio_composition флаги должны быть true или false.")
+        if self.output_format != "wav":
+            raise ClipEngineError("Goal 3C поддерживает только audio_composition.output_format: wav.")
+        if not 8000 <= self.sample_rate <= 192000:
+            raise ClipEngineError("audio_composition.sample_rate должен быть от 8000 до 192000.")
+        if not 0.10 <= self.duck_level <= 1:
+            raise ClipEngineError("audio_composition.duck_level должен быть от 0.10 до 1.")
+        if not 0 <= self.duck_attack_seconds <= 5 or not 0 <= self.duck_release_seconds <= 5:
+            raise ClipEngineError("audio_composition duck attack/release должны быть от 0 до 5 секунд.")
+        if not -40 <= self.narration_target_lufs <= -5:
+            raise ClipEngineError("audio_composition.narration_target_lufs должен быть от -40 до -5.")
+        if not -12 <= self.narration_true_peak_db <= -0.1:
+            raise ClipEngineError("audio_composition.narration_true_peak_db должен быть от -12 до -0.1.")
+        if not 1 <= self.narration_lra <= 20:
+            raise ClipEngineError("audio_composition.narration_lra должен быть от 1 до 20.")
+        if not self.engine_version.strip():
+            raise ClipEngineError("audio_composition.engine_version не должен быть пустым.")
+
+
+@dataclass(slots=True)
 class AppConfig:
     whisper_model: str = "small"
     language: str | None = None
@@ -360,6 +401,7 @@ class AppConfig:
     transformation: TransformationConfig = field(default_factory=TransformationConfig)
     production: ProductionConfig = field(default_factory=ProductionConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
+    audio_composition: AudioCompositionConfig = field(default_factory=AudioCompositionConfig)
     min_selected_clip_distance_seconds: float = 8.0
     optional_visual_features: bool = False
     # Compatibility flag for older local configurations; --mock-ai has priority.
@@ -394,6 +436,7 @@ class AppConfig:
         self.transformation.validate()
         self.production.validate()
         self.tts.validate()
+        self.audio_composition.validate()
         if not 0 <= self.min_selected_clip_distance_seconds <= 600:
             raise ClipEngineError("min_selected_clip_distance_seconds должен быть от 0 до 600.")
         if not isinstance(self.optional_visual_features, bool):
@@ -434,6 +477,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "transformation": TransformationConfig,
             "production": ProductionConfig,
             "tts": TTSConfig,
+            "audio_composition": AudioCompositionConfig,
         }
         for name, config_type in nested.items():
             nested_values = values.get(name)

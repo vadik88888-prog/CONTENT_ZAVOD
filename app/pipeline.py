@@ -8,9 +8,10 @@ from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.audio_features import analyse_audio
+from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
 from app.content_transformation import TRANSFORMATION_ENGINE_VERSION, run_content_transformation
-from app.errors import ClipEngineError, ProductionPlanError, StageError, TTSError, TransformationProviderError
+from app.errors import AudioCompositionError, ClipEngineError, ProductionPlanError, StageError, TTSError, TransformationProviderError
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.intelligence_candidates import generate_candidates_with_stats
 from app.local_scoring import score_candidates
@@ -44,6 +45,7 @@ TRANSFORMATION_STAGES = (
 )
 PRODUCTION_PLAN_STAGES = ("production_plan",)
 TTS_STAGES = ("tts_generation",)
+AUDIO_COMPOSITION_STAGES = ("audio_composition",)
 
 
 @dataclass(slots=True)
@@ -119,6 +121,7 @@ class Pipeline:
         recompute_transformation: bool = False,
         production_plan_only: bool = False, recompute_production_plan: bool = False,
         tts_only: bool = False, recompute_tts: bool = False, disable_tts: bool = False,
+        audio_only: bool = False, recompute_audio: bool = False,
     ) -> None:
         self.root = root.resolve()
         self.config = config
@@ -133,6 +136,8 @@ class Pipeline:
         self.tts_only = tts_only
         self.recompute_tts = recompute_tts
         self.disable_tts = disable_tts
+        self.audio_only = audio_only
+        self.recompute_audio = recompute_audio
         self.warnings: list[str] = []
         self.errors: list[str] = []
 
@@ -146,8 +151,16 @@ class Pipeline:
                 if name == "report" or any(name.startswith(base) for base in TTS_STAGES)
             )
             tracker.invalidate("Запрошен --recompute-tts.", tts_names)
+        if self.recompute_audio:
+            audio_names = tuple(
+                name for name in tracker.data.get("stages", {})
+                if name == "report" or any(name.startswith(base) for base in AUDIO_COMPOSITION_STAGES)
+            )
+            tracker.invalidate("Запрошен --recompute-audio.", audio_names)
         if self.tts_only:
             return self._run_tts_only(tracker, source, work_directory, output_directory)
+        if self.audio_only:
+            return self._run_audio_only(tracker, source, work_directory, output_directory)
         if self.recompute_intelligence:
             tracker.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
         if self.recompute_transformation:
@@ -237,6 +250,10 @@ class Pipeline:
             tracker, transformation, work_directory, output_directory,
         )
         tts = self._run_tts(tracker, production, work_directory, output_directory)
+        audio = self._run_audio(
+            tracker, production, source, transcript, work_directory, output_directory,
+            Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
+        )
         render_data = (
             self._skip_render_for_production_plan(tracker, work_directory / "render.json")
             if self.production_plan_only
@@ -264,7 +281,7 @@ class Pipeline:
             str(ai_data.get("selection_mode", "local")), int(raw_candidates.get("candidates_generated", len(candidates))),
         )
         report_path = output_directory / "report.json"
-        tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts}))
+        tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio}))
         tracker.finish("report")
         make_report(
             report_path, source_data, metadata, self.config, tracker.data, len(selected), len(candidates),
@@ -283,6 +300,7 @@ class Pipeline:
             content_transformation=transformation,
             production_plan=production,
             tts=tts,
+            audio=audio,
         )
         return PipelineResult(work_directory, output_directory, report_path, len(selected), outputs, self.warnings)
 
@@ -509,6 +527,49 @@ class Pipeline:
         self.errors.extend([f"tts: {item.message}" for item in result.api_errors])
         return tts_report_section(result)
 
+    def _run_audio(
+        self, tracker: StageTracker, production: dict[str, Any], source: Source,
+        transcript: dict[str, Any], work_directory: Path, output_directory: Path,
+        prepared_source_audio_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """Compose Audio Project after existing plan/TTS stages, never changing render inputs."""
+
+        if not self.config.audio_composition.enabled or self.production_plan_only:
+            reason = "disabled" if not self.config.audio_composition.enabled else "production_plan_only"
+            tracker.skip("audio_composition", f"Audio Composition skipped: {reason}.")
+            return {"enabled": False, "status": "skipped", "reason": reason}
+        plan_data = production.get("production_plan") if isinstance(production, dict) else None
+        if not isinstance(plan_data, dict):
+            tracker.skip("audio_composition", "Нет ProductionPlan для Audio Composition.")
+            return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
+        try:
+            plan = ProductionPlan.model_validate(plan_data)
+        except Exception as error:
+            tracker.start("audio_composition")
+            tracker.finish("audio_composition", "failed", sanitize_api_error(error))
+            return {"enabled": True, "status": "failed", "reason": "invalid_production_plan"}
+        stage_name = f"audio_composition:{plan.plan_id}"
+        tracker.start(stage_name, _hash({
+            "plan": plan.plan_id, "audio": self.config.audio_composition,
+            "tts_result": _file_fingerprint(output_directory / "tts" / "tts-result.json"),
+            "recompute": self.recompute_audio,
+        }))
+        try:
+            project = AudioCompositionService(self.root, self.config).compose(
+                plan, source, transcript, read_json(output_directory / "tts" / "tts-result.json", {}),
+                work_directory, output_directory, force_recompute=self.recompute_audio,
+                prepared_source_audio_path=prepared_source_audio_path,
+            )
+        except AudioCompositionError as error:
+            safe = sanitize_api_error(error)
+            tracker.finish(stage_name, "failed", safe)
+            self.errors.append(f"audio: {safe}")
+            return {"enabled": True, "status": "failed", "errors": [safe]}
+        tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
+        self.warnings.extend(project.warnings)
+        self.errors.extend([f"audio: {item}" for item in project.errors])
+        return audio_report_section(project)
+
     def _run_tts_only(
         self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
     ) -> PipelineResult:
@@ -553,6 +614,67 @@ class Pipeline:
         write_json(report_path, existing)
         old_outputs = [Path(value) for value in existing.get("output_files", []) if Path(value).is_file()]
         return PipelineResult(work_directory, output_directory, report_path, int(existing.get("selected_clips_count", 0) or 0), old_outputs, self.warnings)
+
+    def _run_audio_only(
+        self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
+    ) -> PipelineResult:
+        """Compose only audio from existing artifacts; no transcribe, TTS, ASS, or video render."""
+
+        plan_path = output_directory / "production-plan.json"
+        if not plan_path.is_file():
+            raise AudioCompositionError(
+                "ProductionPlan не найден для --audio-only. Сначала создайте его через "
+                "--production-plan-only --transform-script."
+            )
+        try:
+            plan = ProductionPlan.model_validate(read_json(plan_path, {}))
+        except Exception as error:
+            raise AudioCompositionError(
+                f"ProductionPlan для --audio-only невалиден: {sanitize_api_error(error)}"
+            ) from error
+        transcript = read_json(work_directory / "transcript.json", {})
+        if not isinstance(transcript, dict):
+            transcript = {}
+        stage_name = f"audio_composition:{plan.plan_id}"
+        tracker.start(stage_name, _hash({
+            "plan": plan.plan_id, "audio": self.config.audio_composition,
+            "tts_result": _file_fingerprint(output_directory / "tts" / "tts-result.json"),
+            "recompute": self.recompute_audio, "only": True,
+        }))
+        try:
+            project = AudioCompositionService(self.root, self.config).compose(
+                plan, source, transcript, read_json(output_directory / "tts" / "tts-result.json", {}),
+                work_directory, output_directory, force_recompute=self.recompute_audio,
+                prepared_source_audio_path=_prepared_source_audio_path(work_directory),
+            )
+        except AudioCompositionError as error:
+            safe = sanitize_api_error(error)
+            tracker.finish(stage_name, "failed", safe)
+            raise AudioCompositionError(f"Audio Composition не завершён: {safe}") from error
+        tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
+        self.warnings.extend(project.warnings)
+        self.errors.extend([f"audio: {item}" for item in project.errors])
+        audio = audio_report_section(project)
+        report_path = output_directory / "report.json"
+        existing = read_json(report_path, {})
+        if not isinstance(existing, dict) or not existing:
+            existing = {
+                "source": source.to_dict(), "source_duration_seconds": None,
+                "selected_clips_count": 0, "candidates_count": 0, "output_files": [],
+                "warnings": [], "errors": [],
+                "production_plan": {"enabled": True, "status": "completed", "production_plan": plan.model_dump(mode="json")},
+                "tts": {"enabled": False, "status": "skipped", "reason": "not-run-by-audio-only"},
+            }
+        existing["audio"] = audio
+        existing["stages"] = tracker.data.get("stages", {})
+        existing["warnings"] = [*existing.get("warnings", []), *self.warnings]
+        existing["errors"] = [*existing.get("errors", []), *self.errors]
+        write_json(report_path, existing)
+        old_outputs = [Path(value) for value in existing.get("output_files", []) if Path(value).is_file()]
+        return PipelineResult(
+            work_directory, output_directory, report_path,
+            int(existing.get("selected_clips_count", 0) or 0), old_outputs, self.warnings,
+        )
 
     def _write_production_artifacts(
         self, output_directory: Path, suffix: str, index: int, plan: dict[str, Any],
@@ -745,7 +867,7 @@ class Pipeline:
         for stage in ("transcription", *INTELLIGENCE_STAGES, "production_plan"): tracker.skip(stage, warning)
         report_path = output_directory / "report.json"
         tracker.start("report"); tracker.finish("report")
-        make_report(report_path, source, metadata, self.config, tracker.data, 0, 0, [], self.warnings, self.errors, _local_ai_usage("not-called"), False, False, clip_intelligence={"version": "1.6", "selection_mode": "no-audio"}, content_transformation={"enabled": bool(self.config.transformation.enabled), "status": "skipped", "reason": "no-audio"}, production_plan={"enabled": bool(self.config.production.enabled), "status": "skipped", "reason": "no-audio"})
+        make_report(report_path, source, metadata, self.config, tracker.data, 0, 0, [], self.warnings, self.errors, _local_ai_usage("not-called"), False, False, clip_intelligence={"version": "1.6", "selection_mode": "no-audio"}, content_transformation={"enabled": bool(self.config.transformation.enabled), "status": "skipped", "reason": "no-audio"}, production_plan={"enabled": bool(self.config.production.enabled), "status": "skipped", "reason": "no-audio"}, audio={"enabled": bool(self.config.audio_composition.enabled), "status": "skipped", "reason": "no-audio"})
         return PipelineResult(work_directory, output_directory, report_path, 0, [], self.warnings)
 
 
@@ -755,6 +877,24 @@ def _hash(value: Any) -> str:
             return asdict(item)
         return str(item)
     return stable_text_hash(json.dumps(value, sort_keys=True, ensure_ascii=False, default=default))
+
+
+def _file_fingerprint(path: Path) -> dict[str, Any] | None:
+    """Small cache signature without reading or exposing TTS/artifact contents."""
+
+    if not path.is_file():
+        return None
+    stat = path.stat()
+    return {"path": str(path), "size": stat.st_size, "modified_ns": stat.st_mtime_ns}
+
+
+def _prepared_source_audio_path(work_directory: Path) -> Path | None:
+    """Return only a local source-derived audio artifact; never download or transcribe here."""
+
+    metadata = read_json(work_directory / "metadata.json", {})
+    value = metadata.get("audio_path") if isinstance(metadata, dict) else None
+    path = Path(str(value)) if value else work_directory / "audio_16khz_mono.wav"
+    return path if path.is_file() else None
 
 
 def _write(path: Path, data: dict[str, Any]) -> dict[str, Any]:

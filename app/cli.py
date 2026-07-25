@@ -112,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--tts-voice", help="Явно выбрать provider voice; по умолчанию auto mapping из VoiceProfile.")
     process.add_argument("--tts-model", help="Модель TTS provider для этого запуска.")
     process.add_argument("--tts-budget-limit", type=float, help="Максимальная оценочная стоимость TTS в USD для этого запуска.")
+    process.add_argument(
+        "--audio-only", action="store_true",
+        help="Собрать только Audio Project из существующих ProductionPlan/TTS artifacts без TTS, Whisper, ASS или video render.",
+    )
+    process.add_argument(
+        "--recompute-audio", action="store_true",
+        help="Игнорировать cache извлечённого dialogue/normalised narration для Audio Project.",
+    )
     return parser
 
 
@@ -129,8 +137,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         config = load_config(arguments.config)
+        if arguments.tts_only and arguments.audio_only:
+            raise ClipEngineError("--tts-only и --audio-only нельзя использовать вместе: это отдельные изолированные этапы.")
+        if arguments.production_plan_only and arguments.audio_only:
+            raise ClipEngineError("--production-plan-only и --audio-only нельзя использовать вместе.")
         _apply_transformation_arguments(config, arguments)
         _apply_tts_arguments(config, arguments)
+        _apply_audio_arguments(config, arguments)
         result = Pipeline(
             root, config, mock_ai=arguments.mock_ai,
             no_ai_rerank=arguments.no_ai_rerank,
@@ -143,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
             tts_only=arguments.tts_only,
             recompute_tts=arguments.recompute_tts,
             disable_tts=arguments.disable_tts,
+            audio_only=arguments.audio_only,
+            recompute_audio=arguments.recompute_audio,
         ).run(
             input_path=arguments.input, url=arguments.url
         )
@@ -169,6 +184,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{tts.get('status')} · provider={tts.get('provider')} · "
             f"generated={tts.get('generated_count', 0)} cache={tts.get('cache_hit_count', 0)} "
             f"fallback={tts.get('fallback_count', 0)}"
+        )
+    audio = report.get("audio", {}) if isinstance(report, dict) else {}
+    if isinstance(audio, dict) and audio.get("enabled"):
+        print(
+            "Audio: "
+            f"{audio.get('status')} · narration={audio.get('narration_count', 0)} "
+            f"dialogue={audio.get('dialogue_count', 0)} · "
+            f"{float(audio.get('mix_duration', 0) or 0):.1f} с"
         )
     if arguments.print_transformed_script:
         transformation = report.get("content_transformation", {}) if isinstance(report, dict) else {}
@@ -220,4 +243,12 @@ def _apply_tts_arguments(config, arguments: argparse.Namespace) -> None:
     if arguments.tts_only and not arguments.disable_tts:
         # `--tts-only` is an explicit request to execute the TTS service from an existing plan.
         tts.enabled = True
+    config.validate()
+
+
+def _apply_audio_arguments(config, arguments: argparse.Namespace) -> None:
+    """Enable the isolated Audio Project flow only when the user requests it."""
+
+    if arguments.audio_only:
+        config.audio_composition.enabled = True
     config.validate()
