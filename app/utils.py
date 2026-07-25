@@ -48,6 +48,17 @@ def write_json(path: Path, data: Any) -> None:
     temporary.replace(path)
 
 
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write binary artifacts without exposing a partial audio file to cache readers."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False, suffix=".tmp") as file:
+        file.write(data)
+        file.flush()
+        temporary = Path(file.name)
+    temporary.replace(path)
+
+
 def format_seconds(value: float | None) -> str:
     if value is None:
         return "н/д"

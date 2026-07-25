@@ -25,6 +25,7 @@ def make_report(
     clip_intelligence: dict[str, Any] | None = None,
     content_transformation: dict[str, Any] | None = None,
     production_plan: dict[str, Any] | None = None,
+    tts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stages = state.get("stages", {})
     durations = {
@@ -70,6 +71,7 @@ def make_report(
         "clip_intelligence": clip_intelligence or {},
         "content_transformation": content_transformation or {"enabled": False, "status": "skipped"},
         "production_plan": production_plan or {"enabled": False, "status": "skipped"},
+        "tts": tts or {"enabled": False, "status": "skipped"},
     }
     write_json(path, report)
     return report

@@ -104,7 +104,31 @@ production:
   pause_after_narration_seconds: 0.25
   voice_profile_id: default-documentary
   voice_gender: neutral           # male, female или neutral — только placeholder
-  voice_style: documentary        # calm, energetic или documentary
+  voice_style: documentary        # calm, energetic, documentary или conversational
   original_dialogue_speaker: original_speaker_unknown
+tts:
+  # Goal 3B synthesizes only existing narration segments from ProductionPlan.
+  # It never changes FinalScript/ProductionPlan and never mixes or renders audio/video.
+  enabled: false
+  provider: openai                # openai, mock or local (typed no-audio fallback)
+  model: gpt-4o-mini-tts
+  voice: auto                     # auto uses the deterministic VoiceProfile registry; or a provider voice such as cedar
+  language: auto                  # auto = ProductionPlan language; ru or en can override
+  speed: 1.0
+  budget_limit: 1.0               # USD estimate guard before any provider request
+  cost_per_1m_characters: 15.0    # USD estimate; update for the selected provider/model tariff
+  timeout_seconds: 45
+  max_retries: 2
+  cache_enabled: true
+  output_format: wav              # normalized downstream format is WAV PCM s16le, mono
+  sample_rate: 48000
+  # ProductionPlan timing is approximate: a difference creates a warning first.
+  duration_warning_ratio: 0.50
+  duration_error_ratio: 6.0
+  minimum_audio_duration: 0.10
+  maximum_segment_duration: 120
+  provider_config_version: 3B.0
+  # Test-only mock modes: valid, provider_error, timeout, empty_audio, malformed_response.
+  mock_mode: valid
 min_selected_clip_distance_seconds: 8
 optional_visual_features: false

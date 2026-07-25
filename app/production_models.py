@@ -12,7 +12,7 @@ class VoiceProfile(BaseModel):
 
     profile_id: str = "default-documentary"
     gender: Literal["male", "female", "neutral"] = "neutral"
-    style: Literal["calm", "energetic", "documentary"] = "documentary"
+    style: Literal["calm", "energetic", "documentary", "conversational"] = "documentary"
     language: str
     is_placeholder: Literal[True] = True
 

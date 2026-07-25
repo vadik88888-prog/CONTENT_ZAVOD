@@ -258,8 +258,76 @@ class ProductionConfig:
             raise ClipEngineError("production voice_profile_id и original_dialogue_speaker не должны быть пустыми.")
         if self.voice_gender not in {"male", "female", "neutral"}:
             raise ClipEngineError("production.voice_gender: male, female или neutral.")
-        if self.voice_style not in {"calm", "energetic", "documentary"}:
-            raise ClipEngineError("production.voice_style: calm, energetic или documentary.")
+        if self.voice_style not in {"calm", "energetic", "documentary", "conversational"}:
+            raise ClipEngineError("production.voice_style: calm, energetic, documentary или conversational.")
+
+
+@dataclass(slots=True)
+class TTSConfig:
+    """Goal 3B settings. Disabled by default so existing process runs stay unchanged."""
+
+    enabled: bool = False
+    provider: str = "openai"
+    model: str = "gpt-4o-mini-tts"
+    voice: str = "auto"
+    language: str = "auto"
+    speed: float = 1.0
+    budget_limit: float = 1.0
+    cost_per_1m_characters: float = 15.0
+    timeout_seconds: float = 45.0
+    max_retries: int = 2
+    cache_enabled: bool = True
+    output_format: str = "wav"
+    sample_rate: int = 48000
+    # ProductionPlan timing is a local WPS heuristic. A difference is informative,
+    # not automatically broken audio; only an extreme difference is an error.
+    duration_warning_ratio: float = 0.50
+    duration_error_ratio: float = 6.0
+    minimum_audio_duration: float = 0.10
+    maximum_segment_duration: float = 120.0
+    provider_config_version: str = "3B.0"
+    # Test-only deterministic provider behaviours; production config should remain valid.
+    mock_mode: str = "valid"
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool):
+            raise ClipEngineError("tts.enabled и tts.cache_enabled должны быть true или false.")
+        if self.provider not in {"openai", "mock", "local"}:
+            raise ClipEngineError("tts.provider: openai, mock или local.")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ClipEngineError("tts.model не должен быть пустым.")
+        if not isinstance(self.voice, str) or not self.voice.strip():
+            raise ClipEngineError("tts.voice не должен быть пустым.")
+        if self.language not in {"auto", "ru", "en"}:
+            raise ClipEngineError("tts.language: auto, ru или en.")
+        if not 0.25 <= self.speed <= 4:
+            raise ClipEngineError("tts.speed должен быть от 0.25 до 4.")
+        for name, value in (
+            ("tts.budget_limit", self.budget_limit),
+            ("tts.cost_per_1m_characters", self.cost_per_1m_characters),
+            ("tts.duration_warning_ratio", self.duration_warning_ratio),
+            ("tts.duration_error_ratio", self.duration_error_ratio),
+            ("tts.minimum_audio_duration", self.minimum_audio_duration),
+            ("tts.maximum_segment_duration", self.maximum_segment_duration),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ClipEngineError(f"{name} должен быть неотрицательным числом.")
+        if self.duration_error_ratio < self.duration_warning_ratio:
+            raise ClipEngineError("tts.duration_error_ratio должен быть не меньше tts.duration_warning_ratio.")
+        if self.maximum_segment_duration <= 0 or self.minimum_audio_duration > self.maximum_segment_duration:
+            raise ClipEngineError("tts.maximum_segment_duration должен быть положительным и не меньше minimum_audio_duration.")
+        if not 1 <= self.sample_rate <= 192000:
+            raise ClipEngineError("tts.sample_rate должен быть от 1 до 192000.")
+        if self.output_format != "wav":
+            raise ClipEngineError("Goal 3B поддерживает только tts.output_format: wav.")
+        if not 1 <= self.timeout_seconds <= 300:
+            raise ClipEngineError("tts.timeout_seconds должен быть от 1 до 300.")
+        if isinstance(self.max_retries, bool) or not isinstance(self.max_retries, int) or not 0 <= self.max_retries <= 5:
+            raise ClipEngineError("tts.max_retries должен быть числом от 0 до 5.")
+        if not self.provider_config_version.strip():
+            raise ClipEngineError("tts.provider_config_version не должен быть пустым.")
+        if self.mock_mode not in {"valid", "provider_error", "timeout", "empty_audio", "malformed_response"}:
+            raise ClipEngineError("tts.mock_mode содержит неподдерживаемый тестовый режим.")
 
 
 @dataclass(slots=True)
@@ -291,6 +359,7 @@ class AppConfig:
     ai_reranking: AIRerankingConfig = field(default_factory=AIRerankingConfig)
     transformation: TransformationConfig = field(default_factory=TransformationConfig)
     production: ProductionConfig = field(default_factory=ProductionConfig)
+    tts: TTSConfig = field(default_factory=TTSConfig)
     min_selected_clip_distance_seconds: float = 8.0
     optional_visual_features: bool = False
     # Compatibility flag for older local configurations; --mock-ai has priority.
@@ -324,6 +393,7 @@ class AppConfig:
         self.ai_reranking.validate()
         self.transformation.validate()
         self.production.validate()
+        self.tts.validate()
         if not 0 <= self.min_selected_clip_distance_seconds <= 600:
             raise ClipEngineError("min_selected_clip_distance_seconds должен быть от 0 до 600.")
         if not isinstance(self.optional_visual_features, bool):
@@ -363,6 +433,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "ai_reranking": AIRerankingConfig,
             "transformation": TransformationConfig,
             "production": ProductionConfig,
+            "tts": TTSConfig,
         }
         for name, config_type in nested.items():
             nested_values = values.get(name)

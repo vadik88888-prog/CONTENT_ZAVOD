@@ -10,7 +10,7 @@ from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.audio_features import analyse_audio
 from app.config import AppConfig
 from app.content_transformation import TRANSFORMATION_ENGINE_VERSION, run_content_transformation
-from app.errors import ClipEngineError, ProductionPlanError, StageError, TransformationProviderError
+from app.errors import ClipEngineError, ProductionPlanError, StageError, TTSError, TransformationProviderError
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.intelligence_candidates import generate_candidates_with_stats
 from app.local_scoring import score_candidates
@@ -28,6 +28,7 @@ from app.transcript_features import analyse_transcript
 from app.transcription import transcribe
 from app.semantic_extraction import build_source_context
 from app.transformation_prompts import PROMPT_VERSIONS
+from app.tts_service import TTSService, tts_report_section
 from app.utils import read_json, safe_name, stable_text_hash, utc_now, write_json
 
 
@@ -42,6 +43,7 @@ TRANSFORMATION_STAGES = (
     "transformation_script_validation", "transformation_final_script", "transformation_result",
 )
 PRODUCTION_PLAN_STAGES = ("production_plan",)
+TTS_STAGES = ("tts_generation",)
 
 
 @dataclass(slots=True)
@@ -116,6 +118,7 @@ class Pipeline:
         transform_script: bool | None = None, no_ai_transformation: bool = False,
         recompute_transformation: bool = False,
         production_plan_only: bool = False, recompute_production_plan: bool = False,
+        tts_only: bool = False, recompute_tts: bool = False, disable_tts: bool = False,
     ) -> None:
         self.root = root.resolve()
         self.config = config
@@ -127,6 +130,9 @@ class Pipeline:
         self.recompute_transformation = recompute_transformation
         self.production_plan_only = production_plan_only
         self.recompute_production_plan = recompute_production_plan
+        self.tts_only = tts_only
+        self.recompute_tts = recompute_tts
+        self.disable_tts = disable_tts
         self.warnings: list[str] = []
         self.errors: list[str] = []
 
@@ -134,6 +140,14 @@ class Pipeline:
         validate_source_arguments(input_path, url)
         source, work_directory, output_directory = self._prepare_source(input_path, url)
         tracker = StageTracker(work_directory / "state.json")
+        if self.recompute_tts:
+            tts_names = tuple(
+                name for name in tracker.data.get("stages", {})
+                if name == "report" or any(name.startswith(base) for base in TTS_STAGES)
+            )
+            tracker.invalidate("Запрошен --recompute-tts.", tts_names)
+        if self.tts_only:
+            return self._run_tts_only(tracker, source, work_directory, output_directory)
         if self.recompute_intelligence:
             tracker.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
         if self.recompute_transformation:
@@ -222,6 +236,7 @@ class Pipeline:
         production = self._build_production_plans(
             tracker, transformation, work_directory, output_directory,
         )
+        tts = self._run_tts(tracker, production, work_directory, output_directory)
         render_data = (
             self._skip_render_for_production_plan(tracker, work_directory / "render.json")
             if self.production_plan_only
@@ -249,7 +264,7 @@ class Pipeline:
             str(ai_data.get("selection_mode", "local")), int(raw_candidates.get("candidates_generated", len(candidates))),
         )
         report_path = output_directory / "report.json"
-        tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production}))
+        tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts}))
         tracker.finish("report")
         make_report(
             report_path, source_data, metadata, self.config, tracker.data, len(selected), len(candidates),
@@ -267,6 +282,7 @@ class Pipeline:
             },
             content_transformation=transformation,
             production_plan=production,
+            tts=tts,
         )
         return PipelineResult(work_directory, output_directory, report_path, len(selected), outputs, self.warnings)
 
@@ -463,6 +479,80 @@ class Pipeline:
             "items": outcomes,
             "production_note": "Production Plan is the future source of truth; no TTS, audio mix, subtitle render, ASS or video render was generated.",
         }
+
+    def _run_tts(
+        self, tracker: StageTracker, production: dict[str, Any],
+        work_directory: Path, output_directory: Path,
+    ) -> dict[str, Any]:
+        """Run Goal 3B strictly from the already-built primary ProductionPlan."""
+
+        if not self.config.tts.enabled or self.disable_tts:
+            tracker.skip("tts_generation", "TTS отключён конфигурацией или --disable-tts.")
+            return {"enabled": False, "status": "skipped", "reason": "disabled"}
+        plan_data = production.get("production_plan") if isinstance(production, dict) else None
+        if not isinstance(plan_data, dict):
+            tracker.skip("tts_generation", "Нет ProductionPlan для TTS.")
+            return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
+        try:
+            plan = ProductionPlan.model_validate(plan_data)
+        except Exception as error:
+            tracker.start("tts_generation")
+            tracker.finish("tts_generation", "failed", sanitize_api_error(error))
+            return {"enabled": True, "status": "failed", "reason": "invalid_production_plan"}
+        stage_name = f"tts_generation:{plan.plan_id}"
+        tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
+        result = TTSService(self.root, self.config).generate(
+            plan, work_directory, output_directory, force_recompute=self.recompute_tts,
+        )
+        tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
+        self.warnings.extend(result.warnings)
+        self.errors.extend([f"tts: {item.message}" for item in result.api_errors])
+        return tts_report_section(result)
+
+    def _run_tts_only(
+        self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
+    ) -> PipelineResult:
+        """Use an existing ProductionPlan only; no media preparation, render, or plan rebuild occurs."""
+
+        plan_path = output_directory / "production-plan.json"
+        if not plan_path.is_file():
+            raise TTSError(
+                "ProductionPlan не найден для --tts-only. Сначала создайте его через "
+                "--production-plan-only --transform-script."
+            )
+        try:
+            plan = ProductionPlan.model_validate(read_json(plan_path, {}))
+        except Exception as error:
+            raise TTSError(f"ProductionPlan для --tts-only невалиден: {sanitize_api_error(error)}") from error
+        stage_name = f"tts_generation:{plan.plan_id}"
+        tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts, "only": True}))
+        if self.disable_tts:
+            tracker.skip(stage_name, "Запрошен --disable-tts.")
+            tts = {"enabled": False, "status": "skipped", "reason": "disabled"}
+        else:
+            result = TTSService(self.root, self.config).generate(
+                plan, work_directory, output_directory, force_recompute=self.recompute_tts,
+                enabled=self.config.tts.enabled,
+            )
+            tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
+            self.warnings.extend(result.warnings)
+            self.errors.extend([f"tts: {item.message}" for item in result.api_errors])
+            tts = tts_report_section(result)
+        report_path = output_directory / "report.json"
+        existing = read_json(report_path, {})
+        if not isinstance(existing, dict) or not existing:
+            existing = {
+                "source": source.to_dict(), "source_duration_seconds": None,
+                "selected_clips_count": 0, "candidates_count": 0, "output_files": [],
+                "warnings": [], "errors": [], "production_plan": {"enabled": True, "status": "completed", "production_plan": plan.model_dump(mode="json")},
+            }
+        existing["tts"] = tts
+        existing["stages"] = tracker.data.get("stages", {})
+        existing["warnings"] = [*existing.get("warnings", []), *self.warnings]
+        existing["errors"] = [*existing.get("errors", []), *self.errors]
+        write_json(report_path, existing)
+        old_outputs = [Path(value) for value in existing.get("output_files", []) if Path(value).is_file()]
+        return PipelineResult(work_directory, output_directory, report_path, int(existing.get("selected_clips_count", 0) or 0), old_outputs, self.warnings)
 
     def _write_production_artifacts(
         self, output_directory: Path, suffix: str, index: int, plan: dict[str, Any],

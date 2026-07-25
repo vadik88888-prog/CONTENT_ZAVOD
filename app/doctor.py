@@ -104,6 +104,15 @@ def collect_checks(root: Path, config: AppConfig | None = None) -> list[Check]:
             "ok" if os.getenv(variable) else "warn",
             "Найден." if os.getenv(variable) else "Не задан — используйте --mock-ai или добавьте ключ в .env.",
         ))
+    if config.tts.enabled:
+        tts_provider = config.tts.provider
+        checks.append(Check("TTS provider", "ok", f"{tts_provider} · {config.tts.model}"))
+        if tts_provider == "openai":
+            checks.append(Check(
+                "OpenAI TTS API key",
+                "ok" if os.getenv("OPENAI_API_KEY") else "warn",
+                "Найден." if os.getenv("OPENAI_API_KEY") else "Не задан — используйте tts.provider=mock/local или добавьте ключ в .env.",
+            ))
     for folder in ("input", "work", "output"):
         path = root / folder
         try:

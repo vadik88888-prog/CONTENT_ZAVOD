@@ -96,6 +96,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute-production-plan", action="store_true",
         help="Пересчитать только Production Plan и report, сохранив FinalScript cache.",
     )
+    process.add_argument(
+        "--tts-only", action="store_true",
+        help="Синтезировать TTS только из уже существующего production-plan.json; render и план не запускаются.",
+    )
+    process.add_argument(
+        "--recompute-tts", action="store_true",
+        help="Игнорировать TTS cache и заново сгенерировать narration artifacts.",
+    )
+    process.add_argument(
+        "--disable-tts", action="store_true",
+        help="Отключить TTS для этого запуска без изменения Production Plan.",
+    )
+    process.add_argument("--tts-provider", choices=["openai", "mock", "local"], help="TTS provider для этого запуска.")
+    process.add_argument("--tts-voice", help="Явно выбрать provider voice; по умолчанию auto mapping из VoiceProfile.")
+    process.add_argument("--tts-model", help="Модель TTS provider для этого запуска.")
+    process.add_argument("--tts-budget-limit", type=float, help="Максимальная оценочная стоимость TTS в USD для этого запуска.")
     return parser
 
 
@@ -114,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(arguments.config)
         _apply_transformation_arguments(config, arguments)
+        _apply_tts_arguments(config, arguments)
         result = Pipeline(
             root, config, mock_ai=arguments.mock_ai,
             no_ai_rerank=arguments.no_ai_rerank,
@@ -123,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
             recompute_transformation=arguments.recompute_transformation,
             production_plan_only=arguments.production_plan_only,
             recompute_production_plan=arguments.recompute_production_plan,
+            tts_only=arguments.tts_only,
+            recompute_tts=arguments.recompute_tts,
+            disable_tts=arguments.disable_tts,
         ).run(
             input_path=arguments.input, url=arguments.url
         )
@@ -141,6 +161,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{production.get('status')} · narration={production.get('narration_count', 0)} "
             f"dialogue={production.get('dialogue_count', 0)} · "
             f"~{float(production.get('estimated_duration', 0) or 0):.1f} с"
+        )
+    tts = report.get("tts", {}) if isinstance(report, dict) else {}
+    if isinstance(tts, dict) and tts.get("enabled"):
+        print(
+            "TTS: "
+            f"{tts.get('status')} · provider={tts.get('provider')} · "
+            f"generated={tts.get('generated_count', 0)} cache={tts.get('cache_hit_count', 0)} "
+            f"fallback={tts.get('fallback_count', 0)}"
         )
     if arguments.print_transformed_script:
         transformation = report.get("content_transformation", {}) if isinstance(report, dict) else {}
@@ -174,4 +202,22 @@ def _apply_transformation_arguments(config, arguments: argparse.Namespace) -> No
         transformation.allow_cta = True
     if arguments.strict_grounding:
         transformation.strict_grounding = True
+    config.validate()
+
+
+def _apply_tts_arguments(config, arguments: argparse.Namespace) -> None:
+    """Apply ephemeral TTS overrides without changing the checked-in configuration."""
+
+    tts = config.tts
+    if arguments.tts_provider:
+        tts.provider = arguments.tts_provider
+    if arguments.tts_voice:
+        tts.voice = arguments.tts_voice
+    if arguments.tts_model:
+        tts.model = arguments.tts_model
+    if arguments.tts_budget_limit is not None:
+        tts.budget_limit = arguments.tts_budget_limit
+    if arguments.tts_only and not arguments.disable_tts:
+        # `--tts-only` is an explicit request to execute the TTS service from an existing plan.
+        tts.enabled = True
     config.validate()

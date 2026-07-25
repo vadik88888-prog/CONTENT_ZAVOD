@@ -367,6 +367,101 @@ python -m app process --input ".\input\smoke-test.mp4" --mock-ai --transform-scr
 Speech, ElevenLabs, voice cloning, audio mix/ducking, FFmpeg audio pipeline,
 ASS/subtitle render и translation.
 
+## TTS Core (Goal 3B)
+
+Goal 3B исполняет уже готовый `ProductionPlan`, но не меняет его. Сервис берёт
+только `narration` segments в их исходном порядке: текст проходит лишь
+техническую нормализацию пробелов и переносов, затем для каждого блока отдельно
+создаётся audio artifact. `original_dialogue` placeholders, pauses, metadata и
+весь план целиком в TTS provider не передаются.
+
+```text
+ProductionPlan
+  → narration segment requests
+  → provider / typed fallback
+  → WAV PCM s16le, 48 kHz, mono
+  → ffprobe duration validation
+  → per-segment TTS cache + manifest
+```
+
+По умолчанию `tts.enabled: false`: прежняя команда `process` не делает новых
+платных запросов. Для OpenAI нужен тот же `OPENAI_API_KEY` в `.env`, что и для
+AI transformation. Внешняя API-тарификация относится к OpenAI Platform и не
+входит в подписку ChatGPT. Синтезированную AI-речь следует явно раскрывать
+конечным слушателям.
+
+Пример `config.yaml`:
+
+```yaml
+tts:
+  enabled: true
+  provider: openai
+  model: gpt-4o-mini-tts
+  voice: auto
+  budget_limit: 1.0
+```
+
+`voice: auto` детерминированно отображает placeholder `VoiceProfile` из плана
+на встроенный голос OpenAI: например, neutral/documentary → `cedar`.
+Явный `tts.voice` или `--tts-voice cedar` имеет приоритет. Неизвестный профиль
+безопасно использует `cedar` и оставляет warning в TTS result.
+
+Для быстрой полностью локальной проверки используйте mock; он создаёт
+детерминированные не-тихие WAV fixtures, а не обращается к API:
+
+```powershell
+# Нужен уже созданный production-plan.json. Рендер и создание плана не запускаются.
+python -m app process --input ".\input\smoke-test.mp4" --tts-only --tts-provider mock
+
+# Принудительно пропустить TTS cache.
+python -m app process --input ".\input\smoke-test.mp4" --tts-only --tts-provider mock --recompute-tts
+
+# Явно выключить синтез в одном запуске.
+python -m app process --input ".\input\smoke-test.mp4" --disable-tts
+```
+
+`--tts-only` намеренно **не** строит Production Plan заново: если рядом с
+результатом нет `production-plan.json`, команда завершается понятной ошибкой и
+предлагает сначала выполнить `--production-plan-only --transform-script`.
+Существующие MP4 и `render.json` не перезаписываются.
+
+Cache расположен в отдельном namespace `work/tts-cache/`. Ключ содержит
+нормализованный narration text, provider/model/voice/language/speed, WAV/48 kHz,
+версию provider config и схему TTS; он не зависит от полного Production Plan.
+Перед cache hit проверяется SHA-256, повреждённый WAV не используется.
+
+До вызова provider сервис считает символы и estimate
+`cost_per_1m_characters`; если сумма строго больше `budget_limit`, запрос не
+отправляется и появляется typed fallback `budget_exceeded`. Ошибки provider,
+timeout, пустой/повреждённый WAV, неподдерживаемый язык и отсутствующий ключ
+также не ломают pipeline: они создают явный no-audio fallback artifact, без
+фальшивого успешного файла тишины.
+
+Расчёт длительности Production Plan основан на локальном WPS и остаётся
+приблизительным. Поэтому штатное отличие фактической WAV-длины сначала
+фиксируется как `warning`; только экстремальное расхождение, настраиваемое через
+`duration_error_ratio`, становится `invalid` и не попадает в успешный cache.
+
+Результаты лежат отдельно от MP4:
+
+```text
+output/<source>/tts/
+  tts-result.json
+  tts-manifest.json
+  tts-summary.txt
+  segments/narration-001-<cache-key>.wav
+```
+
+`report.json.tts` содержит provider/model/voice, число segments, generated,
+cache hits, fallbacks, estimate cost, измеренную длину, validation status,
+безопасные ошибки и пути артефактов. Сырые provider responses, base64 и ключи в
+report не записываются.
+
+В Goal 3B намеренно всё ещё отсутствуют объединённый narration track, audio
+mix, ducking, извлечение original dialogue, музыка/effects, выравнивание
+timeline по фактической речи, регенерация/render субтитров, ASS changes, video
+render, voice cloning и translation. Это будет предметом отдельного Goal 3C.
+
 ## Тесты
 
 После активации виртуального окружения:

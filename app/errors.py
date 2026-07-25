@@ -48,3 +48,7 @@ class TransformationFallbackError(ClipEngineError):
 
 class ProductionPlanError(ClipEngineError):
     """Невозможно построить безопасный production plan из FinalScript."""
+
+
+class TTSError(ClipEngineError):
+    """TTS provider or generated-audio validation failed without changing the Production Plan."""
