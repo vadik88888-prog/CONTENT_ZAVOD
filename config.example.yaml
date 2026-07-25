@@ -146,5 +146,36 @@ audio_composition:
   narration_true_peak_db: -1.5
   narration_lra: 11.0
   engine_version: 3C.0
+production_render:
+  # Goal 3D is isolated from legacy render and disabled until explicitly requested.
+  enabled: false
+  cache_enabled: true
+  output_width: 1080
+  output_height: 1920
+  output_fps: 30
+  video_codec: h264
+  video_bitrate: 6M
+  pixel_format: yuv420p
+  encoder: auto                 # auto, nvenc or cpu; auto safely falls back to CPU
+  crop_strategy: fit_blur_background
+  manual_crop_x: 0.5
+  manual_crop_y: 0.5
+  transitions: cut
+  subtitles_enabled: true
+  subtitle_style: documentary   # minimal, documentary, dynamic or clean
+  subtitle_font_family: Arial
+  subtitle_max_chars_per_line: 28
+  subtitle_max_lines: 2
+  subtitle_min_duration: 0.45
+  subtitle_max_duration: 3.5
+  subtitle_reading_speed_cps: 15.0
+  maximum_freeze_duration: 1.5
+  maximum_loop_duration: 0.0
+  minimum_clip_duration: 0.10
+  maximum_speed_adjustment: 1.0
+  av_sync_warning_ms: 100
+  av_sync_error_ms: 350
+  maximum_duration_difference: 0.35
+  render_config_version: 3D.0
 min_selected_clip_distance_seconds: 8
 optional_visual_features: false

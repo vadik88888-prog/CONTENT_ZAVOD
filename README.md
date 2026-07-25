@@ -520,6 +520,84 @@ validation и только безопасные сообщения ошибок.
 раньше завершился typed fallback; в этом случае статус будет `partial`, а не
 ложный успешный narration.
 
+## Final Video Composition Engine (Goal 3D)
+
+Goal 3D исполняет уже готовые production artifacts и собирает отдельный финальный
+Short/Reel MP4. Он не вызывает AI, не пересобирает TTS или audio mix, не меняет
+`ProductionPlan`/`AudioProject` и не использует legacy render/ASS как входные
+данные.
+
+```text
+source video + ProductionPlan + AudioProject + mixed_audio.wav + transcript timestamps
+  → deterministic VideoTimeline
+  → vertical visual clips + production subtitles
+  → mux only existing mixed_audio.wav
+  → validated final-short.mp4
+```
+
+Для изолированного запуска уже должны существовать:
+
+- `output/<source>/production-plan.json`;
+- `output/<source>/audio/audio-project.json` и `mixed_audio.wav`;
+- исходный video file; `transcript.json` рекомендуется для narration visual mapping.
+
+```powershell
+# Не запускает OpenAI, TTS, Audio Composition, Whisper, legacy render или новый сценарий.
+python -m app process --input ".\input\smoke-test.mp4" --production-render-only
+
+# Повторно собрать только финальный MP4, игнорируя production-render cache.
+python -m app process --input ".\input\smoke-test.mp4" --production-render-only --recompute-production-render
+
+# Явно выбрать CPU, crop и subtitle preset.
+python -m app process --input ".\input\smoke-test.mp4" --production-render-only `
+  --video-encoder cpu --crop-strategy fit_blur_background --subtitle-style documentary
+
+# Сохранить SubtitleProject/ASS, но не burn-in subtitle text в MP4.
+python -m app process --input ".\input\smoke-test.mp4" --production-render-only --disable-subtitles
+```
+
+Настройки лежат в `production_render`. Production default — 1080×1920, 30 FPS,
+H.264/yuv420p, AAC, `+faststart` и `fit_blur_background`. `encoder: auto`
+пробует NVENC и безопасно переходит на `libx264`; при явном `nvenc` недоступный
+encoder возвращает понятную ошибку без ложного MP4. `cpu` всегда использует
+`libx264`.
+
+Visual mapping строится из фактической `AudioProject.timeline`: dialogue берёт
+свои source timestamps; narration берёт transcript ranges, связанные с evidence
+в ProductionPlan. Для отсутствующего/невалидного mapping применяется фиксированный
+порядок fallback (тот же fact, предыдущий clip, следующий clip, freeze frame,
+safe excerpt, нейтральный fill), и причина записывается в `video-project.json`
+и `report.json.production_render`.
+
+Subtitle cues строятся заново из фактических audio ranges, а не из предварительной
+WPS-оценки Goal 3A. Поддерживаются styles `minimal`, `documentary`, `dynamic`,
+`clean`; длинный текст детерминированно делится без переписывания. Безопасный
+system font fallback не требует добавления font files в Git.
+
+Артефакты изолированы от legacy output:
+
+```text
+output/<source>/production-render/
+  final-short.mp4
+  video-project.json
+  video-timeline.json
+  subtitle-project.json
+  production-subtitles.ass
+  render-result.json
+  render-summary.txt
+  clips/
+  temp/
+```
+
+Cache находится в `work/production-render-cache/`; его ключ учитывает source и
+mixed-audio checksums, AudioProject, timeline, subtitles/style, canvas, crop и
+codec settings. Изменение только subtitle style рендерит видео заново, но не
+запускает upstream AI/TTS/audio phases. Legacy MP4 и `render.json` остаются
+нетронутыми до успешной final validation.
+
+Goal 3D пока не включает smart crop/face tracking, B-roll, video/image generation,
+karaoke captions, motion graphics, новый audio mix или mux обратно в legacy clips.
+
 ## Тесты
 
 После активации виртуального окружения:

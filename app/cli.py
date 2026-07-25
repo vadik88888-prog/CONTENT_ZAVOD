@@ -120,6 +120,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute-audio", action="store_true",
         help="Игнорировать cache извлечённого dialogue/normalised narration для Audio Project.",
     )
+    process.add_argument(
+        "--production-render-only", action="store_true",
+        help="Собрать только финальный Goal 3D MP4 из существующих ProductionPlan и AudioProject без AI/TTS/audio mix/legacy render.",
+    )
+    process.add_argument(
+        "--recompute-production-render", action="store_true",
+        help="Игнорировать production render cache и заново собрать финальный MP4.",
+    )
+    process.add_argument(
+        "--disable-production-render", action="store_true",
+        help="Отключить production render для этого запуска, не меняя legacy render.",
+    )
+    process.add_argument("--output-width", type=int, help="Ширина Goal 3D холста 9:16 (чётное число).")
+    process.add_argument("--output-height", type=int, help="Высота Goal 3D холста 9:16 (чётное число).")
+    process.add_argument("--output-fps", type=float, help="FPS Goal 3D production render.")
+    process.add_argument(
+        "--crop-strategy", choices=["center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"],
+        help="Стратегия vertical composition для production render.",
+    )
+    process.add_argument("--subtitle-style", choices=["minimal", "documentary", "dynamic", "clean"], help="Стиль production subtitles.")
+    process.add_argument("--disable-subtitles", action="store_true", help="Не burn-in production ASS в финальный MP4.")
+    process.add_argument("--video-encoder", choices=["auto", "nvenc", "cpu"], help="Encoder Goal 3D: auto, nvenc или cpu.")
     return parser
 
 
@@ -137,13 +159,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         config = load_config(arguments.config)
-        if arguments.tts_only and arguments.audio_only:
-            raise ClipEngineError("--tts-only и --audio-only нельзя использовать вместе: это отдельные изолированные этапы.")
-        if arguments.production_plan_only and arguments.audio_only:
-            raise ClipEngineError("--production-plan-only и --audio-only нельзя использовать вместе.")
+        only_modes = [arguments.tts_only, arguments.audio_only, arguments.production_render_only]
+        if sum(bool(value) for value in only_modes) > 1:
+            raise ClipEngineError("--tts-only, --audio-only и --production-render-only — отдельные изолированные этапы; выберите один.")
+        if arguments.production_plan_only and (arguments.audio_only or arguments.production_render_only):
+            raise ClipEngineError("--production-plan-only нельзя использовать вместе с --audio-only или --production-render-only.")
+        if arguments.production_render_only and arguments.disable_production_render:
+            raise ClipEngineError("--production-render-only несовместим с --disable-production-render.")
         _apply_transformation_arguments(config, arguments)
         _apply_tts_arguments(config, arguments)
         _apply_audio_arguments(config, arguments)
+        _apply_production_render_arguments(config, arguments)
         result = Pipeline(
             root, config, mock_ai=arguments.mock_ai,
             no_ai_rerank=arguments.no_ai_rerank,
@@ -158,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
             disable_tts=arguments.disable_tts,
             audio_only=arguments.audio_only,
             recompute_audio=arguments.recompute_audio,
+            production_render_only=arguments.production_render_only,
+            recompute_production_render=arguments.recompute_production_render,
+            disable_production_render=arguments.disable_production_render,
         ).run(
             input_path=arguments.input, url=arguments.url
         )
@@ -192,6 +221,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{audio.get('status')} · narration={audio.get('narration_count', 0)} "
             f"dialogue={audio.get('dialogue_count', 0)} · "
             f"{float(audio.get('mix_duration', 0) or 0):.1f} с"
+        )
+    production_render = report.get("production_render", {}) if isinstance(report, dict) else {}
+    if isinstance(production_render, dict) and production_render.get("enabled"):
+        print(
+            "Production render: "
+            f"{production_render.get('status')} · {production_render.get('resolution')} · "
+            f"{float(production_render.get('duration', 0) or 0):.1f} с · "
+            f"encoder={production_render.get('encoder')} cache={production_render.get('cache_hit')}"
         )
     if arguments.print_transformed_script:
         transformation = report.get("content_transformation", {}) if isinstance(report, dict) else {}
@@ -251,4 +288,27 @@ def _apply_audio_arguments(config, arguments: argparse.Namespace) -> None:
 
     if arguments.audio_only:
         config.audio_composition.enabled = True
+    config.validate()
+
+
+def _apply_production_render_arguments(config, arguments: argparse.Namespace) -> None:
+    """Apply Goal 3D-only overrides after all old config paths are settled."""
+
+    render = config.production_render
+    if arguments.production_render_only:
+        render.enabled = True
+    if arguments.output_width is not None:
+        render.output_width = arguments.output_width
+    if arguments.output_height is not None:
+        render.output_height = arguments.output_height
+    if arguments.output_fps is not None:
+        render.output_fps = arguments.output_fps
+    if arguments.crop_strategy:
+        render.crop_strategy = arguments.crop_strategy
+    if arguments.subtitle_style:
+        render.subtitle_style = arguments.subtitle_style
+    if arguments.disable_subtitles:
+        render.subtitles_enabled = False
+    if arguments.video_encoder:
+        render.encoder = arguments.video_encoder
     config.validate()

@@ -56,3 +56,7 @@ class TTSError(ClipEngineError):
 
 class AudioCompositionError(ClipEngineError):
     """Audio Project could not be safely composed from existing plan and audio artifacts."""
+
+
+class ProductionRenderError(ClipEngineError):
+    """Goal 3D could not safely build a final video from existing production artifacts."""

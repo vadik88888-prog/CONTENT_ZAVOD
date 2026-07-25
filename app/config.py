@@ -372,6 +372,85 @@ class AudioCompositionConfig:
 
 
 @dataclass(slots=True)
+class ProductionRenderConfig:
+    """Goal 3D final video composition settings; disabled by default for legacy safety."""
+
+    enabled: bool = False
+    cache_enabled: bool = True
+    output_width: int = 1080
+    output_height: int = 1920
+    output_fps: float = 30.0
+    video_codec: str = "h264"
+    video_bitrate: str = "6M"
+    pixel_format: str = "yuv420p"
+    encoder: str = "auto"
+    crop_strategy: str = "fit_blur_background"
+    manual_crop_x: float = 0.5
+    manual_crop_y: float = 0.5
+    transitions: str = "cut"
+    subtitles_enabled: bool = True
+    subtitle_style: str = "documentary"
+    subtitle_font_family: str = "Arial"
+    subtitle_max_chars_per_line: int = 28
+    subtitle_max_lines: int = 2
+    subtitle_min_duration: float = 0.45
+    subtitle_max_duration: float = 3.5
+    subtitle_reading_speed_cps: float = 15.0
+    maximum_freeze_duration: float = 1.5
+    maximum_loop_duration: float = 0.0
+    minimum_clip_duration: float = 0.10
+    maximum_speed_adjustment: float = 1.0
+    av_sync_warning_ms: float = 100.0
+    av_sync_error_ms: float = 350.0
+    maximum_duration_difference: float = 0.35
+    render_config_version: str = "3D.0"
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool) or not isinstance(self.subtitles_enabled, bool):
+            raise ClipEngineError("production_render.enabled, cache_enabled и subtitles_enabled должны быть true или false.")
+        if self.output_width < 2 or self.output_height < 2 or self.output_width % 2 or self.output_height % 2:
+            raise ClipEngineError("production_render output_width/output_height должны быть положительными чётными числами.")
+        if abs((self.output_width / self.output_height) - (9 / 16)) > 0.002:
+            raise ClipEngineError("production_render поддерживает только холст 9:16.")
+        if not 1 < self.output_fps <= 120:
+            raise ClipEngineError("production_render.output_fps должен быть от 1 до 120.")
+        if self.video_codec != "h264" or self.pixel_format != "yuv420p":
+            raise ClipEngineError("Goal 3D поддерживает только H.264 и yuv420p.")
+        if not isinstance(self.video_bitrate, str) or not self.video_bitrate.strip():
+            raise ClipEngineError("production_render.video_bitrate не должен быть пустым.")
+        if self.encoder not in {"auto", "nvenc", "cpu"}:
+            raise ClipEngineError("production_render.encoder: auto, nvenc или cpu.")
+        if self.crop_strategy not in {"center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"}:
+            raise ClipEngineError("production_render.crop_strategy содержит неподдерживаемую стратегию.")
+        if self.transitions not in {"cut", "short_crossfade", "fade_from_black", "fade_to_black"}:
+            raise ClipEngineError("production_render.transitions содержит неподдерживаемый переход.")
+        if self.subtitle_style not in {"minimal", "documentary", "dynamic", "clean"}:
+            raise ClipEngineError("production_render.subtitle_style: minimal, documentary, dynamic или clean.")
+        if not isinstance(self.subtitle_font_family, str) or not self.subtitle_font_family.strip() or len(self.subtitle_font_family) > 160:
+            raise ClipEngineError("production_render.subtitle_font_family должен быть непустой безопасной строкой.")
+        if not 8 <= self.subtitle_max_chars_per_line <= 80 or not 1 <= self.subtitle_max_lines <= 4:
+            raise ClipEngineError("production_render subtitle_max_chars_per_line/max_lines вне допустимого диапазона.")
+        if not 0.05 <= self.subtitle_min_duration <= self.subtitle_max_duration <= 12:
+            raise ClipEngineError("production_render subtitle duration limits некорректны.")
+        if not 4 <= self.subtitle_reading_speed_cps <= 40:
+            raise ClipEngineError("production_render.subtitle_reading_speed_cps должен быть от 4 до 40.")
+        if not 0 <= self.maximum_freeze_duration <= 5 or not 0 <= self.maximum_loop_duration <= 5:
+            raise ClipEngineError("production_render maximum freeze/loop duration должны быть от 0 до 5.")
+        if not 0.04 <= self.minimum_clip_duration <= 10:
+            raise ClipEngineError("production_render.minimum_clip_duration должен быть от 0.04 до 10.")
+        if not 1 <= self.maximum_speed_adjustment <= 1.25:
+            raise ClipEngineError("production_render.maximum_speed_adjustment должен быть от 1 до 1.25.")
+        if not 0 <= self.manual_crop_x <= 1 or not 0 <= self.manual_crop_y <= 1:
+            raise ClipEngineError("production_render manual crop coordinates должны быть от 0 до 1.")
+        if not 0 <= self.av_sync_warning_ms <= self.av_sync_error_ms <= 5000:
+            raise ClipEngineError("production_render AV sync thresholds некорректны.")
+        if not 0.01 <= self.maximum_duration_difference <= 10:
+            raise ClipEngineError("production_render.maximum_duration_difference должен быть от 0.01 до 10.")
+        if not self.render_config_version.strip():
+            raise ClipEngineError("production_render.render_config_version не должен быть пустым.")
+
+
+@dataclass(slots=True)
 class AppConfig:
     whisper_model: str = "small"
     language: str | None = None
@@ -402,6 +481,7 @@ class AppConfig:
     production: ProductionConfig = field(default_factory=ProductionConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     audio_composition: AudioCompositionConfig = field(default_factory=AudioCompositionConfig)
+    production_render: ProductionRenderConfig = field(default_factory=ProductionRenderConfig)
     min_selected_clip_distance_seconds: float = 8.0
     optional_visual_features: bool = False
     # Compatibility flag for older local configurations; --mock-ai has priority.
@@ -437,6 +517,7 @@ class AppConfig:
         self.production.validate()
         self.tts.validate()
         self.audio_composition.validate()
+        self.production_render.validate()
         if not 0 <= self.min_selected_clip_distance_seconds <= 600:
             raise ClipEngineError("min_selected_clip_distance_seconds должен быть от 0 до 600.")
         if not isinstance(self.optional_visual_features, bool):
@@ -478,6 +559,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "production": ProductionConfig,
             "tts": TTSConfig,
             "audio_composition": AudioCompositionConfig,
+            "production_render": ProductionRenderConfig,
         }
         for name, config_type in nested.items():
             nested_values = values.get(name)
