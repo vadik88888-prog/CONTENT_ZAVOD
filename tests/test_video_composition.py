@@ -20,6 +20,7 @@ from app.video_composition import (
     make_crop_plan,
     probe_media,
     production_render_report_section,
+    _ffmpeg,
     _timeline_filter,
 )
 from app.video_models import CanvasConfig, CropPlan, RenderValidation, SourceVideoClip, VideoTimeline
@@ -72,6 +73,14 @@ def test_video_models_validate_canvas_crop_and_timeline_ranges() -> None:
         CropPlan(strategy="center_crop", source_width=100, source_height=100, crop_width=80, crop_height=80, crop_x=30, crop_y=0)
     with pytest.raises(ValidationError):
         SourceVideoClip(**{**clip.model_dump(), "timeline_end_seconds": 0.5})
+
+
+def test_missing_ffmpeg_and_ffprobe_fail_with_clear_render_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.video_composition.shutil.which", lambda _name: None)
+    with pytest.raises(ProductionRenderError, match="ffprobe"):
+        probe_media(Path("source.mp4"), require_video=True)
+    with pytest.raises(ProductionRenderError, match="ffmpeg"):
+        _ffmpeg()
 
 
 def test_timeline_maps_actual_audio_dialogue_and_uses_deterministic_pause_fallback(tmp_path: Path) -> None:

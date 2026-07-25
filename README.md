@@ -67,6 +67,13 @@ Synthetic fixtures проверяют техническое поведение:
 в `validation/fixtures/` лицензированные реальные примеры, отметьте их
 категорию и никогда не коммитьте сами медиа.
 
+**Текущий production status:** техническое ядро успешно прошло 121
+regression-тест,
+зелёный `doctor`, full synthetic pipeline, source-format, cache-recovery и
+30/60/90-минутные проверки. Для production-quality sign-off всё ещё нужны
+лицензированные реальные категории и сверка реального API billing. Полный
+аудит рисков и компромиссов: [`validation/architecture_audit.md`](validation/architecture_audit.md).
+
 ## Что реализовано
 
 - CLI-команда проверки окружения: 'python -m app doctor';

@@ -19,7 +19,7 @@ from app.production_plan import build_production_plan
 from app.semantic_extraction import build_source_context
 from app.tts_models import TTSSegmentRequest, TTSProviderConfig, TTSVoiceConfig
 from app.tts_providers import MockTTSProvider, OpenAITTSProvider
-from app.tts_service import TTSService, normalize_narration_text, resolve_voice, tts_report_section, validate_audio
+from app.tts_service import TTSService, normalize_audio, normalize_narration_text, resolve_voice, tts_report_section, validate_audio
 from app.utils import read_json, write_json
 
 
@@ -313,6 +313,21 @@ def test_duration_validation_rejects_non_audio(tmp_path: Path) -> None:
     path.write_bytes(b"not a wav")
     validation = validate_audio(path, 1, _tts_config())
     assert validation.status == "invalid"
+
+
+def test_missing_ffmpeg_and_ffprobe_are_safe_tts_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"placeholder")
+    with monkeypatch.context() as context:
+        context.setattr("app.tts_service.shutil.which", lambda _name: None)
+        with pytest.raises(RuntimeError, match="ffmpeg"):
+            normalize_audio(source, tmp_path / "normalized.wav", 48000)
+
+    result = TTSService(tmp_path, _tts_config()).generate(_plan(), tmp_path / "run", tmp_path / "out", provider=MockTTSProvider())
+    audio = Path(result.segments[0].artifact.audio_file_path or "")
+    monkeypatch.setattr("app.tts_service.shutil.which", lambda _name: None)
+    validation = validate_audio(audio, 1, _tts_config())
+    assert validation.status == "invalid" and validation.message == "ffprobe is unavailable."
 
 
 def test_duration_validation_has_valid_warning_invalid_states(tmp_path: Path) -> None:
