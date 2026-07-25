@@ -1,0 +1,9 @@
+# Generated validation media, reports, intermediate artifacts and metrics are local evidence only.
+fixtures/*
+!fixtures/.gitkeep
+reports/*
+!reports/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+metrics/*
+!metrics/.gitkeep

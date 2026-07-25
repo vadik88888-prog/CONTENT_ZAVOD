@@ -190,15 +190,32 @@ class TTSService:
             validation = validate_audio(output_path, request.estimated_duration_seconds, self.config)
             if validation.status == "invalid":
                 return None
+            # Cache identity is deliberately based on normalized text and provider
+            # settings, not on a plan-local segment id.  Rebind every plan-local
+            # field before returning it: the same narration may legitimately
+            # appear at a different position in another production plan.
             return cached.model_copy(update={
+                "production_plan_id": request.production_plan_id,
+                "segment_id": request.segment_id,
+                "provider": request.provider_config.provider,
+                "model": request.provider_config.model,
+                "voice": request.voice.voice,
+                "language": request.language,
+                "source_text": request.narration_text,
+                "cache_key": request.cache_key,
                 "status": "cached",
                 "artifact": artifact.model_copy(update={
+                    "production_plan_id": request.production_plan_id,
+                    "segment_id": request.segment_id,
+                    "cache_key": request.cache_key,
                     "audio_file_path": str(output_path), "raw_audio_file_path": None,
                     "origin": "cache", "byte_size": output_path.stat().st_size,
                     "actual_duration_seconds": validation.actual_duration_seconds,
                 }),
                 "validation": validation,
-                "usage": cached.usage.model_copy(update={"api_call_count": 0, "retries": 0}),
+                "usage": cached.usage.model_copy(update={
+                    "character_count": len(request.normalized_text), "api_call_count": 0, "retries": 0,
+                }),
                 "created_at": utc_now(),
             })
         except Exception:

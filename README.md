@@ -48,6 +48,25 @@ python -m app process --input ".\input\test-video.mp4" --config config.yaml
 добавлен блок `ai` с provider, model, токенами, приблизительной стоимостью,
 повторами и безопасными сообщениями API.
 
+## Production validation (Goal 3E)
+
+Reproducible local validation tooling is in [`validation/`](validation/README.md).
+It keeps generated media, reports and metrics outside Git, while the commands
+and validation profile remain versioned:
+
+~~~powershell
+python validation\generate_variants.py --source .\input\smoke-test.mp4
+python validation\collect_health.py --report .\output\<source>\report.json
+python validation\run_stress.py --input .\validation\fixtures\synthetic-proxy-interview.mp4 --config .\validation\config.synthetic.yaml
+~~~
+
+The synthetic fixtures validate technical behaviour (FFmpeg, cache recovery,
+source formats, A/V sync, subtitles and deterministic pipeline stages). They
+do **not** establish content-quality claims for films, series, interviews,
+podcasts, lectures, gameplay or news. For that review, put licensed real
+examples in `validation/fixtures/` locally and record their category; never
+commit the media.
+
 ## Что реализовано
 
 - CLI-команда проверки окружения: 'python -m app doctor';

@@ -1,0 +1,36 @@
+# Goal 3E: reproducible, local-only full-pipeline validation profile.
+# It intentionally uses deterministic providers and a small vertical canvas; it
+# must never be used as a production-quality output profile.
+whisper_model: small
+device: auto
+compute_type: auto
+output_width: 360
+output_height: 640
+encoder_preference: cpu
+ai:
+  provider: mock
+  model: gpt-5-mini
+  max_retries: 2
+transformation:
+  enabled: true
+  ai_strategy: local_only
+  mode: auto
+tts:
+  enabled: true
+  provider: mock
+  model: gpt-4o-mini-tts
+  voice: auto
+  cache_enabled: true
+audio_composition:
+  enabled: true
+  cache_enabled: true
+production_render:
+  enabled: true
+  cache_enabled: true
+  output_width: 360
+  output_height: 640
+  output_fps: 30
+  video_bitrate: 900k
+  encoder: cpu
+  subtitles_enabled: true
+  subtitle_style: documentary

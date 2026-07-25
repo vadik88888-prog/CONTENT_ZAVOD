@@ -139,6 +139,30 @@ def test_tts_cache_is_segment_based_and_force_recompute_bypasses_it(tmp_path: Pa
     assert forced.cache_hit_count == 0
 
 
+def test_tts_cache_rebinds_results_to_the_current_plan_segment_ids(tmp_path: Path) -> None:
+    plan = _plan()
+    config = _tts_config()
+    service = TTSService(tmp_path, config)
+    service.generate(plan, tmp_path / "first", tmp_path / "first-out", provider=MockTTSProvider())
+    renamed_segments = [
+        segment.model_copy(update={"segment_id": f"{segment.segment_id}-rerun"})
+        if isinstance(segment, NarrationSegment) else segment
+        for segment in plan.segments
+    ]
+    reused_plan = plan.model_copy(update={
+        "plan_id": "production-candidate-tts-001-rerun", "segments": renamed_segments,
+    })
+    provider = MockTTSProvider()
+    result = service.generate(reused_plan, tmp_path / "rerun", tmp_path / "rerun-out", provider=provider)
+
+    expected_ids = [segment.segment_id for segment in renamed_segments if isinstance(segment, NarrationSegment)]
+    assert provider.call_count == 0
+    assert result.cache_hit_count == len(expected_ids)
+    assert [segment.segment_id for segment in result.segments] == expected_ids
+    assert all(segment.production_plan_id == reused_plan.plan_id for segment in result.segments)
+    assert all(segment.artifact and segment.artifact.segment_id == segment.segment_id for segment in result.segments)
+
+
 def test_cache_key_changes_for_text_voice_provider_and_model(tmp_path: Path) -> None:
     plan = _plan()
     config = _tts_config()
