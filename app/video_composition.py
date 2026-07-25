@@ -37,7 +37,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "3D.0"
+PRODUCTION_RENDER_ENGINE_VERSION = "3D.1"
 
 
 class VideoCompositionService:
@@ -558,6 +558,7 @@ def _render_cache_key(
         "canvas": canvas.model_dump(mode="json"), "crop": config.crop_strategy,
         "encoder": config.encoder, "codec": config.video_codec, "bitrate": config.video_bitrate,
         "subtitles_enabled": config.subtitles_enabled, "version": config.render_config_version,
+        "engine_version": PRODUCTION_RENDER_ENGINE_VERSION,
     }, sort_keys=True, ensure_ascii=False))
 
 

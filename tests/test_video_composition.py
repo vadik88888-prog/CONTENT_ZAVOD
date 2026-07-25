@@ -157,6 +157,9 @@ def test_subtitles_use_audio_timeline_split_long_text_and_escape_ass(tmp_path: P
     write_production_ass(project, ass, 180, 320)
     content = ass.read_text(encoding="utf-8-sig")
     assert r"\{" in content and "Dialogue:" in content
+    style_line = next(line for line in content.splitlines() if line.startswith("Style: Production,"))
+    metrics = style_line.split(",")
+    assert metrics[2] == "12" and metrics[16:20] == ["1", "0", "2", "12"]
     config.production_render.subtitle_font_family = "__missing_font__"
     _style, fallback, warning = resolve_subtitle_style(config.production_render)
     assert fallback and warning and "Arial" in warning

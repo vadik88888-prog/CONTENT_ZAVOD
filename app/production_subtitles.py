@@ -148,6 +148,7 @@ def write_production_ass(project: SubtitleProject, path: Path, width: int, heigh
     style = project.style
     alignment = 2 if style.position == "bottom" and style.alignment == "center" else 1 if style.position == "bottom" else 8
     bold = -1 if style.font_weight == "bold" else 0
+    font_size, outline_width, shadow, margin_horizontal, margin_vertical = _ass_metrics(style, width, height)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -157,7 +158,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Production,{_escape_style(style.font_family)},{style.font_size},{_ass_color(style.text_color)},{_ass_color(style.text_color)},{_ass_color(style.outline_color)},{_ass_color(style.background)}, {bold},0,0,0,100,100,0,0,1,{style.outline_width},{style.shadow},{alignment},70,70,{style.bottom_margin},1
+Style: Production,{_escape_style(style.font_family)},{font_size},{_ass_color(style.text_color)},{_ass_color(style.text_color)},{_ass_color(style.outline_color)},{_ass_color(style.background)}, {bold},0,0,0,100,100,0,0,1,{outline_width},{shadow},{alignment},{margin_horizontal},{margin_horizontal},{margin_vertical},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -168,6 +169,19 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     ]
     write_bytes_atomic(path, (header + "\n".join(events) + "\n").encode("utf-8-sig"))
     return path
+
+
+def _ass_metrics(style: SubtitleStyle, width: int, height: int) -> tuple[int, int, int, int, int]:
+    """Scale style coordinates from the 1080×1920 production reference canvas."""
+
+    scale = min(width / 1080, height / 1920)
+    return (
+        max(12, round(style.font_size * scale)),
+        max(1, round(style.outline_width * scale)),
+        max(0, round(style.shadow * scale)),
+        max(12, round(70 * scale)),
+        max(32, round(style.bottom_margin * scale)),
+    )
 
 
 def _wrap_and_escape(text: str, style: SubtitleStyle) -> str:
