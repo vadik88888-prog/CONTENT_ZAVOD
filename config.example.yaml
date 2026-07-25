@@ -1,0 +1,110 @@
+# Скопируйте файл как config.yaml и меняйте только нужные параметры.
+whisper_model: small
+language: null                 # null = определить автоматически
+device: auto                   # auto, cuda или cpu
+compute_type: auto             # auto, float16, int8_float16 или int8
+min_clip_duration: 15
+target_clip_duration: 35
+max_clip_duration: 60
+max_clips: 5
+score_threshold: 60
+overlap_threshold: 0.55
+pre_roll_seconds: 0.35
+post_roll_seconds: 0.35
+render_mode: blur-background   # blur-background или center-crop
+subtitles_enabled: true
+output_width: 1080
+output_height: 1920
+encoder_preference: auto       # auto, nvenc или cpu
+delete_downloaded_source: false
+ai:
+  provider: openai             # openai, gemini или mock
+  model: gpt-5-mini            # модель задаётся только здесь
+  max_retries: 2
+  # USD за токен; обновляйте по тарифу выбранной модели при необходимости.
+  input_token_price: 0.00000025
+  output_token_price: 0.000002
+mock_ai: false                 # совместимость; для разового запуска используйте --mock-ai
+transcript_features:
+  hook_patterns: ["почему", "как", "никогда", "главная ошибка", "вот что произошло", "самое важное", "how", "why"]
+  filler_words: ["ээ", "эм", "ну", "как бы", "типа", "короче", "uh", "um", "like"]
+audio_analysis:
+  window_seconds: 0.1
+  silence_threshold: 0.08
+  min_silence_seconds: 0.3
+scene_detection:
+  enabled: true
+  threshold: 0.35
+candidate_generation:
+  min_duration_seconds: 15
+  target_duration_seconds: 30
+  max_duration_seconds: 60
+  boundary_search_radius_seconds: 4
+  max_candidates: 100
+  overlap_limit: 0.75
+scoring:
+  weights:
+    hook: 0.18
+    completeness: 0.18
+    clarity: 0.12
+    speech_density: 0.08
+    pacing: 0.08
+    audio_energy: 0.08
+    scene_structure: 0.10
+    context_independence: 0.10
+    boundary_quality: 0.08
+  repetition_penalty_weight: 12
+  filler_penalty_weight: 18
+ai_reranking:
+  enabled: true
+  shortlist_size: 15
+  final_clip_count: 3
+transformation:
+  # false сохраняет прежнее поведение; включите --transform-script для разового запуска.
+  enabled: false
+  mode: auto
+  ai_strategy: compact          # compact, staged или local_only
+  target_duration_seconds: 35
+  min_duration_seconds: 20
+  max_duration_seconds: 60
+  target_words_per_second: 2.4
+  preserve_language: true
+  output_language: auto         # ru/en требует отдельной future translation stage
+  allow_translation: false
+  context_before_seconds: 10
+  context_after_seconds: 10
+  allow_cta: false
+  max_repair_attempts: 1
+  fallback_enabled: true
+  strict_grounding: true
+  minimum_grounding_score: 0.90
+  minimum_quality_score: 0.55
+  semantic_validation_enabled: true
+  cache_enabled: true
+  # Только для тестов: valid, invalid_fact_id, unsupported_number, changed_negation,
+  # malformed_json, provider_error, empty_script, repair_success, repair_failure.
+  mock_mode: valid
+  weights:
+    hook_strength: 0.10
+    clarity: 0.10
+    completeness: 0.10
+    brevity: 0.08
+    information_density: 0.08
+    context_independence: 0.09
+    naturalness: 0.08
+    pacing: 0.07
+    ending_strength: 0.07
+    factual_grounding: 0.14
+    source_coverage: 0.09
+production:
+  # Строится локально после FinalScript; никаких TTS, аудио или FFmpeg-операций.
+  enabled: true
+  cache_enabled: true
+  narration_words_per_second: 2.4
+  pause_after_narration_seconds: 0.25
+  voice_profile_id: default-documentary
+  voice_gender: neutral           # male, female или neutral — только placeholder
+  voice_style: documentary        # calm, energetic или documentary
+  original_dialogue_speaker: original_speaker_unknown
+min_selected_clip_distance_seconds: 8
+optional_visual_features: false

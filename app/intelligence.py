@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.config import AppConfig
+from app.models import Candidate, ScoredCandidate
+
+
+def shortlist(candidates: list[Candidate], size: int) -> list[Candidate]:
+    return sorted(candidates, key=lambda item: item.local_quality_score, reverse=True)[:size]
+
+
+def local_rank(candidates: list[Candidate]) -> list[ScoredCandidate]:
+    return [_local_scored(candidate) for candidate in candidates]
+
+
+def merge_ai_ranking(
+    candidates: list[Candidate], ai_scored: list[ScoredCandidate], ai_ok: bool
+) -> list[ScoredCandidate]:
+    if not ai_ok:
+        return local_rank(candidates)
+    ai_by_id = {item.candidate.id: item for item in ai_scored}
+    ranked: list[ScoredCandidate] = []
+    for candidate in candidates:
+        local = _local_scored(candidate)
+        semantic = ai_by_id.get(candidate.id)
+        if semantic is None:
+            ranked.append(local)
+            continue
+        candidate.ai_score = float(semantic.score)
+        semantic.candidate.ai_score = candidate.ai_score
+        final = round(candidate.local_quality_score * 0.55 + candidate.ai_score * 0.45)
+        semantic.score = max(0, min(100, final))
+        semantic.selected = True
+        semantic.selection_reason = None
+        ranked.append(semantic)
+    return ranked
+
+
+def intelligence_summary(
+    transcript_features: dict[str, Any], audio_features: dict[str, Any], scene_boundaries: dict[str, Any],
+    candidates: list[Candidate], shortlist_items: list[Candidate], ai_used: bool, ai_fallback: bool,
+    selection_mode: str,
+    candidates_generated: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "version": "1.6",
+        "transcript_feature_count": len(transcript_features.get("segments", [])),
+        "scene_boundary_count": len(scene_boundaries.get("boundaries", [])),
+        "silence_interval_count": len(audio_features.get("silence_intervals", [])),
+        "candidates_generated": candidates_generated if candidates_generated is not None else len(candidates),
+        "candidates_after_deduplication": len(candidates),
+        "shortlist_size": len(shortlist_items),
+        "selection_mode": selection_mode,
+        "ai_reranking_used": ai_used,
+        "ai_fallback_used": ai_fallback,
+    }
+
+
+def _local_scored(candidate: Candidate) -> ScoredCandidate:
+    local = candidate.local_scores
+    score = int(round(candidate.local_quality_score))
+    return ScoredCandidate(
+        candidate=candidate,
+        title=_title(candidate.text),
+        hook=_hook(candidate.text),
+        summary=candidate.text[:600],
+        score=score,
+        hook_score=int(round(float(local.get("hook", 0)))),
+        completeness_score=int(round(float(local.get("completeness", 0)))),
+        emotional_score=0,
+        clarity_score=int(round(float(local.get("clarity", 0)))),
+        context_dependency_score=int(round(100 - float(local.get("context_independence", 0)))),
+        rejection_reason=None,
+        selected=True,
+    )
+
+
+def _title(text: str) -> str:
+    return " ".join(text.replace("\n", " ").split()[:8]).rstrip(".,!?…") or "Фрагмент видео"
+
+
+def _hook(text: str) -> str:
+    return text.split(".", 1)[0].strip()[:300] or text[:300]

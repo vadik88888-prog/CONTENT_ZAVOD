@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any
+
+from app.errors import ClipEngineError
+
+
+@dataclass(slots=True)
+class AIConfig:
+    """Configuration shared by every AI provider."""
+
+    provider: str = "openai"
+    model: str = "gpt-5-mini"
+    max_retries: int = 2
+    # USD per token. Kept in configuration because prices can change.
+    input_token_price: float | None = 0.00000025
+    output_token_price: float | None = 0.000002
+
+    def validate(self) -> None:
+        if not isinstance(self.provider, str) or self.provider not in {"openai", "gemini", "mock"}:
+            raise ClipEngineError("ai.provider: openai, gemini или mock.")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ClipEngineError("ai.model не должен быть пустым.")
+        if isinstance(self.max_retries, bool) or not isinstance(self.max_retries, int) or not 0 <= self.max_retries <= 5:
+            raise ClipEngineError("ai.max_retries должен быть числом от 0 до 5.")
+        for name, value in (
+            ("ai.input_token_price", self.input_token_price),
+            ("ai.output_token_price", self.output_token_price),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
+            ):
+                raise ClipEngineError(f"{name} не может быть отрицательным.")
+
+
+@dataclass(slots=True)
+class TranscriptFeatureConfig:
+    hook_patterns: list[str] = field(default_factory=lambda: [
+        "почему", "как", "никогда", "главная ошибка", "вот что произошло",
+        "самое важное", "how", "why", "never", "the main mistake", "what happened",
+    ])
+    filler_words: list[str] = field(default_factory=lambda: [
+        "ээ", "эм", "ну", "как бы", "типа", "короче", "uh", "um", "like",
+    ])
+
+    def validate(self) -> None:
+        for name, values in (("transcript_features.hook_patterns", self.hook_patterns), ("transcript_features.filler_words", self.filler_words)):
+            if not isinstance(values, list) or not all(isinstance(value, str) and value.strip() for value in values):
+                raise ClipEngineError(f"{name} должен быть непустым списком строк.")
+
+
+@dataclass(slots=True)
+class AudioAnalysisConfig:
+    window_seconds: float = 0.1
+    silence_threshold: float = 0.08
+    min_silence_seconds: float = 0.3
+
+    def validate(self) -> None:
+        if not 0.02 <= self.window_seconds <= 2:
+            raise ClipEngineError("audio_analysis.window_seconds должен быть от 0.02 до 2.")
+        if not 0 <= self.silence_threshold <= 1:
+            raise ClipEngineError("audio_analysis.silence_threshold должен быть от 0 до 1.")
+        if not 0 <= self.min_silence_seconds <= 10:
+            raise ClipEngineError("audio_analysis.min_silence_seconds должен быть от 0 до 10.")
+
+
+@dataclass(slots=True)
+class SceneDetectionConfig:
+    enabled: bool = True
+    threshold: float = 0.35
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ClipEngineError("scene_detection.enabled должен быть true или false.")
+        if not 0.01 <= self.threshold <= 1:
+            raise ClipEngineError("scene_detection.threshold должен быть от 0.01 до 1.")
+
+
+@dataclass(slots=True)
+class CandidateGenerationConfig:
+    min_duration_seconds: float = 15.0
+    target_duration_seconds: float = 30.0
+    max_duration_seconds: float = 60.0
+    boundary_search_radius_seconds: float = 4.0
+    max_candidates: int = 100
+    overlap_limit: float = 0.75
+
+    def validate(self) -> None:
+        if not (0 < self.min_duration_seconds <= self.target_duration_seconds <= self.max_duration_seconds <= 180):
+            raise ClipEngineError("candidate_generation: minimum ≤ target ≤ maximum ≤ 180.")
+        if not 0 <= self.boundary_search_radius_seconds <= 20:
+            raise ClipEngineError("candidate_generation.boundary_search_radius_seconds должен быть от 0 до 20.")
+        if not 1 <= self.max_candidates <= 500:
+            raise ClipEngineError("candidate_generation.max_candidates должен быть от 1 до 500.")
+        if not 0 <= self.overlap_limit <= 1:
+            raise ClipEngineError("candidate_generation.overlap_limit должен быть от 0 до 1.")
+
+
+DEFAULT_SCORING_WEIGHTS = {
+    "hook": 0.18,
+    "completeness": 0.18,
+    "clarity": 0.12,
+    "speech_density": 0.08,
+    "pacing": 0.08,
+    "audio_energy": 0.08,
+    "scene_structure": 0.10,
+    "context_independence": 0.10,
+    "boundary_quality": 0.08,
+}
+
+
+@dataclass(slots=True)
+class ScoringConfig:
+    weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
+    repetition_penalty_weight: float = 12.0
+    filler_penalty_weight: float = 18.0
+
+    def validate(self) -> None:
+        expected = set(DEFAULT_SCORING_WEIGHTS)
+        if set(self.weights) != expected:
+            raise ClipEngineError("scoring.weights должен содержать все заданные компоненты local scoring.")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in self.weights.values()):
+            raise ClipEngineError("scoring.weights должен содержать неотрицательные числа.")
+        if abs(sum(self.weights.values()) - 1.0) > 0.001:
+            raise ClipEngineError("Сумма scoring.weights должна быть равна 1.0.")
+        if not 0 <= self.repetition_penalty_weight <= 100 or not 0 <= self.filler_penalty_weight <= 100:
+            raise ClipEngineError("Веса штрафов scoring должны быть от 0 до 100.")
+
+
+@dataclass(slots=True)
+class AIRerankingConfig:
+    enabled: bool = True
+    shortlist_size: int = 15
+    final_clip_count: int = 3
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ClipEngineError("ai_reranking.enabled должен быть true или false.")
+        if not 1 <= self.shortlist_size <= 100:
+            raise ClipEngineError("ai_reranking.shortlist_size должен быть от 1 до 100.")
+        if not 1 <= self.final_clip_count <= self.shortlist_size:
+            raise ClipEngineError("ai_reranking.final_clip_count должен быть от 1 до shortlist_size.")
+
+
+DEFAULT_TRANSFORMATION_WEIGHTS = {
+    "hook_strength": 0.10,
+    "clarity": 0.10,
+    "completeness": 0.10,
+    "brevity": 0.08,
+    "information_density": 0.08,
+    "context_independence": 0.09,
+    "naturalness": 0.08,
+    "pacing": 0.07,
+    "ending_strength": 0.07,
+    "factual_grounding": 0.14,
+    "source_coverage": 0.09,
+}
+
+
+@dataclass(slots=True)
+class TransformationConfig:
+    """Typed, backwards-compatible settings for the Goal 2 script artifact."""
+
+    # Disabled by default: an existing process command must not unexpectedly make an
+    # external request or create a new product artifact until the user asks for it.
+    enabled: bool = False
+    mode: str = "auto"
+    ai_strategy: str = "compact"
+    target_duration_seconds: float = 35.0
+    min_duration_seconds: float = 20.0
+    max_duration_seconds: float = 60.0
+    target_words_per_second: float = 2.4
+    preserve_language: bool = True
+    output_language: str = "auto"
+    allow_translation: bool = False
+    context_before_seconds: float = 10.0
+    context_after_seconds: float = 10.0
+    allow_cta: bool = False
+    max_repair_attempts: int = 1
+    fallback_enabled: bool = True
+    strict_grounding: bool = True
+    minimum_grounding_score: float = 0.90
+    minimum_quality_score: float = 0.55
+    semantic_validation_enabled: bool = True
+    cache_enabled: bool = True
+    # The mock modes are intentional test fixtures; normal CLI use stays "valid".
+    mock_mode: str = "valid"
+    weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TRANSFORMATION_WEIGHTS))
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ClipEngineError("transformation.enabled должен быть true или false.")
+        if self.mode not in {
+            "faithful_compression", "hook_first", "educational", "story", "listicle",
+            "provocative", "calm_expert", "direct_response", "auto",
+        }:
+            raise ClipEngineError("transformation.mode содержит неподдерживаемый режим.")
+        if self.ai_strategy not in {"staged", "compact", "local_only"}:
+            raise ClipEngineError("transformation.ai_strategy: staged, compact или local_only.")
+        if not (0 < self.min_duration_seconds <= self.target_duration_seconds <= self.max_duration_seconds <= 180):
+            raise ClipEngineError("transformation: min_duration_seconds ≤ target_duration_seconds ≤ max_duration_seconds ≤ 180.")
+        if not 0.5 <= self.target_words_per_second <= 5.0:
+            raise ClipEngineError("transformation.target_words_per_second должен быть от 0.5 до 5.")
+        if self.output_language not in {"auto", "ru", "en"}:
+            raise ClipEngineError("transformation.output_language: auto, ru или en.")
+        if not 0 <= self.context_before_seconds <= 60 or not 0 <= self.context_after_seconds <= 60:
+            raise ClipEngineError("transformation context_before_seconds/context_after_seconds должны быть от 0 до 60.")
+        if not 0 <= self.max_repair_attempts <= 2:
+            raise ClipEngineError("transformation.max_repair_attempts должен быть от 0 до 2.")
+        for name, value in (
+            ("minimum_grounding_score", self.minimum_grounding_score),
+            ("minimum_quality_score", self.minimum_quality_score),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                raise ClipEngineError(f"transformation.{name} должен быть от 0 до 1.")
+        if not all(isinstance(value, bool) for value in (
+            self.preserve_language, self.allow_translation, self.allow_cta,
+            self.fallback_enabled, self.strict_grounding, self.semantic_validation_enabled,
+            self.cache_enabled,
+        )):
+            raise ClipEngineError("Флаги transformation должны быть true или false.")
+        if self.mock_mode not in {
+            "valid", "invalid_fact_id", "unsupported_number", "changed_negation",
+            "malformed_json", "provider_error", "empty_script", "repair_success", "repair_failure",
+        }:
+            raise ClipEngineError("transformation.mock_mode содержит неподдерживаемый тестовый режим.")
+        if set(self.weights) != set(DEFAULT_TRANSFORMATION_WEIGHTS):
+            raise ClipEngineError("transformation.weights должен содержать все компоненты ScriptQualityScore.")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in self.weights.values()):
+            raise ClipEngineError("transformation.weights должен содержать неотрицательные числа.")
+        if abs(sum(self.weights.values()) - 1.0) > 0.001:
+            raise ClipEngineError("Сумма transformation.weights должна быть равна 1.0.")
+
+
+@dataclass(slots=True)
+class ProductionConfig:
+    """Local-only Goal 3A planning settings; no TTS or media tool settings exist here."""
+
+    enabled: bool = True
+    cache_enabled: bool = True
+    narration_words_per_second: float = 2.4
+    pause_after_narration_seconds: float = 0.25
+    voice_profile_id: str = "default-documentary"
+    voice_gender: str = "neutral"
+    voice_style: str = "documentary"
+    original_dialogue_speaker: str = "original_speaker_unknown"
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool):
+            raise ClipEngineError("production.enabled и production.cache_enabled должны быть true или false.")
+        if not 0.5 <= self.narration_words_per_second <= 5.0:
+            raise ClipEngineError("production.narration_words_per_second должен быть от 0.5 до 5.")
+        if not 0 <= self.pause_after_narration_seconds <= 3:
+            raise ClipEngineError("production.pause_after_narration_seconds должен быть от 0 до 3.")
+        if not self.voice_profile_id.strip() or not self.original_dialogue_speaker.strip():
+            raise ClipEngineError("production voice_profile_id и original_dialogue_speaker не должны быть пустыми.")
+        if self.voice_gender not in {"male", "female", "neutral"}:
+            raise ClipEngineError("production.voice_gender: male, female или neutral.")
+        if self.voice_style not in {"calm", "energetic", "documentary"}:
+            raise ClipEngineError("production.voice_style: calm, energetic или documentary.")
+
+
+@dataclass(slots=True)
+class AppConfig:
+    whisper_model: str = "small"
+    language: str | None = None
+    device: str = "auto"
+    compute_type: str = "auto"
+    min_clip_duration: float = 15.0
+    target_clip_duration: float = 35.0
+    max_clip_duration: float = 60.0
+    max_clips: int = 5
+    score_threshold: int = 60
+    overlap_threshold: float = 0.55
+    pre_roll_seconds: float = 0.35
+    post_roll_seconds: float = 0.35
+    render_mode: str = "blur-background"
+    subtitles_enabled: bool = True
+    output_width: int = 1080
+    output_height: int = 1920
+    encoder_preference: str = "auto"
+    delete_downloaded_source: bool = False
+    ai: AIConfig = field(default_factory=AIConfig)
+    transcript_features: TranscriptFeatureConfig = field(default_factory=TranscriptFeatureConfig)
+    audio_analysis: AudioAnalysisConfig = field(default_factory=AudioAnalysisConfig)
+    scene_detection: SceneDetectionConfig = field(default_factory=SceneDetectionConfig)
+    candidate_generation: CandidateGenerationConfig = field(default_factory=CandidateGenerationConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    ai_reranking: AIRerankingConfig = field(default_factory=AIRerankingConfig)
+    transformation: TransformationConfig = field(default_factory=TransformationConfig)
+    production: ProductionConfig = field(default_factory=ProductionConfig)
+    min_selected_clip_distance_seconds: float = 8.0
+    optional_visual_features: bool = False
+    # Compatibility flag for older local configurations; --mock-ai has priority.
+    mock_ai: bool = False
+
+    def validate(self) -> None:
+        if not (0 < self.min_clip_duration <= self.target_clip_duration <= self.max_clip_duration):
+            raise ClipEngineError(
+                "Длительности клипа должны удовлетворять: minimum ≤ target ≤ maximum."
+            )
+        if self.max_clip_duration > 180:
+            raise ClipEngineError("Максимальная длительность клипа не должна превышать 180 секунд.")
+        if self.max_clips < 1:
+            raise ClipEngineError("Количество клипов должно быть не меньше одного.")
+        if not 0 <= self.score_threshold <= 100:
+            raise ClipEngineError("Порог оценки должен быть от 0 до 100.")
+        if not 0 <= self.overlap_threshold <= 1:
+            raise ClipEngineError("Порог пересечения должен быть от 0 до 1.")
+        if self.render_mode not in {"blur-background", "center-crop"}:
+            raise ClipEngineError("Режим рендера: blur-background или center-crop.")
+        if self.device not in {"auto", "cuda", "cpu"}:
+            raise ClipEngineError("device: auto, cuda или cpu.")
+        if self.encoder_preference not in {"auto", "nvenc", "cpu"}:
+            raise ClipEngineError("encoder_preference: auto, nvenc или cpu.")
+        self.ai.validate()
+        self.transcript_features.validate()
+        self.audio_analysis.validate()
+        self.scene_detection.validate()
+        self.candidate_generation.validate()
+        self.scoring.validate()
+        self.ai_reranking.validate()
+        self.transformation.validate()
+        self.production.validate()
+        if not 0 <= self.min_selected_clip_distance_seconds <= 600:
+            raise ClipEngineError("min_selected_clip_distance_seconds должен быть от 0 до 600.")
+        if not isinstance(self.optional_visual_features, bool):
+            raise ClipEngineError("optional_visual_features должен быть true или false.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def load_config(path: Path | None = None) -> AppConfig:
+    values: dict[str, Any] = {}
+    if path is not None:
+        if not path.exists():
+            raise ClipEngineError(f"Файл конфигурации не найден: {path}")
+        try:
+            import yaml
+        except ImportError as error:
+            raise ClipEngineError(
+                "Для чтения config.yaml установите зависимости: pip install -r requirements.txt"
+            ) from error
+        with path.open("r", encoding="utf-8") as file:
+            loaded = yaml.safe_load(file) or {}
+        if not isinstance(loaded, dict):
+            raise ClipEngineError("Конфигурация должна быть YAML-объектом key: value.")
+        allowed = {item.name for item in fields(AppConfig)}
+        unknown = sorted(set(loaded) - allowed)
+        if unknown:
+            raise ClipEngineError(f"Неизвестные параметры config.yaml: {', '.join(unknown)}")
+        values = dict(loaded)
+        nested = {
+            "ai": AIConfig,
+            "transcript_features": TranscriptFeatureConfig,
+            "audio_analysis": AudioAnalysisConfig,
+            "scene_detection": SceneDetectionConfig,
+            "candidate_generation": CandidateGenerationConfig,
+            "scoring": ScoringConfig,
+            "ai_reranking": AIRerankingConfig,
+            "transformation": TransformationConfig,
+            "production": ProductionConfig,
+        }
+        for name, config_type in nested.items():
+            nested_values = values.get(name)
+            if nested_values is None:
+                continue
+            if not isinstance(nested_values, dict):
+                raise ClipEngineError(f"{name} в config.yaml должен быть YAML-объектом key: value.")
+            nested_allowed = {item.name for item in fields(config_type)}
+            nested_unknown = sorted(set(nested_values) - nested_allowed)
+            if nested_unknown:
+                raise ClipEngineError(
+                    f"Неизвестные параметры {name} в config.yaml: {', '.join(nested_unknown)}"
+                )
+            values[name] = config_type(**nested_values)
+    config = AppConfig(**values)
+    config.validate()
+    return config
