@@ -32,12 +32,15 @@ def test_presets_resolve_to_distinct_real_pipeline_values() -> None:
     assert standard.ai_reranking_enabled is True
     assert maximum.candidate_limit > standard.candidate_limit > fast.candidate_limit
     assert maximum.shortlist_size > standard.shortlist_size > fast.shortlist_size
+    assert fast.crop_strategy == "fit_blur_background"
+    assert standard.crop_strategy == maximum.crop_strategy == "center_crop"
 
     config = load_config()
     apply_resolved_processing_config(config, maximum)
     assert config.ai_reranking.final_clip_count == 5
     assert config.candidate_generation.max_candidates == maximum.candidate_limit
     assert config.transformation.ai_strategy == "staged"
+    assert config.production_render.crop_strategy == "center_crop"
     assert config.product_flow.processing_mode == "maximum"
 
 

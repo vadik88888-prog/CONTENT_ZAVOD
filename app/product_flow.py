@@ -123,6 +123,7 @@ class ResolvedProcessingConfig:
     ai_reranking_enabled: bool
     transformation_strategy: str
     video_bitrate: str
+    crop_strategy: str
     cache_policy: str
     resolver_version: str = PRESET_RESOLVER_VERSION
 
@@ -138,6 +139,7 @@ class ResolvedProcessingConfig:
             "ai_reranking_enabled": self.ai_reranking_enabled,
             "transformation_strategy": self.transformation_strategy,
             "video_bitrate": self.video_bitrate,
+            "crop_strategy": self.crop_strategy,
             "cache_policy": self.cache_policy,
             "resolver_version": self.resolver_version,
         }
@@ -209,9 +211,9 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
     deep_analysis = resolve_deep_analysis(intent.deep_analysis, source_metadata)
     requested_count = intent.requested_clip_count
     defaults = {
-        "fast": {"clips": 1, "candidates": 40, "shortlist": 8, "reranking": False, "strategy": "local_only", "bitrate": "4M"},
-        "standard": {"clips": 3, "candidates": 100, "shortlist": 15, "reranking": True, "strategy": "compact", "bitrate": platform.video_bitrate},
-        "maximum": {"clips": 5, "candidates": 160, "shortlist": 30, "reranking": True, "strategy": "staged", "bitrate": "8M"},
+        "fast": {"clips": 1, "candidates": 40, "shortlist": 8, "reranking": False, "strategy": "local_only", "bitrate": "4M", "crop": "fit_blur_background"},
+        "standard": {"clips": 3, "candidates": 100, "shortlist": 15, "reranking": True, "strategy": "compact", "bitrate": platform.video_bitrate, "crop": "center_crop"},
+        "maximum": {"clips": 5, "candidates": 160, "shortlist": 30, "reranking": True, "strategy": "staged", "bitrate": "8M", "crop": "center_crop"},
     }[intent.processing_mode]
     clip_count = requested_count or int(defaults["clips"])
     return ResolvedProcessingConfig(
@@ -225,6 +227,7 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         ai_reranking_enabled=bool(defaults["reranking"]),
         transformation_strategy=str(defaults["strategy"]),
         video_bitrate=str(defaults["bitrate"]),
+        crop_strategy=str(defaults["crop"]),
         cache_policy="reuse" if intent.processing_mode != "maximum" else "reuse-with-quality-refresh",
     )
 
@@ -288,6 +291,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     config.production_render.output_height = resolved.platform.height
     config.production_render.output_fps = resolved.platform.output_fps
     config.production_render.video_bitrate = resolved.video_bitrate
+    config.production_render.crop_strategy = resolved.crop_strategy
     config.production_render.subtitle_style = resolved.subtitle_preset
     config.production_render.cache_enabled = resolved.cache_policy.startswith("reuse")
     config.optional_visual_features = resolved.deep_analysis.resolved
