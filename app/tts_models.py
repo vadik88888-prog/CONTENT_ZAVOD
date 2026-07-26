@@ -170,4 +170,5 @@ class TTSGenerationResult(BaseModel):
     api_call_count: int = Field(ge=0)
     api_errors: list[TTSError] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    skip_reason: str | None = None
     artifacts: list[str] = Field(default_factory=list)

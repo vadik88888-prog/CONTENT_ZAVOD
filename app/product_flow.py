@@ -18,6 +18,7 @@ DEEP_ANALYSIS_MODES = frozenset({"auto", "on", "off"})
 PLATFORMS = frozenset({"tiktok", "reels", "shorts", "universal"})
 SUBTITLE_PRESETS = frozenset({"minimal", "documentary", "dynamic", "clean"})
 CLIP_COUNTS = frozenset({"auto", "1", "3", "5"})
+AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
 PRESET_RESOLVER_VERSION = "4B.1"
 
 
@@ -57,6 +58,7 @@ class ProcessingIntent:
     platform: str = "universal"
     clip_count: str = "3"
     subtitle_preset: str = "documentary"
+    audio_mode: str = "original"
 
     def validate(self) -> None:
         if self.processing_mode not in PROCESSING_MODES:
@@ -69,6 +71,8 @@ class ProcessingIntent:
             raise ValueError("Unsupported clip count.")
         if self.subtitle_preset not in SUBTITLE_PRESETS:
             raise ValueError("Unsupported subtitle preset.")
+        if self.audio_mode not in AUDIO_MODES:
+            raise ValueError("Unsupported audio mode.")
 
     @property
     def requested_clip_count(self) -> int | None:
@@ -82,6 +86,7 @@ class ProcessingIntent:
             "platform": self.platform,
             "clip_count": str(self.clip_count),
             "subtitle_preset": self.subtitle_preset,
+            "audio_mode": self.audio_mode,
         }
 
     @classmethod
@@ -92,6 +97,7 @@ class ProcessingIntent:
             platform=str(value.get("platform", "universal")),
             clip_count=str(value.get("clip_count", "3")),
             subtitle_preset=str(value.get("subtitle_preset", "documentary")),
+            audio_mode=str(value.get("audio_mode", "original")),
         )
         intent.validate()
         return intent
@@ -118,6 +124,7 @@ class ResolvedProcessingConfig:
     platform: PlatformPreset
     clip_count: int
     subtitle_preset: str
+    audio_mode: str
     candidate_limit: int
     shortlist_size: int
     ai_reranking_enabled: bool
@@ -134,6 +141,7 @@ class ResolvedProcessingConfig:
             "platform": self.platform.to_dict(),
             "clip_count": self.clip_count,
             "subtitle_preset": self.subtitle_preset,
+            "audio_mode": self.audio_mode,
             "candidate_limit": self.candidate_limit,
             "shortlist_size": self.shortlist_size,
             "ai_reranking_enabled": self.ai_reranking_enabled,
@@ -222,6 +230,7 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         platform=platform,
         clip_count=clip_count,
         subtitle_preset=intent.subtitle_preset,
+        audio_mode=intent.audio_mode,
         candidate_limit=int(defaults["candidates"]),
         shortlist_size=max(clip_count, int(defaults["shortlist"])),
         ai_reranking_enabled=bool(defaults["reranking"]),
@@ -293,6 +302,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     config.production_render.video_bitrate = resolved.video_bitrate
     config.production_render.crop_strategy = resolved.crop_strategy
     config.production_render.subtitle_style = resolved.subtitle_preset
+    config.production.audio_mode = resolved.audio_mode
     config.production_render.cache_enabled = resolved.cache_policy.startswith("reuse")
     config.optional_visual_features = resolved.deep_analysis.resolved
     flow = config.product_flow
@@ -303,6 +313,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     flow.platform = resolved.platform.platform
     flow.clip_count = resolved.clip_count
     flow.subtitle_preset = resolved.subtitle_preset
+    flow.audio_mode = resolved.audio_mode
     flow.preset_version = resolved.resolver_version
 
 

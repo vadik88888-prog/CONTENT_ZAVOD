@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.ai import sanitize_api_error
+from app.audio_modes import tts_eligibility
 from app.config import AppConfig
 from app.production_models import NarrationSegment, ProductionPlan
 from app.tts_models import (
@@ -78,6 +79,17 @@ class TTSService:
         batch = TTSRequest(
             production_plan_id=plan.plan_id, provider_config=provider_config, voice=voice, created_at=started_at,
         )
+        eligible, reason = tts_eligibility(plan)
+        if not eligible:
+            return self._result(
+                batch,
+                started_at,
+                "skipped",
+                [],
+                0.0,
+                [f"TTS skipped: {reason}."],
+                skip_reason=reason,
+            )
         requests, request_warnings = self._prepare_requests(plan, provider_config, voice, temporary_dir)
         warnings = ([voice_warning] if voice_warning else []) + request_warnings
         estimated_cost = round(sum(_cost(item, self.config) for item in requests), 8)
@@ -302,6 +314,7 @@ class TTSService:
     def _result(
         self, request: TTSRequest, started_at: str, status: str,
         segments: list[TTSSegmentResult], estimated_cost: float, warnings: list[str],
+        skip_reason: str | None = None,
     ) -> TTSGenerationResult:
         successful = [item for item in segments if item.status in {"generated", "cached"}]
         validations = [item.validation.status for item in successful if item.validation]
@@ -328,6 +341,7 @@ class TTSService:
             api_call_count=sum(item.usage.api_call_count for item in segments),
             api_errors=[item for item in api_errors if item is not None],
             warnings=warnings,
+            skip_reason=skip_reason,
         )
 
     def _write_artifacts(
@@ -458,6 +472,10 @@ def tts_report_section(result: TTSGenerationResult) -> dict[str, Any]:
         "total_duration": result.total_duration_seconds,
         "validation_status": result.validation_status,
         "api_call_count": result.api_call_count,
+        "tts_eligible": result.skip_reason is None and bool(result.segments),
+        "tts_invoked": result.status != "skipped" and bool(result.segments),
+        "tts_provider_called": result.api_call_count > 0,
+        "skip_reason": result.skip_reason,
         "api_errors": [item.model_dump(mode="json") for item in result.api_errors],
         "artifacts": result.artifacts,
         "cache": {"enabled": result.request.provider_config.provider != "local", "hit_count": result.cache_hit_count},

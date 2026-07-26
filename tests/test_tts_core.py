@@ -23,7 +23,7 @@ from app.tts_service import TTSService, normalize_audio, normalize_narration_tex
 from app.utils import read_json, write_json
 
 
-def _plan() -> ProductionPlan:
+def _plan(audio_mode: str = "voiceover") -> ProductionPlan:
     config = AppConfig()
     config.transformation.ai_strategy = "local_only"
     text = "First, measure the source data. Then keep the original claim without changing the facts."
@@ -39,6 +39,7 @@ def _plan() -> ProductionPlan:
         features, {}, {"boundaries": []}, config.transformation,
     )
     outcome = run_content_transformation(context, config.transformation, None, force_local=True)
+    config.production.audio_mode = audio_mode
     return build_production_plan(outcome, config.production)
 
 
@@ -120,6 +121,39 @@ def test_mock_tts_generates_normalized_wav_and_manifest(tmp_path: Path) -> None:
     assert all(item.artifact and item.artifact.sample_rate == 48000 for item in result.segments)
     for name in ("tts-result.json", "tts-manifest.json", "tts-summary.txt"):
         assert (tmp_path / "out" / "tts" / name).is_file()
+
+
+def test_source_audio_mode_skips_tts_without_provider_call_or_artifacts(tmp_path: Path) -> None:
+    plan = _plan("original")
+    provider = MockTTSProvider()
+
+    result = TTSService(tmp_path, _tts_config()).generate(
+        plan, tmp_path / "run", tmp_path / "out", provider=provider,
+    )
+
+    assert plan.tts_eligible is False
+    assert result.status == "skipped"
+    assert result.skip_reason == "source_audio_mode"
+    assert provider.call_count == 0
+    assert result.segments == [] and result.artifacts == []
+    assert not (tmp_path / "out" / "tts").exists()
+    report = tts_report_section(result)
+    assert report["tts_invoked"] is False and report["estimated_cost"] == 0
+
+
+def test_pipeline_source_audio_mode_has_no_tts_stage_artifacts(tmp_path: Path) -> None:
+    plan = _plan("original")
+    pipeline = Pipeline(tmp_path, _tts_config())
+    result = pipeline._run_tts(
+        StageTracker(tmp_path / "state.json"),
+        {"items": [{"candidate_id": "candidate-tts-001", "status": "completed", "plan": plan.model_dump(mode="json")} ]},
+        tmp_path / "run", tmp_path / "out",
+    )
+
+    assert result["status"] == "skipped"
+    assert result["tts_invoked"] is False
+    assert result["items"][0]["reason"] == "source_audio_mode"
+    assert not (tmp_path / "out" / "tts").exists()
 
 
 def test_tts_cache_is_segment_based_and_force_recompute_bypasses_it(tmp_path: Path) -> None:

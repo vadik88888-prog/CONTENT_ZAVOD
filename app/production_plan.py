@@ -64,7 +64,11 @@ def build_production_plan(
     dialogue_mappings: list[DialogueSegment] = []
     narration_to_dialogue: dict[str, list[str]] = {}
     used_dialogue_fact_ids: set[str] = set()
-    dialogue_only = final.get("production_ready_for_tts") is False
+    audio_mode = str(getattr(production_config, "audio_mode", "original"))
+    source_audio_mode = audio_mode in {"original", "original_enhanced"}
+    # A transformed FinalScript is evidence for selection, never implicit consent
+    # to replace the speaker. Original modes always remain dialogue-only.
+    dialogue_only = source_audio_mode or final.get("production_ready_for_tts") is False
     order = 1
     for index, sentence in enumerate(sentences):
         sentence_id = str(sentence.get("sentence_id") or f"sentence-{index + 1:03d}")
@@ -179,6 +183,9 @@ def build_production_plan(
             source_id=str(source.get("id", "")),
             final_script_hash=final_script_hash,
         ),
+        audio_mode=audio_mode,
+        tts_eligible=not dialogue_only and audio_mode in {"voiceover", "replace_voice", "mixed"},
+        audio_mode_reason="source_audio_mode" if source_audio_mode else "explicit_voiceover_intent",
     )
     return plan
 

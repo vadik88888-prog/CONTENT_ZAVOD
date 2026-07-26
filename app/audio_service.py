@@ -188,6 +188,7 @@ class AudioCompositionService:
         project_id = f"audio-{plan.plan_id}-{stable_text_hash(json.dumps([clip.clip_id for clip in timeline_clips]))[:12]}"
         project = AudioProject(
             project_id=project_id,
+            audio_mode=plan.audio_mode,
             status=_project_status(mix_status, narration_clips, plan, warnings),
             timeline=timeline, tracks=tracks,
             mix=AudioMix(
@@ -219,6 +220,7 @@ class AudioCompositionService:
                 schema_version=AUDIO_PROJECT_SCHEMA_VERSION, audio_project_id=project_id,
                 production_plan_id=plan.plan_id, source_id=source.id,
                 source_media_path=str(source.path),
+                audio_mode=plan.audio_mode,
                 tts_result_path=_tts_result_path(tts_result),
                 transcript_path=str(work_directory / "transcript.json") if (work_directory / "transcript.json").is_file() else None,
                 created_at=started_at, completed_at=utc_now(),
@@ -373,6 +375,8 @@ def audio_report_section(project: AudioProject) -> dict[str, Any]:
     return {
         "enabled": True,
         "status": project.status,
+        "audio_mode": project.audio_mode,
+        "source_audio_present": bool(project.tracks[1].clips),
         "tracks": [track.model_dump(mode="json") for track in project.tracks],
         "ducking": project.mix.ducking.model_dump(mode="json"),
         "dialogue_count": len(project.tracks[1].clips),

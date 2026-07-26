@@ -163,6 +163,26 @@ class ProductionPlan(BaseModel):
     audio_layers: list[AudioLayer]
     subtitle_track: SubtitleTrack
     metadata: ProductionMetadata
+    audio_mode: Literal["original", "original_enhanced", "voiceover", "replace_voice", "mixed"] = "original"
+    tts_eligible: bool = False
+    audio_mode_reason: str = "source_audio_mode"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_pre_audio_mode_plans(cls, value: object) -> object:
+        """Old cached plans with narration retain their historical voiceover intent."""
+
+        if not isinstance(value, dict) or "audio_mode" in value:
+            return value
+        migrated = dict(value)
+        has_narration = any(
+            isinstance(item, dict) and item.get("segment_type") == "narration"
+            for item in migrated.get("segments", [])
+        )
+        migrated["audio_mode"] = "voiceover" if has_narration else "original"
+        migrated["tts_eligible"] = has_narration
+        migrated["audio_mode_reason"] = "legacy_plan_migration"
+        return migrated
 
     @model_validator(mode="after")
     def _validate_relationships(self) -> "ProductionPlan":
@@ -176,4 +196,9 @@ class ProductionPlan(BaseModel):
             raise ValueError("dialogue_mappings must mirror dialogue placeholder segments")
         if {entry.segment_id for entry in self.timeline.entries} != set(segment_ids):
             raise ValueError("Timeline must contain every production segment")
+        has_narration = any(isinstance(segment, NarrationSegment) for segment in self.segments)
+        if self.audio_mode in {"original", "original_enhanced"} and has_narration:
+            raise ValueError("source audio modes cannot contain generated narration segments")
+        if self.tts_eligible and (not has_narration or self.audio_mode not in {"voiceover", "replace_voice", "mixed"}):
+            raise ValueError("TTS eligibility requires explicit voiceover intent and narration")
         return self

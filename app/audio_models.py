@@ -195,6 +195,7 @@ class AudioMetadata(BaseModel):
     production_plan_id: str
     source_id: str
     source_media_path: str
+    audio_mode: Literal["original", "original_enhanced", "voiceover", "replace_voice", "mixed"] = "original"
     tts_result_path: str | None = None
     transcript_path: str | None = None
     created_at: str
@@ -210,6 +211,7 @@ class AudioProject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    audio_mode: Literal["original", "original_enhanced", "voiceover", "replace_voice", "mixed"] = "original"
     status: Literal["completed", "partial", "skipped", "failed"]
     timeline: AudioTimeline
     tracks: list[AudioTrack]

@@ -39,6 +39,12 @@ def _transformation_outcome() -> dict:
     return result
 
 
+def _voiceover_production():
+    production = AppConfig().production
+    production.audio_mode = "voiceover"
+    return production
+
+
 def test_pydantic_production_models_reject_invalid_narration() -> None:
     with pytest.raises(ValidationError):
         NarrationSegment(
@@ -49,7 +55,7 @@ def test_pydantic_production_models_reject_invalid_narration() -> None:
 
 
 def test_builder_creates_narration_dialogue_pauses_and_placeholders() -> None:
-    plan = build_production_plan(_transformation_outcome(), AppConfig().production)
+    plan = build_production_plan(_transformation_outcome(), _voiceover_production())
     assert isinstance(plan, ProductionPlan)
     assert plan.timeline.narration_count == len(plan.subtitle_track.cues)
     assert plan.timeline.dialogue_count == len(plan.dialogue_mappings)
@@ -74,6 +80,7 @@ def test_dialogue_mapping_has_fact_transcript_timestamps_speaker_and_confidence(
 
 def test_timeline_is_deterministic_and_keeps_dialogue_linked_without_counting_it_twice() -> None:
     config = AppConfig()
+    config.production.audio_mode = "voiceover"
     first = build_production_plan(_transformation_outcome(), config.production)
     second = build_production_plan(_transformation_outcome(), config.production)
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
@@ -87,7 +94,7 @@ def test_timeline_is_deterministic_and_keeps_dialogue_linked_without_counting_it
 def test_builder_marks_cta_and_summary_is_media_free() -> None:
     transformation = _transformation_outcome()
     transformation["final_script"]["sentences"][-1]["role"] = "cta"
-    plan = build_production_plan(transformation, AppConfig().production)
+    plan = build_production_plan(transformation, _voiceover_production())
     assert any(item.narration_role == "cta" for item in plan.segments if isinstance(item, NarrationSegment))
     summary = production_summary(plan)
     assert "TTS" in summary and "no media was generated" in summary
@@ -149,13 +156,22 @@ def test_dialogue_only_final_script_builds_plan_without_tts_narration() -> None:
     outcome = _transformation_outcome()
     outcome["final_script"]["production_ready_for_tts"] = False
 
-    plan = build_production_plan(outcome, AppConfig().production)
+    plan = build_production_plan(outcome, _voiceover_production())
 
     assert not any(isinstance(segment, NarrationSegment) for segment in plan.segments)
     assert plan.dialogue_mappings
     assert all(isinstance(segment, DialogueSegment) for segment in plan.segments)
     assert plan.timeline.narration_count == 0
     assert plan.timeline.dialogue_count == len(plan.dialogue_mappings)
+
+
+def test_default_audio_mode_builds_source_dialogue_without_tts_narration() -> None:
+    plan = build_production_plan(_transformation_outcome(), AppConfig().production)
+
+    assert plan.audio_mode == "original"
+    assert not plan.tts_eligible
+    assert not any(isinstance(segment, NarrationSegment) for segment in plan.segments)
+    assert plan.dialogue_mappings
 
 
 def test_production_plan_only_does_not_overwrite_existing_render_cache(tmp_path: Path) -> None:

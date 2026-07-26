@@ -183,6 +183,25 @@ def test_audio_composition_handles_missing_optional_tracks(
     assert Path(project.mix.mixed_audio_path or "").is_file()
 
 
+def test_source_audio_mode_composes_dialogue_without_any_tts_artifact(tmp_path: Path) -> None:
+    config = _audio_config()
+    plan = _plan(narration=False, dialogue=True)
+    source_path = _source_wav(tmp_path / "source.wav")
+    provider = MockTTSProvider()
+
+    tts = TTSService(tmp_path, config).generate(plan, tmp_path / "run", tmp_path / "tts-out", provider=provider)
+    project = AudioCompositionService(tmp_path, config).compose(
+        plan, local_source(str(source_path)), {"segments": [{"id": 0, "start": 0, "end": 3}]},
+        None, tmp_path / "work", tmp_path / "out",
+    )
+
+    assert plan.audio_mode == "original"
+    assert tts.status == "skipped" and provider.call_count == 0 and not tts.artifacts
+    assert project.status == "completed"
+    assert [clip.clip_type for clip in project.timeline.clips] == ["dialogue", "silence"]
+    assert Path(project.mix.mixed_audio_path or "").is_file()
+
+
 def test_tts_provider_fallback_does_not_block_dialogue_audio(tmp_path: Path) -> None:
     config = _audio_config()
     plan = _plan()

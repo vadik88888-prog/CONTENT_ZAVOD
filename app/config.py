@@ -246,8 +246,12 @@ class ProductionConfig:
     voice_gender: str = "neutral"
     voice_style: str = "documentary"
     original_dialogue_speaker: str = "original_speaker_unknown"
+    # Source dialogue is the product default; synthetic narration is opt-in.
+    audio_mode: str = "original"
 
     def validate(self) -> None:
+        if self.audio_mode not in {"original", "original_enhanced", "voiceover", "replace_voice", "mixed"}:
+            raise ClipEngineError("production.audio_mode must be a supported audio mode.")
         if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool):
             raise ClipEngineError("production.enabled и production.cache_enabled должны быть true или false.")
         if not 0.5 <= self.narration_words_per_second <= 5.0:
@@ -461,9 +465,12 @@ class ProductFlowConfig:
     platform: str = "universal"
     clip_count: int = 3
     subtitle_preset: str = "documentary"
+    audio_mode: str = "original"
     preset_version: str = "4B.1"
 
     def validate(self) -> None:
+        if self.audio_mode not in {"original", "original_enhanced", "voiceover", "replace_voice", "mixed"}:
+            raise ClipEngineError("product_flow.audio_mode must be a supported audio mode.")
         if self.processing_mode not in {"fast", "standard", "maximum"}:
             raise ClipEngineError("product_flow.processing_mode: fast, standard или maximum.")
         if self.deep_analysis_requested not in {"auto", "on", "off"}:

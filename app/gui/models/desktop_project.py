@@ -36,6 +36,7 @@ class ProjectOptions:
     clip_count: str = "3"
     subtitles_enabled: bool = True
     subtitle_style: str = "documentary"
+    audio_mode: str = "original"
     encoder: str = "auto"
     use_cache: bool = True
     recompute_all: bool = False
@@ -56,6 +57,7 @@ class ProjectOptions:
             platform=self.platform,
             clip_count=str(self.clip_count),
             subtitle_preset=self.subtitle_style,
+            audio_mode=self.audio_mode,
         )
 
 
@@ -109,7 +111,7 @@ class DesktopProject:
             raise ValueError("Project settings are corrupted.")
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
-            "subtitles_enabled", "subtitle_style", "encoder", "use_cache", "recompute_all",
+            "subtitles_enabled", "subtitle_style", "audio_mode", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
         source_metadata = dict(value.get("source_metadata") or {})

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
+from app.audio_modes import tts_eligibility
 from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
@@ -560,6 +561,7 @@ class Pipeline:
             tracker.skip("tts_generation", "Нет ProductionPlan для TTS.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
         outcomes: list[dict[str, Any]] = []
+        eligible: list[tuple[int, str, ProductionPlan]] = []
         for index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
             try:
@@ -567,6 +569,23 @@ class Pipeline:
             except Exception as error:
                 outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
                 continue
+            allowed, reason = tts_eligibility(plan)
+            if not allowed:
+                outcomes.append({
+                    "candidate_id": candidate_id, "status": "skipped", "reason": reason,
+                    "tts_invoked": False, "estimated_cost": 0.0, "actual_cost": 0.0,
+                })
+                continue
+            eligible.append((index, candidate_id, plan))
+        if not eligible:
+            reason = str(outcomes[0].get("reason", "no_eligible_narration")) if outcomes else "no_eligible_narration"
+            tracker.skip("tts_generation", f"TTS skipped: {reason}.")
+            return {
+                "enabled": True, "status": "skipped", "reason": reason,
+                "tts_invoked": False, "estimated_cost": 0.0, "actual_cost": 0.0,
+                "items": outcomes,
+            }
+        for index, candidate_id, plan in eligible:
             candidate_output = _candidate_output_directory(output_directory, candidate_id, index)
             stage_name = f"tts_generation:{plan.plan_id}"
             tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
@@ -582,7 +601,7 @@ class Pipeline:
                 continue
             tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
             report = tts_report_section(result)
-            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report})
+            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report, "tts_invoked": report["tts_invoked"]})
             self.warnings.extend(result.warnings)
             self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
         return _multi_stage_report("tts", outcomes)
@@ -604,28 +623,30 @@ class Pipeline:
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
         tts_items = {str(item.get("candidate_id")): item for item in tts.get("items", []) if isinstance(item, dict)}
         outcomes: list[dict[str, Any]] = []
-        for item in plan_items:
+        for index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
-            tts_item = tts_items.get(candidate_id)
-            if not tts_item or tts_item.get("status") not in {"completed", "partial", "fallback"}:
-                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "tts_unavailable"})
-                continue
             try:
                 plan = ProductionPlan.model_validate(plan_data)
             except Exception as error:
                 outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
                 continue
-            candidate_output = Path(str(tts_item["output_directory"]))
+            tts_allowed, _reason = tts_eligibility(plan)
+            tts_item = tts_items.get(candidate_id)
+            if tts_allowed and (not tts_item or tts_item.get("status") not in {"completed", "partial", "fallback"}):
+                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "tts_unavailable"})
+                continue
+            candidate_output = Path(str(tts_item["output_directory"])) if tts_item else _candidate_output_directory(output_directory, candidate_id, index)
             stage_name = f"audio_composition:{plan.plan_id}"
             tracker.start(stage_name, _hash({
                 "plan": plan.plan_id,
                 "audio": self.config.audio_composition,
-                "tts_result": _file_fingerprint(candidate_output / "tts" / "tts-result.json"),
+                "audio_mode": plan.audio_mode,
+                "tts_result": _file_fingerprint(candidate_output / "tts" / "tts-result.json") if tts_allowed else None,
                 "recompute": self.recompute_audio,
             }))
             try:
                 project = AudioCompositionService(self.root, self.config).compose(
-                    plan, source, transcript, read_json(candidate_output / "tts" / "tts-result.json", {}),
+                    plan, source, transcript, read_json(candidate_output / "tts" / "tts-result.json", {}) if tts_allowed else None,
                     work_directory, candidate_output, force_recompute=self.recompute_audio,
                     prepared_source_audio_path=prepared_source_audio_path,
                 )
