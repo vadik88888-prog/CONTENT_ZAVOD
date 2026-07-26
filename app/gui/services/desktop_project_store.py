@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.gui.models import DesktopProject, ProjectOptions, ProjectStatus
+from app.source_models import SourceSpec
 from app.utils import read_json, safe_name, utc_now, write_json
 
 
@@ -66,6 +67,32 @@ class DesktopProjectStore:
             status=ProjectStatus.READY,
             settings=options or ProjectOptions(),
             source_metadata=dict(source_metadata or {"size_bytes": source.stat().st_size}),
+            source_spec=SourceSpec.local(str(source), source_metadata),
+        )
+        self.save(project)
+        return project
+
+    def create_url(
+        self, url: str, metadata: dict, *, name: str | None = None, options: ProjectOptions | None = None,
+    ) -> DesktopProject:
+        """Create a pending URL project; its source is downloaded only on confirmation."""
+
+        project_id = uuid.uuid4().hex
+        directory = self.project_directory(project_id)
+        directory.mkdir(parents=True, exist_ok=False)
+        now = utc_now()
+        title = name or str(metadata.get("title") or "Видео по ссылке")
+        project = DesktopProject(
+            project_id=project_id,
+            name=safe_name(title, "Видео по ссылке"),
+            created_at=now,
+            updated_at=now,
+            source_path="",
+            project_directory=str(directory),
+            status=ProjectStatus.READY,
+            settings=options or ProjectOptions(),
+            source_metadata=dict(metadata),
+            source_spec=SourceSpec.url(url, metadata),
         )
         self.save(project)
         return project

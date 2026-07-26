@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from app.product_flow import ProcessingIntent
+from app.source_models import SourceSpec
 from app.utils import utc_now
 
 
@@ -73,20 +74,22 @@ class DesktopProject:
     latest_run_id: str | None = None
     thumbnail_path: str | None = None
     source_metadata: dict[str, Any] = field(default_factory=dict)
-    schema_version: int = 2
+    source_spec: SourceSpec = field(default_factory=SourceSpec)
+    schema_version: int = 3
 
     def validate(self) -> None:
         if not self.project_id or not self.name.strip():
             raise ValueError("Project id and name are required.")
         if self.status not in ProjectStatus.ALL:
             raise ValueError("Unsupported project status.")
-        if self.schema_version != 2:
+        if self.schema_version != 3:
             raise ValueError("Unsupported project schema version.")
         self.settings.validate()
+        self.source_spec.validate()
 
     @property
     def source(self) -> Path:
-        return Path(self.source_path)
+        return Path(self.source_spec.downloaded_path or self.source_path)
 
     @property
     def directory(self) -> Path:
@@ -109,6 +112,7 @@ class DesktopProject:
             "subtitles_enabled", "subtitle_style", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
+        source_metadata = dict(value.get("source_metadata") or {})
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
@@ -120,10 +124,13 @@ class DesktopProject:
             settings=ProjectOptions(**migrated_settings),
             latest_run_id=str(value["latest_run_id"]) if value.get("latest_run_id") else None,
             thumbnail_path=str(value["thumbnail_path"]) if value.get("thumbnail_path") else None,
-            source_metadata=dict(value.get("source_metadata") or {}),
-            # Schema 1 projects had no product-flow intent.  Defaults preserve their
-            # prior standard/documentary desktop behaviour and are written as v2 next save.
-            schema_version=2,
+            source_metadata=source_metadata,
+            source_spec=SourceSpec.from_dict(
+                value.get("source_spec"), fallback_path=str(value.get("source_path", "")), fallback_metadata=source_metadata,
+            ),
+            # Older projects had only ``source_path``.  They are migrated in memory
+            # to an explicit local source and written as v3 on the next save.
+            schema_version=3,
         )
         project.validate()
         return project

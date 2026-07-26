@@ -12,6 +12,7 @@ from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade,
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
+from app.source_download import validate_public_video_url
 from app.utils import utc_now
 
 
@@ -63,6 +64,38 @@ class DesktopServices:
         metadata = self.pipeline.inspect_source(source_path)
         return self.projects.create(source_path, source_metadata=metadata)
 
+    def create_url_project(self, url: str, metadata: dict) -> DesktopProject:
+        return self.projects.create_url(validate_public_video_url(url), metadata)
+
+    def mark_url_download_started(self, project: DesktopProject) -> None:
+        if project.source_spec.kind != "url":
+            raise InputValidationError("Этот проект использует локальный файл.")
+        project.source_spec.download_state = "downloading"
+        project.source_spec.error_message = None
+        self.projects.save(project)
+
+    def complete_url_download(self, project: DesktopProject, path: str | Path) -> DesktopProject:
+        source = validate_video_path(path)
+        source_directory = (Path(project.project_directory) / "sources").resolve()
+        if not source.is_relative_to(source_directory):
+            raise InputValidationError("Загруженный файл должен находиться в папке проекта.")
+        metadata = self.pipeline.inspect_source(source)
+        project.source_path = str(source)
+        project.source_metadata = metadata
+        project.source_spec.downloaded_path = str(source)
+        project.source_spec.metadata = metadata
+        project.source_spec.download_state = "downloaded"
+        project.source_spec.error_message = None
+        self.projects.save(project)
+        return project
+
+    def fail_url_download(self, project: DesktopProject, message: str, *, cancelled: bool = False) -> None:
+        if project.source_spec.kind != "url":
+            return
+        project.source_spec.download_state = "cancelled" if cancelled else "failed"
+        project.source_spec.error_message = redact_secrets(message)
+        self.projects.save(project)
+
     def save_project(self, project: DesktopProject) -> None:
         project.settings.validate()
         self.projects.save(project)
@@ -81,8 +114,10 @@ class DesktopServices:
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
-        source = Path(project.source_path)
+        source = project.source
         if not source.is_file():
+            if project.source_spec.kind == "url":
+                raise InputValidationError("Сначала загрузите видео по ссылке.")
             raise InputValidationError("Исходный видеофайл больше недоступен.")
         intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
         run = self.runs.create(
@@ -106,7 +141,12 @@ class DesktopServices:
                 },
                 "local_test_mode": self.settings.local_test_mode,
             },
-            source_snapshot={"path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
+            source_snapshot={
+                "kind": project.source_spec.kind,
+                "path": str(source),
+                "name": source.name,
+                "size_bytes": source.stat().st_size,
+            },
             pipeline_version="0.1.0",
         )
         run.cost_estimate = estimate.estimated_ai_cost_max

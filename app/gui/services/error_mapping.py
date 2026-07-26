@@ -39,6 +39,22 @@ def map_error(error: object) -> UserFacingError:
             detail,
             "final_output_missing",
         )
+    if "yt-dlp" in lowered or "загрузить видео по этой ссылке" in lowered or "ссылк" in lowered and "видео" in lowered:
+        if "компонент" in lowered or "yt-dlp" in lowered:
+            return UserFacingError(
+                "Не готова загрузка по ссылке",
+                "Для загрузки по ссылке требуется дополнительный компонент.",
+                "Установите yt-dlp или добавьте видео как локальный файл.",
+                detail,
+                "ytdlp_missing",
+            )
+        return UserFacingError(
+            "Не удалось загрузить видео",
+            "Не удалось получить видео по этой ссылке.",
+            "Проверьте, что ссылка публичная, или сохраните видео вручную и добавьте как файл.",
+            detail,
+            "url_download_failed",
+        )
     if "не найден" in lowered and ("видео" in lowered or "source" in lowered or "file" in lowered):
         return UserFacingError("Файл недоступен", "Не удалось найти исходное видео.", "Проверьте путь к файлу и подключённые диски.", detail, "source_missing")
     if "ffmpeg" in lowered or "ffprobe" in lowered:

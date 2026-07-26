@@ -84,7 +84,7 @@ def test_legacy_project_migrates_to_product_flow_defaults(tmp_path: Path) -> Non
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     migrated = store.load(project.project_id)
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert migrated.settings.processing_mode == "standard"
     assert migrated.settings.subtitle_style == "clean"
 

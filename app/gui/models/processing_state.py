@@ -17,6 +17,7 @@ class ProcessingPhase(StrEnum):
 
 
 STAGE_LABELS = {
+    "download": "Загружаем видео",
     "source": "Подготавливаем видео",
     "media": "Подготавливаем видео",
     "transcription": "Распознаём речь",
@@ -43,6 +44,9 @@ class ProcessingSnapshot:
     elapsed_seconds: float = 0.0
     last_activity_at: str | None = None
     last_activity_reason: str | None = None
+    progress_fraction: float | None = None
+    transfer_speed: str | None = None
+    eta_seconds: int | None = None
 
     @property
     def stage_label(self) -> str:

@@ -6,7 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -35,17 +35,26 @@ class ProjectsScreen(QWidget):
         header = QHBoxLayout()
         title = QLabel("Проекты")
         title.setObjectName("title")
-        self.new_button = QPushButton("Новый проект")
+        self.new_button = QPushButton("Выбрать видео")
         self.new_button.setObjectName("primary")
         self.new_button.clicked.connect(self.choose_file)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.new_button)
         root.addLayout(header)
-        hint = QLabel("Выберите локальное видео — приложение создаст проект, но не начнёт обработку без вашего подтверждения.")
+        hint = QLabel("Выберите локальное видео или вставьте публичную ссылку. Обработка начнётся только после вашего подтверждения.")
         hint.setObjectName("subtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
+        url_row = QHBoxLayout()
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Вставьте ссылку на видео")
+        self.url_input.returnPressed.connect(self._create_url)
+        self.url_button = QPushButton("Получить видео")
+        self.url_button.clicked.connect(self._create_url)
+        url_row.addWidget(self.url_input, 1)
+        url_row.addWidget(self.url_button)
+        root.addLayout(url_row)
         self.drop_zone = VideoDropZone()
         self.drop_zone.file_dropped.connect(self.viewmodel.create)
         root.addWidget(self.drop_zone)
@@ -64,6 +73,7 @@ class ProjectsScreen(QWidget):
         self.viewmodel.projects_changed.connect(self._render)
         self.viewmodel.project_created.connect(self.project_opened)
         self.viewmodel.error_occurred.connect(self._show_error)
+        self.viewmodel.url_busy_changed.connect(self._url_busy_changed)
 
     def refresh(self) -> None:
         self.viewmodel.refresh()
@@ -74,6 +84,14 @@ class ProjectsScreen(QWidget):
         )
         if path:
             self.viewmodel.create(path)
+
+    def _create_url(self) -> None:
+        self.viewmodel.create_from_url(self.url_input.text())
+
+    def _url_busy_changed(self, busy: bool) -> None:
+        self.url_input.setDisabled(busy)
+        self.url_button.setDisabled(busy)
+        self.url_button.setText("Проверяем ссылку…" if busy else "Получить видео")
 
     def _render(self, projects: list[DesktopProject]) -> None:
         while self.list_layout.count() > 1:
@@ -92,7 +110,11 @@ class ProjectsScreen(QWidget):
         text = QVBoxLayout()
         name = QLabel(project.name)
         name.setStyleSheet("font-size: 16px; font-weight: 600;")
-        detail = QLabel(f"{Path(project.source_path).name} · изменён {project.updated_at[:16].replace('T', ' ')}")
+        source_name = (
+            project.source.name if project.source_spec.is_ready
+            else str(project.source_metadata.get("title") or "Видео по ссылке")
+        )
+        detail = QLabel(f"{source_name} · изменён {project.updated_at[:16].replace('T', ' ')}")
         detail.setObjectName("muted")
         text.addWidget(name)
         text.addWidget(detail)

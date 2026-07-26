@@ -10,6 +10,7 @@ from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.error_mapping import map_error
 from app.gui.services.pipeline_facade import PreparedPipelineRun
 from app.gui.services.pipeline_runner import QtPipelineRunner
+from app.gui.services.url_source_service import URLSourceService
 
 
 class ProjectViewModel(QObject):
@@ -39,10 +40,15 @@ class ProjectViewModel(QObject):
         self.runner.run_completed.connect(self._completed)
         self.runner.run_failed.connect(self._failed)
         self.runner.run_cancelled.connect(self._cancelled)
+        self.source_downloader = URLSourceService(self)
+        self.source_downloader.download_progress.connect(self._download_progress)
+        self.source_downloader.download_completed.connect(self._download_completed)
+        self.source_downloader.failed.connect(self._download_failed)
+        self.source_downloader.cancelled.connect(self._download_cancelled)
 
     @property
     def active(self) -> bool:
-        return self.runner.active
+        return self.runner.active or self.source_downloader.busy
 
     def open(self, project: DesktopProject) -> None:
         self.project = project
@@ -67,6 +73,9 @@ class ProjectViewModel(QObject):
     def start(self) -> None:
         if not self.project or self.active:
             return
+        if not self.project.source_spec.is_ready:
+            self._start_source_download()
+            return
         try:
             self.run, self.prepared = self.services.prepare_run(self.project)
             self.project_changed.emit(self.project)
@@ -78,6 +87,12 @@ class ProjectViewModel(QObject):
                 self.project_changed.emit(self.project)
 
     def cancel(self) -> None:
+        if self.source_downloader.busy:
+            self.snapshot.phase = ProcessingPhase.CANCELLING
+            self.snapshot.message = "Останавливаем загрузку"
+            self.processing_changed.emit(self.snapshot)
+            self.source_downloader.cancel()
+            return
         if not self.active or not self.run:
             return
         self.run.status = RunStatus.CANCELLING
@@ -86,6 +101,70 @@ class ProjectViewModel(QObject):
         self.snapshot.message = "Останавливаем обработку"
         self.processing_changed.emit(self.snapshot)
         self.runner.cancel()
+
+    def _start_source_download(self) -> None:
+        if not self.project or self.project.source_spec.kind != "url" or not self.project.source_spec.original_url:
+            return
+        try:
+            self.services.mark_url_download_started(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return
+        self._started_at = time.monotonic()
+        self._elapsed_timer.start()
+        self.snapshot = ProcessingSnapshot(
+            ProcessingPhase.PREPARING, stage="download", message="Загружаем видео",
+            last_activity_reason="yt-dlp launch requested",
+        )
+        self.project_changed.emit(self.project)
+        self.processing_changed.emit(self.snapshot)
+        self.source_downloader.download(
+            self.project.source_spec.original_url,
+            self.project.directory / "sources",
+        )
+
+    def _download_progress(self, progress) -> None:
+        self.snapshot.phase = ProcessingPhase.RUNNING
+        self.snapshot.stage = "download"
+        self.snapshot.message = "Загружаем видео"
+        self.snapshot.progress_fraction = progress.fraction
+        self.snapshot.transfer_speed = progress.speed
+        self.snapshot.eta_seconds = progress.eta_seconds
+        self.snapshot.last_activity_reason = "yt-dlp progress updated"
+        self.processing_changed.emit(self.snapshot)
+
+    def _download_completed(self, path: str) -> None:
+        if not self.project:
+            return
+        try:
+            self.project = self.services.complete_url_download(self.project, path)
+        except Exception as error:
+            self._download_failed(str(error))
+            return
+        self._elapsed_timer.stop()
+        self.snapshot = ProcessingSnapshot(message="Видео загружено")
+        self.project_changed.emit(self.project)
+        self.processing_changed.emit(self.snapshot)
+        self.start()
+
+    def _download_failed(self, message: str) -> None:
+        if not self.project:
+            return
+        self._elapsed_timer.stop()
+        self.services.fail_url_download(self.project, message)
+        self.snapshot = ProcessingSnapshot(ProcessingPhase.FAILED, message="Не удалось загрузить видео")
+        self.project_changed.emit(self.project)
+        self.processing_changed.emit(self.snapshot)
+        self.error_occurred.emit(map_error(message))
+
+    def _download_cancelled(self) -> None:
+        if not self.project:
+            return
+        self._elapsed_timer.stop()
+        self.services.fail_url_download(self.project, "Загрузка видео отменена.", cancelled=True)
+        self.snapshot = ProcessingSnapshot(ProcessingPhase.CANCELLED, message="Загрузка отменена")
+        self.project_changed.emit(self.project)
+        self.processing_changed.emit(self.snapshot)
 
     def _run_started(self) -> None:
         self._started_at = time.monotonic()

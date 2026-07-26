@@ -154,14 +154,18 @@ class ProjectScreen(QWidget):
         self.project = project
         self.title.setText(project.name)
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
-        self.preview.set_file(project.source_path)
+        if project.source_spec.is_ready:
+            self.preview.set_file(str(project.source))
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source else "н/д"
         resolution = f"{source.get('width', '—')} × {source.get('height', '—')}" if source else "н/д"
         fps = source.get("fps", "н/д") if source else "н/д"
+        size = self._format_file_size(source.get("size_bytes") or source.get("estimated_size_bytes")) if source else "н/д"
+        source_name = project.source.name if project.source_spec.is_ready else str(source.get("title") or "Видео по ссылке")
+        source_kind = "Ссылка на видео" if project.source_spec.kind == "url" else "Файл"
         self._replace_card_text(self.metadata, [
-            f"Файл: {Path(project.source_path).name}", f"Длительность: {duration}",
-            f"Разрешение: {resolution}", f"FPS: {fps}",
+            f"{source_kind}: {source_name}", f"Длительность: {duration}",
+            f"Разрешение: {resolution}", f"Размер: {size}", f"FPS: {fps}",
         ])
         self._update_estimate(project)
         self._set_combo_data(self.processing_mode, project.settings.processing_mode)
@@ -200,9 +204,15 @@ class ProjectScreen(QWidget):
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         if active:
             activity = snapshot.last_activity_at or "ожидаем запуск"
+            transfer = ""
+            if snapshot.transfer_speed:
+                transfer = f" · Скорость: {snapshot.transfer_speed}"
+            if snapshot.eta_seconds is not None:
+                transfer += f" · Осталось: {format_seconds(snapshot.eta_seconds)}"
             self.progress.set_running(
                 snapshot.stage_label,
-                f"Прошло {format_seconds(snapshot.elapsed_seconds)} · Активность: {activity}",
+                f"Прошло {format_seconds(snapshot.elapsed_seconds)} · Активность: {activity}{transfer}",
+                snapshot.progress_fraction,
             )
         else:
             self.progress.set_finished(snapshot.message)
@@ -271,6 +281,18 @@ class ProjectScreen(QWidget):
         if index >= 0:
             combo.setCurrentIndex(index)
         combo.blockSignals(False)
+
+    @staticmethod
+    def _format_file_size(value: object) -> str:
+        try:
+            size = float(value)
+        except (TypeError, ValueError):
+            return "н/д"
+        for unit in ("Б", "КБ", "МБ", "ГБ"):
+            if size < 1024 or unit == "ГБ":
+                return f"{size:.0f} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+            size /= 1024
+        return "н/д"
 
     def _error(self, error) -> None:
         QMessageBox.warning(self, error.title, error.user_message)

@@ -36,7 +36,7 @@ class ProcessingProgress(QFrame):
         self.cancel_button.hide()
         layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignLeft)
 
-    def set_running(self, stage: str, elapsed: str) -> None:
+    def set_running(self, stage: str, elapsed: str, progress_fraction: float | None = None) -> None:
         self.stage.setText(stage)
         self.elapsed.setText(elapsed)
         if not self._history or self._history[-1] != stage:
@@ -44,6 +44,11 @@ class ProcessingProgress(QFrame):
             self._history = self._history[-3:]
             self.recent.setText(" · ".join(self._history[:-1]))
         self.progress.show()
+        if progress_fraction is None:
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(max(0, min(100, round(progress_fraction * 100))))
         self.cancel_button.show()
 
     def set_finished(self, message: str) -> None:

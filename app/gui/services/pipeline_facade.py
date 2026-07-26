@@ -96,7 +96,7 @@ class PipelineFacade:
         return intent, resolved, estimate
 
     def prepare(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
-        source_path = validate_video_path(project.source_path)
+        source_path = validate_video_path(project.source)
         config = load_config(self._base_config(settings))
         _intent, resolved, _estimate = self.plan_processing(project, settings)
         self._apply_project_options(config, project, settings, resolved)
