@@ -642,7 +642,8 @@ class Pipeline:
             if tts_allowed and (not tts_item or tts_item.get("status") not in {"completed", "partial", "fallback"}):
                 outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "tts_unavailable"})
                 continue
-            candidate_output = Path(str(tts_item["output_directory"])) if tts_item else _candidate_output_directory(output_directory, candidate_id, index)
+            candidate_output_value = tts_item.get("output_directory") if isinstance(tts_item, dict) else None
+            candidate_output = Path(str(candidate_output_value)) if candidate_output_value else _candidate_output_directory(output_directory, candidate_id, index)
             stage_name = f"audio_composition:{plan.plan_id}"
             tracker.start(stage_name, _hash({
                 "plan": plan.plan_id,

@@ -202,6 +202,28 @@ def test_source_audio_mode_composes_dialogue_without_any_tts_artifact(tmp_path: 
     assert Path(project.mix.mixed_audio_path or "").is_file()
 
 
+def test_pipeline_composes_source_audio_after_a_skipped_tts_stage(tmp_path: Path) -> None:
+    config = _audio_config()
+    plan = _plan(narration=False, dialogue=True)
+    source_path = _source_wav(tmp_path / "source.wav")
+    pipeline = Pipeline(tmp_path, config)
+    tracker = StageTracker(tmp_path / "state.json")
+    production = {
+        "items": [{"candidate_id": "candidate-audio", "status": "completed", "plan": plan.model_dump(mode="json")}],
+    }
+
+    tts = pipeline._run_tts(tracker, production, tmp_path / "work", tmp_path / "out")
+    audio = pipeline._run_audio(
+        tracker, production, tts, local_source(str(source_path)), {"segments": [{"id": 0, "start": 0, "end": 3}]},
+        tmp_path / "work", tmp_path / "out",
+    )
+
+    assert tts["status"] == "skipped"
+    assert audio["status"] == "completed"
+    assert (tmp_path / "out" / "audio" / "mixed_audio.wav").is_file()
+    assert not (tmp_path / "out" / "tts").exists()
+
+
 def test_tts_provider_fallback_does_not_block_dialogue_audio(tmp_path: Path) -> None:
     config = _audio_config()
     plan = _plan()
