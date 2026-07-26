@@ -38,11 +38,12 @@ from app.transformation_models import FINAL_SCRIPT_CONTRACT_VERSION, validate_fi
 from app.tts_service import TTSService, tts_report_section
 from app.utils import read_json, safe_name, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
+from app.visual_analysis import analyse_video_subjects
 
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "render", "report",
+    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.6.3"
 TRANSFORMATION_STAGES = (
@@ -225,6 +226,11 @@ class Pipeline:
             {"source": source.id, "settings": self.config.scene_detection},
             lambda: _write(work_directory / "scene_boundaries.json", detect_scene_boundaries(source.path, float(metadata["duration"]), self.config.scene_detection)),
         )
+        visual_analysis = self._cached(
+            tracker, "visual_analysis", work_directory / "visual_analysis.json",
+            {"source": source.id, "duration": metadata.get("duration"), "enabled": self.config.optional_visual_features, "model": self.config.ai.model},
+            lambda: _write(work_directory / "visual_analysis.json", analyse_video_subjects(source.path, float(metadata.get("duration") or 0), self.config)),
+        )
         raw_candidates = self._cached(
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
             {"transcript_features": _hash(transcript_features), "audio": _hash(audio_features), "scenes": _hash(scenes), "settings": self.config.candidate_generation},
@@ -276,7 +282,7 @@ class Pipeline:
             Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
         )
         production_render = self._run_production_render(
-            tracker, production, source, transcript, work_directory, output_directory,
+            tracker, production, source, transcript, work_directory, output_directory, visual_analysis,
         )
         render_data = (
             self._skip_render_for_production_plan(tracker, work_directory / "render.json")
@@ -609,7 +615,7 @@ class Pipeline:
 
     def _run_production_render(
         self, tracker: StageTracker, production: dict[str, Any], source: Source,
-        transcript: dict[str, Any], work_directory: Path, output_directory: Path,
+        transcript: dict[str, Any], work_directory: Path, output_directory: Path, visual_analysis: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the Goal 3D executor after its upstream artifacts, never through legacy render."""
 
@@ -640,12 +646,12 @@ class Pipeline:
             self.errors.append(f"production_render: {safe}")
             return {"enabled": True, "status": "failed", "errors": [safe]}
         return self._compose_production_render(
-            tracker, plan, audio_project, source, transcript, work_directory, output_directory, raise_on_error=False,
+            tracker, plan, audio_project, source, transcript, work_directory, output_directory, raise_on_error=False, visual_analysis=visual_analysis,
         )
 
     def _compose_production_render(
         self, tracker: StageTracker, plan: ProductionPlan, audio_project: AudioProject, source: Source,
-        transcript: dict[str, Any], work_directory: Path, output_directory: Path, raise_on_error: bool,
+        transcript: dict[str, Any], work_directory: Path, output_directory: Path, raise_on_error: bool, visual_analysis: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stage_name = f"production_render:{plan.plan_id}"
         tracker.start(stage_name, _hash({
@@ -655,7 +661,7 @@ class Pipeline:
         }))
         try:
             project = VideoCompositionService(self.root, self.config).compose(
-                plan, audio_project, source, transcript, work_directory, output_directory,
+                plan, audio_project, source, transcript, work_directory, output_directory, visual_analysis=visual_analysis,
                 force_recompute=self.recompute_production_render,
             )
         except ProductionRenderError as error:

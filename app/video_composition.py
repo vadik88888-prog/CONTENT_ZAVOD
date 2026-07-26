@@ -52,12 +52,14 @@ class VideoCompositionService:
     def compose(
         self, plan: ProductionPlan, audio_project: AudioProject, source: Source,
         transcript: dict[str, Any], work_directory: Path, output_directory: Path,
-        force_recompute: bool = False,
+        force_recompute: bool = False, visual_analysis: dict[str, Any] | None = None,
     ) -> VideoProject:
         render_config = self.config.production_render
         if not source.path.is_file():
             raise ProductionRenderError("Исходный video file для production render не найден.")
         source_info = probe_media(source.path, require_video=True)
+        if visual_analysis and isinstance(visual_analysis.get("subject_keyframes"), list):
+            source_info["subject_keyframes"] = visual_analysis["subject_keyframes"]
         mixed_path = Path(audio_project.mix.mixed_audio_path or "")
         if not mixed_path.is_file():
             raise ProductionRenderError("mixed_audio.wav не найден для production render.")
