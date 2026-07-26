@@ -217,6 +217,22 @@ def test_subtitles_use_audio_timeline_split_long_text_and_escape_ass(tmp_path: P
     assert fallback and warning and "Arial" in warning
 
 
+def test_dynamic_subtitles_use_word_level_highlighting_and_keep_cyrillic(tmp_path: Path) -> None:
+    config, plan, _source, _transcript, audio = _upstream(tmp_path)
+    config.production_render.subtitle_style = "dynamic"
+    raw = plan.model_dump(mode="json")
+    raw["segments"][0]["text"] = "Это заметный динамический заголовок"
+    raw["segments"][0]["word_count"] = 4
+    dynamic_plan = type(plan).model_validate(raw)
+    project = build_subtitle_project(dynamic_plan, audio, config.production_render)
+    ass = tmp_path / "dynamic.ass"
+    write_production_ass(project, ass, 180, 320)
+    content = ass.read_text(encoding="utf-8-sig")
+    assert "&H004AD5FF" in content  # #FFD54A in ASS BGR order
+    assert r"{\k" in content
+    assert "ДИНАМИЧЕСКИЙ" in content
+
+
 def test_transition_filters_preserve_audio_timeline_duration() -> None:
     crossfade, label = _timeline_filter([1.0, 2.0, 1.0], "short_crossfade")
     assert "xfade" in crossfade and "tpad" in crossfade and label == "[vconcat]"

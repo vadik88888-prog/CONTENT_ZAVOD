@@ -232,6 +232,7 @@ class SubtitleStyle(BaseModel):
     font_size: int = Field(ge=12, le=240)
     font_weight: Literal["normal", "bold"] = "bold"
     text_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    highlight_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
     outline_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
     outline_width: float = Field(ge=0, le=16)
     shadow: float = Field(ge=0, le=16)

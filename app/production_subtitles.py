@@ -13,10 +13,10 @@ from app.video_models import SubtitleCue, SubtitleProject, SubtitleStyle
 
 
 _STYLE_PRESETS: dict[str, dict[str, Any]] = {
-    "minimal": {"font_size": 56, "font_weight": "normal", "text_color": "#FFFFFF", "outline_color": "#202020", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 170, "alignment": "center", "uppercase": False},
-    "documentary": {"font_size": 62, "font_weight": "bold", "text_color": "#FFFFFF", "outline_color": "#101010", "outline_width": 3, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 185, "alignment": "center", "uppercase": False},
-    "dynamic": {"font_size": 68, "font_weight": "bold", "text_color": "#FFFFFF", "outline_color": "#111111", "outline_width": 4, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 190, "alignment": "center", "uppercase": True},
-    "clean": {"font_size": 58, "font_weight": "bold", "text_color": "#FFFFFF", "outline_color": "#242424", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 165, "alignment": "center", "uppercase": False},
+    "minimal": {"font_size": 56, "font_weight": "normal", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#202020", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 170, "alignment": "center", "uppercase": False},
+    "documentary": {"font_size": 62, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#101010", "outline_width": 3, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 185, "alignment": "center", "uppercase": False},
+    "dynamic": {"font_size": 68, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFD54A", "outline_color": "#111111", "outline_width": 4, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 190, "alignment": "center", "uppercase": True},
+    "clean": {"font_size": 58, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#242424", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 165, "alignment": "center", "uppercase": False},
 }
 
 
@@ -158,13 +158,13 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Production,{_escape_style(style.font_family)},{font_size},{_ass_color(style.text_color)},{_ass_color(style.text_color)},{_ass_color(style.outline_color)},{_ass_color(style.background)}, {bold},0,0,0,100,100,0,0,1,{outline_width},{shadow},{alignment},{margin_horizontal},{margin_horizontal},{margin_vertical},1
+Style: Production,{_escape_style(style.font_family)},{font_size},{_ass_color(style.text_color)},{_ass_color(style.highlight_color)},{_ass_color(style.outline_color)},{_ass_color(style.background)}, {bold},0,0,0,100,100,0,0,1,{outline_width},{shadow},{alignment},{margin_horizontal},{margin_horizontal},{margin_vertical},1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
     events = [
-        f"Dialogue: 0,{_ass_time(cue.start_seconds)},{_ass_time(cue.end_seconds)},Production,{_escape(cue.speaker)},0,0,0,,{_wrap_and_escape(cue.text, style)}"
+        f"Dialogue: 0,{_ass_time(cue.start_seconds)},{_ass_time(cue.end_seconds)},Production,{_escape(cue.speaker)},0,0,0,,{_format_cue(cue, style)}"
         for cue in project.cues
     ]
     write_bytes_atomic(path, (header + "\n".join(events) + "\n").encode("utf-8-sig"))
@@ -182,6 +182,19 @@ def _ass_metrics(style: SubtitleStyle, width: int, height: int) -> tuple[int, in
         max(12, round(70 * scale)),
         max(32, round(style.bottom_margin * scale)),
     )
+
+
+def _format_cue(cue: SubtitleCue, style: SubtitleStyle) -> str:
+    if style.style_id == "dynamic":
+        words = cue.text.split()
+        if words:
+            total_centiseconds = max(len(words), round((cue.end_seconds - cue.start_seconds) * 100))
+            base, remainder = divmod(total_centiseconds, len(words))
+            return " ".join(
+                f"{{\\k{base + (1 if index < remainder else 0)}}}{_escape(word)}"
+                for index, word in enumerate(words)
+            )
+    return _wrap_and_escape(cue.text, style)
 
 
 def _wrap_and_escape(text: str, style: SubtitleStyle) -> str:
