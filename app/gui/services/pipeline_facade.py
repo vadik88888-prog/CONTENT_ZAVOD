@@ -32,6 +32,7 @@ class PipelineCompletion:
     output_files: list[Path]
     warnings: list[str]
     error_summary: str | None
+    technical_details: str | None
     cost_estimate: float | None
 
 
@@ -90,21 +91,78 @@ class PipelineFacade:
 
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
         if not prepared.report_path.is_file():
-            return PipelineCompletion(prepared.report_path, [], [], "Итоговый отчёт обработки не найден.", None)
-        raw = read_json(prepared.report_path, {})
+            return self._failed_completion(
+                prepared, "Итоговый отчёт обработки не найден.",
+                f"Expected report is missing: {prepared.report_path}",
+            )
+        try:
+            raw = read_json(prepared.report_path, {})
+        except (OSError, ValueError) as error:
+            return self._failed_completion(
+                prepared, "Не удалось прочитать итоговый отчёт обработки.",
+                f"Report cannot be parsed: {prepared.report_path}; {error}",
+            )
         if not isinstance(raw, dict):
-            return PipelineCompletion(prepared.report_path, [], [], "Итоговый отчёт имеет неверный формат.", None)
-        paths = [Path(str(value)) for value in raw.get("output_files", [])]
+            return self._failed_completion(
+                prepared, "Не удалось прочитать итоговый отчёт обработки.",
+                f"Report root is not a JSON object: {prepared.report_path}",
+            )
         production = raw.get("production_render", {})
-        if isinstance(production, dict) and production.get("output_file"):
-            paths.append(Path(str(production["output_file"])))
-        output_files = list(dict.fromkeys(path for path in paths if path.is_file()))
+        if not isinstance(production, dict):
+            return self._failed_completion(
+                prepared, "Не удалось создать итоговый видеофайл.",
+                "report.production_render is missing or invalid; final MP4 contract is unavailable.",
+            )
+        status = str(production.get("status", ""))
+        if status not in {"completed", "warning"}:
+            return self._failed_completion(
+                prepared, "Не удалось создать итоговый видеофайл.",
+                f"production_render.status={status or 'missing'}; expected completed or warning.",
+            )
+        final_path = self._final_output_path(prepared, production)
+        validation_error = self._validate_final_mp4(final_path)
+        if validation_error:
+            return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", validation_error)
         warnings = [str(value) for value in raw.get("warnings", [])]
+        production_warnings = production.get("warnings", [])
+        if not isinstance(production_warnings, list):
+            production_warnings = [production_warnings]
+        warnings.extend(str(value) for value in production_warnings if str(value) not in warnings)
         ai = raw.get("ai", {}) if isinstance(raw.get("ai"), dict) else {}
         tts = raw.get("tts", {}) if isinstance(raw.get("tts"), dict) else {}
         values = [ai.get("estimated_cost"), tts.get("estimated_cost")]
         estimate = sum(float(item) for item in values if isinstance(item, (int, float)))
-        return PipelineCompletion(prepared.report_path, output_files, warnings, None, estimate or None)
+        return PipelineCompletion(prepared.report_path, [final_path], warnings, None, None, estimate or None)
+
+    @staticmethod
+    def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:
+        return PipelineCompletion(prepared.report_path, [], [], summary, details, None)
+
+    @staticmethod
+    def _final_output_path(prepared: PreparedPipelineRun, production: dict[str, Any]) -> Path:
+        """Use the engine report first; final-short.mp4 is the documented fallback contract."""
+
+        reported = production.get("output_file")
+        if isinstance(reported, str) and reported.strip():
+            candidate = Path(reported)
+            return candidate if candidate.is_absolute() else prepared.output_directory / candidate
+        return prepared.output_directory / "production-render" / "final-short.mp4"
+
+    @staticmethod
+    def _validate_final_mp4(path: Path) -> str | None:
+        if not path.exists():
+            return f"Expected final MP4 does not exist: {path}"
+        if not path.is_file():
+            return f"Expected final MP4 is not a file: {path}"
+        if path.stat().st_size <= 0:
+            return f"Expected final MP4 is empty: {path}"
+        try:
+            metadata = probe_video(path)
+        except Exception as error:
+            return f"Expected final MP4 is not readable by ffprobe: {path}; {error}"
+        if not metadata.get("width") or not metadata.get("height"):
+            return f"Expected final MP4 has no readable video stream: {path}"
+        return None
 
     def _base_config(self, settings: DesktopSettings) -> Path:
         if settings.config_path:

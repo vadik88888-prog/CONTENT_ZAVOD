@@ -44,7 +44,7 @@ class VideoPreview(QFrame):
 
     def set_file(self, path: str | Path | None) -> None:
         candidate = Path(path) if path else None
-        self._path = candidate if candidate and candidate.is_file() else None
+        self._path = candidate if self.usable_media_path(candidate) else None
         if self._path:
             self.player.setSource(QUrl.fromLocalFile(str(self._path)))
             self.placeholder.hide()
@@ -72,6 +72,10 @@ class VideoPreview(QFrame):
     def _set_available(self, value: bool) -> None:
         self.play_button.setEnabled(value)
         self.open_button.setEnabled(value)
+
+    @staticmethod
+    def usable_media_path(path: Path | None) -> bool:
+        return bool(path and path.is_file() and path.stat().st_size > 0)
 
 
 from PySide6.QtCore import Qt

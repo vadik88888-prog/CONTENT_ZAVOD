@@ -23,6 +23,14 @@ def redact_secrets(value: object) -> str:
 def map_error(error: object) -> UserFacingError:
     detail = redact_secrets(error)
     lowered = detail.lower()
+    if "итоговый видеофайл" in lowered:
+        return UserFacingError(
+            "Не удалось создать итоговый видеофайл",
+            "Не удалось создать итоговый видеофайл.",
+            "Проверьте технический журнал и повторите запуск.",
+            detail,
+            "final_output_missing",
+        )
     if "не найден" in lowered and ("видео" in lowered or "source" in lowered or "file" in lowered):
         return UserFacingError("Файл недоступен", "Не удалось найти исходное видео.", "Проверьте путь к файлу и подключённые диски.", detail, "source_missing")
     if "ffmpeg" in lowered or "ffprobe" in lowered:

@@ -124,7 +124,7 @@ class DesktopServices:
     def finish_success(self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun) -> ProjectRun:
         completion = self.pipeline.completion(prepared)
         if completion.error_summary:
-            return self.finish_failure(project, run, completion.error_summary)
+            return self.finish_failure(project, run, completion.error_summary, completion.technical_details)
         run.status = RunStatus.COMPLETED_WITH_WARNINGS if completion.warnings else RunStatus.COMPLETED
         run.finished_at = utc_now()
         run.warnings = completion.warnings
@@ -137,10 +137,14 @@ class DesktopServices:
         self.projects.save(project)
         return run
 
-    def finish_failure(self, project: DesktopProject, run: ProjectRun, message: str) -> ProjectRun:
+    def finish_failure(
+        self, project: DesktopProject, run: ProjectRun, message: str, technical_details: str | None = None,
+    ) -> ProjectRun:
         run.status = RunStatus.FAILED
         run.finished_at = utc_now()
         run.error_summary = redact_secrets(message)
+        run.technical_details = redact_secrets(technical_details or message)
+        self.append_log(run, run.technical_details)
         self.runs.save(run)
         project.status = ProjectStatus.FAILED
         self.projects.save(project)

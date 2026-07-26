@@ -26,7 +26,8 @@ ContentFactoryData/
 
 Каждый `run.json` append-only: ID запуска, project/source/settings snapshots,
 version, лог, report, artifact paths, warnings, безопасную error summary и
-`cost_estimate`. `actual_cost` всегда `null`, пока не добавлена отдельная
+`cost_estimate`, понятную `error_summary` и redacted `technical_details`.
+`actual_cost` всегда `null`, пока не добавлена отдельная
 сверка с billing provider. Предыдущая запись никогда не перезаписывается.
 
 После успеха копируется report и для MP4 создаётся hard link; если проекты и

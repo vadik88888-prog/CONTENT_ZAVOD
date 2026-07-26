@@ -121,6 +121,10 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self._failed(str(error))
             return
+        if run.status == RunStatus.FAILED:
+            self._finish(ProcessingPhase.FAILED, "Не удалось создать итоговый видеофайл", run)
+            self.error_occurred.emit(map_error(run.error_summary or "Не удалось создать итоговый видеофайл."))
+            return
         phase = ProcessingPhase.COMPLETED_WITH_WARNINGS if run.warnings else ProcessingPhase.COMPLETED
         self._finish(phase, "Ролик готов" if not run.warnings else "Ролик готов с предупреждениями", run)
 
@@ -140,7 +144,9 @@ class ProjectViewModel(QObject):
     def _finish(self, phase: ProcessingPhase, message: str, run: ProjectRun) -> None:
         self._elapsed_timer.stop()
         self.snapshot.phase = phase
+        self.snapshot.stage = None
         self.snapshot.message = message
+        self.snapshot.elapsed_seconds = 0.0
         self.processing_changed.emit(self.snapshot)
         self.project_changed.emit(self.project)
         self.runs_changed.emit(self.services.runs_for(self.project))

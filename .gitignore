@@ -23,5 +23,7 @@ work/*
 output/*
 !output/.gitkeep
 models/
+!app/gui/models/
+!app/gui/models/*.py
 ContentFactoryData/
 .content-factory/
