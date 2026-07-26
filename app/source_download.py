@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -45,6 +46,21 @@ class DownloadCancelled(SourceError):
 ProgressCallback = Callable[[DownloadProgress], None]
 
 
+def find_ytdlp_executable() -> str | None:
+    """Find yt-dlp from PATH or beside the active virtual-environment Python."""
+
+    from_path = shutil.which("yt-dlp")
+    if from_path:
+        return from_path
+    scripts = Path(sys.executable).resolve().parent
+    names = ("yt-dlp.exe", "yt-dlp") if sys.platform == "win32" else ("yt-dlp", "yt-dlp.exe")
+    for name in names:
+        candidate = scripts / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def validate_public_video_url(value: str) -> str:
     """Accept only absolute HTTP(S) URLs that cannot directly address local hosts."""
 
@@ -67,7 +83,7 @@ class YtDlpSource:
     """A process-only adapter. It never reads browser cookies or invokes a shell."""
 
     def __init__(self, executable: str | None = None) -> None:
-        self.executable = executable or shutil.which("yt-dlp")
+        self.executable = executable or find_ytdlp_executable()
 
     @property
     def available(self) -> bool:
@@ -146,7 +162,16 @@ class YtDlpSource:
         if exit_code != 0:
             cleanup_partial_downloads(destination)
             raise SourceError("Не удалось получить видео по этой ссылке.")
-        downloaded = next((path.resolve() for path in reversed(paths) if path.is_file() and _is_child(path, destination)), None)
+        downloaded = next(
+            (path.resolve() for path in reversed(paths) if path.is_file() and _is_child(path, destination)),
+            None,
+        )
+        if downloaded is None:
+            # Generic/direct-media extractors do not always emit after_move even
+            # though they return zero and leave a complete local file. Restrict
+            # the recovery to completed files inside this known project folder.
+            completed = _completed_downloads(destination)
+            downloaded = completed[-1] if completed else None
         if downloaded is None:
             raise SourceError("Загрузка завершилась, но итоговый видеофайл не найден.")
         return downloaded
@@ -212,6 +237,21 @@ def cleanup_partial_downloads(directory: Path) -> None:
     for item in root.glob("*"):
         if item.is_file() and (item.name.endswith(".part") or item.name.endswith(".ytdl")) and _is_child(item, root):
             item.unlink(missing_ok=True)
+
+
+def _completed_downloads(directory: Path) -> list[Path]:
+    root = directory.expanduser().resolve()
+    if not root.is_dir():
+        return []
+    candidates = [
+        item.resolve()
+        for item in root.iterdir()
+        if item.is_file()
+        and not item.name.endswith(".part")
+        and not item.name.endswith(".ytdl")
+        and _is_child(item, root)
+    ]
+    return sorted(candidates, key=lambda item: item.stat().st_mtime_ns)
 
 
 def _eta_seconds(value: str) -> int | None:

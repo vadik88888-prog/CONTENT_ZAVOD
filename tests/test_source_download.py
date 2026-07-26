@@ -12,6 +12,7 @@ from app.source_download import (
     DownloadCancelled,
     YtDlpSource,
     cleanup_partial_downloads,
+    find_ytdlp_executable,
     parse_download_progress,
     parse_url_metadata,
     validate_public_video_url,
@@ -37,6 +38,21 @@ def test_metadata_and_progress_are_parsed_without_exposing_internal_ytdlp_output
     assert progress.fraction == 0.425
     assert progress.speed == "1.5MiB/s"
     assert progress.eta_seconds == 17
+
+
+def test_ytdlp_is_found_beside_active_virtual_environment_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"python")
+    executable = tmp_path / "yt-dlp.exe"
+    executable.write_bytes(b"yt-dlp")
+    monkeypatch.setattr(download_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(download_module.sys, "executable", str(python))
+    monkeypatch.setattr(download_module.sys, "platform", "win32")
+
+    assert find_ytdlp_executable() == str(executable)
+    assert YtDlpSource().executable == str(executable)
 
 
 def test_ytdlp_download_uses_argument_list_and_reports_progress(tmp_path: Path, monkeypatch) -> None:
@@ -73,6 +89,28 @@ def test_ytdlp_download_uses_argument_list_and_reports_progress(tmp_path: Path, 
     assert received["arguments"][-1] == "https://example.test/a video?x=1;not-a-command"
     assert "shell" not in received["kwargs"]
     assert updates[0].fraction == 0.5
+
+
+def test_ytdlp_download_recovers_a_completed_direct_file_without_after_move_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sources"
+    target.mkdir()
+    completed = target / "direct-video.mp4"
+    completed.write_bytes(b"video")
+
+    class FakeProcess:
+        stdout = io.StringIO("download: 100.0%|2MiB/s|NA\n")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(download_module.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+
+    assert YtDlpSource("yt-dlp.exe").download("https://example.test/video.mp4", target) == completed.resolve()
 
 
 def test_cancelled_download_removes_only_partial_markers(tmp_path: Path, monkeypatch) -> None:

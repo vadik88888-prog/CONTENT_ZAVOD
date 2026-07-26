@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import AppConfig
+from app.source_download import find_ytdlp_executable
 
 
 @dataclass(slots=True)
@@ -80,7 +81,7 @@ def collect_checks(root: Path, config: AppConfig | None = None) -> list[Check]:
         ),
     ]
     for command, title in (("ffmpeg", "FFmpeg"), ("ffprobe", "FFprobe"), ("yt-dlp", "yt-dlp")):
-        executable = shutil.which(command)
+        executable = find_ytdlp_executable() if command == "yt-dlp" else shutil.which(command)
         checks.append(
             Check(title, "ok" if executable else "error", executable or "Не найден в PATH.")
         )
