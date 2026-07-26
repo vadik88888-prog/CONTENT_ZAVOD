@@ -118,6 +118,26 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(clip_count=str(self.clip_count.currentData()))
         )
         settings.addWidget(self.clip_count)
+        settings.addWidget(QLabel("Аудио"))
+        self.audio_mode = QComboBox()
+        self.audio_mode.addItem("Исходная речь", "original")
+        self.audio_mode.addItem("Исходная речь, улучшить звук", "original_enhanced")
+        self.audio_mode.addItem("Озвучка", "voiceover")
+        self.audio_mode.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(audio_mode=str(self.audio_mode.currentData()))
+        )
+        settings.addWidget(self.audio_mode)
+        settings.addWidget(QLabel("Композиция кадра"))
+        self.composition_strategy = QComboBox()
+        self.composition_strategy.addItem("Авто: сохранить важное", "safe_auto")
+        self.composition_strategy.addItem("По центру", "center_crop")
+        self.composition_strategy.addItem("С размытым фоном", "fit_blur_background")
+        self.composition_strategy.addItem("С однотонным фоном", "fit_solid_background")
+        self.composition_strategy.addItem("Верхняя часть кадра", "top_crop")
+        self.composition_strategy.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(composition_strategy=str(self.composition_strategy.currentData()))
+        )
+        settings.addWidget(self.composition_strategy)
         settings.addWidget(QLabel("Субтитры"))
         self.subtitles = QCheckBox("Показывать субтитры")
         self.subtitles.toggled.connect(lambda value: self.viewmodel.save_options(subtitles_enabled=value))
@@ -172,6 +192,8 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.deep_analysis, project.settings.deep_analysis)
         self._set_combo_data(self.platform, project.settings.platform)
         self._set_combo_data(self.clip_count, str(project.settings.clip_count))
+        self._set_combo_data(self.audio_mode, project.settings.audio_mode)
+        self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
@@ -224,7 +246,7 @@ class ProjectScreen(QWidget):
         self.run_button.setDisabled(active)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
-            self.subtitles, self.subtitle_style, self.cache,
+            self.audio_mode, self.composition_strategy, self.subtitles, self.subtitle_style, self.cache,
         ):
             widget.setDisabled(active)
 

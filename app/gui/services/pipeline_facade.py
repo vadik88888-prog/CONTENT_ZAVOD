@@ -311,6 +311,7 @@ class PipelineFacade:
         config.production_render.enabled = True
         config.production_render.subtitles_enabled = options.subtitles_enabled
         config.production_render.subtitle_style = options.subtitle_style
+        config.production_render.crop_strategy = options.composition_strategy
         config.production_render.encoder = options.encoder
         config.production_render.cache_enabled = options.use_cache
         config.device = settings.device_preference

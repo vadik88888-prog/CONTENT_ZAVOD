@@ -9,37 +9,41 @@ from typing import Any
 from app.config import ProductionRenderConfig
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
 from app.utils import stable_text_hash, write_bytes_atomic
-from app.video_models import SubtitleCue, SubtitleProject, SubtitleStyle
+from app.video_models import SubtitleCue, SubtitleProject, SubtitleStyle, SubtitleWordTiming
 
 
 _STYLE_PRESETS: dict[str, dict[str, Any]] = {
     "minimal": {"font_size": 56, "font_weight": "normal", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#202020", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 170, "alignment": "center", "uppercase": False},
-    "documentary": {"font_size": 62, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#101010", "outline_width": 3, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 185, "alignment": "center", "uppercase": False},
+    "documentary": {"font_size": 58, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#101010", "outline_width": 1.5, "shadow": 0, "background": "transparent", "position": "bottom", "bottom_margin": 220, "alignment": "center", "uppercase": False},
     "dynamic": {"font_size": 68, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFD54A", "outline_color": "#111111", "outline_width": 4, "shadow": 2, "background": "transparent", "position": "bottom", "bottom_margin": 190, "alignment": "center", "uppercase": True},
     "clean": {"font_size": 58, "font_weight": "bold", "text_color": "#FFFFFF", "highlight_color": "#FFFFFF", "outline_color": "#242424", "outline_width": 2, "shadow": 1, "background": "transparent", "position": "bottom", "bottom_margin": 165, "alignment": "center", "uppercase": False},
 }
 
 
 def build_subtitle_project(
-    plan: ProductionPlan, audio_project: Any, config: ProductionRenderConfig,
+    plan: ProductionPlan, audio_project: Any, config: ProductionRenderConfig, transcript: dict[str, Any] | None = None,
 ) -> SubtitleProject:
     """Use actual AudioProject clip ranges; never reuse the estimated Goal 3A cues."""
 
     style, font_fallback, font_warning = resolve_subtitle_style(config)
     plan_segments = {segment.segment_id: segment for segment in plan.segments}
+    transcript_words = _transcript_words(transcript)
     cues: list[SubtitleCue] = []
     for clip in audio_project.timeline.clips:
         segment = plan_segments.get(clip.production_segment_id)
         if isinstance(segment, NarrationSegment):
             text, source_type, speaker = segment.text, "narration", "narrator"
+            words: list[SubtitleWordTiming] = []
         elif isinstance(segment, DialogueSegment):
-            text, source_type, speaker = segment.source_text, "dialogue", segment.speaker
+            words = _dialogue_word_timings(segment, clip, transcript_words)
+            text = " ".join(item.text for item in words) if words else segment.source_text
+            source_type, speaker = "dialogue", segment.speaker
         else:
             continue
         chunks = split_subtitle_text(text, config)
         cues.extend(_timed_cues(
             chunks, clip.production_segment_id or clip.clip_id, speaker, source_type,
-            float(clip.timeline_start_seconds), float(clip.timeline_end_seconds), style, config,
+            float(clip.timeline_start_seconds), float(clip.timeline_end_seconds), style, config, words,
         ))
     duration = float(audio_project.timeline.duration_seconds)
     project_id = f"subtitles-{audio_project.project_id}-{stable_text_hash(style.model_dump_json())[:12]}"
@@ -54,7 +58,12 @@ def resolve_subtitle_style(config: ProductionRenderConfig) -> tuple[SubtitleStyl
     requested = config.subtitle_font_family.strip()
     font, fallback, warning = _resolve_font(requested)
     values = dict(_STYLE_PRESETS[config.subtitle_style])
-    values.update({"style_id": config.subtitle_style, "font_family": font})
+    values.update({
+        "style_id": config.subtitle_style,
+        "font_family": font,
+        "max_chars_per_line": config.subtitle_max_chars_per_line,
+        "max_lines": config.subtitle_max_lines,
+    })
     return SubtitleStyle(**values), fallback, warning
 
 
@@ -106,9 +115,56 @@ def split_subtitle_text(text: str, config: ProductionRenderConfig) -> list[str]:
     return chunks
 
 
+def _transcript_words(transcript: dict[str, Any] | None) -> list[tuple[str, float, float]]:
+    if not isinstance(transcript, dict):
+        return []
+    raw = transcript.get("words", [])
+    if not isinstance(raw, list):
+        return []
+    result: list[tuple[str, float, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("word") or "").strip()
+        try:
+            start, end = float(item["start"]), float(item["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if text and end > start:
+            result.append((text, start, end))
+    return result
+
+
+def _dialogue_word_timings(
+    segment: DialogueSegment, clip: Any, transcript_words: list[tuple[str, float, float]],
+) -> list[SubtitleWordTiming]:
+    """Map source transcript timings into the concatenated AudioProject timeline."""
+
+    source_start, source_end = segment.source_start_seconds, segment.source_end_seconds
+    source_duration = source_end - source_start
+    timeline_start = float(clip.timeline_start_seconds)
+    timeline_end = float(clip.timeline_end_seconds)
+    if source_duration <= 0 or timeline_end <= timeline_start:
+        return []
+    scale = (timeline_end - timeline_start) / source_duration
+    result: list[SubtitleWordTiming] = []
+    for text, start, end in transcript_words:
+        if end <= source_start or start >= source_end:
+            continue
+        clipped_start, clipped_end = max(start, source_start), min(end, source_end)
+        local_start = timeline_start + (clipped_start - source_start) * scale
+        local_end = timeline_start + (clipped_end - source_start) * scale
+        if local_end > local_start:
+            result.append(SubtitleWordTiming(
+                text=text, start_seconds=round(local_start, 3), end_seconds=round(local_end, 3),
+            ))
+    return result
+
+
 def _timed_cues(
     chunks: list[str], segment_id: str, speaker: str, source_type: str,
     start: float, end: float, style: SubtitleStyle, config: ProductionRenderConfig,
+    word_timings: list[SubtitleWordTiming] | None = None,
 ) -> list[SubtitleCue]:
     if not chunks or end <= start:
         return []
@@ -117,31 +173,49 @@ def _timed_cues(
     total_weight = sum(weights)
     cursor = start
     cues: list[SubtitleCue] = []
+    groups = _cue_word_groups(chunks, word_timings or [])
     for index, (chunk, weight) in enumerate(zip(chunks, weights), start=1):
-        if index == len(chunks):
+        cue_words = groups[index - 1] if groups else []
+        if cue_words:
+            cue_start = max(cursor, cue_words[0].start_seconds)
+            cue_end = min(end, cue_words[-1].end_seconds)
+        elif index == len(chunks):
+            cue_start = cursor
             cue_end = end
         else:
+            cue_start = cursor
             planned = total * weight / total_weight
             # The segment duration is authoritative. Clamp only while another cue remains.
             planned = min(config.subtitle_max_duration, max(config.subtitle_min_duration, planned))
             remaining_min = 0.05 * (len(chunks) - index)
-            cue_end = min(end - remaining_min, cursor + planned)
-        if cue_end <= cursor:
-            cue_end = min(end, cursor + 0.05)
+            cue_end = min(end - remaining_min, cue_start + planned)
+        if cue_end <= cue_start:
+            cue_end = min(end, cue_start + 0.05)
         rendered = chunk.upper() if style.uppercase else chunk
-        line_count = _line_count(rendered, config.subtitle_max_chars_per_line)
+        line_count = len(_wrapped_lines(rendered, style.max_chars_per_line))
         cues.append(SubtitleCue(
             cue_id=f"cue-{segment_id}-{index:03d}", segment_id=segment_id, speaker=speaker,
-            text=rendered, start_seconds=round(cursor, 3), end_seconds=round(cue_end, 3),
+            text=rendered, start_seconds=round(cue_start, 3), end_seconds=round(cue_end, 3),
             word_count=len(chunk.split()), line_count=line_count, style_id=style.style_id,
-            source_type=source_type,
+            source_type=source_type, word_timings=cue_words,
         ))
         cursor = cue_end
     return cues
 
 
-def _line_count(text: str, maximum: int) -> int:
-    return max(1, (len(text) + maximum - 1) // maximum)
+def _cue_word_groups(chunks: list[str], words: list[SubtitleWordTiming]) -> list[list[SubtitleWordTiming]]:
+    if not words:
+        return [[] for _chunk in chunks]
+    result: list[list[SubtitleWordTiming]] = []
+    cursor = 0
+    for chunk in chunks:
+        count = len(chunk.split())
+        group = words[cursor:cursor + count]
+        if len(group) != count:
+            return [[] for _chunk in chunks]
+        result.append(group)
+        cursor += count
+    return result if cursor == len(words) else [[] for _chunk in chunks]
 
 
 def write_production_ass(project: SubtitleProject, path: Path, width: int, height: int) -> Path:
@@ -188,6 +262,12 @@ def _format_cue(cue: SubtitleCue, style: SubtitleStyle) -> str:
     if style.style_id == "dynamic":
         words = cue.text.split()
         if words:
+            if len(cue.word_timings) == len(words):
+                return " ".join(
+                    f"{{\\k{max(1, round((timing.end_seconds - timing.start_seconds) * 100))}}}"
+                    f"{_escape(timing.text.upper() if style.uppercase else timing.text)}"
+                    for timing in cue.word_timings
+                )
             total_centiseconds = max(len(words), round((cue.end_seconds - cue.start_seconds) * 100))
             base, remainder = divmod(total_centiseconds, len(words))
             return " ".join(
@@ -198,13 +278,33 @@ def _format_cue(cue: SubtitleCue, style: SubtitleStyle) -> str:
 
 
 def _wrap_and_escape(text: str, style: SubtitleStyle) -> str:
-    # The cue was already bounded; splitting approximately halfway makes two readable lines.
-    escaped = _escape(text)
-    if len(text) <= 28:
-        return escaped
-    words = escaped.split(" ")
-    split = max(1, len(words) // 2)
-    return " ".join(words[:split]) + r"\N" + " ".join(words[split:])
+    return r"\N".join(_escape(line) for line in _wrapped_lines(text, style.max_chars_per_line))
+
+
+_NO_BREAK_AFTER = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
+    "в", "во", "и", "к", "ко", "на", "о", "об", "от", "по", "с", "со", "у", "за", "из", "не",
+})
+
+
+def _wrapped_lines(text: str, maximum: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        proposed = " ".join([*current, word])
+        if current and len(proposed) > maximum:
+            if len(current) > 1 and current[-1].casefold().rstrip(",") in _NO_BREAK_AFTER:
+                word = current.pop() + " " + word
+            lines.append(current)
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(current)
+    return [" ".join(line) for line in lines]
 
 
 def _escape(value: str) -> str:

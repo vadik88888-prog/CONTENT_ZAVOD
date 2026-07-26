@@ -424,7 +424,7 @@ class ProductionRenderConfig:
             raise ClipEngineError("production_render.video_bitrate не должен быть пустым.")
         if self.encoder not in {"auto", "nvenc", "cpu"}:
             raise ClipEngineError("production_render.encoder: auto, nvenc или cpu.")
-        if self.crop_strategy not in {"center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"}:
+        if self.crop_strategy not in {"safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"}:
             raise ClipEngineError("production_render.crop_strategy содержит неподдерживаемую стратегию.")
         if self.transitions not in {"cut", "short_crossfade", "fade_from_black", "fade_to_black"}:
             raise ClipEngineError("production_render.transitions содержит неподдерживаемый переход.")

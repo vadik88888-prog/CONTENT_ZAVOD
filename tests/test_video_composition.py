@@ -174,6 +174,29 @@ def test_reframe_plan_uses_safe_fallback_and_smooths_subject_keyframes() -> None
     assert tracked.keyframes[1].normalized_y - tracked.keyframes[0].normalized_y <= 0.12
 
 
+def test_safe_auto_reframe_preserves_unknown_landscape_and_uses_subject_when_confident() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {"display_width": 1920, "display_height": 1080, "rotation": 0}
+    crop = make_crop_plan(source, canvas, config)
+    reframe = build_reframe_plan(source, canvas, config, VideoTimeline(clips=[], duration_seconds=0))
+
+    assert crop.strategy == "fit_blur_background"
+    assert reframe.strategy == "blur_fallback"
+    assert reframe.fallback_reason and "unsafe crop" in reframe.fallback_reason
+
+    tracked_source = {
+        **source,
+        "subject_keyframes": [{"time_seconds": 0, "normalized_x": 0.8, "normalized_y": 0.4, "confidence": 0.9}],
+    }
+    tracked_crop = make_crop_plan(tracked_source, canvas, config)
+    tracked_reframe = build_reframe_plan(tracked_source, canvas, config, VideoTimeline(clips=[], duration_seconds=0))
+    assert tracked_crop.strategy == "manual_normalized_crop"
+    assert tracked_reframe.strategy == "subject_crop" and tracked_reframe.subject_detection_used
+
+
 def test_subject_anchor_changes_the_actual_horizontal_crop() -> None:
     from app.config import ProductionRenderConfig
 
@@ -244,6 +267,28 @@ def test_dynamic_subtitles_use_word_level_highlighting_and_keep_cyrillic(tmp_pat
     assert "&H004AD5FF" in content  # #FFD54A in ASS BGR order
     assert r"{\k" in content
     assert "ДИНАМИЧЕСКИЙ" in content
+
+
+def test_dialogue_subtitles_use_source_word_timestamps_when_available(tmp_path: Path) -> None:
+    config, plan, _source, _transcript, audio = _upstream(tmp_path)
+    config.production_render.subtitle_style = "dynamic"
+    transcript = {
+        "words": [
+            {"start": 1.0, "end": 1.2, "text": "Source"},
+            {"start": 1.2, "end": 1.45, "text": "dialogue"},
+            {"start": 1.45, "end": 1.7, "text": "remains"},
+            {"start": 1.7, "end": 2.0, "text": "audible."},
+        ]
+    }
+
+    project = build_subtitle_project(plan, audio, config.production_render, transcript)
+    cue = next(item for item in project.cues if item.source_type == "dialogue")
+    dialogue_clip = next(item for item in audio.timeline.clips if item.clip_type == "dialogue")
+    assert [item.text for item in cue.word_timings] == ["Source", "dialogue", "remains", "audible."]
+    assert cue.word_timings[0].start_seconds == pytest.approx(dialogue_clip.timeline_start_seconds)
+    ass = tmp_path / "dialogue-timing.ass"
+    write_production_ass(project, ass, 180, 320)
+    assert r"{\k20}SOURCE" in ass.read_text(encoding="utf-8-sig")
 
 
 def test_transition_filters_preserve_audio_timeline_duration() -> None:

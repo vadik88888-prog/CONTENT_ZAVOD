@@ -130,6 +130,8 @@ class DesktopServices:
                     "clip_count": project.settings.clip_count,
                     "subtitles_enabled": project.settings.subtitles_enabled,
                     "subtitle_style": project.settings.subtitle_style,
+                    "audio_mode": project.settings.audio_mode,
+                    "composition_strategy": project.settings.composition_strategy,
                     "encoder": project.settings.encoder,
                     "use_cache": project.settings.use_cache,
                     "recompute_all": project.settings.recompute_all,
@@ -179,10 +181,15 @@ class DesktopServices:
             raise InputValidationError("Исходный видеофайл больше недоступен.")
         intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
         previous = parent_run.settings_snapshot.get("project_options", {})
+        previous_audio_mode = str(previous.get("audio_mode", "original"))
+        if previous_audio_mode != project.settings.audio_mode:
+            raise InputValidationError("Для изменения аудиорежима запустите полное создание ролика.")
         current = {
             "subtitle_style": project.settings.subtitle_style,
             "subtitles_enabled": project.settings.subtitles_enabled,
             "platform": project.settings.platform,
+            "audio_mode": project.settings.audio_mode,
+            "composition_strategy": project.settings.composition_strategy,
             "encoder": project.settings.encoder,
         }
         changed = {name: value for name, value in current.items() if previous.get(name) != value}

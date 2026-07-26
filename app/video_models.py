@@ -216,11 +216,28 @@ class SubtitleCue(BaseModel):
     line_count: int = Field(ge=1, le=8)
     style_id: str
     source_type: Literal["narration", "dialogue"]
+    word_timings: list["SubtitleWordTiming"] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _ordered(self) -> "SubtitleCue":
         if self.end_seconds <= self.start_seconds:
             raise ValueError("subtitle cue must have positive duration")
+        return self
+
+
+class SubtitleWordTiming(BaseModel):
+    """Actual word timing in the final mixed-audio timeline when available."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=400)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "SubtitleWordTiming":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("subtitle word timing must have positive duration")
         return self
 
 
@@ -241,6 +258,8 @@ class SubtitleStyle(BaseModel):
     bottom_margin: int = Field(ge=0, le=1000)
     alignment: Literal["center", "left"] = "center"
     uppercase: bool = False
+    max_chars_per_line: int = Field(default=28, ge=8, le=80)
+    max_lines: int = Field(default=2, ge=1, le=4)
 
 
 class SubtitleProject(BaseModel):

@@ -136,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--output-height", type=int, help="Высота Goal 3D холста 9:16 (чётное число).")
     process.add_argument("--output-fps", type=float, help="FPS Goal 3D production render.")
     process.add_argument(
-        "--crop-strategy", choices=["center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"],
+        "--crop-strategy", choices=["safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"],
         help="Стратегия vertical composition для production render.",
     )
     process.add_argument("--subtitle-style", choices=["minimal", "documentary", "dynamic", "clean"], help="Стиль production subtitles.")

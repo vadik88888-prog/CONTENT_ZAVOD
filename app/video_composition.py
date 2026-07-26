@@ -80,7 +80,7 @@ class VideoCompositionService:
                 "AudioProject timeline и mixed_audio.wav имеют несовместимую длительность: "
                 f"{timeline.duration_seconds:.3f}s vs {actual_audio_duration:.3f}s."
             )
-        subtitle_project = build_subtitle_project(plan, audio_project, render_config)
+        subtitle_project = build_subtitle_project(plan, audio_project, render_config, transcript)
         cache_key = _render_cache_key(
             source_checksum, mixed_checksum, audio_project, timeline, subtitle_project, canvas, render_config,
         )
@@ -105,7 +105,9 @@ class VideoCompositionService:
             production_plan_id=plan.plan_id, audio_project_id=audio_project.project_id, mixed_audio_path=str(mixed_path),
             canvas=canvas, target_duration_seconds=timeline.duration_seconds, actual_duration_seconds=0,
             timeline=timeline, reframe_plan=reframe_plan, tracks=[track], subtitle_project=subtitle_project, render_request=request,
-            metadata=metadata, warnings=list(subtitle_project.warnings), fallback_reasons=fallback_reasons,
+            metadata=metadata,
+            warnings=list(subtitle_project.warnings),
+            fallback_reasons=[*fallback_reasons, *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else [])],
         )
         render_root = output_directory / "production-render"
         cache_path = self.root / "work" / "production-render-cache" / f"{cache_key}.json"
@@ -428,20 +430,27 @@ def _transitions(clips: list[VideoClipModel], config: ProductionRenderConfig) ->
 def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig) -> CropPlan:
     width, height = int(source_info["display_width"]), int(source_info["display_height"])
     rotation = int(source_info.get("rotation", 0))
-    if config.crop_strategy in {"fit_blur_background", "fit_solid_background"}:
-        return CropPlan(strategy=config.crop_strategy, source_width=width, source_height=height, display_rotation_degrees=rotation)
     target = canvas.width / canvas.height
+    strategy = config.crop_strategy
+    subject = _subject_anchor(source_info)
+    # Auto mode must never make a destructive landscape crop without reliable
+    # subject evidence. The full frame with a background is safer than guessing.
+    if strategy == "safe_auto":
+        if width / height > target * 1.03 and subject is None:
+            return CropPlan(strategy="fit_blur_background", source_width=width, source_height=height, display_rotation_degrees=rotation)
+        strategy = "center_crop"
+    if strategy in {"fit_blur_background", "fit_solid_background"}:
+        return CropPlan(strategy=strategy, source_width=width, source_height=height, display_rotation_degrees=rotation)
     if width / height >= target:
         crop_height = height
         crop_width = _even_down(height * target)
     else:
         crop_width = width
         crop_height = _even_down(width / target)
-    subject = _subject_anchor(source_info)
-    if config.crop_strategy == "top_crop":
+    if strategy == "top_crop":
         x, y = (width - crop_width) // 2, 0
         normalized_x, normalized_y, strategy = 0.5, 0.0, "top_crop"
-    elif subject is not None and config.crop_strategy == "center_crop":
+    elif subject is not None and strategy == "center_crop":
         normalized_x, normalized_y = subject
         x = _even_down((width - crop_width) * normalized_x)
         y = _even_down((height - crop_height) * normalized_y)
@@ -449,7 +458,7 @@ def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: Pr
     else:
         x = _even_down((width - crop_width) * config.manual_crop_x)
         y = _even_down((height - crop_height) * config.manual_crop_y)
-        normalized_x, normalized_y, strategy = config.manual_crop_x, config.manual_crop_y, config.crop_strategy
+        normalized_x, normalized_y, strategy = config.manual_crop_x, config.manual_crop_y, strategy
     x = max(0, min(x, width - crop_width))
     y = max(0, min(y, height - crop_height))
     return CropPlan(
@@ -515,13 +524,19 @@ def build_reframe_plan(
             strategy="original_vertical", source_width=width, source_height=height,
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
         )
-    if config.crop_strategy == "center_crop" and confident:
+    if config.crop_strategy == "safe_auto" and not confident:
+        return ReframePlan(
+            strategy="blur_fallback", source_width=width, source_height=height,
+            canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.20,
+            fallback_reason="Subject confidence is insufficient; full-frame blur fallback avoids an unsafe crop.",
+        )
+    if config.crop_strategy in {"safe_auto", "center_crop"} and confident:
         return ReframePlan(
             strategy="subject_crop", source_width=width, source_height=height,
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
             keyframes=_smooth_reframe_keyframes(confident), subject_detection_used=True,
         )
-    if config.crop_strategy == "center_crop":
+    if config.crop_strategy in {"safe_auto", "center_crop"}:
         return ReframePlan(
             strategy="center_crop", source_width=width, source_height=height,
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,

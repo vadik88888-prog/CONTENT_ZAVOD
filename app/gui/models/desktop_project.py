@@ -37,6 +37,7 @@ class ProjectOptions:
     subtitles_enabled: bool = True
     subtitle_style: str = "documentary"
     audio_mode: str = "original"
+    composition_strategy: str = "safe_auto"
     encoder: str = "auto"
     use_cache: bool = True
     recompute_all: bool = False
@@ -45,6 +46,8 @@ class ProjectOptions:
         self.processing_intent().validate()
         if self.encoder not in {"auto", "cpu", "nvenc"}:
             raise ValueError("Unsupported encoder.")
+        if self.composition_strategy not in {"safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop"}:
+            raise ValueError("Unsupported composition strategy.")
         if not all(isinstance(item, bool) for item in (
             self.subtitles_enabled, self.use_cache, self.recompute_all,
         )):
@@ -111,7 +114,7 @@ class DesktopProject:
             raise ValueError("Project settings are corrupted.")
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
-            "subtitles_enabled", "subtitle_style", "audio_mode", "encoder", "use_cache", "recompute_all",
+            "subtitles_enabled", "subtitle_style", "audio_mode", "composition_strategy", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
         source_metadata = dict(value.get("source_metadata") or {})
