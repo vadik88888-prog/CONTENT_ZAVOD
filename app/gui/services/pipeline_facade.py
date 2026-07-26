@@ -184,7 +184,23 @@ class PipelineFacade:
         tts = raw.get("tts", {}) if isinstance(raw.get("tts"), dict) else {}
         values = [ai.get("estimated_cost"), tts.get("estimated_cost")]
         estimate = sum(float(item) for item in values if isinstance(item, (int, float)))
-        return PipelineCompletion(prepared.report_path, [final_path], warnings, None, None, estimate or None)
+        output_files = [final_path]
+        for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
+            path = Path(str(value))
+            candidate = path if path.is_absolute() else prepared.output_directory / path
+            if candidate == final_path or candidate in output_files:
+                continue
+            # The legacy renderer can leave report entries for a previous cache
+            # run.  Missing paths are not current partial failures and must not
+            # downgrade a valid production result.
+            if not candidate.is_file():
+                continue
+            artifact_error = self._validate_final_mp4(candidate)
+            if artifact_error:
+                warnings.append("Один из дополнительных роликов не прошёл проверку и не был добавлен в результаты.")
+                continue
+            output_files.append(candidate)
+        return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, estimate or None)
 
     @staticmethod
     def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:

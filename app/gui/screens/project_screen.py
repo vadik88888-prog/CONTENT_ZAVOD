@@ -187,9 +187,9 @@ class ProjectScreen(QWidget):
             text = QLabel(f"{run.started_at[:16].replace('T', ' ')} · {run.status.replace('_', ' ')}")
             text.setWordWrap(True)
             layout.addWidget(text, 1)
-            result = next((Path(item) for item in run.artifact_paths if Path(item).suffix.lower() == ".mp4" and Path(item).is_file()), None)
-            if result:
-                button = QPushButton("Открыть ролик")
+            results = [Path(item) for item in run.artifact_paths if Path(item).suffix.lower() == ".mp4" and Path(item).is_file()]
+            for index, result in enumerate(results, start=1):
+                button = QPushButton("Открыть ролик" if len(results) == 1 else f"Ролик {index}")
                 button.clicked.connect(lambda _, path=result: self._open_file(path))
                 layout.addWidget(button)
             folder = QPushButton("Папка")

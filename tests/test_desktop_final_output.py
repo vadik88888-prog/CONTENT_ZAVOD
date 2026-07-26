@@ -14,7 +14,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.viewmodels.project_viewmodel import ProjectViewModel
-from app.utils import write_json
+from app.utils import read_json, write_json
 
 
 def _context(tmp_path: Path):
@@ -109,6 +109,26 @@ def test_valid_report_mp4_without_warnings_is_completed(tmp_path: Path, valid_vi
     assert finished.status == RunStatus.COMPLETED
     assert project.status == ProjectStatus.COMPLETED
     assert [Path(value).name for value in finished.artifact_paths] == ["report.json", "final-short.mp4"]
+
+
+def test_completion_keeps_each_valid_independent_clip_result(tmp_path: Path, valid_video_probe) -> None:
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    additional = prepared.output_directory / "clip-02.mp4"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"valid final artifact")
+    additional.write_bytes(b"valid additional artifact")
+    _write_report(prepared, final)
+    report = read_json(prepared.report_path)
+    report["output_files"] = [str(additional)]
+    write_json(prepared.report_path, report)
+
+    completion = services.pipeline.completion(prepared)
+    finished = services.finish_success(project, run, prepared)
+
+    assert completion.output_files == [final, additional]
+    assert finished.status == RunStatus.COMPLETED
+    assert [Path(value).name for value in finished.artifact_paths] == ["report.json", "final-short.mp4", "clip-02.mp4"]
 
 
 def test_zero_byte_final_mp4_is_failed(tmp_path: Path) -> None:
