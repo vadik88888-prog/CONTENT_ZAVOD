@@ -278,11 +278,11 @@ class Pipeline:
         )
         tts = self._run_tts(tracker, production, work_directory, output_directory)
         audio = self._run_audio(
-            tracker, production, source, transcript, work_directory, output_directory,
+            tracker, production, tts, source, transcript, work_directory, output_directory,
             Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
         )
         production_render = self._run_production_render(
-            tracker, production, source, transcript, work_directory, output_directory, visual_analysis,
+            tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
         render_data = (
             self._skip_render_for_production_plan(tracker, work_directory / "render.json")
@@ -294,6 +294,11 @@ class Pipeline:
             )
         )
         outputs = [Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()]
+        production_outputs = production_render.get("output_files", []) if isinstance(production_render, dict) else []
+        for value in production_outputs if isinstance(production_outputs, list) else []:
+            path = Path(str(value))
+            if path.is_file() and path not in outputs:
+                outputs.append(path)
         self.warnings.extend(render_data.get("warnings", []))
         self.errors.extend(render_data.get("errors", []))
         if source.downloaded and self.config.delete_downloaded_source and outputs:
@@ -545,33 +550,45 @@ class Pipeline:
         self, tracker: StageTracker, production: dict[str, Any],
         work_directory: Path, output_directory: Path,
     ) -> dict[str, Any]:
-        """Run Goal 3B strictly from the already-built primary ProductionPlan."""
+        """Run Goal 3B for every completed ProductionPlan without rebuilding it."""
 
         if not self.config.tts.enabled or self.disable_tts:
             tracker.skip("tts_generation", "TTS отключён конфигурацией или --disable-tts.")
             return {"enabled": False, "status": "skipped", "reason": "disabled"}
-        plan_data = production.get("production_plan") if isinstance(production, dict) else None
-        if not isinstance(plan_data, dict):
+        plan_items = _production_items(production)
+        if not plan_items:
             tracker.skip("tts_generation", "Нет ProductionPlan для TTS.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
-        try:
-            plan = ProductionPlan.model_validate(plan_data)
-        except Exception as error:
-            tracker.start("tts_generation")
-            tracker.finish("tts_generation", "failed", sanitize_api_error(error))
-            return {"enabled": True, "status": "failed", "reason": "invalid_production_plan"}
-        stage_name = f"tts_generation:{plan.plan_id}"
-        tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
-        result = TTSService(self.root, self.config).generate(
-            plan, work_directory, output_directory, force_recompute=self.recompute_tts,
-        )
-        tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
-        self.warnings.extend(result.warnings)
-        self.errors.extend([f"tts: {item.message}" for item in result.api_errors])
-        return tts_report_section(result)
+        outcomes: list[dict[str, Any]] = []
+        for index, item in enumerate(plan_items, start=1):
+            candidate_id, plan_data = item["candidate_id"], item["plan"]
+            try:
+                plan = ProductionPlan.model_validate(plan_data)
+            except Exception as error:
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
+                continue
+            candidate_output = _candidate_output_directory(output_directory, candidate_id, index)
+            stage_name = f"tts_generation:{plan.plan_id}"
+            tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
+            try:
+                result = TTSService(self.root, self.config).generate(
+                    plan, work_directory, candidate_output, force_recompute=self.recompute_tts,
+                )
+            except TTSError as error:
+                safe = sanitize_api_error(error)
+                tracker.finish(stage_name, "failed", safe)
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": safe})
+                self.errors.append(f"tts:{candidate_id}: {safe}")
+                continue
+            tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
+            report = tts_report_section(result)
+            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report})
+            self.warnings.extend(result.warnings)
+            self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
+        return _multi_stage_report("tts", outcomes)
 
     def _run_audio(
-        self, tracker: StageTracker, production: dict[str, Any], source: Source,
+        self, tracker: StageTracker, production: dict[str, Any], tts: dict[str, Any], source: Source,
         transcript: dict[str, Any], work_directory: Path, output_directory: Path,
         prepared_source_audio_path: Path | None = None,
     ) -> dict[str, Any]:
@@ -581,40 +598,51 @@ class Pipeline:
             reason = "disabled" if not self.config.audio_composition.enabled else "production_plan_only"
             tracker.skip("audio_composition", f"Audio Composition skipped: {reason}.")
             return {"enabled": False, "status": "skipped", "reason": reason}
-        plan_data = production.get("production_plan") if isinstance(production, dict) else None
-        if not isinstance(plan_data, dict):
+        plan_items = _production_items(production)
+        if not plan_items:
             tracker.skip("audio_composition", "Нет ProductionPlan для Audio Composition.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
-        try:
-            plan = ProductionPlan.model_validate(plan_data)
-        except Exception as error:
-            tracker.start("audio_composition")
-            tracker.finish("audio_composition", "failed", sanitize_api_error(error))
-            return {"enabled": True, "status": "failed", "reason": "invalid_production_plan"}
-        stage_name = f"audio_composition:{plan.plan_id}"
-        tracker.start(stage_name, _hash({
-            "plan": plan.plan_id, "audio": self.config.audio_composition,
-            "tts_result": _file_fingerprint(output_directory / "tts" / "tts-result.json"),
-            "recompute": self.recompute_audio,
-        }))
-        try:
-            project = AudioCompositionService(self.root, self.config).compose(
-                plan, source, transcript, read_json(output_directory / "tts" / "tts-result.json", {}),
-                work_directory, output_directory, force_recompute=self.recompute_audio,
-                prepared_source_audio_path=prepared_source_audio_path,
-            )
-        except AudioCompositionError as error:
-            safe = sanitize_api_error(error)
-            tracker.finish(stage_name, "failed", safe)
-            self.errors.append(f"audio: {safe}")
-            return {"enabled": True, "status": "failed", "errors": [safe]}
-        tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
-        self.warnings.extend(project.warnings)
-        self.errors.extend([f"audio: {item}" for item in project.errors])
-        return audio_report_section(project)
+        tts_items = {str(item.get("candidate_id")): item for item in tts.get("items", []) if isinstance(item, dict)}
+        outcomes: list[dict[str, Any]] = []
+        for item in plan_items:
+            candidate_id, plan_data = item["candidate_id"], item["plan"]
+            tts_item = tts_items.get(candidate_id)
+            if not tts_item or tts_item.get("status") not in {"completed", "partial", "fallback"}:
+                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "tts_unavailable"})
+                continue
+            try:
+                plan = ProductionPlan.model_validate(plan_data)
+            except Exception as error:
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
+                continue
+            candidate_output = Path(str(tts_item["output_directory"]))
+            stage_name = f"audio_composition:{plan.plan_id}"
+            tracker.start(stage_name, _hash({
+                "plan": plan.plan_id,
+                "audio": self.config.audio_composition,
+                "tts_result": _file_fingerprint(candidate_output / "tts" / "tts-result.json"),
+                "recompute": self.recompute_audio,
+            }))
+            try:
+                project = AudioCompositionService(self.root, self.config).compose(
+                    plan, source, transcript, read_json(candidate_output / "tts" / "tts-result.json", {}),
+                    work_directory, candidate_output, force_recompute=self.recompute_audio,
+                    prepared_source_audio_path=prepared_source_audio_path,
+                )
+            except AudioCompositionError as error:
+                safe = sanitize_api_error(error)
+                tracker.finish(stage_name, "failed", safe)
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": safe})
+                self.errors.append(f"audio:{candidate_id}: {safe}")
+                continue
+            tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
+            outcomes.append({"candidate_id": candidate_id, "status": project.status, "output_directory": str(candidate_output), "report": audio_report_section(project)})
+            self.warnings.extend(project.warnings)
+            self.errors.extend([f"audio:{candidate_id}: {entry}" for entry in project.errors])
+        return _multi_stage_report("audio", outcomes)
 
     def _run_production_render(
-        self, tracker: StageTracker, production: dict[str, Any], source: Source,
+        self, tracker: StageTracker, production: dict[str, Any], audio: dict[str, Any], source: Source,
         transcript: dict[str, Any], work_directory: Path, output_directory: Path, visual_analysis: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the Goal 3D executor after its upstream artifacts, never through legacy render."""
@@ -628,26 +656,33 @@ class Pipeline:
                 reason = "production_plan_only"
             tracker.skip("production_render", f"Production render skipped: {reason}.")
             return {"enabled": False, "status": "skipped", "reason": reason}
-        plan_data = production.get("production_plan") if isinstance(production, dict) else None
-        if not isinstance(plan_data, dict):
+        plan_items = _production_items(production)
+        if not plan_items:
             tracker.skip("production_render", "Нет ProductionPlan для production render.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
-        audio_path = output_directory / "audio" / "audio-project.json"
-        if not audio_path.is_file():
-            tracker.skip("production_render", "Нет AudioProject для production render.")
-            return {"enabled": True, "status": "skipped", "reason": "no_audio_project"}
-        try:
-            plan = ProductionPlan.model_validate(plan_data)
-            audio_project = AudioProject.model_validate(read_json(audio_path, {}))
-        except Exception as error:
-            safe = sanitize_api_error(error)
-            tracker.start("production_render")
-            tracker.finish("production_render", "failed", safe)
-            self.errors.append(f"production_render: {safe}")
-            return {"enabled": True, "status": "failed", "errors": [safe]}
-        return self._compose_production_render(
-            tracker, plan, audio_project, source, transcript, work_directory, output_directory, raise_on_error=False, visual_analysis=visual_analysis,
-        )
+        audio_items = {str(item.get("candidate_id")): item for item in audio.get("items", []) if isinstance(item, dict)}
+        outcomes: list[dict[str, Any]] = []
+        for item in plan_items:
+            candidate_id, plan_data = item["candidate_id"], item["plan"]
+            audio_item = audio_items.get(candidate_id)
+            if not audio_item or audio_item.get("status") not in {"completed", "partial"}:
+                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "audio_unavailable"})
+                continue
+            candidate_output = Path(str(audio_item["output_directory"]))
+            try:
+                plan = ProductionPlan.model_validate(plan_data)
+                audio_project = AudioProject.model_validate(read_json(candidate_output / "audio" / "audio-project.json", {}))
+            except Exception as error:
+                safe = sanitize_api_error(error)
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "errors": [safe]})
+                self.errors.append(f"production_render:{candidate_id}: {safe}")
+                continue
+            report = self._compose_production_render(
+                tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
+                raise_on_error=False, visual_analysis=visual_analysis,
+            )
+            outcomes.append({"candidate_id": candidate_id, "status": report.get("status", "failed"), "output_directory": str(candidate_output), "report": report, "output_file": report.get("output_file")})
+        return _multi_stage_report("production_render", outcomes)
 
     def _compose_production_render(
         self, tracker: StageTracker, plan: ProductionPlan, audio_project: AudioProject, source: Source,
@@ -1078,6 +1113,39 @@ def _file_fingerprint(path: Path) -> dict[str, Any] | None:
         return None
     stat = path.stat()
     return {"path": str(path), "size": stat.st_size, "modified_ns": stat.st_mtime_ns}
+
+
+def _production_items(production: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = production.get("items", []) if isinstance(production, dict) else []
+    result: list[dict[str, Any]] = []
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict) or item.get("status") != "completed" or not isinstance(item.get("plan"), dict):
+            continue
+        result.append({"candidate_id": str(item.get("candidate_id") or "candidate"), "plan": item["plan"]})
+    # Old reports expose only the primary plan. Keep render-only and existing
+    # cache layouts operational while new full runs fan out to every item.
+    if not result and isinstance(production, dict) and isinstance(production.get("production_plan"), dict):
+        result.append({"candidate_id": "primary", "plan": production["production_plan"]})
+    return result
+
+
+def _candidate_output_directory(root: Path, candidate_id: str, index: int) -> Path:
+    return root if index == 1 else root / "candidates" / safe_name(candidate_id, f"clip-{index:02d}")
+
+
+def _multi_stage_report(stage: str, outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    successful = [item for item in outcomes if item.get("status") in {"completed", "partial", "fallback", "warning"}]
+    if not successful:
+        return {"enabled": True, "status": "failed", "items": outcomes}
+    primary = dict(successful[0].get("report") or {})
+    status = "completed" if len(successful) == len(outcomes) else "warning" if stage == "production_render" else "partial"
+    primary.update({"enabled": True, "status": status, "items": outcomes})
+    if stage == "production_render":
+        primary["output_file"] = successful[0].get("output_file") or primary.get("output_file")
+        primary["output_files"] = [item["output_file"] for item in successful if isinstance(item.get("output_file"), str)]
+        if len(successful) != len(outcomes):
+            primary.setdefault("warnings", []).append("Не все ролики удалось экспортировать; готовые результаты сохранены.")
+    return primary
 
 
 def _prepared_source_audio_path(work_directory: Path) -> Path | None:
