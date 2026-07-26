@@ -131,6 +131,35 @@ def test_completion_keeps_each_valid_independent_clip_result(tmp_path: Path, val
     assert [Path(value).name for value in finished.artifact_paths] == ["report.json", "final-short.mp4", "clip-02.mp4"]
 
 
+def test_primary_result_registry_excludes_legacy_outputs_and_keeps_exact_count(tmp_path: Path, valid_video_probe) -> None:
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    second = prepared.output_directory / "candidates" / "clip-two" / "production-render" / "clip-two.mp4"
+    third = prepared.output_directory / "candidates" / "clip-three" / "production-render" / "clip-three.mp4"
+    legacy = [prepared.output_directory / f"legacy-{number}.mp4" for number in range(1, 4)]
+    for path in [final, second, third, *legacy]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"valid final artifact")
+    _write_report(prepared, final)
+    report = read_json(prepared.report_path)
+    report["output_files"] = [str(path) for path in [final, second, third, *legacy]]
+    report["primary_results"] = [
+        {"candidate_id": "clip-one", "output_file": str(final), "status": "completed", "primary": True},
+        {"candidate_id": "clip-two", "output_file": str(second), "status": "completed", "primary": True},
+        {"candidate_id": "clip-three", "output_file": str(third), "status": "completed", "primary": True},
+    ]
+    report["produced_clips_count"] = 3
+    write_json(prepared.report_path, report)
+
+    completion = services.pipeline.completion(prepared)
+    finished = services.finish_success(project, run, prepared)
+
+    assert completion.output_files == [final, second, third]
+    assert [Path(value).name for value in finished.artifact_paths] == [
+        "report.json", "final-short.mp4", "clip-two.mp4", "clip-three.mp4",
+    ]
+
+
 def test_zero_byte_final_mp4_is_failed(tmp_path: Path) -> None:
     services, project, run, prepared = _context(tmp_path)
     final = prepared.output_directory / "production-render" / "final-short.mp4"

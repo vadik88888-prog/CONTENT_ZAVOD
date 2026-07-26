@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.audio_modes import tts_eligibility
+from app.clip_results import primary_clip_results, result_paths
 from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
@@ -285,21 +286,26 @@ class Pipeline:
         production_render = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
-        render_data = (
-            self._skip_render_for_production_plan(tracker, work_directory / "render.json")
-            if self.production_plan_only
-            else self._cached(
-                tracker, "render", work_directory / "render.json",
-                {"selected": [(item.candidate.id, item.score) for item in selected], "render": self.config.render_mode, "dimensions": [self.config.output_width, self.config.output_height], "encoder": self.config.encoder_preference},
-                lambda: self._render(source, transcript, selected, output_directory, work_directory / "render.json"),
-            )
+        production_is_primary = bool(
+            self.config.production_render.enabled and not self.disable_production_render and not self.production_plan_only
         )
-        outputs = [Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()]
-        production_outputs = production_render.get("output_files", []) if isinstance(production_render, dict) else []
-        for value in production_outputs if isinstance(production_outputs, list) else []:
-            path = Path(str(value))
-            if path.is_file() and path not in outputs:
-                outputs.append(path)
+        if production_is_primary:
+            tracker.skip("render", "Legacy render skipped; production render owns final results.")
+            render_data = {"output_files": [], "warnings": [], "errors": [], "skipped": "production_render_primary"}
+        else:
+            render_data = (
+                self._skip_render_for_production_plan(tracker, work_directory / "render.json")
+                if self.production_plan_only
+                else self._cached(
+                    tracker, "render", work_directory / "render.json",
+                    {"selected": [(item.candidate.id, item.score) for item in selected], "render": self.config.render_mode, "dimensions": [self.config.output_width, self.config.output_height], "encoder": self.config.encoder_preference},
+                    lambda: self._render(source, transcript, selected, output_directory, work_directory / "render.json"),
+                )
+            )
+        registry = primary_clip_results(production_render)
+        outputs = result_paths(registry, output_directory) if production_is_primary else [
+            Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()
+        ]
         self.warnings.extend(render_data.get("warnings", []))
         self.errors.extend(render_data.get("errors", []))
         if source.downloaded and self.config.delete_downloaded_source and outputs:
@@ -338,8 +344,9 @@ class Pipeline:
             tts=tts,
             audio=audio,
             production_render=production_render,
+            primary_results=[item.to_dict() for item in registry],
         )
-        return PipelineResult(work_directory, output_directory, report_path, len(selected), outputs, self.warnings)
+        return PipelineResult(work_directory, output_directory, report_path, len(outputs), outputs, self.warnings)
 
     def _source_stage(self, tracker: StageTracker, artifact: Path, source: Source) -> dict[str, Any]:
         stored = read_json(artifact, {})
@@ -601,7 +608,7 @@ class Pipeline:
                 continue
             tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
             report = tts_report_section(result)
-            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report, "tts_invoked": report["tts_invoked"]})
+            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report, "tts_invoked": bool(report.get("tts_invoked", True))})
             self.warnings.extend(result.warnings)
             self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
         return _multi_stage_report("tts", outcomes)
@@ -891,12 +898,15 @@ class Pipeline:
             write_json(report_path, existing)
             raise
         existing["production_render"] = production_render
+        registry = primary_clip_results(production_render)
+        existing["primary_results"] = [item.to_dict() for item in registry]
+        existing["produced_clips_count"] = len(registry)
+        existing["output_files"] = [str(path) for path in result_paths(registry, output_directory) if path.is_file()]
         existing["stages"] = tracker.data.get("stages", {})
         existing["warnings"] = [*existing.get("warnings", []), *self.warnings]
         existing["errors"] = [*existing.get("errors", []), *self.errors]
         write_json(report_path, existing)
-        final_output = production_render.get("output_file") if isinstance(production_render, dict) else None
-        output_files = [Path(final_output)] if final_output and Path(final_output).is_file() else []
+        output_files = [path for path in result_paths(registry, output_directory) if path.is_file()]
         return PipelineResult(
             work_directory, output_directory, report_path,
             int(existing.get("selected_clips_count", 0) or 0), output_files, self.warnings,
@@ -1164,6 +1174,7 @@ def _multi_stage_report(stage: str, outcomes: list[dict[str, Any]]) -> dict[str,
     if stage == "production_render":
         primary["output_file"] = successful[0].get("output_file") or primary.get("output_file")
         primary["output_files"] = [item["output_file"] for item in successful if isinstance(item.get("output_file"), str)]
+        primary["clip_results"] = [item.to_dict() for item in primary_clip_results({"items": outcomes})]
         if len(successful) != len(outcomes):
             primary.setdefault("warnings", []).append("Не все ролики удалось экспортировать; готовые результаты сохранены.")
     return primary

@@ -98,5 +98,6 @@ def test_every_production_plan_gets_an_isolated_output_and_partial_results_survi
     assert (output_directory / "tts" / "tts-result.json").is_file()
     assert (output_directory / "candidates" / "clip-two" / "tts" / "tts-result.json").is_file()
     assert len(rendered["output_files"]) == (1 if fail_second else 2)
+    assert len(rendered["clip_results"]) == (1 if fail_second else 2)
     assert all(Path(value).is_file() for value in rendered["output_files"])
     assert rendered["status"] == ("warning" if fail_second else "completed")

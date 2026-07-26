@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from app.clip_results import ClipResult, result_paths
 from app.config import load_config
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
 from app.gui.services.desktop_project_store import validate_video_path
@@ -202,7 +203,7 @@ class PipelineFacade:
             )
         final_path = self._final_output_path(prepared, production)
         validation_error = self._validate_final_mp4(final_path)
-        if validation_error:
+        if validation_error and not isinstance(raw.get("primary_results"), list):
             return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", validation_error)
         warnings = [str(value) for value in raw.get("warnings", [])]
         production_warnings = production.get("warnings", [])
@@ -213,6 +214,25 @@ class PipelineFacade:
         tts = raw.get("tts", {}) if isinstance(raw.get("tts"), dict) else {}
         values = [ai.get("estimated_cost"), tts.get("estimated_cost")]
         estimate = sum(float(item) for item in values if isinstance(item, (int, float)))
+        registry_value = raw.get("primary_results")
+        if isinstance(registry_value, list):
+            registry = [
+                item for value in registry_value
+                if (item := ClipResult.from_dict(value)) is not None and item.primary
+            ]
+            if not registry:
+                return self._failed_completion(
+                    prepared,
+                    "Не удалось создать итоговый видеофайл.",
+                    "report.primary_results is present but contains no successful primary ClipResult entries.",
+                )
+            output_files = result_paths(registry, prepared.output_directory)
+            for candidate in output_files:
+                artifact_error = self._validate_final_mp4(candidate)
+                if artifact_error:
+                    return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", artifact_error)
+            cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
+            return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost)
         output_files = [final_path]
         for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
             path = Path(str(value))
