@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,13 @@ class PreparedPipelineRun:
     report_path: Path
     output_directory: Path
     runtime_config_path: Path
+    source_path: Path | None = None
+    runtime_flags: dict[str, str] = field(default_factory=dict)
+
+    def command_line(self) -> str:
+        """Return the Windows-safe command line used by the desktop runner."""
+
+        return subprocess.list2cmdline([self.program, *self.arguments])
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +79,9 @@ class PipelineFacade:
         run_key = f"{source.display_name}-{source.id[:12]}"
         work_directory = self.engine_root / "work" / run_key
         output_directory = self.engine_root / "output" / run_key
-        arguments = ["-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--transform-script"]
+        # The engine is executed as a child of QProcess, where Python's normal
+        # stdout buffering hides useful diagnostics until the process exits.
+        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--transform-script"]
         if settings.local_test_mode:
             arguments.extend(["--mock-ai", "--no-ai-transformation"])
         if project.settings.recompute_all or not project.settings.use_cache:
@@ -87,6 +97,14 @@ class PipelineFacade:
             report_path=output_directory / "report.json",
             output_directory=output_directory,
             runtime_config_path=config_path,
+            source_path=source_path,
+            runtime_flags={
+                "device": str(config.device),
+                "encoder": str(config.production_render.encoder),
+                "cache": str(config.production_render.cache_enabled).lower(),
+                "mock_ai": str(settings.local_test_mode).lower(),
+                "ai_provider": str(config.ai.provider),
+            },
         )
 
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
@@ -169,7 +187,13 @@ class PipelineFacade:
             configured = Path(settings.config_path).expanduser()
             if configured.is_file():
                 return configured
-        return self.engine_root / "config.example.yaml"
+        example = self.engine_root / "config.example.yaml"
+        if example.is_file():
+            return example
+        # Keep a locally renamed user configuration usable without changing the
+        # normal repository contract.  Desktop settings still take precedence.
+        renamed = self.engine_root / "config.yaml.yaml"
+        return renamed if renamed.is_file() else example
 
     @staticmethod
     def _apply_project_options(config: Any, project: DesktopProject, settings: DesktopSettings) -> None:

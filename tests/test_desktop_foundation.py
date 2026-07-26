@@ -118,8 +118,10 @@ def test_pipeline_facade_builds_safe_mock_command_and_runtime_config(tmp_path: P
     prepared = PipelineFacade(engine_root).prepare(project, run, settings)
 
     assert prepared.program == sys.executable
+    assert prepared.arguments[:3] == ["-u", "-m", "app"]
     assert "--mock-ai" in prepared.arguments
     assert "--no-ai-transformation" in prepared.arguments
+    assert prepared.runtime_flags["mock_ai"] == "true"
     assert str(source.resolve()) in prepared.arguments
     runtime = prepared.runtime_config_path.read_text(encoding="utf-8")
     assert "provider: mock" in runtime

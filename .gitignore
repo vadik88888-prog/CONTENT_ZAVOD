@@ -11,6 +11,8 @@ build/
 dist/
 *.egg-info/
 .env
+config.yaml
+config.yaml.yaml
 *.log
 .DS_Store
 Thumbs.db

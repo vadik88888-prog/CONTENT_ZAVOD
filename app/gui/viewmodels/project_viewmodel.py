@@ -34,6 +34,7 @@ class ProjectViewModel(QObject):
         self.runner = QtPipelineRunner(self)
         self.runner.run_started.connect(self._run_started)
         self.runner.stage_changed.connect(self._stage_changed)
+        self.runner.activity_changed.connect(self._activity_changed)
         self.runner.log_received.connect(self._log_received)
         self.runner.run_completed.connect(self._completed)
         self.runner.run_failed.connect(self._failed)
@@ -88,7 +89,12 @@ class ProjectViewModel(QObject):
 
     def _run_started(self) -> None:
         self._started_at = time.monotonic()
-        self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Подготавливаем видео")
+        self.snapshot = ProcessingSnapshot(
+            ProcessingPhase.PREPARING,
+            message="Подготавливаем видео",
+            last_activity_at=self.runner.last_activity_at,
+            last_activity_reason="QProcess entered Running",
+        )
         self._elapsed_timer.start()
         if self.run:
             self.run.status = RunStatus.RUNNING
@@ -101,6 +107,11 @@ class ProjectViewModel(QObject):
         self.snapshot.phase = ProcessingPhase.RUNNING
         self.snapshot.stage = stage
         self.snapshot.message = label
+        self.processing_changed.emit(self.snapshot)
+
+    def _activity_changed(self, timestamp: str, reason: str) -> None:
+        self.snapshot.last_activity_at = timestamp
+        self.snapshot.last_activity_reason = reason
         self.processing_changed.emit(self.snapshot)
 
     def _emit_elapsed(self) -> None:
@@ -131,8 +142,13 @@ class ProjectViewModel(QObject):
     def _failed(self, message: str) -> None:
         if not self.project or not self.run:
             return
-        run = self.services.finish_failure(self.project, self.run, message)
-        self._finish(ProcessingPhase.FAILED, "Не удалось создать ролик", run)
+        run = self.services.finish_failure(self.project, self.run, message, self.runner.failure_details or message)
+        final_message = (
+            "Обработка остановилась и не отвечает."
+            if message == "Обработка остановилась и не отвечает."
+            else "Не удалось создать ролик"
+        )
+        self._finish(ProcessingPhase.FAILED, final_message, run)
         self.error_occurred.emit(map_error(message))
 
     def _cancelled(self) -> None:

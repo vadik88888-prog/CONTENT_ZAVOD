@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot
+from app.gui.services.desktop_project_store import DesktopProjectStore
+from app.gui.services.desktop_services import DesktopServices
+from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
+from app.gui.services.pipeline_runner import QtPipelineRunner
+from app.gui.services.run_history_store import RunHistoryStore
+from app.gui.services.settings_store import SettingsStore
+from app.gui.services.system_service import SystemService
+from app.gui.viewmodels.project_viewmodel import ProjectViewModel
+
+
+def _application():
+    from PySide6.QtCore import QCoreApplication
+
+    return QCoreApplication.instance() or QCoreApplication([])
+
+
+def _prepared(tmp_path: Path, arguments: list[str]) -> PreparedPipelineRun:
+    return PreparedPipelineRun(
+        program=sys.executable,
+        arguments=arguments,
+        working_directory=tmp_path,
+        state_path=tmp_path / "state.json",
+        report_path=tmp_path / "report.json",
+        output_directory=tmp_path / "output",
+        runtime_config_path=tmp_path / "runtime.yaml",
+        source_path=tmp_path / "source.mp4",
+    )
+
+
+def _run_loop(milliseconds: int) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    loop = QEventLoop()
+    QTimer.singleShot(milliseconds, loop.quit)
+    loop.exec()
+
+
+def _services(tmp_path: Path) -> tuple[DesktopServices, object]:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(source)
+    services = DesktopServices(
+        engine_root=tmp_path,
+        settings_store=SettingsStore(data),
+        settings=DesktopSettings.defaults(data),
+        projects=projects,
+        runs=RunHistoryStore(projects),
+        pipeline=PipelineFacade(tmp_path),
+        system=SystemService(tmp_path),
+    )
+    return services, project
+
+
+def test_pipeline_log_is_created_before_qprocess_start(monkeypatch, tmp_path: Path) -> None:
+    services, project = _services(tmp_path)
+    prepared = _prepared(tmp_path, ["-u", "-c", "print('never started')"])
+    monkeypatch.setattr(services.pipeline, "prepare", lambda *_args: prepared)
+
+    run, returned = services.prepare_run(project)
+
+    log = Path(run.log_path)
+    assert returned == prepared
+    assert log.is_file()
+    text = log.read_text(encoding="utf-8")
+    assert "Desktop pipeline launch prepared." in text
+    assert f"command: {prepared.command_line()}" in text
+    assert f"cwd: {tmp_path}" in text
+    assert "PYTHONUNBUFFERED=1" in text
+
+
+def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None:
+    _application()
+    failures: list[str] = []
+    runner = QtPipelineRunner(startup_timeout_ms=20, stall_timeout_ms=100, kill_timeout_ms=20)
+    runner.run_failed.connect(failures.append)
+    runner._prepared = _prepared(tmp_path, ["-u", "-c", "pass"])
+
+    runner._startup_timed_out()
+
+    assert failures == ["Не удалось запустить локальный процесс обработки."]
+    assert "startup watchdog timeout" in runner.failure_details
+    assert "process_state=NotRunning" in runner.failure_details
+
+
+def test_stall_watchdog_fails_started_silent_process(tmp_path: Path) -> None:
+    _application()
+    failures: list[str] = []
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=80, kill_timeout_ms=50)
+    runner.run_failed.connect(failures.append)
+    runner.start(_prepared(tmp_path, ["-u", "-c", "import time; time.sleep(10)"]))
+
+    _run_loop(800)
+
+    assert failures == ["Обработка остановилась и не отвечает."]
+    assert "stall watchdog timeout" in runner.failure_details
+    assert "last_activity_at=" in runner.failure_details
+    assert not runner.active
+
+
+def test_stdout_and_stderr_update_activity_and_log_without_secrets(tmp_path: Path) -> None:
+    _application()
+    services, project = _services(tmp_path)
+    run = services.runs.create(project, {}, {"path": str(project.source)}, "0.1.0")
+    activities: list[str] = []
+    logs: list[str] = []
+    completed: list[int] = []
+    fake_key = "sk" + "-secret-value-123456"
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=5_000)
+    runner.activity_changed.connect(lambda _time, reason: activities.append(reason))
+    runner.log_received.connect(logs.append)
+    runner.log_received.connect(lambda line: services.append_log(run, line))
+    runner.run_completed.connect(completed.append)
+    prepared = _prepared(
+        tmp_path,
+        [
+            "-u", "-c",
+            f"import sys, time; key_name='OPENAI_API_KEY'; print(key_name + '=' + {fake_key!r}, flush=True); "
+            "print('stderr activity', file=sys.stderr, flush=True); time.sleep(0.05)",
+        ],
+    )
+    services.record_launch_context(run, prepared)
+    runner.start(prepared)
+
+    _run_loop(500)
+
+    assert completed == [0]
+    assert "stdout output" in activities
+    assert "stderr output" in activities
+    combined = "\n".join(logs)
+    assert "QProcess state: Starting" in combined
+    assert "QProcess state: Running" in combined
+    assert "QProcess state: NotRunning" in combined
+    assert fake_key not in combined
+    pipeline_log = Path(run.log_path).read_text(encoding="utf-8")
+    assert "command:" in pipeline_log
+    assert "QProcess cwd:" in pipeline_log
+    assert "QProcess state: Running" in pipeline_log
+    assert "OPENAI_API_KEY:" in pipeline_log
+    assert fake_key not in pipeline_log
+
+
+def test_paths_with_cyrillic_apostrophe_and_double_spaces_are_passed_verbatim(tmp_path: Path) -> None:
+    _application()
+    source = tmp_path / "Клип  Тони Д'Амато.mp4"
+    output: list[str] = []
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=5_000)
+    runner.log_received.connect(output.append)
+    runner.start(_prepared(
+        tmp_path,
+        ["-u", "-c", "import sys; print(sys.argv[1], flush=True)", str(source)],
+    ))
+
+    _run_loop(500)
+
+    assert str(source) in "\n".join(output)
+
+
+def test_successful_run_does_not_trigger_watchdog(tmp_path: Path) -> None:
+    _application()
+    completed: list[int] = []
+    failures: list[str] = []
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=500)
+    runner.run_completed.connect(completed.append)
+    runner.run_failed.connect(failures.append)
+    runner.start(_prepared(tmp_path, ["-u", "-c", "print('ok', flush=True)"]))
+
+    _run_loop(700)
+
+    assert completed == [0]
+    assert failures == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process-tree cleanup is a desktop contract")
+def test_cancel_terminates_child_process_tree(tmp_path: Path) -> None:
+    _application()
+    from PySide6.QtCore import QTimer
+
+    marker = tmp_path / "orphan-child.txt"
+    child = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).write_text('orphan')"
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "time.sleep(30)"
+    )
+    cancelled: list[bool] = []
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=5_000, kill_timeout_ms=50)
+    runner.run_cancelled.connect(lambda: cancelled.append(True))
+    runner.start(_prepared(tmp_path, ["-u", "-c", parent]))
+    QTimer.singleShot(100, runner.cancel)
+
+    _run_loop(1_500)
+
+    assert cancelled == [True]
+    assert not runner.active
+    assert not marker.exists()
+
+
+def test_terminal_state_clears_stale_stage_after_stall_failure(tmp_path: Path) -> None:
+    _application()
+    services, project = _services(tmp_path)
+    run = services.runs.create(project, {}, {"path": str(project.source)}, "0.1.0")
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    viewmodel.run = run
+    viewmodel.snapshot = ProcessingSnapshot(
+        phase=ProcessingPhase.RUNNING,
+        stage="transcription",
+        message="Распознаём речь",
+        elapsed_seconds=12.0,
+    )
+    viewmodel._activity_changed("2026-07-26T13:00:00+00:00", "stderr output")
+    viewmodel.runner._failure_details = "stall watchdog timeout"
+
+    viewmodel._failed("Обработка остановилась и не отвечает.")
+
+    assert run.error_summary == "Обработка остановилась и не отвечает."
+    assert run.technical_details == "stall watchdog timeout"
+    assert viewmodel.snapshot.phase == ProcessingPhase.FAILED
+    assert viewmodel.snapshot.stage is None
+    assert viewmodel.snapshot.message == "Обработка остановилась и не отвечает."
+    assert viewmodel.snapshot.last_activity_at == "2026-07-26T13:00:00+00:00"

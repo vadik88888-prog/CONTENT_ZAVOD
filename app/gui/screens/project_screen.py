@@ -162,7 +162,11 @@ class ProjectScreen(QWidget):
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         if active:
-            self.progress.set_running(snapshot.stage_label, f"Прошло {format_seconds(snapshot.elapsed_seconds)}")
+            activity = snapshot.last_activity_at or "ожидаем запуск"
+            self.progress.set_running(
+                snapshot.stage_label,
+                f"Прошло {format_seconds(snapshot.elapsed_seconds)} · Активность: {activity}",
+            )
         else:
             self.progress.set_finished(snapshot.message)
         self.run_button.setDisabled(active)

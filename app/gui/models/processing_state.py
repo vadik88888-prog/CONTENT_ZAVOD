@@ -41,6 +41,8 @@ class ProcessingSnapshot:
     stage: str | None = None
     message: str = "Готово к созданию ролика"
     elapsed_seconds: float = 0.0
+    last_activity_at: str | None = None
+    last_activity_reason: str | None = None
 
     @property
     def stage_label(self) -> str:

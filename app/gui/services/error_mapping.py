@@ -23,6 +23,14 @@ def redact_secrets(value: object) -> str:
 def map_error(error: object) -> UserFacingError:
     detail = redact_secrets(error)
     lowered = detail.lower()
+    if "обработка остановилась и не отвечает" in lowered:
+        return UserFacingError(
+            "Обработка не отвечает",
+            "Обработка остановилась и не отвечает.",
+            "Откройте технический журнал: там сохранены команда, состояние процесса и время последней активности.",
+            detail,
+            "pipeline_stalled",
+        )
     if "итоговый видеофайл" in lowered:
         return UserFacingError(
             "Не удалось создать итоговый видеофайл",

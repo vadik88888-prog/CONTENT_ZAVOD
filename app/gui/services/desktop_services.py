@@ -102,10 +102,34 @@ class DesktopServices:
             run.error_summary = "Не удалось подготовить запуск."
             self.runs.save(run)
             raise
+        # This must happen before Qt starts the child process.  A silent CLI
+        # must never leave a run without an immediately inspectable log.
+        self.record_launch_context(run, prepared)
         project.status = ProjectStatus.PROCESSING
         project.latest_run_id = run.run_id
         self.projects.save(project)
         return run, prepared
+
+    def record_launch_context(self, run: ProjectRun, prepared: PreparedPipelineRun) -> None:
+        """Persist the desktop launch contract without leaking environment secrets."""
+
+        flags = [argument for argument in prepared.arguments if argument.startswith("--")]
+        self.append_log(run, "Desktop pipeline launch prepared.")
+        self.append_log(run, f"command: {prepared.command_line()}")
+        self.append_log(run, f"cwd: {prepared.working_directory}")
+        self.append_log(run, f"source: {prepared.source_path or '<unknown>'}")
+        self.append_log(run, f"runtime config: {prepared.runtime_config_path}")
+        self.append_log(run, f"output directory: {prepared.output_directory}")
+        self.append_log(run, f"flags: {' '.join(flags) if flags else '<none>'}")
+        runtime_flags = "; ".join(
+            f"{key}={value}" for key, value in prepared.runtime_flags.items()
+        )
+        self.append_log(run, f"runtime flags: {runtime_flags or '<unknown>'}")
+        self.append_log(
+            run,
+            "environment: PYTHONUNBUFFERED=1; PYTHONIOENCODING=utf-8; "
+            "inherited environment values are intentionally not logged.",
+        )
 
     def append_log(self, run: ProjectRun, line: str) -> None:
         if not run.log_path:
@@ -119,7 +143,7 @@ class DesktopServices:
                 rotated.unlink()
             path.replace(rotated)
         with path.open("a", encoding="utf-8") as file:
-            file.write(redact_secrets(line).rstrip() + "\n")
+            file.write(f"{utc_now()} {redact_secrets(line).rstrip()}\n")
 
     def finish_success(self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun) -> ProjectRun:
         completion = self.pipeline.completion(prepared)
