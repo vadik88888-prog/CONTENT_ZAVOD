@@ -28,6 +28,13 @@ FFmpeg, провайдеров или структуры timeline.
   длительность 0.762 с, измеренный рост peak working set — 0 байт.
 - 30-минутный source прошёл полный pipeline и final render; 60 и 90 минут
   прошли до ProductionPlan в `--production-plan-only` режиме.
+- Direct QA of the current 30-minute synthetic final mix: EBU R128 integrated loudness
+  `-18.5 LUFS`, loudness range `10.8 LU`, true peak `-5.3 dBFS`. This is evidence
+  for the synthetic dialogue/narration mix, not a replacement for category-specific
+  human listening or a billing-backed production acceptance threshold.
+- `blackdetect` on the current synthetic final render found no black interval of at
+  least `0.1 s` using the validation command's threshold. Frame samples also confirm
+  that the scaled subtitles stay inside the 360x640 canvas.
 
 ## Найденные и исправленные дефекты
 
