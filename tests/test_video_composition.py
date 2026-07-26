@@ -322,6 +322,7 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
     assert rebuilt.result and rebuilt.result.cache_hit is False
     report = production_render_report_section(second)
     assert report["cache_hit"] and "sk-" not in json.dumps(report)
+    assert report["quality"]["status"] == "passed"
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:

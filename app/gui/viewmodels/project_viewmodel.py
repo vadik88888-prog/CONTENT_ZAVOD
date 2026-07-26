@@ -28,6 +28,7 @@ class ProjectViewModel(QObject):
         self.run: ProjectRun | None = None
         self.prepared: PreparedPipelineRun | None = None
         self.snapshot = ProcessingSnapshot()
+        self._launching = False
         self._started_at: float | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
@@ -48,7 +49,7 @@ class ProjectViewModel(QObject):
 
     @property
     def active(self) -> bool:
-        return self.runner.active or self.source_downloader.busy
+        return self._launching or self.runner.active or self.source_downloader.busy
 
     def open(self, project: DesktopProject) -> None:
         self.project = project
@@ -73,15 +74,19 @@ class ProjectViewModel(QObject):
     def start(self) -> None:
         if not self.project or self.active:
             return
+        self._launching = True
         if not self.project.source_spec.is_ready:
             self._start_source_download()
             return
         try:
             self.run, self.prepared = self.services.prepare_run(self.project)
+            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Подготавливаем запуск")
             self.project_changed.emit(self.project)
             self.runs_changed.emit(self.services.runs_for(self.project))
+            self.processing_changed.emit(self.snapshot)
             self.runner.start(self.prepared)
         except Exception as error:
+            self._launching = False
             self.error_occurred.emit(map_error(error))
             if self.project:
                 self.project_changed.emit(self.project)
@@ -89,12 +94,14 @@ class ProjectViewModel(QObject):
     def rerender(self, parent_run: ProjectRun) -> None:
         if not self.project or self.active:
             return
+        self._launching = True
         try:
             self.run, self.prepared = self.services.prepare_render_revision(self.project, parent_run)
             self.project_changed.emit(self.project)
             self.runs_changed.emit(self.services.runs_for(self.project))
             self.runner.start(self.prepared)
         except Exception as error:
+            self._launching = False
             self.error_occurred.emit(map_error(error))
             self.project_changed.emit(self.project)
 
@@ -120,6 +127,7 @@ class ProjectViewModel(QObject):
         try:
             self.services.mark_url_download_started(self.project)
         except Exception as error:
+            self._launching = False
             self.error_occurred.emit(map_error(error))
             return
         self._started_at = time.monotonic()
@@ -154,6 +162,7 @@ class ProjectViewModel(QObject):
             self._download_failed(str(error))
             return
         self._elapsed_timer.stop()
+        self._launching = False
         self.snapshot = ProcessingSnapshot(message="Видео загружено")
         self.project_changed.emit(self.project)
         self.processing_changed.emit(self.snapshot)
@@ -163,6 +172,7 @@ class ProjectViewModel(QObject):
         if not self.project:
             return
         self._elapsed_timer.stop()
+        self._launching = False
         self.services.fail_url_download(self.project, message)
         self.snapshot = ProcessingSnapshot(ProcessingPhase.FAILED, message="Не удалось загрузить видео")
         self.project_changed.emit(self.project)
@@ -173,6 +183,7 @@ class ProjectViewModel(QObject):
         if not self.project:
             return
         self._elapsed_timer.stop()
+        self._launching = False
         self.services.fail_url_download(self.project, "Загрузка видео отменена.", cancelled=True)
         self.snapshot = ProcessingSnapshot(ProcessingPhase.CANCELLED, message="Загрузка отменена")
         self.project_changed.emit(self.project)
@@ -259,4 +270,5 @@ class ProjectViewModel(QObject):
         self.runs_changed.emit(self.services.runs_for(self.project))
         self.run_finished.emit(run)
         self._started_at = None
+        self._launching = False
         self.prepared = None

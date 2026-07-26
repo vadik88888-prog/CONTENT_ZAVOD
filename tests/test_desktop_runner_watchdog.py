@@ -78,6 +78,24 @@ def test_pipeline_log_is_created_before_qprocess_start(monkeypatch, tmp_path: Pa
     assert "PYTHONUNBUFFERED=1" in text
 
 
+def test_viewmodel_rejects_duplicate_launch_before_qprocess_becomes_active(monkeypatch, tmp_path: Path) -> None:
+    _application()
+    services, project = _services(tmp_path)
+    run = services.runs.create(project, {}, {"path": str(project.source)}, "0.1.0")
+    prepared = _prepared(tmp_path, ["-u", "-c", "print('later')"])
+    calls: list[bool] = []
+    monkeypatch.setattr(DesktopServices, "prepare_run", lambda _self, _project: (calls.append(True) or (run, prepared)))
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+    monkeypatch.setattr(viewmodel.runner, "start", lambda _prepared: None)
+
+    viewmodel.start()
+    viewmodel.start()
+
+    assert calls == [True]
+    assert viewmodel.active
+
+
 def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None:
     _application()
     failures: list[str] = []

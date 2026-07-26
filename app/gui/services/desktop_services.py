@@ -12,6 +12,7 @@ from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade,
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
+from app.product_flow import calibrate_processing_estimate
 from app.source_download import validate_public_video_url
 from app.utils import utc_now
 
@@ -109,7 +110,8 @@ class DesktopServices:
     def processing_estimate(self, project: DesktopProject):
         """A serialisable preflight estimate for the project screen."""
 
-        return self.pipeline.plan_processing(project, self.settings)[2]
+        estimate = self.pipeline.plan_processing(project, self.settings)[2]
+        return calibrate_processing_estimate(estimate, self.runs_for(project))
 
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status == ProjectStatus.PROCESSING:
@@ -120,6 +122,7 @@ class DesktopServices:
                 raise InputValidationError("Сначала загрузите видео по ссылке.")
             raise InputValidationError("Исходный видеофайл больше недоступен.")
         intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        estimate = calibrate_processing_estimate(estimate, self.runs_for(project))
         run = self.runs.create(
             project,
             settings_snapshot={

@@ -11,6 +11,7 @@ from typing import Any
 from app.audio_models import AudioProject
 from app.config import AppConfig, ProductionRenderConfig
 from app.errors import ProductionRenderError
+from app.output_quality import validate_output_quality
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
 from app.production_subtitles import build_subtitle_project, write_production_ass
 from app.rendering import nvenc_available
@@ -189,7 +190,10 @@ class VideoCompositionService:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
             raise ProductionRenderError(f"Production render failed: {_safe_error(error)}") from error
-        warnings = [*project.warnings, *validation.messages]
+        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        if quality["status"] == "failed":
+            raise ProductionRenderError("Output quality validation failed: " + "; ".join(quality["errors"]))
+        warnings = [*project.warnings, *validation.messages, *quality["warnings"]]
         if encoder_warning:
             warnings.append(encoder_warning)
         result = RenderResult(
@@ -881,6 +885,7 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "validation": validation.status,
         "warnings": project.warnings,
         "fallback_reasons": project.fallback_reasons,
+        "quality": validate_output_quality(project, project.render_request.subtitles_enabled),
         "errors": [item.model_dump(mode="json") for item in result.errors] if result else [],
         "artifacts": project.artifact_paths,
         "ai_called": False,

@@ -10,6 +10,7 @@ service and pipeline stage.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -284,6 +285,46 @@ def estimate_processing(
             "Оценка зависит от длительности, выбранного режима и мощности компьютера.",
             "Итоговое число роликов зависит от найденных подходящих фрагментов.",
         ),
+    )
+
+
+def calibrate_processing_estimate(estimate: ProcessingEstimate, runs: list[Any]) -> ProcessingEstimate:
+    """Adjust a new estimate only from persisted comparable completed runs."""
+
+    ratios: list[float] = []
+    for run in runs:
+        if str(getattr(run, "status", "")) not in {"completed", "completed_with_warnings"}:
+            continue
+        snapshot = getattr(run, "settings_snapshot", {})
+        if not isinstance(snapshot, dict):
+            continue
+        previous = snapshot.get("product_flow", {})
+        if not isinstance(previous, dict):
+            continue
+        previous_estimate = previous.get("estimate", {})
+        if not isinstance(previous_estimate, dict):
+            continue
+        try:
+            started = datetime.fromisoformat(str(getattr(run, "started_at")))
+            finished = datetime.fromisoformat(str(getattr(run, "finished_at")))
+            actual = (finished - started).total_seconds()
+            midpoint = (float(previous_estimate["estimated_seconds_min"]) + float(previous_estimate["estimated_seconds_max"])) / 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 5 <= actual <= 24 * 3600 and midpoint > 0:
+            ratios.append(max(0.55, min(1.9, actual / midpoint)))
+    if len(ratios) < 2:
+        return estimate
+    factor = sum(ratios[-8:]) / min(8, len(ratios))
+    low = max(15, int(round(estimate.estimated_seconds_min * factor * 0.9)))
+    high = max(low + 15, int(round(estimate.estimated_seconds_max * factor * 1.1)))
+    return ProcessingEstimate(
+        estimated_seconds_min=low, estimated_seconds_max=high,
+        estimated_ai_cost_min=estimate.estimated_ai_cost_min, estimated_ai_cost_max=estimate.estimated_ai_cost_max,
+        estimated_clips_min=estimate.estimated_clips_min, estimated_clips_max=estimate.estimated_clips_max,
+        deep_analysis_resolved=estimate.deep_analysis_resolved, cached_stages=estimate.cached_stages,
+        confidence="calibrated",
+        assumptions=(*estimate.assumptions, f"Оценка откалибрована по {len(ratios)} завершённым запускам этого приложения."),
     )
 
 

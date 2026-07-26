@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.config import load_config
 from app.gui.models import DesktopSettings, RunKind, RunStatus
@@ -13,6 +14,7 @@ from app.gui.services.system_service import SystemService
 from app.product_flow import (
     ProcessingIntent,
     apply_resolved_processing_config,
+    calibrate_processing_estimate,
     estimate_processing,
     resolve_processing_intent,
 )
@@ -72,6 +74,26 @@ def test_estimate_is_a_range_and_does_not_invent_local_ai_cost() -> None:
     assert paid.estimated_seconds_min < paid.estimated_seconds_max
     assert paid.estimated_ai_cost_min is not None
     assert longer.estimated_seconds_min > paid.estimated_seconds_min
+
+
+def test_estimate_calibrates_from_persisted_completed_run_history() -> None:
+    resolved = resolve_processing_intent(ProcessingIntent(processing_mode="standard", clip_count="3"), _metadata())
+    base = estimate_processing(resolved, _metadata(), paid_ai_available=False)
+    history = [
+        SimpleNamespace(
+            status="completed", started_at="2026-07-01T10:00:00+00:00", finished_at="2026-07-01T10:06:00+00:00",
+            settings_snapshot={"product_flow": {"estimate": base.to_dict()}},
+        ),
+        SimpleNamespace(
+            status="completed_with_warnings", started_at="2026-07-02T10:00:00+00:00", finished_at="2026-07-02T10:05:00+00:00",
+            settings_snapshot={"product_flow": {"estimate": base.to_dict()}},
+        ),
+    ]
+
+    calibrated = calibrate_processing_estimate(base, history)
+
+    assert calibrated.confidence == "calibrated"
+    assert calibrated.estimated_seconds_max != base.estimated_seconds_max
 
 
 def test_legacy_project_migrates_to_product_flow_defaults(tmp_path: Path) -> None:
@@ -159,3 +181,28 @@ def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Pat
     assert "--recompute-production-render" in prepared.arguments
     assert "--transform-script" not in prepared.arguments
     assert prepared.runtime_flags["render_only"] == "true"
+
+
+def test_render_revision_rejects_audio_mode_change(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(source, source_metadata=_metadata())
+    settings = DesktopSettings.defaults(data); settings.local_test_mode = True
+    history = RunHistoryStore(projects)
+    parent = history.create(
+        project, {"project_options": {"audio_mode": "original"}}, {"path": str(source)}, "0.1.0",
+    )
+    parent.status = RunStatus.COMPLETED; history.save(parent)
+    services = DesktopServices(
+        engine_root=Path(__file__).resolve().parents[1], settings_store=SettingsStore(data), settings=settings,
+        projects=projects, runs=history, pipeline=PipelineFacade(Path(__file__).resolve().parents[1]),
+        system=SystemService(Path(__file__).resolve().parents[1]),
+    )
+    project.settings.audio_mode = "voiceover"
+
+    import pytest
+    from app.gui.services.desktop_project_store import InputValidationError
+    with pytest.raises(InputValidationError, match="аудиорежима"):
+        services.prepare_render_revision(project, parent)
