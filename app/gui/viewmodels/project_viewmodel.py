@@ -86,6 +86,18 @@ class ProjectViewModel(QObject):
             if self.project:
                 self.project_changed.emit(self.project)
 
+    def rerender(self, parent_run: ProjectRun) -> None:
+        if not self.project or self.active:
+            return
+        try:
+            self.run, self.prepared = self.services.prepare_render_revision(self.project, parent_run)
+            self.project_changed.emit(self.project)
+            self.runs_changed.emit(self.services.runs_for(self.project))
+            self.runner.start(self.prepared)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            self.project_changed.emit(self.project)
+
     def cancel(self) -> None:
         if self.source_downloader.busy:
             self.snapshot.phase = ProcessingPhase.CANCELLING

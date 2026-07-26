@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunStatus
+from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade, PreparedPipelineRun
@@ -164,6 +164,49 @@ class DesktopServices:
         self.record_launch_context(run, prepared)
         project.status = ProjectStatus.PROCESSING
         project.latest_run_id = run.run_id
+        self.projects.save(project)
+        return run, prepared
+
+    def prepare_render_revision(self, project: DesktopProject, parent_run: ProjectRun) -> tuple[ProjectRun, PreparedPipelineRun]:
+        """Create an immutable export revision from existing production/audio artifacts."""
+
+        if project.status == ProjectStatus.PROCESSING:
+            raise RuntimeError("Этот проект уже обрабатывается.")
+        if parent_run.status not in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_WARNINGS}:
+            raise InputValidationError("Повторный экспорт доступен только после успешного запуска.")
+        source = project.source
+        if not source.is_file():
+            raise InputValidationError("Исходный видеофайл больше недоступен.")
+        intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        previous = parent_run.settings_snapshot.get("project_options", {})
+        current = {
+            "subtitle_style": project.settings.subtitle_style,
+            "subtitles_enabled": project.settings.subtitles_enabled,
+            "platform": project.settings.platform,
+            "encoder": project.settings.encoder,
+        }
+        changed = {name: value for name, value in current.items() if previous.get(name) != value}
+        run = self.runs.create(
+            project,
+            settings_snapshot={
+                "project_options": {**current, "processing_mode": project.settings.processing_mode, "deep_analysis": project.settings.deep_analysis, "clip_count": project.settings.clip_count, "use_cache": project.settings.use_cache, "recompute_all": False},
+                "product_flow": {"user_intent": intent.to_dict(), "resolved_config": resolved.to_dict(), "estimate": estimate.to_dict()},
+                "local_test_mode": self.settings.local_test_mode,
+            },
+            source_snapshot={"kind": project.source_spec.kind, "path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
+            pipeline_version="0.1.0", run_kind=RunKind.RENDER_REVISION, parent_run_id=parent_run.run_id,
+            changed_settings=changed, invalidated_stages=["production_render"],
+        )
+        run.cost_estimate = 0.0
+        self.runs.save(run)
+        try:
+            prepared = self.pipeline.prepare_render_revision(project, run, self.settings)
+        except Exception:
+            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить повторный экспорт."
+            self.runs.save(run)
+            raise
+        self.record_launch_context(run, prepared)
+        project.status = ProjectStatus.PROCESSING; project.latest_run_id = run.run_id
         self.projects.save(project)
         return run, prepared
 

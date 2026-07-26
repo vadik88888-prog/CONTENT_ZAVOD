@@ -21,6 +21,12 @@ class RunStatus:
     })
 
 
+class RunKind:
+    FULL = "full"
+    RENDER_REVISION = "render_revision"
+    ALL: ClassVar[frozenset[str]] = frozenset({FULL, RENDER_REVISION})
+
+
 @dataclass(slots=True)
 class ProjectRun:
     run_id: str
@@ -39,14 +45,22 @@ class ProjectRun:
     technical_details: str | None = None
     cost_estimate: float | None = None
     actual_cost: float | None = None
-    schema_version: int = 1
+    run_kind: str = RunKind.FULL
+    parent_run_id: str | None = None
+    changed_settings: dict[str, Any] = field(default_factory=dict)
+    invalidated_stages: list[str] = field(default_factory=list)
+    schema_version: int = 2
 
     def validate(self) -> None:
         if not self.run_id or not self.project_id or self.status not in RunStatus.ALL:
             raise ValueError("Run record is invalid.")
         if self.actual_cost is not None and not isinstance(self.actual_cost, (int, float)):
             raise ValueError("Actual cost must be numeric or null.")
-        if self.schema_version != 1:
+        if self.run_kind not in RunKind.ALL:
+            raise ValueError("Unsupported run kind.")
+        if self.run_kind == RunKind.RENDER_REVISION and not self.parent_run_id:
+            raise ValueError("Render revision needs its parent run.")
+        if self.schema_version != 2:
             raise ValueError("Unsupported run schema version.")
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,7 +86,12 @@ class ProjectRun:
             technical_details=str(value["technical_details"]) if value.get("technical_details") else None,
             cost_estimate=float(value["cost_estimate"]) if value.get("cost_estimate") is not None else None,
             actual_cost=float(value["actual_cost"]) if value.get("actual_cost") is not None else None,
-            schema_version=int(value.get("schema_version", 1)),
+            run_kind=str(value.get("run_kind", RunKind.FULL)),
+            parent_run_id=str(value["parent_run_id"]) if value.get("parent_run_id") else None,
+            changed_settings=dict(value.get("changed_settings") or {}),
+            invalidated_stages=[str(item) for item in value.get("invalidated_stages", [])],
+            # Schema v1 records are ordinary full runs with no revision metadata.
+            schema_version=2,
         )
         run.validate()
         return run

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.config import load_config
-from app.gui.models import DesktopSettings
+from app.gui.models import DesktopSettings, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineFacade
@@ -127,3 +127,35 @@ def test_desktop_run_persists_intent_resolved_config_and_estimate(tmp_path: Path
     assert "processing_mode: maximum" in runtime
     assert "platform: shorts" in runtime
     assert "final_clip_count: 5" in runtime
+
+
+def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(source, source_metadata=_metadata())
+    settings = DesktopSettings.defaults(data)
+    settings.local_test_mode = True
+    engine_root = Path(__file__).resolve().parents[1]
+    history = RunHistoryStore(projects)
+    parent = history.create(project, {}, {"path": str(source)}, "0.1.0")
+    parent.status = RunStatus.COMPLETED
+    history.save(parent)
+    services = DesktopServices(
+        engine_root=engine_root, settings_store=SettingsStore(data), settings=settings,
+        projects=projects, runs=history, pipeline=PipelineFacade(engine_root), system=SystemService(engine_root),
+    )
+    project.settings.subtitle_style = "dynamic"
+    project.settings.platform = "shorts"
+
+    revision, prepared = services.prepare_render_revision(project, parent)
+
+    assert revision.run_kind == RunKind.RENDER_REVISION
+    assert revision.parent_run_id == parent.run_id
+    assert revision.invalidated_stages == ["production_render"]
+    assert revision.cost_estimate == 0.0
+    assert "--production-render-only" in prepared.arguments
+    assert "--recompute-production-render" in prepared.arguments
+    assert "--transform-script" not in prepared.arguments
+    assert prepared.runtime_flags["render_only"] == "true"

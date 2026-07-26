@@ -4,7 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from app.gui.models import DesktopProject, ProjectRun, RunStatus
+from app.gui.models import DesktopProject, ProjectRun, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore, PersistenceError
 from app.utils import read_json, utc_now, write_json
 
@@ -23,7 +23,11 @@ class RunHistoryStore:
             raise PersistenceError("Некорректный идентификатор запуска.")
         return self.runs_directory(project_id) / run_id
 
-    def create(self, project: DesktopProject, settings_snapshot: dict, source_snapshot: dict, pipeline_version: str) -> ProjectRun:
+    def create(
+        self, project: DesktopProject, settings_snapshot: dict, source_snapshot: dict, pipeline_version: str,
+        *, run_kind: str = RunKind.FULL, parent_run_id: str | None = None,
+        changed_settings: dict | None = None, invalidated_stages: list[str] | None = None,
+    ) -> ProjectRun:
         run_id = uuid.uuid4().hex
         directory = self.run_directory(project.project_id, run_id)
         directory.mkdir(parents=True, exist_ok=False)
@@ -36,6 +40,10 @@ class RunHistoryStore:
             settings_snapshot=dict(settings_snapshot),
             source_snapshot=dict(source_snapshot),
             pipeline_version=pipeline_version,
+            run_kind=run_kind,
+            parent_run_id=parent_run_id,
+            changed_settings=dict(changed_settings or {}),
+            invalidated_stages=list(invalidated_stages or []),
             log_path=str(directory / "pipeline.log"),
         )
         self.save(run)

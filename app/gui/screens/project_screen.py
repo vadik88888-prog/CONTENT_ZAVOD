@@ -192,6 +192,11 @@ class ProjectScreen(QWidget):
                 button = QPushButton("Открыть ролик" if len(results) == 1 else f"Ролик {index}")
                 button.clicked.connect(lambda _, path=result: self._open_file(path))
                 layout.addWidget(button)
+            if run.status in {"completed", "completed_with_warnings"}:
+                rerender = QPushButton("Создать заново")
+                rerender.setToolTip("Повторно экспортировать с текущими стилем, платформой и качеством без нового AI-анализа.")
+                rerender.clicked.connect(lambda _, parent_run=run: self.viewmodel.rerender(parent_run))
+                layout.addWidget(rerender)
             folder = QPushButton("Папка")
             folder.clicked.connect(lambda _, path=Path(run.log_path).parent if run.log_path else None: self._open_folder(path))
             layout.addWidget(folder)

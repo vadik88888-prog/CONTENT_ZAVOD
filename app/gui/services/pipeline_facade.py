@@ -141,6 +141,35 @@ class PipelineFacade:
             },
         )
 
+    def prepare_render_revision(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
+        """Prepare the dependency-bounded CLI path: render only, never analysis or audio."""
+
+        source_path = validate_video_path(project.source)
+        config = load_config(self._base_config(settings))
+        _intent, resolved, _estimate = self.plan_processing(project, settings)
+        self._apply_project_options(config, project, settings, resolved)
+        run_directory = Path(project.project_directory) / "runs" / run.run_id
+        config_path = run_directory / "runtime-config.yaml"
+        config_path.write_text(yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
+        source = local_source(str(source_path))
+        run_key = f"{source.display_name}-{source.id[:12]}"
+        work_directory = self.engine_root / "work" / run_key
+        output_directory = self.engine_root / "output" / run_key
+        arguments = [
+            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path),
+            "--production-render-only", "--recompute-production-render",
+        ]
+        return PreparedPipelineRun(
+            program=sys.executable, arguments=arguments, working_directory=self.engine_root,
+            state_path=work_directory / "state.json", report_path=output_directory / "report.json",
+            output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
+            runtime_flags={
+                "render_only": "true", "device": str(config.device), "encoder": str(config.production_render.encoder),
+                "cache": str(config.production_render.cache_enabled).lower(), "processing_mode": resolved.processing_mode,
+                "platform": resolved.platform.platform,
+            },
+        )
+
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
         if not prepared.report_path.is_file():
             return self._failed_completion(
@@ -200,7 +229,8 @@ class PipelineFacade:
                 warnings.append("Один из дополнительных роликов не прошёл проверку и не был добавлен в результаты.")
                 continue
             output_files.append(candidate)
-        return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, estimate or None)
+        cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
+        return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost)
 
     @staticmethod
     def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:
