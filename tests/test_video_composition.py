@@ -174,6 +174,19 @@ def test_reframe_plan_uses_safe_fallback_and_smooths_subject_keyframes() -> None
     assert tracked.keyframes[1].normalized_y - tracked.keyframes[0].normalized_y <= 0.12
 
 
+def test_subject_anchor_changes_the_actual_horizontal_crop() -> None:
+    from app.config import ProductionRenderConfig
+
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="center_crop")
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    crop = make_crop_plan(
+        {"display_width": 1280, "display_height": 720, "rotation": 0, "subject_keyframes": [{"normalized_x": 0.8, "normalized_y": 0.4, "confidence": 0.9}]},
+        canvas, config,
+    )
+    assert crop.strategy == "manual_normalized_crop"
+    assert crop.crop_x is not None and crop.crop_x > (1280 - (720 * 9 / 16)) / 2
+
+
 def test_rotation_metadata_is_reflected_in_safe_display_crop(tmp_path: Path) -> None:
     executable = shutil.which("ffmpeg")
     if not executable:

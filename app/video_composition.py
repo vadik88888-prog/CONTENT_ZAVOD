@@ -437,17 +437,48 @@ def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: Pr
     else:
         crop_width = width
         crop_height = _even_down(width / target)
+    subject = _subject_anchor(source_info)
     if config.crop_strategy == "top_crop":
         x, y = (width - crop_width) // 2, 0
+        normalized_x, normalized_y, strategy = 0.5, 0.0, "top_crop"
+    elif subject is not None and config.crop_strategy == "center_crop":
+        normalized_x, normalized_y = subject
+        x = _even_down((width - crop_width) * normalized_x)
+        y = _even_down((height - crop_height) * normalized_y)
+        strategy = "manual_normalized_crop"
     else:
         x = _even_down((width - crop_width) * config.manual_crop_x)
         y = _even_down((height - crop_height) * config.manual_crop_y)
+        normalized_x, normalized_y, strategy = config.manual_crop_x, config.manual_crop_y, config.crop_strategy
     x = max(0, min(x, width - crop_width))
     y = max(0, min(y, height - crop_height))
     return CropPlan(
-        strategy=config.crop_strategy, source_width=width, source_height=height, display_rotation_degrees=rotation,
-        normalized_x=config.manual_crop_x, normalized_y=config.manual_crop_y,
+        strategy=strategy, source_width=width, source_height=height, display_rotation_degrees=rotation,
+        normalized_x=normalized_x, normalized_y=normalized_y,
         crop_width=crop_width, crop_height=crop_height, crop_x=x, crop_y=y,
+    )
+
+
+def _subject_anchor(source_info: dict[str, Any]) -> tuple[float, float] | None:
+    raw = source_info.get("subject_keyframes")
+    if not isinstance(raw, list):
+        return None
+    observations: list[tuple[float, float, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            x, y, confidence = float(item["normalized_x"]), float(item["normalized_y"]), float(item["confidence"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= x <= 1 and 0 <= y <= 1 and confidence >= 0.55:
+            observations.append((x, y, confidence))
+    if not observations:
+        return None
+    weight = sum(item[2] for item in observations)
+    return (
+        sum(item[0] * item[2] for item in observations) / weight,
+        sum(item[1] * item[2] for item in observations) / weight,
     )
 
 
