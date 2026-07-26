@@ -11,7 +11,11 @@ from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
-from app.content_transformation import TRANSFORMATION_ENGINE_VERSION, run_content_transformation
+from app.content_transformation import (
+    TRANSFORMATION_ENGINE_VERSION,
+    run_content_transformation,
+    validate_transformation_outcome,
+)
 from app.errors import AudioCompositionError, ClipEngineError, ProductionPlanError, ProductionRenderError, StageError, TTSError, TransformationProviderError
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.intelligence_candidates import generate_candidates_with_stats
@@ -30,6 +34,7 @@ from app.transcript_features import analyse_transcript
 from app.transcription import transcribe
 from app.semantic_extraction import build_source_context
 from app.transformation_prompts import PROMPT_VERSIONS
+from app.transformation_models import FINAL_SCRIPT_CONTRACT_VERSION, validate_final_script
 from app.tts_service import TTSService, tts_report_section
 from app.utils import read_json, safe_name, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
@@ -469,6 +474,18 @@ class Pipeline:
             })
             stage_name = f"production_plan:{candidate_id}"
             use_cache = self.config.production.cache_enabled and tracker.completed(stage_name, artifact, cache_key)
+            final_validation = validate_final_script(
+                final,
+                transformation_item.get("source_context", {}),
+                transformation_item.get("semantic_representation", {}),
+                str(transformation_item.get("candidate_id") or ""),
+            )
+            if use_cache and not final_validation.passed:
+                tracker.invalidate("Cached ProductionPlan has an invalid FinalScript contract.", (stage_name,))
+                self.warnings.append(
+                    f"Production plan cache for {candidate_id} was invalidated by FinalScript contract validation."
+                )
+                use_cache = False
             if use_cache:
                 plan_data = read_json(artifact, {})
                 try:
@@ -876,6 +893,7 @@ class Pipeline:
             artifact = work_directory / f"transformation-{suffix}.json"
             cache_key = _hash({
                 "engine": TRANSFORMATION_ENGINE_VERSION,
+                "final_script_contract": FINAL_SCRIPT_CONTRACT_VERSION,
                 "source": source.get("id"),
                 "candidate": candidate.to_dict(),
                 "transcript": _hash(transcript),
@@ -890,8 +908,18 @@ class Pipeline:
             use_cache = self.config.transformation.cache_enabled and tracker.completed(stage_name, artifact, cache_key)
             if use_cache:
                 outcome = read_json(artifact, {})
-                outcome["cache_hit"] = True
-            else:
+                final_validation = validate_transformation_outcome(outcome, context)
+                if final_validation.passed:
+                    outcome["cache_hit"] = True
+                    outcome.setdefault("validation", {})["final_script"] = final_validation.to_dict()
+                    outcome["final_script_source"] = "cache"
+                else:
+                    tracker.invalidate("Cached FinalScript does not satisfy the current contract.", (stage_name,))
+                    self.warnings.append(
+                        f"Transformation cache for {candidate.id} was invalidated by FinalScript contract validation."
+                    )
+                    use_cache = False
+            if not use_cache:
                 tracker.start(stage_name, cache_key)
                 actual_provider = provider
                 if provider_error is not None:
@@ -903,7 +931,11 @@ class Pipeline:
                 outcome["cache_hit"] = False
                 write_json(artifact, outcome)
                 self._write_transformation_work_artifacts(work_directory, suffix, outcome)
-                tracker.finish(stage_name, "completed" if outcome.get("cacheable", True) else "fallback")
+                outcome_status = str(outcome.get("status", "failed"))
+                tracker.finish(
+                    stage_name,
+                    outcome_status if outcome_status in {"completed", "fallback", "failed"} else "failed",
+                )
                 self._record_transformation_substages(tracker, candidate.id, cache_key, outcome)
             outcomes.append(outcome)
             outcome_artifacts = self._write_transformation_artifacts(output_directory, suffix, index, outcome)
@@ -912,6 +944,9 @@ class Pipeline:
             raw_errors = usage.get("api_errors", []) if isinstance(usage, dict) else []
             if raw_errors:
                 self.errors.extend([f"transformation: {sanitize_api_error(value)}" for value in raw_errors])
+            normalization = outcome.get("normalization", {}) if isinstance(outcome.get("normalization"), dict) else {}
+            for warning in normalization.get("warnings", []) if isinstance(normalization.get("warnings"), list) else []:
+                self.warnings.append(f"Transformation {candidate.id}: {warning}")
             if outcome.get("fallback", {}).get("used"):
                 reason = outcome.get("fallback", {}).get("reason")
                 self.warnings.append(
@@ -956,13 +991,15 @@ class Pipeline:
     ) -> None:
         """Expose typed intermediate stages in state.json without coupling them to render."""
 
+        validation = outcome.get("validation", {}) if isinstance(outcome.get("validation"), dict) else {}
+        final_validation = validation.get("final_script", {}) if isinstance(validation.get("final_script"), dict) else {}
         available = {
             "transformation_source_context": bool(outcome.get("source_context")),
             "transformation_semantic_representation": bool(outcome.get("semantic_representation")),
             "transformation_narrative_plan": bool(outcome.get("narrative_plan")),
             "transformation_script_draft": bool(outcome.get("draft_script")),
             "transformation_script_validation": bool(outcome.get("validation")),
-            "transformation_final_script": bool(outcome.get("final_script")),
+            "transformation_final_script": bool(final_validation.get("passed")),
         }
         for name, exists in available.items():
             stage_name = f"{name}:{candidate_id}"
@@ -973,7 +1010,9 @@ class Pipeline:
         self, output_directory: Path, suffix: str, index: int, outcome: dict[str, Any],
     ) -> list[str]:
         final = outcome.get("final_script", {})
-        if not isinstance(final, dict) or not final.get("full_text"):
+        validation = outcome.get("validation", {}) if isinstance(outcome.get("validation"), dict) else {}
+        final_validation = validation.get("final_script", {}) if isinstance(validation.get("final_script"), dict) else {}
+        if not isinstance(final, dict) or not final.get("full_text") or not final_validation.get("passed"):
             return []
         json_path = output_directory / f"transformed-script-{suffix}.json"
         text_path = output_directory / f"transformed-script-{suffix}.txt"

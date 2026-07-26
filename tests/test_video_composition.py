@@ -96,6 +96,24 @@ def test_timeline_maps_actual_audio_dialogue_and_uses_deterministic_pause_fallba
     assert [clip.order for clip in timeline.clips] == list(range(1, len(timeline.clips) + 1))
 
 
+def test_prepared_source_clip_keeps_freeze_padding_duration(tmp_path: Path) -> None:
+    config, _plan_value, source, _transcript, _audio = _upstream(tmp_path)
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    clip = SourceVideoClip(
+        clip_id="visual-freeze", order=1, timeline_start_seconds=0, timeline_end_seconds=2,
+        duration_seconds=2, source_path=str(source.path), source_start_seconds=0,
+        source_end_seconds=1.4, visual_strategy="mapped_source",
+        crop_plan=make_crop_plan(probe_media(source.path, require_video=True), canvas, config.production_render),
+        freeze_duration_seconds=0.6, status="fallback", fallback_reason="source_clip_short_freeze",
+    )
+    destination = tmp_path / "freeze-padded.mp4"
+
+    VideoCompositionService(tmp_path, config)._prepare_visual_clip(clip, canvas, destination)
+
+    actual = float(probe_media(destination, require_video=True)["video_duration"])
+    assert abs(actual - clip.duration_seconds) <= 0.15
+
+
 def test_missing_or_invalid_mapping_is_reported_without_random_clip_selection(tmp_path: Path) -> None:
     config, plan, source, _transcript, audio = _upstream(tmp_path)
     raw = plan.model_dump(mode="json")

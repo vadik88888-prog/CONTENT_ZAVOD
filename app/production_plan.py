@@ -18,10 +18,11 @@ from app.production_models import (
     TimelineEstimate,
     VoiceProfile,
 )
+from app.transformation_models import validate_final_script
 from app.utils import stable_text_hash
 
 
-PRODUCTION_PLAN_VERSION = "3A.0"
+PRODUCTION_PLAN_VERSION = "3A.1"
 TIMELINE_VERSION = "3A.0"
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
 
@@ -34,7 +35,11 @@ def build_production_plan(
     final = _dict(transformation.get("final_script"), "FinalScript")
     context = _dict(transformation.get("source_context"), "SourceContext")
     semantic = _dict(transformation.get("semantic_representation"), "SemanticRepresentation")
-    candidate_id = str(final.get("candidate_id") or context.get("candidate_id") or "")
+    expected_candidate_id = str(transformation.get("candidate_id") or context.get("candidate_id") or "")
+    validation = validate_final_script(final, context, semantic, expected_candidate_id)
+    if not validation.passed:
+        raise ProductionPlanError(_final_script_diagnostic(transformation, final, expected_candidate_id, validation.errors))
+    candidate_id = str(final.get("candidate_id") or "")
     language = str(final.get("language") or context.get("language") or "unknown")
     sentences = [item for item in final.get("sentences", []) if isinstance(item, dict) and str(item.get("text", "")).strip()]
     if not candidate_id or not sentences:
@@ -59,6 +64,7 @@ def build_production_plan(
     dialogue_mappings: list[DialogueSegment] = []
     narration_to_dialogue: dict[str, list[str]] = {}
     used_dialogue_fact_ids: set[str] = set()
+    dialogue_only = final.get("production_ready_for_tts") is False
     order = 1
     for index, sentence in enumerate(sentences):
         sentence_id = str(sentence.get("sentence_id") or f"sentence-{index + 1:03d}")
@@ -67,6 +73,35 @@ def build_production_plan(
         source_ids = [int(item) for item in sentence.get("source_segment_ids", []) if int(item) in evidence]
         if not fact_ids or not source_ids:
             raise ProductionPlanError(f"FinalScript sentence {sentence_id} не имеет подтверждённого fact/transcript mapping.")
+        if dialogue_only:
+            for fact_id in fact_ids:
+                if fact_id in used_dialogue_fact_ids:
+                    continue
+                fact = facts[fact_id]
+                source_id = _first_known_segment_id(fact, evidence, source_ids)
+                source = evidence[source_id]
+                dialogue = DialogueSegment(
+                    segment_id=f"dialogue-{len(dialogue_mappings) + 1:03d}",
+                    order=order,
+                    estimated_duration_seconds=max(
+                        0.0,
+                        float(fact.get("evidence_end", source.get("end", 0)))
+                        - float(fact.get("evidence_start", source.get("start", 0))),
+                    ),
+                    fact_id=fact_id,
+                    transcript_segment_id=source_id,
+                    source_start_seconds=float(fact.get("evidence_start", source.get("start", 0))),
+                    source_end_seconds=float(fact.get("evidence_end", source.get("end", 0))),
+                    source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
+                    speaker=str(production_config.original_dialogue_speaker),
+                    confidence=float(fact.get("confidence", 0.0)),
+                    linked_segment_ids=[],
+                )
+                segments.append(dialogue)
+                dialogue_mappings.append(dialogue)
+                used_dialogue_fact_ids.add(fact_id)
+                order += 1
+            continue
         narration_id = f"narration-{index + 1:03d}"
         narration = NarrationSegment(
             segment_id=narration_id,
@@ -236,3 +271,19 @@ def _dict(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not value:
         raise ProductionPlanError(f"{name} отсутствует или не имеет ожидаемой структуры.")
     return value
+
+
+def _final_script_diagnostic(
+    transformation: dict[str, Any], final: dict[str, Any], expected_candidate_id: str, errors: list[str],
+) -> str:
+    actual_candidate_id = str(final.get("candidate_id") or "")
+    raw_sentences = final.get("sentences", [])
+    sentences_count = len(raw_sentences) if isinstance(raw_sentences, list) else 0
+    source = str(transformation.get("final_script_source") or "unknown")
+    compact_errors = "; ".join(str(item) for item in errors[:5]) or "unknown validation error"
+    return (
+        "ProductionPlan rejected FinalScript contract: "
+        f"expected_candidate_id={expected_candidate_id or '<missing>'}; "
+        f"actual_candidate_id={actual_candidate_id or '<missing>'}; "
+        f"sentences_count={sentences_count}; source={source}; validation_errors={compact_errors}"
+    )

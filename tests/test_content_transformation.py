@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,11 +24,13 @@ from app.transformation_models import (
     FactSourceScope,
     FactualityType,
     FallbackReason,
+    FinalScript,
     NarrativePlan,
     ScriptSentence,
     SemanticFact,
     SemanticRepresentation,
     SentenceRole,
+    validate_final_script,
 )
 from app.transformation_prompts import OPENAI_SCRIPT_DRAFT_SCHEMA, OPENAI_TRANSFORMATION_RESPONSE_SCHEMA
 
@@ -168,8 +171,103 @@ def test_failed_repair_never_returns_unsafe_script() -> None:
     config.transformation.mock_mode = "repair_failure"
     result = run_content_transformation(_context(), config.transformation, MockProvider(config))
     assert result["status"] == "fallback"
-    assert result["fallback"]["reason"] == "repair_failed"
+    # The malformed provider payload is discarded before the deterministic
+    # fallback is built, so it is reported as a structured-output failure.
+    assert result["fallback"]["reason"] == "invalid_structured_output"
     assert result["validation"]["grounding"]["passed"]
+    assert result["validation"]["final_script"]["passed"]
+
+
+class _StaticTransformer:
+    name = "openai"
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def transform_compact(self, _context):
+        return deepcopy(self.payload), {"provider": self.name, "model": "test-model", "api_errors": []}
+
+
+def _provider_payload() -> tuple[object, dict]:
+    context, semantic, plan, draft = _draft()
+    return context, {
+        "semantic_representation": semantic.to_dict(),
+        "narrative_plan": plan.to_dict(),
+        "script_draft": draft.to_dict(),
+    }
+
+
+@pytest.mark.parametrize("returned_candidate_id", ["", "candidate-other"])
+def test_provider_candidate_identity_is_forced_to_current_candidate(returned_candidate_id: str) -> None:
+    context, payload = _provider_payload()
+    for item in payload.values():
+        item["candidate_id"] = returned_candidate_id
+    payload["semantic_representation"]["source_evidence_map"] = {"unrelated": [0]}
+
+    result = run_content_transformation(context, AppConfig().transformation, _StaticTransformer(payload))
+
+    assert result["status"] == "completed"
+    assert result["final_script"]["candidate_id"] == context.candidate_id
+    assert result["validation"]["final_script"]["passed"]
+    assert result["semantic_representation"]["source_evidence_map"] == {
+        item["fact_id"]: item["evidence_segment_ids"]
+        for item in result["semantic_representation"]["supporting_facts"]
+    }
+    assert result["normalization"]["warnings"]
+
+
+@pytest.mark.parametrize("invalid_part", ["narrative_plan", "script_draft"])
+def test_invalid_provider_narrative_or_draft_uses_grounded_current_candidate_fallback(invalid_part: str) -> None:
+    context, payload = _provider_payload()
+    payload[invalid_part] = {}
+
+    result = run_content_transformation(context, AppConfig().transformation, _StaticTransformer(payload))
+
+    assert result["status"] == "fallback"
+    assert result["fallback"]["reason"] == "invalid_structured_output"
+    assert result["final_script"]["candidate_id"] == context.candidate_id
+    assert result["final_script"]["sentences"]
+    assert result["validation"]["final_script"]["passed"]
+    primary_ids = {item.segment_id for item in context.primary_evidence}
+    assert all(
+        set(sentence["source_segment_ids"]).issubset(primary_ids)
+        for sentence in result["final_script"]["sentences"]
+    )
+
+
+def test_empty_candidate_transcript_cannot_create_a_final_script() -> None:
+    result = run_content_transformation(_context(""), AppConfig().transformation, None, force_local=True)
+
+    assert result["status"] == "failed"
+    assert not result["validation"]["final_script"]["passed"]
+    assert not result["final_script"].get("sentences")
+
+
+@pytest.mark.parametrize("mutation", ["candidate", "sentences", "text"])
+def test_final_script_contract_rejects_missing_candidate_sentences_or_text(mutation: str) -> None:
+    context, semantic, _plan, draft = _draft()
+    final = FinalScript.from_draft(draft, "completed", True).to_dict()
+    if mutation == "candidate":
+        final["candidate_id"] = ""
+    elif mutation == "sentences":
+        final["sentences"] = []
+    else:
+        final["sentences"][0]["text"] = ""
+
+    validation = validate_final_script(final, context, semantic, context.candidate_id)
+
+    assert not validation.passed
+
+
+@pytest.mark.parametrize("candidate_id", ["candidate-011", "candidate-023", "candidate-039"])
+def test_final_script_contract_is_valid_for_each_selected_candidate(candidate_id: str) -> None:
+    context = _context("The source statement remains grounded. The second statement is also grounded.")
+    context.candidate_id = candidate_id
+
+    result = run_content_transformation(context, AppConfig().transformation, None, force_local=True)
+
+    assert result["final_script"]["candidate_id"] == candidate_id
+    assert result["validation"]["final_script"]["passed"]
 
 
 class _Responses:
@@ -232,6 +330,30 @@ def test_transformation_cache_and_artifacts_do_not_touch_render(tmp_path: Path) 
     assert (tmp_path / "output" / "transformed-script.txt").is_file()
     assert (tmp_path / "output" / "transformed-script.json").is_file()
     assert not list((tmp_path / "output").glob("*.ass"))
+
+
+def test_legacy_cached_final_script_is_invalidated_before_production(tmp_path: Path) -> None:
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    pipeline = Pipeline(tmp_path, config, mock_ai=True, transform_script=True)
+    tracker = StageTracker(tmp_path / "state.json")
+    candidate = Candidate("candidate-001", 0, 20, "A complete source sentence. Another complete source sentence.", transcript_segment_ids=[0])
+    scored = ScoredCandidate(candidate, "", "", "", 90, 90, 90, 60, 90, 10, None, True)
+    transcript = {"language": "en", "segments": [{"start": 0, "end": 20, "text": candidate.text}]}
+    features = {"segments": [{"id": 0, "start": 0, "end": 20, "sentence_start": True, "sentence_end": True, "speech_density": 0.5, "pause_before_seconds": 0, "pause_after_seconds": 0, "filler_word_ratio": 0, "repetition_score": 0}]}
+    arguments = ({"id": "s", "path": "source.mp4"}, {}, [scored], transcript, features, {}, {"boundaries": []}, tmp_path / "work", tmp_path / "output")
+    pipeline._transform_selected(tracker, *arguments)
+    artifact = tmp_path / "work" / "transformation-candidate-001.json"
+    cached = json.loads(artifact.read_text(encoding="utf-8"))
+    cached["final_script"]["candidate_id"] = ""
+    artifact.write_text(json.dumps(cached), encoding="utf-8")
+
+    second = pipeline._transform_selected(tracker, *arguments)
+
+    assert second["cache"]["hit_count"] == 0
+    assert second["validation"]["final_script"]["passed"]
+    assert second["final_script"]["candidate_id"] == candidate.id
+    assert any("invalidated" in warning.lower() for warning in pipeline.warnings)
 
 
 def test_provider_failure_is_not_cached_as_a_success(tmp_path: Path) -> None:

@@ -12,6 +12,9 @@ from app.errors import (
 )
 
 
+FINAL_SCRIPT_CONTRACT_VERSION = "3.0"
+
+
 class ContentType(str, Enum):
     EDUCATIONAL = "educational"
     STORY = "story"
@@ -554,4 +557,178 @@ def draft_from_dict(data: dict[str, Any]) -> ScriptDraft:
         used_fact_ids=[str(item) for item in data.get("used_fact_ids", [])], transformation_notes=[str(item) for item in data.get("transformation_notes", [])],
         source_coverage=float(data.get("source_coverage", 0)), novelty_risk=float(data.get("novelty_risk", 0)),
         status=str(data.get("status", "draft")), schema_version=str(data.get("schema_version", "2.0")),
+    )
+
+
+def source_context_from_dict(data: dict[str, Any]) -> SourceContext:
+    """Rehydrate a persisted context only for contract validation."""
+
+    source = data.get("source", {}) if isinstance(data.get("source"), dict) else {}
+    return SourceContext(
+        candidate_id=str(data.get("candidate_id", "")),
+        source_id=str(source.get("id", "")),
+        source_path=str(source.get("path", "")),
+        start_time=float(data.get("start_time", 0)),
+        end_time=float(data.get("end_time", 0)),
+        duration=float(data.get("duration", 0)),
+        language=str(data.get("language", "")),
+        transcript_text=str(data.get("transcript_text", "")),
+        primary_evidence=[_evidence_from_dict(item) for item in data.get("primary_evidence", []) if isinstance(item, dict)],
+        supporting_context=[_evidence_from_dict(item) for item in data.get("supporting_context", []) if isinstance(item, dict)],
+        local_quality_score=float(data.get("local_quality_score", 0)),
+        ai_rerank_score=data.get("ai_rerank_score"),
+        candidate_explanations=[str(item) for item in data.get("candidate_explanations", [])],
+        sentence_boundaries=[dict(item) for item in data.get("sentence_boundaries", []) if isinstance(item, dict)],
+        pause_features=dict(data.get("pause_features", {})),
+        speech_density=float(data.get("speech_density", 0)),
+        filler_information=dict(data.get("filler_information", {})),
+        repetition_information=dict(data.get("repetition_information", {})),
+        scene_boundaries=[dict(item) for item in data.get("scene_boundaries", []) if isinstance(item, dict)],
+        audio_energy_summary=dict(data.get("audio_energy_summary", {})),
+        candidate_features=dict(data.get("candidate_features", {})),
+        schema_version=str(data.get("schema_version", "2.0")),
+    )
+
+
+def final_from_dict(data: dict[str, Any]) -> FinalScript:
+    fallback_reason = data.get("fallback_reason")
+    try:
+        parsed_reason = FallbackReason(str(fallback_reason)) if fallback_reason else None
+    except ValueError:
+        parsed_reason = None
+    return FinalScript(
+        candidate_id=str(data.get("candidate_id", "")),
+        language=str(data.get("language", "")),
+        title=str(data.get("title", "")),
+        hook=str(data.get("hook", "")),
+        body=str(data.get("body", "")),
+        ending=str(data.get("ending", "")),
+        full_text=str(data.get("full_text", "")),
+        sentences=[sentence_from_dict(item) for item in data.get("sentences", []) if isinstance(item, dict)],
+        estimated_duration_seconds=float(data.get("estimated_duration_seconds", 0)),
+        word_count=int(data.get("word_count", 0)),
+        used_fact_ids=[str(item) for item in data.get("used_fact_ids", [])],
+        transformation_notes=[str(item) for item in data.get("transformation_notes", [])],
+        source_coverage=float(data.get("source_coverage", 0)),
+        novelty_risk=float(data.get("novelty_risk", 0)),
+        status=str(data.get("status", "")),
+        production_ready_for_tts=data.get("production_ready_for_tts", False),
+        fallback_reason=parsed_reason,
+        schema_version=str(data.get("schema_version", "2.0")),
+    )
+
+
+def validate_final_script(
+    final: FinalScript | dict[str, Any],
+    context: SourceContext | dict[str, Any],
+    semantic: SemanticRepresentation | dict[str, Any],
+    expected_candidate_id: str | None = None,
+) -> ValidationResult:
+    """Validate the exact boundary accepted by ProductionPlan.
+
+    This deliberately checks only identifiers, source references and timeline
+    invariants.  It never includes transcript text in diagnostics.
+    """
+
+    errors: list[str] = []
+    checks: dict[str, Any] = {"contract_version": FINAL_SCRIPT_CONTRACT_VERSION}
+    try:
+        final_value = final_from_dict(final) if isinstance(final, dict) else final
+        context_value = source_context_from_dict(context) if isinstance(context, dict) else context
+        semantic_value = semantic_from_dict(semantic) if isinstance(semantic, dict) else semantic
+    except (TypeError, ValueError, KeyError) as error:
+        return ValidationResult(False, 0.0, [f"FinalScript cannot be parsed: {error}"], [], checks)
+
+    expected = str(expected_candidate_id or context_value.candidate_id or "")
+    actual = final_value.candidate_id
+    checks.update({"expected_candidate_id": expected, "actual_candidate_id": actual})
+    if not expected:
+        errors.append("Expected candidate_id is missing.")
+    if not actual:
+        errors.append("FinalScript candidate_id is missing.")
+    elif actual != expected:
+        errors.append("FinalScript candidate_id does not match the current candidate.")
+    if final_value.status not in {"completed", "fallback"}:
+        errors.append("FinalScript status is not production-eligible.")
+    if not isinstance(final_value.production_ready_for_tts, bool):
+        errors.append("FinalScript production_ready_for_tts must be boolean.")
+    if not final_value.full_text.strip():
+        errors.append("FinalScript full_text is empty.")
+    if final_value.word_count <= 0:
+        errors.append("FinalScript word_count must be positive.")
+    if final_value.estimated_duration_seconds <= 0:
+        errors.append("FinalScript estimated_duration_seconds must be positive.")
+    if not isinstance(final_value.sentences, list) or not final_value.sentences:
+        errors.append("FinalScript sentences must contain at least one item.")
+
+    primary = {item.segment_id: item for item in context_value.primary_evidence}
+    facts = semantic_value.fact_map()
+    try:
+        semantic_value.validate(context_value)
+        checks["semantic_source_evidence"] = True
+    except Exception:
+        checks["semantic_source_evidence"] = False
+        errors.append("FinalScript semantic source_evidence_map is invalid.")
+
+    for fact in semantic_value.supporting_facts:
+        if (
+            fact.evidence_end < fact.evidence_start
+            or fact.evidence_start < context_value.start_time - 0.01
+            or fact.evidence_end > context_value.end_time + 0.01
+        ):
+            errors.append("FinalScript fact source timing is outside the current candidate.")
+            break
+
+    sentence_ids: set[str] = set()
+    used_fact_ids: set[str] = set()
+    for sentence in final_value.sentences:
+        if not sentence.sentence_id or sentence.sentence_id in sentence_ids:
+            errors.append("FinalScript sentence_id must be present and unique.")
+        sentence_ids.add(sentence.sentence_id)
+        if not sentence.text.strip():
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} is empty.")
+        if not sentence.supported_by_fact_ids:
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} has no fact references.")
+        if not sentence.source_segment_ids:
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} has no source references.")
+        unknown_facts = set(sentence.supported_by_fact_ids) - set(facts)
+        if unknown_facts:
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} has unknown fact references.")
+        invalid_sources = set(sentence.source_segment_ids) - set(primary)
+        if invalid_sources:
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} has source references outside the candidate.")
+        referenced_fact_sources = {
+            source_id
+            for fact_id in sentence.supported_by_fact_ids
+            if fact_id in facts
+            for source_id in facts[fact_id].evidence_segment_ids
+        }
+        if sentence.source_segment_ids and not set(sentence.source_segment_ids).issubset(referenced_fact_sources):
+            errors.append(f"FinalScript sentence {sentence.sentence_id or '<unknown>'} source references do not match its facts.")
+        used_fact_ids.update(sentence.supported_by_fact_ids)
+
+    for evidence in primary.values():
+        if evidence.end < evidence.start or evidence.start < context_value.start_time - 0.01 or evidence.end > context_value.end_time + 0.01:
+            errors.append("FinalScript source timing is outside the current candidate.")
+            break
+    if set(final_value.used_fact_ids) != used_fact_ids:
+        errors.append("FinalScript used_fact_ids do not match sentence fact references.")
+    reconstructed = " ".join(item.text.strip() for item in final_value.sentences if item.text.strip())
+    if reconstructed and final_value.full_text.strip() != reconstructed:
+        errors.append("FinalScript full_text does not match its sentences.")
+    checks.update({
+        "sentences_count": len(final_value.sentences),
+        "source_reference_count": sum(len(item.source_segment_ids) for item in final_value.sentences),
+        "source_timing_valid": not any("timing" in item for item in errors),
+    })
+    return ValidationResult(not errors, 1.0 if not errors else 0.0, errors, [], checks)
+
+
+def _evidence_from_dict(data: dict[str, Any]) -> EvidenceSegment:
+    return EvidenceSegment(
+        segment_id=int(data.get("segment_id", 0)),
+        start=float(data.get("start", 0)),
+        end=float(data.get("end", 0)),
+        text=str(data.get("text", "")),
+        scope=FactSourceScope(str(data.get("scope", FactSourceScope.PRIMARY_CANDIDATE.value))),
     )

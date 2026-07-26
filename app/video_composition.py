@@ -229,7 +229,9 @@ class VideoCompositionService:
         filter_graph = _visual_filter(clip, canvas)
         command = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{clip.source_start_seconds:.6f}",
-            "-i", str(source), "-t", f"{available:.6f}", "-filter_complex", filter_graph,
+            # -t must be an input option.  As an output option it truncates the
+            # filtered stream and removes a legitimate tpad freeze extension.
+            "-t", f"{available:.6f}", "-i", str(source), "-filter_complex", filter_graph,
             "-map", "[vout]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", canvas.pixel_format, "-movflags", "+faststart", str(destination),
         ]

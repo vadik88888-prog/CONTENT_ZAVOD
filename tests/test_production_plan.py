@@ -9,9 +9,10 @@ from pydantic import ValidationError
 from app.cli import build_parser
 from app.config import AppConfig
 from app.content_transformation import run_content_transformation
+from app.errors import ProductionPlanError
 from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import NarrationSegment, ProductionPlan
+from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
 from app.production_plan import build_production_plan, production_summary
 from app.reporting import make_report
 from app.semantic_extraction import build_source_context
@@ -125,6 +126,36 @@ def test_provider_disabled_local_final_script_still_builds_plan() -> None:
     assert outcome["provider"] == "local"
     plan = build_production_plan(outcome, AppConfig().production)
     assert plan.status == "draft"
+
+
+def test_production_plan_rejects_invalid_final_script_with_safe_boundary_diagnostics() -> None:
+    outcome = _transformation_outcome()
+    source_text = outcome["source_context"]["transcript_text"]
+    outcome["final_script"]["candidate_id"] = "candidate-wrong"
+    outcome["final_script_source"] = "ai"
+
+    with pytest.raises(ProductionPlanError) as raised:
+        build_production_plan(outcome, AppConfig().production)
+
+    message = str(raised.value)
+    assert "expected_candidate_id=candidate-production-001" in message
+    assert "actual_candidate_id=candidate-wrong" in message
+    assert "sentences_count=" in message
+    assert "source=ai" in message
+    assert source_text not in message
+
+
+def test_dialogue_only_final_script_builds_plan_without_tts_narration() -> None:
+    outcome = _transformation_outcome()
+    outcome["final_script"]["production_ready_for_tts"] = False
+
+    plan = build_production_plan(outcome, AppConfig().production)
+
+    assert not any(isinstance(segment, NarrationSegment) for segment in plan.segments)
+    assert plan.dialogue_mappings
+    assert all(isinstance(segment, DialogueSegment) for segment in plan.segments)
+    assert plan.timeline.narration_count == 0
+    assert plan.timeline.dialogue_count == len(plan.dialogue_mappings)
 
 
 def test_production_plan_only_does_not_overwrite_existing_render_cache(tmp_path: Path) -> None:
