@@ -10,6 +10,7 @@ from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot,
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
+from app.gui.services.pipeline_facade import STATE_PERSISTENCE_WARNING
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
@@ -111,6 +112,24 @@ def test_valid_report_mp4_without_warnings_is_completed(tmp_path: Path, valid_vi
     assert [Path(value).name for value in finished.artifact_paths] == ["report.json", "final-short.mp4"]
 
 
+def test_degraded_state_persistence_is_a_success_warning_not_a_failed_render(tmp_path: Path, valid_video_probe) -> None:
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"valid final artifact")
+    _write_report(prepared, final)
+    report = read_json(prepared.report_path)
+    report["state_persistence"] = {"status": "degraded", "fallback_state_path": "state.json.fallback.json"}
+    write_json(prepared.report_path, report)
+
+    finished = services.finish_success(project, run, prepared)
+
+    assert finished.status == RunStatus.COMPLETED_WITH_WARNINGS
+    assert project.status == ProjectStatus.COMPLETED_WITH_WARNINGS
+    assert STATE_PERSISTENCE_WARNING in finished.warnings
+    assert [Path(value).name for value in finished.artifact_paths] == ["report.json", "final-short.mp4"]
+
+
 def test_completion_keeps_each_valid_independent_clip_result(tmp_path: Path, valid_video_probe) -> None:
     services, project, run, prepared = _context(tmp_path)
     final = prepared.output_directory / "production-render" / "final-short.mp4"
@@ -158,6 +177,60 @@ def test_primary_result_registry_excludes_legacy_outputs_and_keeps_exact_count(t
     assert [Path(value).name for value in finished.artifact_paths] == [
         "report.json", "final-short.mp4", "clip-two.mp4", "clip-three.mp4",
     ]
+
+
+def test_failed_process_with_current_canonical_results_keeps_outputs(tmp_path: Path, valid_video_probe) -> None:
+    from PySide6.QtCore import QCoreApplication
+
+    _application = QCoreApplication.instance() or QCoreApplication([])
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"valid final artifact")
+    _write_report(prepared, final)
+    report = read_json(prepared.report_path)
+    report["primary_results"] = [{
+        "candidate_id": "clip-one", "output_file": str(final), "status": "completed", "primary": True,
+    }]
+    write_json(prepared.report_path, report)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    viewmodel.run = run
+    viewmodel.prepared = prepared
+
+    viewmodel._failed("Процесс обработки завершился с кодом 1.")
+
+    assert run.status == RunStatus.COMPLETED_WITH_WARNINGS
+    assert STATE_PERSISTENCE_WARNING in run.warnings
+    assert viewmodel.snapshot.phase == ProcessingPhase.COMPLETED_WITH_WARNINGS
+    assert viewmodel.snapshot.message == STATE_PERSISTENCE_WARNING
+    assert [Path(value).name for value in run.artifact_paths] == ["report.json", "final-short.mp4"]
+
+
+def test_startup_recovery_uses_current_report_and_canonical_results(tmp_path: Path, valid_video_probe) -> None:
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"valid final artifact")
+    _write_report(prepared, final)
+    report = read_json(prepared.report_path)
+    report["primary_results"] = [{
+        "candidate_id": "clip-one", "output_file": str(final), "status": "completed", "primary": True,
+    }]
+    write_json(prepared.report_path, report)
+    services.record_launch_context(run, prepared)
+    run.status = RunStatus.RUNNING
+    services.runs.save(run)
+    project.status = ProjectStatus.PROCESSING
+    services.projects.save(project)
+
+    recovered = services.recover_interrupted_runs()
+    restored = services.runs.load(project.project_id, run.run_id)
+
+    assert recovered == 1
+    assert restored.status == RunStatus.COMPLETED_WITH_WARNINGS
+    assert STATE_PERSISTENCE_WARNING in restored.warnings
+    assert [Path(value).name for value in restored.artifact_paths] == ["report.json", "final-short.mp4"]
 
 
 def test_zero_byte_final_mp4_is_failed(tmp_path: Path) -> None:

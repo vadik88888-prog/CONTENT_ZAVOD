@@ -38,7 +38,7 @@ from app.semantic_extraction import build_source_context
 from app.transformation_prompts import PROMPT_VERSIONS
 from app.transformation_models import FINAL_SCRIPT_CONTRACT_VERSION, validate_final_script
 from app.tts_service import TTSService, tts_report_section
-from app.utils import read_json, safe_name, stable_text_hash, utc_now, write_json
+from app.utils import AtomicWriteError, read_json, safe_name, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
 
@@ -74,6 +74,7 @@ class StageTracker:
         self.path = state_path
         self.data = read_json(state_path, {"created_at": utc_now(), "stages": {}})
         self.data.setdefault("stages", {})
+        self.persistence_error: AtomicWriteError | None = None
 
     def completed(self, name: str, artifact: Path, cache_key: str | None = None) -> bool:
         stage = self.data["stages"].get(name, {})
@@ -118,10 +119,25 @@ class StageTracker:
         self._save()
 
     def _save(self) -> None:
+        # A later successful save supersedes an earlier transient failure.  Do
+        # not persist a stale degraded marker into the canonical state file.
+        self.data.pop("state_persistence", None)
         safe = json.loads(json.dumps(self.data))
         for stage in safe.get("stages", {}).values():
             stage.pop("_started", None)
-        write_json(self.path, safe)
+        try:
+            write_json(self.path, safe)
+        except AtomicWriteError as error:
+            self.persistence_error = error
+            self.data["state_persistence"] = {
+                "status": "degraded",
+                "error": str(error.cause),
+                "error_type": type(error.cause).__name__,
+                "winerror": getattr(error.cause, "winerror", None),
+                "fallback_state_path": str(error.fallback_path) if error.fallback_path else None,
+            }
+        else:
+            self.persistence_error = None
 
 
 class Pipeline:

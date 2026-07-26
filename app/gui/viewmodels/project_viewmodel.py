@@ -244,6 +244,15 @@ class ProjectViewModel(QObject):
     def _failed(self, message: str) -> None:
         if not self.project or not self.run:
             return
+        if self.prepared:
+            recovered = self.services.recover_failed_process(self.project, self.run, self.prepared)
+            if recovered:
+                self._finish(
+                    ProcessingPhase.COMPLETED_WITH_WARNINGS,
+                    "Ролики созданы, но не удалось сохранить служебное состояние",
+                    recovered,
+                )
+                return
         run = self.services.finish_failure(self.project, self.run, message, self.runner.failure_details or message)
         final_message = (
             "Обработка остановилась и не отвечает."

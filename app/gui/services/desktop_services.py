@@ -8,7 +8,12 @@ from typing import Iterable
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
 from app.gui.services.error_mapping import redact_secrets
-from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade, PreparedPipelineRun
+from app.gui.services.pipeline_facade import (
+    STATE_PERSISTENCE_WARNING,
+    PipelineCompletion,
+    PipelineFacade,
+    PreparedPipelineRun,
+)
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
@@ -223,6 +228,15 @@ class DesktopServices:
     def record_launch_context(self, run: ProjectRun, prepared: PreparedPipelineRun) -> None:
         """Persist the desktop launch contract without leaking environment secrets."""
 
+        run.settings_snapshot["execution"] = {
+            "state_path": str(prepared.state_path),
+            "report_path": str(prepared.report_path),
+            "output_directory": str(prepared.output_directory),
+            "runtime_config_path": str(prepared.runtime_config_path),
+            "source_path": str(prepared.source_path) if prepared.source_path else None,
+            "runtime_flags": dict(prepared.runtime_flags),
+        }
+        self.runs.save(run)
         flags = [argument for argument in prepared.arguments if argument.startswith("--")]
         self.append_log(run, "Desktop pipeline launch prepared.")
         self.append_log(run, f"command: {prepared.command_line()}")
@@ -259,14 +273,37 @@ class DesktopServices:
         completion = self.pipeline.completion(prepared)
         if completion.error_summary:
             return self.finish_failure(project, run, completion.error_summary, completion.technical_details)
-        run.status = RunStatus.COMPLETED_WITH_WARNINGS if completion.warnings else RunStatus.COMPLETED
+        return self._finish_completion(project, run, completion)
+
+    def recover_failed_process(
+        self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun,
+    ) -> ProjectRun | None:
+        """Keep verified outputs when only final service-state persistence failed."""
+
+        completion = self.pipeline.recovery_completion(prepared, run.started_at)
+        if completion is None:
+            return None
+        return self._finish_completion(project, run, completion, state_persistence_degraded=True)
+
+    def _finish_completion(
+        self,
+        project: DesktopProject,
+        run: ProjectRun,
+        completion: PipelineCompletion,
+        *,
+        state_persistence_degraded: bool = False,
+    ) -> ProjectRun:
+        warnings = list(completion.warnings)
+        if state_persistence_degraded and STATE_PERSISTENCE_WARNING not in warnings:
+            warnings.append(STATE_PERSISTENCE_WARNING)
+        run.status = RunStatus.COMPLETED_WITH_WARNINGS if warnings else RunStatus.COMPLETED
         run.finished_at = utc_now()
-        run.warnings = completion.warnings
+        run.warnings = warnings
         run.cost_estimate = completion.cost_estimate
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
         self.runs.snapshot_report_and_outputs(run, completion.report_path, completion.output_files)
         self.runs.save(run)
-        project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if completion.warnings else ProjectStatus.COMPLETED
+        project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
         project.latest_run_id = run.run_id
         self.projects.save(project)
         return run
@@ -294,4 +331,30 @@ class DesktopServices:
         return run
 
     def recover_interrupted_runs(self) -> int:
-        return sum(self.runs.mark_interrupted(project) for project in self.projects.list())
+        recovered_or_interrupted = 0
+        for project in self.projects.list():
+            changed = False
+            for run in self.runs.list(project.project_id):
+                if run.status not in RunStatus.ACTIVE:
+                    continue
+                prepared = self.pipeline.prepared_from_execution(run)
+                if prepared and self.recover_failed_process(project, run, prepared):
+                    recovered_or_interrupted += 1
+                    changed = True
+                    continue
+                run.status = RunStatus.INTERRUPTED
+                run.finished_at = utc_now()
+                run.error_summary = "Предыдущий запуск был прерван при закрытии приложения."
+                self.runs.save(run)
+                recovered_or_interrupted += 1
+                changed = True
+            if changed:
+                latest = next(iter(self.runs.list(project.project_id)), None)
+                if latest and latest.status == RunStatus.COMPLETED_WITH_WARNINGS:
+                    project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
+                elif latest and latest.status == RunStatus.COMPLETED:
+                    project.status = ProjectStatus.COMPLETED
+                elif latest and latest.status == RunStatus.INTERRUPTED:
+                    project.status = ProjectStatus.INTERRUPTED
+                self.projects.save(project)
+        return recovered_or_interrupted

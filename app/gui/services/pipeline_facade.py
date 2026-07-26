@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,9 @@ from app.product_flow import (
 )
 from app.sources import local_source
 from app.utils import read_json
+
+
+STATE_PERSISTENCE_WARNING = "Ролики созданы, но не удалось сохранить служебное состояние"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,7 @@ class PipelineCompletion:
     error_summary: str | None
     technical_details: str | None
     cost_estimate: float | None
+    canonical_results: bool = False
 
 
 class PipelineFacade:
@@ -210,6 +215,10 @@ class PipelineFacade:
         if not isinstance(production_warnings, list):
             production_warnings = [production_warnings]
         warnings.extend(str(value) for value in production_warnings if str(value) not in warnings)
+        persistence = raw.get("state_persistence", {})
+        if isinstance(persistence, dict) and persistence.get("status") == "degraded":
+            if STATE_PERSISTENCE_WARNING not in warnings:
+                warnings.append(STATE_PERSISTENCE_WARNING)
         ai = raw.get("ai", {}) if isinstance(raw.get("ai"), dict) else {}
         tts = raw.get("tts", {}) if isinstance(raw.get("tts"), dict) else {}
         values = [ai.get("estimated_cost"), tts.get("estimated_cost")]
@@ -232,7 +241,7 @@ class PipelineFacade:
                 if artifact_error:
                     return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", artifact_error)
             cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
-            return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost)
+            return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost, True)
         output_files = [final_path]
         for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
             path = Path(str(value))
@@ -252,9 +261,63 @@ class PipelineFacade:
         cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
         return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost)
 
+    def recovery_completion(self, prepared: PreparedPipelineRun, started_at: str) -> PipelineCompletion | None:
+        """Return a verified canonical completion suitable for a failed process.
+
+        A non-zero process exit is not enough to discard outputs: the report
+        must be newer than the run and its canonical ClipResult registry must
+        still validate every primary MP4.
+        """
+
+        if not self._report_is_current(prepared.report_path, started_at):
+            return None
+        completion = self.completion(prepared)
+        if completion.error_summary or not completion.canonical_results:
+            return None
+        return completion
+
+    def prepared_from_execution(self, run: ProjectRun) -> PreparedPipelineRun | None:
+        """Reconstruct a read-only completion contract stored at launch time."""
+
+        execution = run.settings_snapshot.get("execution", {})
+        if not isinstance(execution, dict):
+            return None
+        required_paths = ("state_path", "report_path", "output_directory")
+        if not all(isinstance(execution.get(name), str) and execution[name].strip() for name in required_paths):
+            return None
+        try:
+            report_path = Path(str(execution["report_path"]))
+            output_directory = Path(str(execution["output_directory"]))
+            state_path = Path(str(execution["state_path"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not all(str(path) for path in (report_path, output_directory, state_path)):
+            return None
+        runtime_config = execution.get("runtime_config_path", "")
+        source = execution.get("source_path")
+        runtime_flags = execution.get("runtime_flags", {})
+        return PreparedPipelineRun(
+            program="", arguments=[], working_directory=self.engine_root,
+            state_path=state_path, report_path=report_path, output_directory=output_directory,
+            runtime_config_path=Path(str(runtime_config or report_path.with_name("runtime-config.yaml"))),
+            source_path=Path(str(source)) if source else None,
+            runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
+        )
+
     @staticmethod
     def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:
         return PipelineCompletion(prepared.report_path, [], [], summary, details, None)
+
+    @staticmethod
+    def _report_is_current(report_path: Path, started_at: str) -> bool:
+        try:
+            started = datetime.fromisoformat(started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            # File timestamps have lower precision on some Windows volumes.
+            return report_path.is_file() and report_path.stat().st_mtime >= started.timestamp() - 2
+        except (OSError, TypeError, ValueError):
+            return False
 
     @staticmethod
     def _final_output_path(prepared: PreparedPipelineRun, production: dict[str, Any]) -> Path:

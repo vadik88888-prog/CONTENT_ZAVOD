@@ -77,6 +77,7 @@ def make_report(
         "tts": tts or {"enabled": False, "status": "skipped"},
         "audio": audio or {"enabled": False, "status": "skipped"},
         "production_render": production_render or {"enabled": False, "status": "skipped"},
+        "state_persistence": state.get("state_persistence", {"status": "saved"}),
         "primary_results": primary_results or [],
         "produced_clips_count": len(primary_results or []),
     }

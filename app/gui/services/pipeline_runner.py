@@ -191,7 +191,10 @@ class QtPipelineRunner(QObject):
             if fingerprint != self._state_fingerprint:
                 self._state_fingerprint = fingerprint
                 self._note_activity("state file updated")
-            raw = json.loads(prepared.state_path.read_text(encoding="utf-8"))
+            # Keep the handle lifetime to a single polling read.  Windows does
+            # not allow an atomic replace while some readers retain the file.
+            with prepared.state_path.open("r", encoding="utf-8") as file:
+                raw = json.load(file)
             stages = raw.get("stages", {}) if isinstance(raw, dict) else {}
             active_stages = [
                 (str(name), value)
