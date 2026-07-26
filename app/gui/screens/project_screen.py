@@ -57,6 +57,8 @@ class ProjectScreen(QWidget):
         left.addWidget(self.preview)
         self.metadata = self._card("Сведения о видео")
         left.addWidget(self.metadata)
+        self.estimate = self._card("Предварительная оценка")
+        left.addWidget(self.estimate)
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
         left.addWidget(self.progress)
@@ -77,30 +79,62 @@ class ProjectScreen(QWidget):
         panel.setMaximumWidth(300)
         settings = QVBoxLayout(panel)
         settings.setContentsMargins(18, 18, 18, 18)
-        heading = QLabel("Настройки ролика")
+        heading = QLabel("Как подготовить ролики")
         heading.setStyleSheet("font-size: 17px; font-weight: 600;")
         settings.addWidget(heading)
+        settings.addWidget(QLabel("Режим обработки"))
+        self.processing_mode = QComboBox()
+        self.processing_mode.addItem("Быстро", "fast")
+        self.processing_mode.addItem("Стандарт", "standard")
+        self.processing_mode.addItem("Максимальное качество", "maximum")
+        self.processing_mode.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(processing_mode=str(self.processing_mode.currentData()))
+        )
+        settings.addWidget(self.processing_mode)
+        settings.addWidget(QLabel("Глубокий анализ видео"))
+        self.deep_analysis = QComboBox()
+        self.deep_analysis.addItem("Автоматически", "auto")
+        self.deep_analysis.addItem("Включён", "on")
+        self.deep_analysis.addItem("Выключен", "off")
+        self.deep_analysis.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(deep_analysis=str(self.deep_analysis.currentData()))
+        )
+        settings.addWidget(self.deep_analysis)
+        settings.addWidget(QLabel("Площадка"))
+        self.platform = QComboBox()
+        self.platform.addItem("TikTok", "tiktok")
+        self.platform.addItem("Instagram Reels", "reels")
+        self.platform.addItem("YouTube Shorts", "shorts")
+        self.platform.addItem("Универсальный вертикальный", "universal")
+        self.platform.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(platform=str(self.platform.currentData()))
+        )
+        settings.addWidget(self.platform)
+        settings.addWidget(QLabel("Количество роликов"))
+        self.clip_count = QComboBox()
+        for label, value in (("Авто", "auto"), ("1 ролик", "1"), ("3 ролика", "3"), ("5 роликов", "5")):
+            self.clip_count.addItem(label, value)
+        self.clip_count.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(clip_count=str(self.clip_count.currentData()))
+        )
+        settings.addWidget(self.clip_count)
         settings.addWidget(QLabel("Субтитры"))
         self.subtitles = QCheckBox("Показывать субтитры")
         self.subtitles.toggled.connect(lambda value: self.viewmodel.save_options(subtitles_enabled=value))
         settings.addWidget(self.subtitles)
         settings.addWidget(QLabel("Стиль субтитров"))
         self.subtitle_style = QComboBox()
-        self.subtitle_style.addItems(["documentary", "clean", "minimal", "dynamic"])
-        self.subtitle_style.currentTextChanged.connect(lambda value: self.viewmodel.save_options(subtitle_style=value))
+        self.subtitle_style.addItem("Документальный", "documentary")
+        self.subtitle_style.addItem("Чистый", "clean")
+        self.subtitle_style.addItem("Минималистичный", "minimal")
+        self.subtitle_style.addItem("Динамичный", "dynamic")
+        self.subtitle_style.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(subtitle_style=str(self.subtitle_style.currentData()))
+        )
         settings.addWidget(self.subtitle_style)
-        settings.addWidget(QLabel("Кодирование"))
-        self.encoder = QComboBox()
-        self.encoder.addItems(["auto", "cpu", "nvenc"])
-        self.encoder.currentTextChanged.connect(lambda value: self.viewmodel.save_options(encoder=value))
-        settings.addWidget(self.encoder)
-        self.cache = QCheckBox("Использовать сохранённые данные")
+        self.cache = QCheckBox("Использовать готовый анализ, если он есть")
         self.cache.toggled.connect(lambda value: self.viewmodel.save_options(use_cache=value))
         settings.addWidget(self.cache)
-        self.recompute = QCheckBox("Полностью пересчитать")
-        self.recompute.setToolTip("Использует существующие безопасные флаги пересчёта pipeline.")
-        self.recompute.toggled.connect(lambda value: self.viewmodel.save_options(recompute_all=value))
-        settings.addWidget(self.recompute)
         settings.addStretch()
         self.run_button = QPushButton("Создать ролик")
         self.run_button.setObjectName("primary")
@@ -129,11 +163,14 @@ class ProjectScreen(QWidget):
             f"Файл: {Path(project.source_path).name}", f"Длительность: {duration}",
             f"Разрешение: {resolution}", f"FPS: {fps}",
         ])
+        self._update_estimate(project)
+        self._set_combo_data(self.processing_mode, project.settings.processing_mode)
+        self._set_combo_data(self.deep_analysis, project.settings.deep_analysis)
+        self._set_combo_data(self.platform, project.settings.platform)
+        self._set_combo_data(self.clip_count, str(project.settings.clip_count))
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
-        self.subtitle_style.blockSignals(True); self.subtitle_style.setCurrentText(project.settings.subtitle_style); self.subtitle_style.blockSignals(False)
-        self.encoder.blockSignals(True); self.encoder.setCurrentText(project.settings.encoder); self.encoder.blockSignals(False)
+        self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
-        self.recompute.blockSignals(True); self.recompute.setChecked(project.settings.recompute_all); self.recompute.blockSignals(False)
 
     def _runs_changed(self, runs: list[ProjectRun]) -> None:
         self.runs = runs
@@ -170,7 +207,10 @@ class ProjectScreen(QWidget):
         else:
             self.progress.set_finished(snapshot.message)
         self.run_button.setDisabled(active)
-        for widget in (self.subtitles, self.subtitle_style, self.encoder, self.cache, self.recompute):
+        for widget in (
+            self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
+            self.subtitles, self.subtitle_style, self.cache,
+        ):
             widget.setDisabled(active)
 
     def _open_project_folder(self) -> None:
@@ -201,6 +241,36 @@ class ProjectScreen(QWidget):
         for value in values:
             label = QLabel(value); label.setObjectName("muted")
             layout.addWidget(label)
+
+    def _update_estimate(self, project: DesktopProject) -> None:
+        try:
+            estimate = self.viewmodel.services.processing_estimate(project)
+            minutes = (
+                f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
+                f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
+            )
+            cost = (
+                "без платного AI"
+                if estimate.estimated_ai_cost_min is None
+                else f"ориентировочно ${estimate.estimated_ai_cost_min:.2f}–${estimate.estimated_ai_cost_max:.2f}"
+            )
+            analysis = "будет использован" if estimate.deep_analysis_resolved else "не потребуется"
+            self._replace_card_text(self.estimate, [
+                f"Время: {minutes}",
+                f"Результат: примерно {estimate.estimated_clips_min}–{estimate.estimated_clips_max} ролика(ов)",
+                f"Глубокий анализ: {analysis}",
+                f"Стоимость AI: {cost}",
+            ])
+        except Exception:
+            self._replace_card_text(self.estimate, ["Оценка появится после проверки настроек."])
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: str) -> None:
+        combo.blockSignals(True)
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        combo.blockSignals(False)
 
     def _error(self, error) -> None:
         QMessageBox.warning(self, error.title, error.user_message)

@@ -73,27 +73,44 @@ class DesktopServices:
     def runs_for(self, project: DesktopProject) -> list[ProjectRun]:
         return self.runs.list(project.project_id)
 
+    def processing_estimate(self, project: DesktopProject):
+        """A serialisable preflight estimate for the project screen."""
+
+        return self.pipeline.plan_processing(project, self.settings)[2]
+
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
         source = Path(project.source_path)
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
+        intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
         run = self.runs.create(
             project,
             settings_snapshot={
-                "project_options": project.settings.__dict__ if hasattr(project.settings, "__dict__") else {
+                "project_options": {
+                    "processing_mode": project.settings.processing_mode,
+                    "deep_analysis": project.settings.deep_analysis,
+                    "platform": project.settings.platform,
+                    "clip_count": project.settings.clip_count,
                     "subtitles_enabled": project.settings.subtitles_enabled,
                     "subtitle_style": project.settings.subtitle_style,
                     "encoder": project.settings.encoder,
                     "use_cache": project.settings.use_cache,
                     "recompute_all": project.settings.recompute_all,
                 },
+                "product_flow": {
+                    "user_intent": intent.to_dict(),
+                    "resolved_config": resolved.to_dict(),
+                    "estimate": estimate.to_dict(),
+                },
                 "local_test_mode": self.settings.local_test_mode,
             },
             source_snapshot={"path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
             pipeline_version="0.1.0",
         )
+        run.cost_estimate = estimate.estimated_ai_cost_max
+        self.runs.save(run)
         try:
             prepared = self.pipeline.prepare(project, run, self.settings)
         except Exception:

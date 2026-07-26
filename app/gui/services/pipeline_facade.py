@@ -12,6 +12,14 @@ from app.config import load_config
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
 from app.gui.services.desktop_project_store import validate_video_path
 from app.media import probe_video
+from app.product_flow import (
+    ProcessingEstimate,
+    ProcessingIntent,
+    ResolvedProcessingConfig,
+    apply_resolved_processing_config,
+    estimate_processing,
+    resolve_processing_intent,
+)
 from app.sources import local_source
 from app.utils import read_json
 
@@ -64,10 +72,34 @@ class PipelineFacade:
             "audio_streams": metadata.get("audio_streams"),
         }
 
+    def plan_processing(
+        self, project: DesktopProject, settings: DesktopSettings,
+    ) -> tuple[ProcessingIntent, ResolvedProcessingConfig, ProcessingEstimate]:
+        """Resolve the user choices and an estimate before a pipeline process starts."""
+
+        base_config = self._base_config(settings)
+        # Planning is also used by the GUI before a child process is prepared.
+        # Test harnesses and a first-run shell may not yet have an engine config;
+        # the built-in defaults still provide a useful, explicitly low-confidence
+        # estimate without hiding an eventual prepare-time configuration error.
+        config = load_config(base_config if base_config.is_file() else None)
+        intent = project.settings.processing_intent()
+        resolved = resolve_processing_intent(intent, project.source_metadata)
+        paid_ai_available = not settings.local_test_mode and (
+            config.ai.provider != "mock" or config.tts.provider != "mock"
+        )
+        estimate = estimate_processing(
+            resolved,
+            project.source_metadata,
+            paid_ai_available=paid_ai_available,
+        )
+        return intent, resolved, estimate
+
     def prepare(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
         source_path = validate_video_path(project.source_path)
         config = load_config(self._base_config(settings))
-        self._apply_project_options(config, project, settings)
+        _intent, resolved, _estimate = self.plan_processing(project, settings)
+        self._apply_project_options(config, project, settings, resolved)
 
         run_directory = Path(project.project_directory) / "runs" / run.run_id
         config_path = run_directory / "runtime-config.yaml"
@@ -104,6 +136,8 @@ class PipelineFacade:
                 "cache": str(config.production_render.cache_enabled).lower(),
                 "mock_ai": str(settings.local_test_mode).lower(),
                 "ai_provider": str(config.ai.provider),
+                "processing_mode": resolved.processing_mode,
+                "platform": resolved.platform.platform,
             },
         )
 
@@ -196,8 +230,11 @@ class PipelineFacade:
         return renamed if renamed.is_file() else example
 
     @staticmethod
-    def _apply_project_options(config: Any, project: DesktopProject, settings: DesktopSettings) -> None:
-        """Turn on existing production stages; do not introduce desktop-only logic."""
+    def _apply_project_options(
+        config: Any, project: DesktopProject, settings: DesktopSettings,
+        resolved: ResolvedProcessingConfig,
+    ) -> None:
+        """Turn user intent into established pipeline settings and production stages."""
 
         options = project.settings
         options.validate()
@@ -211,6 +248,10 @@ class PipelineFacade:
         config.production_render.encoder = options.encoder
         config.production_render.cache_enabled = options.use_cache
         config.device = settings.device_preference
+        apply_resolved_processing_config(config, resolved)
+        # A user can always choose not to reuse existing artifacts.  The product
+        # preset controls normal cache policy; this explicit advanced switch wins.
+        config.production_render.cache_enabled = options.use_cache and config.production_render.cache_enabled
         if settings.local_test_mode:
             config.ai.provider = "mock"
             config.tts.provider = "mock"

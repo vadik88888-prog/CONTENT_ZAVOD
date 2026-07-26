@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from app.product_flow import ProcessingIntent
 from app.utils import utc_now
 
 
@@ -26,8 +27,12 @@ class ProjectStatus:
 
 @dataclass(slots=True)
 class ProjectOptions:
-    """Only settings backed by current engine switches are exposed by the GUI."""
+    """Durable user choices for the simple product flow and advanced rendering."""
 
+    processing_mode: str = "standard"
+    deep_analysis: str = "auto"
+    platform: str = "universal"
+    clip_count: str = "3"
     subtitles_enabled: bool = True
     subtitle_style: str = "documentary"
     encoder: str = "auto"
@@ -35,14 +40,22 @@ class ProjectOptions:
     recompute_all: bool = False
 
     def validate(self) -> None:
-        if self.subtitle_style not in {"minimal", "documentary", "dynamic", "clean"}:
-            raise ValueError("Unsupported subtitle style.")
+        self.processing_intent().validate()
         if self.encoder not in {"auto", "cpu", "nvenc"}:
             raise ValueError("Unsupported encoder.")
         if not all(isinstance(item, bool) for item in (
             self.subtitles_enabled, self.use_cache, self.recompute_all,
         )):
             raise ValueError("Project options must contain booleans.")
+
+    def processing_intent(self) -> ProcessingIntent:
+        return ProcessingIntent(
+            processing_mode=self.processing_mode,
+            deep_analysis=self.deep_analysis,
+            platform=self.platform,
+            clip_count=str(self.clip_count),
+            subtitle_preset=self.subtitle_style,
+        )
 
 
 @dataclass(slots=True)
@@ -60,14 +73,14 @@ class DesktopProject:
     latest_run_id: str | None = None
     thumbnail_path: str | None = None
     source_metadata: dict[str, Any] = field(default_factory=dict)
-    schema_version: int = 1
+    schema_version: int = 2
 
     def validate(self) -> None:
         if not self.project_id or not self.name.strip():
             raise ValueError("Project id and name are required.")
         if self.status not in ProjectStatus.ALL:
             raise ValueError("Unsupported project status.")
-        if self.schema_version != 1:
+        if self.schema_version != 2:
             raise ValueError("Unsupported project schema version.")
         self.settings.validate()
 
@@ -91,6 +104,11 @@ class DesktopProject:
         settings = value.get("settings", {})
         if not isinstance(settings, dict):
             raise ValueError("Project settings are corrupted.")
+        supported_settings = {
+            "processing_mode", "deep_analysis", "platform", "clip_count",
+            "subtitles_enabled", "subtitle_style", "encoder", "use_cache", "recompute_all",
+        }
+        migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
@@ -99,11 +117,13 @@ class DesktopProject:
             source_path=str(value["source_path"]),
             project_directory=str(value["project_directory"]),
             status=str(value.get("status", ProjectStatus.DRAFT)),
-            settings=ProjectOptions(**settings),
+            settings=ProjectOptions(**migrated_settings),
             latest_run_id=str(value["latest_run_id"]) if value.get("latest_run_id") else None,
             thumbnail_path=str(value["thumbnail_path"]) if value.get("thumbnail_path") else None,
             source_metadata=dict(value.get("source_metadata") or {}),
-            schema_version=int(value.get("schema_version", 1)),
+            # Schema 1 projects had no product-flow intent.  Defaults preserve their
+            # prior standard/documentary desktop behaviour and are written as v2 next save.
+            schema_version=2,
         )
         project.validate()
         return project

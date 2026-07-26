@@ -451,6 +451,38 @@ class ProductionRenderConfig:
 
 
 @dataclass(slots=True)
+class ProductFlowConfig:
+    """Resolved user intent recorded with the runtime configuration and report."""
+
+    processing_mode: str = "standard"
+    deep_analysis_requested: str = "auto"
+    deep_analysis_resolved: bool = False
+    deep_analysis_reason: str = "Не запрашивался."
+    platform: str = "universal"
+    clip_count: int = 3
+    subtitle_preset: str = "documentary"
+    preset_version: str = "4B.1"
+
+    def validate(self) -> None:
+        if self.processing_mode not in {"fast", "standard", "maximum"}:
+            raise ClipEngineError("product_flow.processing_mode: fast, standard или maximum.")
+        if self.deep_analysis_requested not in {"auto", "on", "off"}:
+            raise ClipEngineError("product_flow.deep_analysis_requested: auto, on или off.")
+        if not isinstance(self.deep_analysis_resolved, bool):
+            raise ClipEngineError("product_flow.deep_analysis_resolved должен быть true или false.")
+        if not isinstance(self.deep_analysis_reason, str) or not self.deep_analysis_reason.strip():
+            raise ClipEngineError("product_flow.deep_analysis_reason не должен быть пустым.")
+        if self.platform not in {"tiktok", "reels", "shorts", "universal"}:
+            raise ClipEngineError("product_flow.platform содержит неподдерживаемую платформу.")
+        if not 1 <= self.clip_count <= 5:
+            raise ClipEngineError("product_flow.clip_count должен быть от 1 до 5.")
+        if self.subtitle_preset not in {"minimal", "documentary", "dynamic", "clean"}:
+            raise ClipEngineError("product_flow.subtitle_preset содержит неподдерживаемый стиль.")
+        if not isinstance(self.preset_version, str) or not self.preset_version.strip():
+            raise ClipEngineError("product_flow.preset_version не должен быть пустым.")
+
+
+@dataclass(slots=True)
 class AppConfig:
     whisper_model: str = "small"
     language: str | None = None
@@ -482,6 +514,7 @@ class AppConfig:
     tts: TTSConfig = field(default_factory=TTSConfig)
     audio_composition: AudioCompositionConfig = field(default_factory=AudioCompositionConfig)
     production_render: ProductionRenderConfig = field(default_factory=ProductionRenderConfig)
+    product_flow: ProductFlowConfig = field(default_factory=ProductFlowConfig)
     min_selected_clip_distance_seconds: float = 8.0
     optional_visual_features: bool = False
     # Compatibility flag for older local configurations; --mock-ai has priority.
@@ -518,6 +551,7 @@ class AppConfig:
         self.tts.validate()
         self.audio_composition.validate()
         self.production_render.validate()
+        self.product_flow.validate()
         if not 0 <= self.min_selected_clip_distance_seconds <= 600:
             raise ClipEngineError("min_selected_clip_distance_seconds должен быть от 0 до 600.")
         if not isinstance(self.optional_visual_features, bool):
@@ -560,6 +594,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "tts": TTSConfig,
             "audio_composition": AudioCompositionConfig,
             "production_render": ProductionRenderConfig,
+            "product_flow": ProductFlowConfig,
         }
         for name, config_type in nested.items():
             nested_values = values.get(name)
