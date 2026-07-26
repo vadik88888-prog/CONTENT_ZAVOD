@@ -27,6 +27,8 @@ from app.video_models import (
     RenderRequest,
     RenderResult,
     RenderValidation,
+    ReframeKeyframe,
+    ReframePlan,
     SourceVideoClip,
     SubtitleProject,
     VideoClipModel,
@@ -69,6 +71,7 @@ class VideoCompositionService:
         timeline, fallback_reasons = build_video_timeline(
             plan, audio_project, transcript, source.path, source_info, canvas, render_config,
         )
+        reframe_plan = build_reframe_plan(source_info, canvas, render_config, timeline)
         actual_audio_duration = float(mixed_info["audio_duration"])
         if abs(timeline.duration_seconds - actual_audio_duration) > render_config.maximum_duration_difference:
             raise ProductionRenderError(
@@ -99,7 +102,7 @@ class VideoCompositionService:
             project_id=project_id, status="skipped", source_video_path=str(source.path), source_checksum=source_checksum,
             production_plan_id=plan.plan_id, audio_project_id=audio_project.project_id, mixed_audio_path=str(mixed_path),
             canvas=canvas, target_duration_seconds=timeline.duration_seconds, actual_duration_seconds=0,
-            timeline=timeline, tracks=[track], subtitle_project=subtitle_project, render_request=request,
+            timeline=timeline, reframe_plan=reframe_plan, tracks=[track], subtitle_project=subtitle_project, render_request=request,
             metadata=metadata, warnings=list(subtitle_project.warnings), fallback_reasons=fallback_reasons,
         )
         render_root = output_directory / "production-render"
@@ -446,6 +449,78 @@ def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: Pr
     )
 
 
+def build_reframe_plan(
+    source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig, timeline: VideoTimeline,
+) -> ReframePlan:
+    """Persist the composition decision independently of FFmpeg filter generation.
+
+    ``subject_keyframes`` is an optional, cacheable input from a visual-analysis
+    provider.  Until that provider has high-confidence detections, the plan uses
+    a deterministic centred crop or a documented contain/blur fallback rather
+    than pretending subject tracking happened.
+    """
+
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    target = canvas.width / canvas.height
+    ratio = width / height
+    raw_keyframes = source_info.get("subject_keyframes", [])
+    keyframes: list[ReframeKeyframe] = []
+    if isinstance(raw_keyframes, list):
+        for item in raw_keyframes:
+            if not isinstance(item, dict):
+                continue
+            try:
+                keyframes.append(ReframeKeyframe(
+                    time_seconds=float(item["time_seconds"]), normalized_x=float(item["normalized_x"]),
+                    normalized_y=float(item["normalized_y"]), confidence=float(item.get("confidence", 0)),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+    confident = [item for item in keyframes if item.confidence >= 0.55]
+    if ratio <= target * 1.03:
+        return ReframePlan(
+            strategy="original_vertical", source_width=width, source_height=height,
+            canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
+        )
+    if config.crop_strategy == "center_crop" and confident:
+        return ReframePlan(
+            strategy="subject_crop", source_width=width, source_height=height,
+            canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
+            keyframes=_smooth_reframe_keyframes(confident), subject_detection_used=True,
+        )
+    if config.crop_strategy == "center_crop":
+        return ReframePlan(
+            strategy="center_crop", source_width=width, source_height=height,
+            canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
+            fallback_reason="No high-confidence subject observations are available.",
+        )
+    return ReframePlan(
+        strategy="blur_fallback" if config.crop_strategy == "fit_blur_background" else "contain",
+        source_width=width, source_height=height, canvas_width=canvas.width, canvas_height=canvas.height,
+        subtitle_reserved_bottom_ratio=0.16, fallback_reason="Crop strategy preserves the full source frame.",
+    )
+
+
+def _smooth_reframe_keyframes(keyframes: list[ReframeKeyframe]) -> list[ReframeKeyframe]:
+    ordered = sorted(keyframes, key=lambda item: item.time_seconds)
+    result: list[ReframeKeyframe] = []
+    previous: ReframeKeyframe | None = None
+    for item in ordered:
+        if previous is None:
+            smoothed = item
+        else:
+            # Bound per-sample motion to keep a tracker from making abrupt jumps.
+            smoothed = ReframeKeyframe(
+                time_seconds=item.time_seconds,
+                normalized_x=max(previous.normalized_x - 0.16, min(previous.normalized_x + 0.16, item.normalized_x)),
+                normalized_y=max(previous.normalized_y - 0.12, min(previous.normalized_y + 0.12, item.normalized_y)),
+                confidence=item.confidence,
+            )
+        result.append(smoothed)
+        previous = smoothed
+    return result
+
+
 def _visual_filter(clip: SourceVideoClip | FreezeFrameClip, canvas: CanvasConfig) -> str:
     crop = clip.crop_plan
     assert crop is not None
@@ -567,17 +642,19 @@ def _render_cache_key(
 def _write_project_artifacts(project: VideoProject, root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     timeline_path = root / "video-timeline.json"
+    reframe_path = root / "reframe-plan.json"
     subtitle_path = root / "subtitle-project.json"
     project_path = root / "video-project.json"
     result_path = root / "render-result.json"
     summary_path = root / "render-summary.txt"
-    artifacts = [str(project_path), str(timeline_path), str(subtitle_path), str(result_path), str(summary_path)]
+    artifacts = [str(project_path), str(timeline_path), str(reframe_path), str(subtitle_path), str(result_path), str(summary_path)]
     if (root / "production-subtitles.ass").is_file():
         artifacts.append(str(root / "production-subtitles.ass"))
     if project.result and project.result.output_file:
         artifacts.append(project.result.output_file)
     complete = project.model_copy(update={"artifact_paths": artifacts})
     write_json(timeline_path, complete.timeline.model_dump(mode="json"))
+    write_json(reframe_path, complete.reframe_plan.model_dump(mode="json"))
     if complete.subtitle_project is not None:
         write_json(subtitle_path, complete.subtitle_project.model_dump(mode="json"))
     write_json(project_path, complete.model_dump(mode="json"))
@@ -589,7 +666,7 @@ def _artifacts(root: Path, final_path: Path, clips: list[Path] | None = None) ->
     result: list[RenderArtifact] = []
     pairs = [
         ("final_mp4", final_path), ("video_project", root / "video-project.json"),
-        ("video_timeline", root / "video-timeline.json"), ("subtitle_project", root / "subtitle-project.json"),
+        ("video_timeline", root / "video-timeline.json"), ("reframe_plan", root / "reframe-plan.json"), ("subtitle_project", root / "subtitle-project.json"),
         ("production_ass", root / "production-subtitles.ass"), ("render_result", root / "render-result.json"),
         ("summary", root / "render-summary.txt"),
     ]

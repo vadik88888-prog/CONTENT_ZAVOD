@@ -16,6 +16,7 @@ from app.production_subtitles import build_subtitle_project, resolve_subtitle_st
 from app.sources import local_source
 from app.video_composition import (
     VideoCompositionService,
+    build_reframe_plan,
     build_video_timeline,
     make_crop_plan,
     probe_media,
@@ -147,6 +148,30 @@ def test_crop_plans_stay_inside_horizontal_vertical_and_square_sources(width: in
     if plan.crop_width is not None:
         assert plan.crop_x + plan.crop_width <= width
         assert plan.crop_y + plan.crop_height <= height
+
+
+def test_reframe_plan_uses_safe_fallback_and_smooths_subject_keyframes() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="center_crop")
+    fallback = build_reframe_plan(
+        {"display_width": 320, "display_height": 180}, canvas, config, VideoTimeline(clips=[], duration_seconds=0),
+    )
+    assert fallback.strategy == "center_crop"
+    assert fallback.subject_detection_used is False
+    tracked = build_reframe_plan(
+        {
+            "display_width": 320, "display_height": 180,
+            "subject_keyframes": [
+                {"time_seconds": 0, "normalized_x": 0.15, "normalized_y": 0.3, "confidence": 0.9},
+                {"time_seconds": 1, "normalized_x": 0.95, "normalized_y": 0.9, "confidence": 0.9},
+            ],
+        }, canvas, config, VideoTimeline(clips=[], duration_seconds=0),
+    )
+    assert tracked.strategy == "subject_crop" and tracked.subject_detection_used
+    assert tracked.keyframes[1].normalized_x - tracked.keyframes[0].normalized_x <= 0.16
+    assert tracked.keyframes[1].normalized_y - tracked.keyframes[0].normalized_y <= 0.12
 
 
 def test_rotation_metadata_is_reflected_in_safe_display_crop(tmp_path: Path) -> None:

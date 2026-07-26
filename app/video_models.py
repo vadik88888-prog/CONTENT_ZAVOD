@@ -56,6 +56,43 @@ class CropPlan(BaseModel):
         return self
 
 
+class ReframeKeyframe(BaseModel):
+    """A bounded crop position that can be interpolated by a future tracker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    time_seconds: float = Field(ge=0)
+    normalized_x: float = Field(ge=0, le=1)
+    normalized_y: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ReframePlan(BaseModel):
+    """Persisted visual-layout decision, independent from FFmpeg filter syntax."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal["subject_crop", "center_crop", "contain", "blur_fallback", "original_vertical"]
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    canvas_width: int = Field(gt=0)
+    canvas_height: int = Field(gt=0)
+    subtitle_reserved_bottom_ratio: float = Field(ge=0, le=0.5)
+    keyframes: list[ReframeKeyframe] = Field(default_factory=list)
+    subject_detection_used: bool = False
+    fallback_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _valid_plan(self) -> "ReframePlan":
+        if self.strategy == "subject_crop" and not self.keyframes:
+            raise ValueError("subject crop needs at least one keyframe")
+        if self.subject_detection_used and self.strategy != "subject_crop":
+            raise ValueError("subject detection must resolve to subject crop")
+        if self.fallback_reason and self.strategy == "subject_crop":
+            raise ValueError("subject crop cannot carry a fallback reason")
+        return self
+
+
 class VideoClip(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -244,7 +281,7 @@ class RenderRequest(BaseModel):
 class RenderArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    artifact_type: Literal["final_mp4", "video_project", "video_timeline", "subtitle_project", "production_ass", "render_result", "summary", "clip"]
+    artifact_type: Literal["final_mp4", "video_project", "video_timeline", "reframe_plan", "subtitle_project", "production_ass", "render_result", "summary", "clip"]
     path: str
     checksum: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     byte_size: int = Field(ge=0)
@@ -320,6 +357,7 @@ class VideoProject(BaseModel):
     target_duration_seconds: float = Field(ge=0)
     actual_duration_seconds: float = Field(ge=0)
     timeline: VideoTimeline
+    reframe_plan: ReframePlan
     tracks: list[VideoTrack]
     subtitle_project: SubtitleProject | None = None
     render_request: RenderRequest
