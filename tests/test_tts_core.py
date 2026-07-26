@@ -216,6 +216,15 @@ def test_budget_and_disabled_tts_prevent_provider_calls(tmp_path: Path) -> None:
     assert {item.fallback_reason for item in disabled.segments} == {"ai_disabled"}
 
 
+def test_mock_tts_reports_no_paid_cost(tmp_path: Path) -> None:
+    result = TTSService(tmp_path, _tts_config()).generate(
+        _plan(), tmp_path / "mock", tmp_path / "mock-out", provider=MockTTSProvider(),
+    )
+
+    assert result.estimated_cost == 0.0
+    assert result.actual_cost is None
+
+
 def test_missing_openai_key_is_a_safe_zero_call_fallback(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config = _tts_config()

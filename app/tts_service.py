@@ -125,11 +125,13 @@ class TTSService:
 
         by_id = {result.segment_id: result for result in [*results, *cached.values()]}
         ordered = [by_id[request.segment_id] for request in requests]
-        billed_estimate = round(sum(
-            _cost(request, self.config)
-            for request in requests
-            if by_id[request.segment_id].status == "generated"
-        ), 8)
+        billed_estimate = 0.0
+        if provider_config.provider == "openai":
+            billed_estimate = round(sum(
+                _cost(request, self.config)
+                for request in requests
+                if by_id[request.segment_id].status == "generated"
+            ), 8)
         result = self._result(batch, started_at, _status(ordered), ordered, billed_estimate, warnings)
         return self._write_artifacts(result, output_root, segments_dir)
 
