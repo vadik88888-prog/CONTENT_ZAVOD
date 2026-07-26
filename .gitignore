@@ -23,3 +23,5 @@ work/*
 output/*
 !output/.gitkeep
 models/
+ContentFactoryData/
+.content-factory/

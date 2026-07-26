@@ -1,0 +1,32 @@
+* {
+  color: #F4F6F8;
+  /* Arial ships with Windows and has the Cyrillic coverage needed for local paths. */
+  font-family: Arial;
+  font-size: 14px;
+}
+QMainWindow, QWidget#appShell, QWidget#screen, QStackedWidget#contentStack { background: #0D0F12; }
+QFrame#sidebar { background: #111419; border-right: 1px solid #272D36; }
+QFrame#card, QFrame#dropZone, QFrame#preview { background: #15191F; border: 1px solid #272D36; border-radius: 12px; }
+QFrame#dropZone { border: 1px dashed #4A5361; min-height: 132px; }
+QLabel#title { font-size: 26px; font-weight: 700; }
+QLabel#subtitle { color: #A8B0BC; }
+QLabel#muted { color: #737D8C; }
+QLabel#status { border-radius: 9px; padding: 3px 8px; background: #252C38; color: #D6DBE4; }
+QPushButton { background: #222832; border: 1px solid #303946; border-radius: 8px; padding: 8px 12px; min-height: 18px; }
+QPushButton:hover { background: #2A3240; }
+QPushButton:focus { border: 1px solid #7C8CFF; }
+QPushButton#primary { background: #7C8CFF; color: #0D0F12; border: 1px solid #91A0FF; font-weight: 700; }
+QPushButton#primary:hover { background: #94A1FF; }
+QPushButton#danger { background: #542933; border-color: #864150; }
+QPushButton#nav { background: transparent; color: #A8B0BC; text-align: left; border: 0; border-radius: 7px; padding: 10px; }
+QPushButton#nav:checked { background: #222938; color: #F4F6F8; }
+QLineEdit, QComboBox, QTextEdit { background: #111419; border: 1px solid #303946; border-radius: 8px; padding: 7px; selection-background-color: #7C8CFF; }
+QComboBox QAbstractItemView { background: #15191F; selection-background-color: #303B68; }
+QCheckBox { spacing: 8px; }
+QProgressBar { background: #111419; border: 0; border-radius: 4px; min-height: 7px; max-height: 7px; }
+QProgressBar::chunk { background: #7C8CFF; border-radius: 4px; }
+QScrollArea { border: 0; background: #0D0F12; }
+QScrollArea QWidget { background: #0D0F12; }
+QAbstractScrollArea::viewport { background: #0D0F12; }
+QPlainTextEdit::viewport { background: #111419; }
+QToolTip { background: #1A1F27; border: 1px solid #303946; color: #F4F6F8; }

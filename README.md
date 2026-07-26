@@ -624,6 +624,37 @@ codec settings. Изменение только subtitle style рендерит 
 Goal 3D пока не включает smart crop/face tracking, B-roll, video/image generation,
 karaoke captions, motion graphics, новый audio mix или mux обратно в legacy clips.
 
+## Desktop application (Goal 4A)
+
+Content Factory получил локальный desktop foundation на PySide6/Qt. Это рабочая
+внутренняя версия, а не финальный premium-интерфейс и не production sign-off.
+Она создаёт persistent projects, запускает существующий pipeline в отдельном
+локальном процессе, показывает этап обработки, поддерживает отмену и сохраняет
+append-only историю запусков.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m app.gui
+```
+
+В Settings можно выбрать существующий `config.yaml`. Для локальной технической
+проверки без API-ключей включите «Локальный тестовый режим без внешних API»:
+он использует существующие mock providers, а не имитирует платный результат.
+Ключи остаются в `.env`, не показываются и не сохраняются в desktop JSON.
+
+Данные приложения по умолчанию хранятся в `%LOCALAPPDATA%\ContentFactoryData`;
+исходное видео не копируется. Каждый запуск получает собственные `run.json`,
+`pipeline.log`, snapshot report и архивный MP4. Подробности:
+[`desktop-architecture.md`](docs/desktop-architecture.md),
+[`desktop-project-storage.md`](docs/desktop-project-storage.md),
+[`desktop-processing-lifecycle.md`](docs/desktop-processing-lifecycle.md),
+[`desktop-manual-qa.md`](docs/desktop-manual-qa.md).
+
+Известные ограничения: окончательная проверка встроенного multimedia playback,
+fonts и high-DPI нужна на целевых Windows-машинах; реальные content QA и billing
+validation остаются незавершёнными из Goal 3E. Goal 4A не включает installer,
+cloud/web deployment, очередь нескольких jobs, editor, accounts или автопостинг.
+
 ## Тесты
 
 После активации виртуального окружения:
