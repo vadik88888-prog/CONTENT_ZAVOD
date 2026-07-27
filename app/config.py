@@ -112,6 +112,14 @@ class ContentUnderstandingConfig:
     min_story_unit_seconds: float = 12.0
     target_story_unit_seconds: float = 38.0
     max_story_unit_seconds: float = 90.0
+    boundary_schema_version: str = "5A.1"
+    max_head_padding_seconds: float = 0.5
+    target_head_padding_seconds: float = 0.25
+    min_tail_padding_seconds: float = 0.25
+    target_tail_padding_seconds: float = 0.65
+    max_tail_padding_seconds: float = 1.5
+    max_semantic_extension_seconds: float = 12.0
+    continuation_risk_threshold: float = 0.65
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -121,6 +129,7 @@ class ContentUnderstandingConfig:
             ("content_understanding.profile_schema_version", self.profile_schema_version),
             ("content_understanding.content_map_schema_version", self.content_map_schema_version),
             ("content_understanding.story_unit_schema_version", self.story_unit_schema_version),
+            ("content_understanding.boundary_schema_version", self.boundary_schema_version),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
@@ -135,6 +144,14 @@ class ContentUnderstandingConfig:
             raise ClipEngineError(
                 "content_understanding: min StoryUnit ≤ target StoryUnit ≤ max StoryUnit ≤ 180."
             )
+        if not 0 <= self.target_head_padding_seconds <= self.max_head_padding_seconds <= 2:
+            raise ClipEngineError("content_understanding head padding должен быть от 0 до 2 секунд.")
+        if not 0 <= self.min_tail_padding_seconds <= self.target_tail_padding_seconds <= self.max_tail_padding_seconds <= 3:
+            raise ClipEngineError("content_understanding tail padding должен быть от 0 до 3 секунд.")
+        if not 0 <= self.max_semantic_extension_seconds <= 30:
+            raise ClipEngineError("content_understanding.max_semantic_extension_seconds должен быть от 0 до 30.")
+        if not 0 <= self.continuation_risk_threshold <= 1:
+            raise ClipEngineError("content_understanding.continuation_risk_threshold должен быть от 0 до 1.")
 
 
 DEFAULT_SCORING_WEIGHTS = {

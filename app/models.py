@@ -46,6 +46,12 @@ class Candidate:
     local_quality_score: float = 0.0
     ai_score: float | None = None
     explanations: list[str] = field(default_factory=list)
+    chapter_id: str | None = None
+    story_unit_id: str | None = None
+    core_idea: str = ""
+    content_signature: dict[str, Any] = field(default_factory=dict)
+    boundary_diagnostics: dict[str, Any] = field(default_factory=dict)
+    incremental_coverage_score: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -67,6 +73,12 @@ class Candidate:
             "local_quality_score": round(self.local_quality_score, 3),
             "ai_score": round(self.ai_score, 3) if self.ai_score is not None else None,
             "explanations": self.explanations,
+            "chapter_id": self.chapter_id,
+            "story_unit_id": self.story_unit_id,
+            "core_idea": self.core_idea,
+            "content_signature": self.content_signature,
+            "boundary_diagnostics": self.boundary_diagnostics,
+            "incremental_coverage_score": round(self.incremental_coverage_score, 3),
         }
 
 
@@ -128,6 +140,12 @@ def candidate_from_dict(data: dict[str, Any]) -> Candidate:
         local_quality_score=float(data.get("local_quality_score", 0)),
         ai_score=float(data["ai_score"]) if data.get("ai_score") is not None else None,
         explanations=[str(value) for value in data.get("explanations", [])],
+        chapter_id=str(data["chapter_id"]) if data.get("chapter_id") is not None else None,
+        story_unit_id=str(data["story_unit_id"]) if data.get("story_unit_id") is not None else None,
+        core_idea=str(data.get("core_idea", "")),
+        content_signature=dict(data.get("content_signature", {})),
+        boundary_diagnostics=dict(data.get("boundary_diagnostics", {})),
+        incremental_coverage_score=float(data.get("incremental_coverage_score", 0)),
     )
 
 

@@ -57,7 +57,14 @@ def build_source_context(
         identifier = int(raw.get("id", index))
         belongs_to_candidate = identifier in candidate_ids or (end > candidate.start and start < candidate.end)
         if belongs_to_candidate:
-            primary.append(EvidenceSegment(identifier, start, end, text, FactSourceScope.PRIMARY_CANDIDATE))
+            # Candidate boundaries are resolved before transformation.  Keep the
+            # exact source range in every evidence object so ProductionPlan,
+            # dialogue extraction and subtitle timing cannot silently expand a
+            # safe semantic boundary back to the full Whisper segment.
+            primary_start = max(start, candidate.start)
+            primary_end = min(end, candidate.end)
+            if primary_start < primary_end:
+                primary.append(EvidenceSegment(identifier, primary_start, primary_end, text, FactSourceScope.PRIMARY_CANDIDATE))
         elif end > before_start and start < after_end:
             supporting.append(EvidenceSegment(identifier, start, end, text, FactSourceScope.SUPPORTING_CONTEXT))
     if not primary and candidate.text.strip():

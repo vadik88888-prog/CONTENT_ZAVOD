@@ -15,6 +15,12 @@ def select_clips(scored: list[ScoredCandidate], config: AppConfig) -> list[Score
     for item in sorted(scored, key=lambda value: value.score, reverse=True):
         if not item.selected:
             continue
+        boundary = item.candidate.boundary_diagnostics
+        if boundary and not bool(boundary.get("eligible", False)):
+            item.selected = False
+            item.selection_reason = str(boundary.get("fallback_reason") or "Semantic boundary не прошла no-cut-off validation.")
+            item.selection_diagnostics = {"decision": "rejected_boundary", "boundary": boundary}
+            continue
         if item.score < config.score_threshold:
             item.selected = False
             item.selection_reason = "Оценка ниже порога."

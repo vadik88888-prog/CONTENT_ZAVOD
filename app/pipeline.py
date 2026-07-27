@@ -21,6 +21,7 @@ from app.content_understanding import (
     CONTENT_STRATEGY_VERSION,
     build_global_content_map,
     build_video_content_profile,
+    generate_semantic_candidates,
     story_units_artifact,
 )
 from app.content_transformation import (
@@ -30,7 +31,6 @@ from app.content_transformation import (
 )
 from app.errors import AudioCompositionError, ClipEngineError, ProductionPlanError, ProductionRenderError, StageError, TTSError, TransformationProviderError
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
-from app.intelligence_candidates import generate_candidates_with_stats
 from app.local_scoring import score_candidates
 from app.media import prepare_media
 from app.models import Candidate, candidate_from_dict, scored_from_dict
@@ -57,7 +57,7 @@ from app.visual_analysis import analyse_video_subjects
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
     "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
-    "global_content_map", "story_units", "render", "report",
+    "global_content_map", "story_units", "semantic_boundaries", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.7.0"
 TRANSFORMATION_STAGES = (
@@ -314,7 +314,16 @@ class Pipeline:
                 "scenes": _hash(scenes),
                 "visual_analysis": _hash(visual_analysis),
                 "profile": _hash(content_profile),
-                "content_understanding": self.config.content_understanding,
+                "content_map_settings": {
+                    "strategy_version": self.config.content_understanding.strategy_version,
+                    "content_map_schema_version": self.config.content_understanding.content_map_schema_version,
+                    "story_unit_schema_version": self.config.content_understanding.story_unit_schema_version,
+                    "chapter_pause_seconds": self.config.content_understanding.chapter_pause_seconds,
+                    "max_chapter_seconds": self.config.content_understanding.max_chapter_seconds,
+                    "min_story_unit_seconds": self.config.content_understanding.min_story_unit_seconds,
+                    "target_story_unit_seconds": self.config.content_understanding.target_story_unit_seconds,
+                    "max_story_unit_seconds": self.config.content_understanding.max_story_unit_seconds,
+                },
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
@@ -332,10 +341,34 @@ class Pipeline:
             lambda: _write(work_directory / "story_units.json", story_units_artifact(content_map, transcript)),
             cache_tracker=source_cache,
         )
+        semantic_boundaries = self._cached(
+            tracker, "semantic_boundaries", work_directory / "semantic_boundaries.json",
+            {
+                "content_map": _hash(content_map), "transcript": _hash(transcript),
+                "transcript_features": _hash(transcript_features), "scenes": _hash(scenes),
+                "boundary_settings": {
+                    "schema_version": self.config.content_understanding.boundary_schema_version,
+                    "max_head_padding_seconds": self.config.content_understanding.max_head_padding_seconds,
+                    "target_head_padding_seconds": self.config.content_understanding.target_head_padding_seconds,
+                    "min_tail_padding_seconds": self.config.content_understanding.min_tail_padding_seconds,
+                    "target_tail_padding_seconds": self.config.content_understanding.target_tail_padding_seconds,
+                    "max_tail_padding_seconds": self.config.content_understanding.max_tail_padding_seconds,
+                    "max_semantic_extension_seconds": self.config.content_understanding.max_semantic_extension_seconds,
+                    "continuation_risk_threshold": self.config.content_understanding.continuation_risk_threshold,
+                },
+            },
+            lambda: _write_generated_candidates(
+                work_directory / "semantic_boundaries.json",
+                generate_semantic_candidates(content_map, transcript, transcript_features, scenes, self.config),
+            ),
+            cache_tracker=source_cache,
+        )
         raw_candidates = self._cached(
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
-            {"transcript_features": _hash(transcript_features), "audio": _hash(audio_features), "scenes": _hash(scenes), "settings": self.config.candidate_generation},
-            lambda: _write_generated_candidates(work_directory / "candidates_v2.json", generate_candidates_with_stats(transcript, transcript_features, audio_features, scenes, self.config.candidate_generation)),
+            {
+                "semantic_boundaries": _hash(semantic_boundaries),
+            },
+            lambda: _write(work_directory / "candidates_v2.json", dict(semantic_boundaries)),
             cache_tracker=source_cache,
         )
         # Compatibility artifact retained for existing users of the pre-1.6 cache layout.
@@ -457,6 +490,7 @@ class Pipeline:
                 "profile": content_profile,
                 "content_map": content_map,
                 "story_units_ref": str(work_directory / "story_units.json"),
+                "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "story_unit_count": len(story_units.get("story_units", [])),
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "fallback_used": bool(content_profile.get("fallback_used", True)),
