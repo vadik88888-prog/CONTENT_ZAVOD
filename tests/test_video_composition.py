@@ -16,6 +16,8 @@ from app.production_subtitles import build_subtitle_project, resolve_subtitle_st
 from app.sources import local_source
 from app.video_composition import (
     VideoCompositionService,
+    apply_composition_segments,
+    build_composition_segments,
     build_reframe_plan,
     build_video_timeline,
     make_crop_plan,
@@ -23,8 +25,14 @@ from app.video_composition import (
     production_render_report_section,
     _ffmpeg,
     _timeline_filter,
+    _split_timeline_at_scene_boundaries,
+    _validate_tracking_decisions,
+    _visual_filter,
 )
-from app.video_models import CanvasConfig, CropPlan, RenderValidation, SourceVideoClip, VideoTimeline
+from app.video_models import (
+    CanvasConfig, CompositionSegment, CropPlan, ReframeKeyframe, RenderValidation,
+    SourceVideoClip, SubjectBounds, VideoTimeline,
+)
 from tests.test_audio_composition import _audio_config, _plan, _tts_result
 
 
@@ -160,7 +168,7 @@ def test_reframe_plan_uses_safe_fallback_and_smooths_subject_keyframes() -> None
     )
     assert fallback.strategy == "center_crop"
     assert fallback.subject_detection_used is False
-    tracked = build_reframe_plan(
+    manual_with_subject = build_reframe_plan(
         {
             "display_width": 320, "display_height": 180,
             "subject_keyframes": [
@@ -168,6 +176,18 @@ def test_reframe_plan_uses_safe_fallback_and_smooths_subject_keyframes() -> None
                 {"time_seconds": 1, "normalized_x": 0.95, "normalized_y": 0.9, "confidence": 0.9},
             ],
         }, canvas, config, VideoTimeline(clips=[], duration_seconds=0),
+    )
+    assert manual_with_subject.strategy == "center_crop"
+    assert manual_with_subject.subject_detection_used is False
+    auto = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    tracked = build_reframe_plan(
+        {
+            "display_width": 320, "display_height": 180,
+            "subject_keyframes": [
+                {"time_seconds": 0, "normalized_x": 0.15, "normalized_y": 0.3, "confidence": 0.9},
+                {"time_seconds": 1, "normalized_x": 0.95, "normalized_y": 0.9, "confidence": 0.9},
+            ],
+        }, canvas, auto, VideoTimeline(clips=[], duration_seconds=0),
     )
     assert tracked.strategy == "subject_crop" and tracked.subject_detection_used
     assert tracked.keyframes[1].normalized_x - tracked.keyframes[0].normalized_x <= 0.16
@@ -200,7 +220,7 @@ def test_safe_auto_reframe_preserves_unknown_landscape_and_uses_subject_when_con
 def test_subject_anchor_changes_the_actual_horizontal_crop() -> None:
     from app.config import ProductionRenderConfig
 
-    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="center_crop")
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
     canvas = CanvasConfig(width=180, height=320, fps=30)
     crop = make_crop_plan(
         {"display_width": 1280, "display_height": 720, "rotation": 0, "subject_keyframes": [{"normalized_x": 0.8, "normalized_y": 0.4, "confidence": 0.9}]},
@@ -208,6 +228,238 @@ def test_subject_anchor_changes_the_actual_horizontal_crop() -> None:
     )
     assert crop.strategy == "manual_normalized_crop"
     assert crop.crop_x is not None and crop.crop_x > (1280 - (720 * 9 / 16)) / 2
+
+
+def _tracking_timeline(source_path: str, crop: CropPlan, *, duration: float = 3, speaker: str | None = "speaker-a") -> VideoTimeline:
+    clip = SourceVideoClip(
+        clip_id="tracking-source", order=1, timeline_start_seconds=0, timeline_end_seconds=duration,
+        duration_seconds=duration, source_path=source_path, source_start_seconds=0, source_end_seconds=duration,
+        production_segment_id="dialogue-tracking", speaker=speaker, visual_strategy="mapped_source",
+        crop_plan=crop, status="ready",
+    )
+    return VideoTimeline(clips=[clip], duration_seconds=duration)
+
+
+def test_composition_segments_prefer_static_crop_then_enable_safe_tracking() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {"display_width": 320, "display_height": 180, "rotation": 0}
+    base_crop = make_crop_plan(source, canvas, config)
+    static_timeline = _tracking_timeline("source.mp4", base_crop)
+    static_source = {
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.48, "normalized_y": 0.38, "confidence": 0.9, "tracking_target": "primary_face"},
+            {"time_seconds": 1.5, "normalized_x": 0.51, "normalized_y": 0.40, "confidence": 0.92, "tracking_target": "primary_face"},
+            {"time_seconds": 3, "normalized_x": 0.53, "normalized_y": 0.39, "confidence": 0.91, "tracking_target": "primary_face"},
+        ],
+    }
+    static = build_composition_segments(static_source, canvas, config, static_timeline)[0]
+    assert static.tracking_mode == "static_subject_crop"
+    assert static.static_crop_sufficient and not static.tracking_required
+
+    moving_source = {
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.28, "normalized_y": 0.40, "confidence": 0.92, "tracking_target": "primary_face"},
+            {"time_seconds": 1.5, "normalized_x": 0.45, "normalized_y": 0.41, "confidence": 0.92, "tracking_target": "primary_face"},
+            {"time_seconds": 3, "normalized_x": 0.62, "normalized_y": 0.40, "confidence": 0.92, "tracking_target": "primary_face"},
+        ],
+    }
+    plan = build_reframe_plan(moving_source, canvas, config, static_timeline)
+    moving = plan.composition_segments[0]
+    assert moving.tracking_mode == "face_tracking"
+    assert moving.tracking_required and not moving.static_crop_sufficient
+    assert moving.tracking_validation_status == "passed"
+    assert moving.tracking_diagnostics["target_visible"]
+    assert moving.tracking_diagnostics["target_in_safe_zone"]
+    assert moving.target_crop and len(moving.target_crop.tracking_keyframes) >= 2
+    applied = apply_composition_segments(static_timeline, plan.composition_segments)
+    rendered_crop = applied.clips[0].crop_plan
+    assert rendered_crop and rendered_crop.tracking_keyframes
+    assert "if(lt(t\\," in _visual_filter(applied.clips[0], canvas)
+
+
+def test_tracking_quality_validator_disables_a_crop_that_loses_its_target() -> None:
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    unsafe = CompositionSegment(
+        segment_id="unsafe-tracker", visual_clip_id="source", start_seconds=0, end_seconds=1,
+        source_start_seconds=0, source_end_seconds=1, strategy="face_crop",
+        subject_bounds=[
+            SubjectBounds(time_seconds=0, center_x=0.80, center_y=0.40, width=0.16, height=0.20, confidence=0.95, target="primary_face"),
+            SubjectBounds(time_seconds=1, center_x=0.82, center_y=0.40, width=0.16, height=0.20, confidence=0.95, target="primary_face"),
+        ],
+        target_crop=CropPlan(
+            strategy="manual_normalized_crop", source_width=320, source_height=180,
+            crop_width=100, crop_height=180, crop_x=0, crop_y=0,
+            tracking_keyframes=[
+                ReframeKeyframe(time_seconds=0, normalized_x=0.10, normalized_y=0.40, confidence=0.95),
+                ReframeKeyframe(time_seconds=1, normalized_x=0.10, normalized_y=0.40, confidence=0.95),
+            ],
+        ),
+        confidence=0.95, tracking_mode="face_tracking", tracking_target="primary_face",
+        tracking_required=True, tracking_confidence=0.95,
+        tracking_reason="test", static_crop_sufficient=False, tracking_risk="low",
+    )
+    repaired = _validate_tracking_decisions([unsafe], canvas)[0]
+    assert repaired.tracking_mode == "safe_fallback"
+    assert repaired.tracking_validation_status == "failed_repaired"
+    assert repaired.tracking_diagnostics["target_visible"] is False
+    assert "fully visible" in repaired.tracking_reason
+
+
+def test_tracking_engine_uses_group_or_safe_fallback_for_risky_scenes() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {"display_width": 320, "display_height": 180, "rotation": 0}
+    timeline = _tracking_timeline("source.mp4", make_crop_plan(source, canvas, config), duration=1)
+    group = build_composition_segments({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.45, "normalized_y": 0.4, "confidence": 0.9, "visible_face_count": 2, "active_speaker_confidence": 0.95},
+            {"time_seconds": 1, "normalized_x": 0.55, "normalized_y": 0.4, "confidence": 0.9, "visible_face_count": 2, "active_speaker_confidence": 0.95},
+        ],
+    }, canvas, config, timeline)[0]
+    assert group.tracking_mode == "group_framing"
+    assert not group.tracking_required
+    assert group.minimum_focus_hold_seconds == pytest.approx(1.25)
+
+    unstable = build_reframe_plan({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.15, "normalized_y": 0.4, "confidence": 0.95},
+            {"time_seconds": 1, "normalized_x": 0.90, "normalized_y": 0.4, "confidence": 0.95},
+        ],
+    }, canvas, config, timeline).composition_segments[0]
+    assert unstable.tracking_mode == "safe_fallback"
+    assert unstable.fallback_strategy == "fit_with_blur"
+    assert "below the safe threshold" in unstable.tracking_reason
+
+    scene_changed = build_composition_segments({
+        **source,
+        "scene_boundaries": [{"timestamp": 0.5}],
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.28, "normalized_y": 0.4, "confidence": 0.95},
+            {"time_seconds": 1, "normalized_x": 0.48, "normalized_y": 0.4, "confidence": 0.95},
+        ],
+    }, canvas, config, timeline)[0]
+    assert scene_changed.tracking_mode == "scene_wide"
+    assert scene_changed.scene_change_count == 1
+    assert scene_changed.transition_type == "cut"
+
+    tiny_face = build_composition_segments({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.25, "normalized_y": 0.4, "normalized_width": 0.05, "normalized_height": 0.05, "confidence": 0.95, "tracking_target": "primary_face"},
+            {"time_seconds": 1, "normalized_x": 0.45, "normalized_y": 0.4, "normalized_width": 0.05, "normalized_height": 0.05, "confidence": 0.95, "tracking_target": "primary_face"},
+        ],
+    }, canvas, config, timeline)[0]
+    assert tiny_face.tracking_mode == "safe_fallback"
+    assert "too small" in tiny_face.tracking_reason
+
+    screen = build_composition_segments({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.5, "normalized_y": 0.5, "confidence": 0.95, "tracking_target": "screen_region"},
+        ],
+    }, canvas, config, timeline)[0]
+    assert screen.tracking_mode == "scene_wide"
+    assert screen.tracking_target == "screen_region"
+
+
+def test_scene_boundaries_split_the_render_timeline_and_force_controlled_cuts() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto", transitions="short_crossfade")
+    source = {"display_width": 320, "display_height": 180, "rotation": 0}
+    clip = SourceVideoClip(
+        clip_id="source-shot", order=1, timeline_start_seconds=0, timeline_end_seconds=3, duration_seconds=3,
+        source_path="source.mp4", source_start_seconds=0, source_end_seconds=3,
+        visual_strategy="mapped_source", crop_plan=make_crop_plan(source, canvas, config), status="ready",
+    )
+    split = _split_timeline_at_scene_boundaries(
+        VideoTimeline(clips=[clip], duration_seconds=3),
+        {**source, "scene_boundaries": [{"timestamp": 1}, {"timestamp": 2}]}, config,
+    )
+    assert [item.clip_id for item in split.clips] == ["source-shot-scene-01", "source-shot-scene-02", "source-shot-scene-03"]
+    assert all(item.transition_type == "cut" for item in split.transitions)
+    graph, label = _timeline_filter([item.duration_seconds for item in split.clips], split.transitions)
+    assert "xfade" not in graph and "concat=n=2" in graph and label == "[mix2]"
+
+
+def test_production_render_reads_scene_boundaries_and_renders_a_controlled_cut(tmp_path: Path) -> None:
+    from app.utils import write_json
+
+    config, plan, source, transcript, audio = _upstream(tmp_path)
+    config.production_render.transitions = "short_crossfade"
+    write_json(tmp_path / "work" / "scene_boundaries.json", {"boundaries": [{"timestamp": 1.5}]})
+    project = VideoCompositionService(tmp_path, config).compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "out",
+    )
+    assert project.result and project.result.validation.status == "valid"
+    assert any(item.transition_type == "cut" for item in project.timeline.transitions)
+    assert len(project.reframe_plan.composition_segments) == len(project.timeline.clips)
+    assert production_render_report_section(project)["composition"]["summary"]["scene_transition_count"] == 1
+
+
+def test_active_speaker_tracking_applies_hysteresis_before_switching_focus() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {"display_width": 320, "display_height": 180, "rotation": 0}
+    crop = make_crop_plan(source, canvas, config)
+    first = SourceVideoClip(
+        clip_id="speaker-a", order=1, timeline_start_seconds=0, timeline_end_seconds=2, duration_seconds=2,
+        source_path="source.mp4", source_start_seconds=0, source_end_seconds=1.95, speaker="speaker-a",
+        visual_strategy="mapped_source", crop_plan=crop, status="ready",
+    )
+    second = SourceVideoClip(
+        clip_id="speaker-b", order=2, timeline_start_seconds=2, timeline_end_seconds=4, duration_seconds=2,
+        source_path="source.mp4", source_start_seconds=2.05, source_end_seconds=4, speaker="speaker-b",
+        visual_strategy="mapped_source", crop_plan=crop, status="ready",
+    )
+    timeline = VideoTimeline(clips=[first, second], duration_seconds=4)
+    plan = build_reframe_plan({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.25, "normalized_y": 0.4, "confidence": 0.92, "visible_face_count": 2, "active_speaker_confidence": 0.92},
+            {"time_seconds": 1.95, "normalized_x": 0.45, "normalized_y": 0.4, "confidence": 0.92, "visible_face_count": 2, "active_speaker_confidence": 0.92},
+            {"time_seconds": 2.05, "normalized_x": 0.25, "normalized_y": 0.4, "confidence": 0.82, "visible_face_count": 2, "active_speaker_confidence": 0.82},
+            {"time_seconds": 4, "normalized_x": 0.45, "normalized_y": 0.4, "confidence": 0.82, "visible_face_count": 2, "active_speaker_confidence": 0.82},
+        ],
+    }, canvas, config, timeline)
+    first_segment, second_segment = plan.composition_segments
+    assert first_segment.tracking_mode == "active_speaker_tracking"
+    assert second_segment.tracking_mode == "group_framing"
+    assert "hysteresis" in second_segment.tracking_reason
+
+
+def test_tracking_filter_renders_a_smoothed_motion_crop(tmp_path: Path) -> None:
+    from app.config import ProductionRenderConfig
+
+    source_path = _source_video(tmp_path / "tracking-source.mp4")
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {"display_width": 320, "display_height": 180, "rotation": 0}
+    timeline = _tracking_timeline(str(source_path), make_crop_plan(source, canvas, config))
+    reframe = build_reframe_plan({
+        **source,
+        "subject_keyframes": [
+            {"time_seconds": 0, "normalized_x": 0.28, "normalized_y": 0.4, "confidence": 0.92},
+            {"time_seconds": 1.5, "normalized_x": 0.45, "normalized_y": 0.4, "confidence": 0.92},
+            {"time_seconds": 3, "normalized_x": 0.62, "normalized_y": 0.4, "confidence": 0.92},
+        ],
+    }, canvas, config, timeline)
+    applied = apply_composition_segments(timeline, reframe.composition_segments)
+    destination = tmp_path / "tracked.mp4"
+    VideoCompositionService(tmp_path, _audio_config())._prepare_visual_clip(applied.clips[0], canvas, destination)
+    assert abs(float(probe_media(destination, require_video=True)["video_duration"]) - 3) < 0.15
 
 
 def test_rotation_metadata_is_reflected_in_safe_display_crop(tmp_path: Path) -> None:
@@ -332,6 +584,12 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
         "original_text", "original_line_count", "resolved_lines", "resolved_font_size",
         "split_reason", "fallback_used", "layout_state",
     } <= cue.keys() for cue in layout["cues"])
+    composition = report["composition"]
+    assert len(composition["segments"]) == report["clip_count"]
+    assert {
+        "foreground_coverage_ratio", "blur_coverage_ratio", "subject_screen_ratio",
+        "unused_visual_area_ratio", "scene_transition_count",
+    } <= composition["summary"].keys()
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:

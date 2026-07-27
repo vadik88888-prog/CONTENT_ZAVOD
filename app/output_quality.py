@@ -35,11 +35,56 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
                 warnings.append(f"Subtitle cue {cue.cue_id} uses the safe fitted fallback.")
     reframe = getattr(project, "reframe_plan", None)
     fallback = getattr(reframe, "fallback_reason", None)
+    composition_segments = list(getattr(reframe, "composition_segments", []) or [])
+    tracking_modes: dict[str, int] = {}
+    tracking_validation: list[dict[str, Any]] = []
+    composition_quality: list[dict[str, Any]] = []
+    for segment in composition_segments:
+        mode = str(getattr(segment, "tracking_mode", "none"))
+        tracking_modes[mode] = tracking_modes.get(mode, 0) + 1
+        validation_status = str(getattr(segment, "tracking_validation_status", "not_applicable"))
+        if mode in {"face_tracking", "person_tracking", "active_speaker_tracking", "object_tracking"}:
+            if bool(getattr(segment, "static_crop_sufficient", False)):
+                errors.append(f"Composition segment {segment.segment_id} tracks despite a sufficient static crop.")
+            if validation_status not in {"passed", "passed_with_warning"}:
+                errors.append(f"Composition segment {segment.segment_id} has unvalidated dynamic tracking.")
+        if validation_status == "failed_repaired":
+            warnings.append(f"Composition segment {segment.segment_id} disabled tracking and applied its safe fallback.")
+        composition_status = str(getattr(segment, "composition_quality_status", "passed"))
+        if composition_status in {"failed", "failed_repairable"}:
+            errors.append(f"Composition segment {segment.segment_id} did not resolve its composition quality failure.")
+        elif composition_status == "passed_with_warning":
+            warnings.append(f"Composition segment {segment.segment_id} has composition-quality warnings.")
+        composition_quality.append({
+            "segment_id": segment.segment_id,
+            "status": composition_status,
+            "reasons": list(getattr(segment, "composition_quality_reasons", []) or []),
+            "diagnostics": dict(getattr(segment, "composition_diagnostics", {}) or {}),
+        })
+        if mode in {"safe_fallback", "scene_wide", "group_framing"} or getattr(segment, "fallback_reason", None):
+            tracking_validation.append({
+                "segment_id": segment.segment_id,
+                "tracking_mode": mode,
+                "status": validation_status,
+                "reason": getattr(segment, "tracking_reason", None),
+                "fallback_reason": getattr(segment, "fallback_reason", None),
+            })
     return {
         "status": "failed" if errors else "warning" if warnings else "passed",
         "warnings": warnings,
         "errors": errors,
         "reframe_fallback": fallback,
+        "tracking": {
+            "segment_count": len(composition_segments),
+            "modes": tracking_modes,
+            "required_count": sum(bool(getattr(segment, "tracking_required", False)) for segment in composition_segments),
+            "repaired_count": sum(
+                getattr(segment, "tracking_validation_status", "") == "failed_repaired"
+                for segment in composition_segments
+            ),
+            "decisions_requiring_attention": tracking_validation,
+        },
+        "composition_quality": composition_quality,
         "fallback_fill_count": len(fills),
         "visual_clip_count": len(clips),
     }

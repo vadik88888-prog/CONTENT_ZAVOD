@@ -28,6 +28,17 @@ class CanvasConfig(BaseModel):
         return self
 
 
+class ReframeKeyframe(BaseModel):
+    """A normalized subject position used by a static or moving crop."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    time_seconds: float = Field(ge=0)
+    normalized_x: float = Field(ge=0, le=1)
+    normalized_y: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+
+
 class CropPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -41,6 +52,7 @@ class CropPlan(BaseModel):
     crop_height: int | None = Field(default=None, gt=0)
     crop_x: int | None = Field(default=None, ge=0)
     crop_y: int | None = Field(default=None, ge=0)
+    tracking_keyframes: list[ReframeKeyframe] = Field(default_factory=list, max_length=64)
 
     @model_validator(mode="after")
     def _valid_crop(self) -> "CropPlan":
@@ -53,18 +65,104 @@ class CropPlan(BaseModel):
                 raise ValueError("crop cannot exceed source dimensions")
             if self.crop_x + self.crop_width > self.source_width or self.crop_y + self.crop_height > self.source_height:
                 raise ValueError("crop offsets must stay within source dimensions")
+        if self.tracking_keyframes and self.crop_width is None:
+            raise ValueError("tracking keyframes require a concrete crop window")
+        if any(
+            right.time_seconds <= left.time_seconds
+            for left, right in zip(self.tracking_keyframes, self.tracking_keyframes[1:])
+        ):
+            raise ValueError("tracking keyframes must be strictly ordered")
         return self
 
 
-class ReframeKeyframe(BaseModel):
-    """A bounded crop position that can be interpolated by a future tracker."""
+class SubjectBounds(BaseModel):
+    """A conservative normalized subject observation; it never identifies a person."""
 
     model_config = ConfigDict(extra="forbid")
 
     time_seconds: float = Field(ge=0)
-    normalized_x: float = Field(ge=0, le=1)
-    normalized_y: float = Field(ge=0, le=1)
+    center_x: float = Field(ge=0, le=1)
+    center_y: float = Field(ge=0, le=1)
+    width: float = Field(default=0.16, gt=0, le=1)
+    height: float = Field(default=0.20, gt=0, le=1)
     confidence: float = Field(ge=0, le=1)
+    target: Literal[
+        "primary_face", "primary_person", "active_speaker", "important_object",
+        "screen_region", "subject_group", "scene_center", "none",
+    ] = "primary_person"
+    visible_face_count: int = Field(default=1, ge=0, le=32)
+    active_speaker_confidence: float = Field(default=0, ge=0, le=1)
+    scene_id: str | None = Field(default=None, max_length=160)
+
+
+class CompositionSegment(BaseModel):
+    """Scene-level vertical-composition and tracking decision for one visual interval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    segment_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+    visual_clip_id: str | None = None
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    source_start_seconds: float | None = Field(default=None, ge=0)
+    source_end_seconds: float | None = Field(default=None, ge=0)
+    speaker_id: str | None = Field(default=None, max_length=160)
+    scene_change_count: int = Field(default=0, ge=0)
+    strategy: Literal[
+        "subject_crop", "face_crop", "center_crop", "fit_with_blur", "split_layout",
+        "safe_fallback", "group_framing", "scene_wide", "original_vertical",
+    ]
+    subject_bounds: list[SubjectBounds] = Field(default_factory=list)
+    target_crop: CropPlan | None = None
+    target_scale: float | None = Field(default=None, gt=0, le=16)
+    target_center_x: float = Field(default=0.5, ge=0, le=1)
+    target_center_y: float = Field(default=0.5, ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    fallback_reason: str | None = None
+    transition_type: Literal["cut", "short_crossfade", "hold"] = "cut"
+
+    tracking_mode: Literal[
+        "none", "static_subject_crop", "face_tracking", "person_tracking",
+        "active_speaker_tracking", "object_tracking", "group_framing", "scene_wide", "safe_fallback",
+    ]
+    tracking_target: Literal[
+        "primary_face", "primary_person", "active_speaker", "important_object",
+        "screen_region", "subject_group", "scene_center", "none",
+    ]
+    tracking_required: bool
+    tracking_confidence: float = Field(ge=0, le=1)
+    tracking_reason: str = Field(min_length=1, max_length=1200)
+    static_crop_sufficient: bool
+    tracking_risk: Literal["none", "low", "medium", "high", "unsafe"]
+    fallback_strategy: Literal[
+        "none", "static_subject_crop", "group_framing", "scene_wide", "fit_with_blur", "safe_fallback",
+    ] = "none"
+    wide_safe_layout_required: bool = False
+    minimum_focus_hold_seconds: float = Field(default=1.25, ge=0, le=30)
+    tracking_validation_status: Literal["not_applicable", "passed", "passed_with_warning", "failed_repaired"] = "not_applicable"
+    tracking_validation_reasons: list[str] = Field(default_factory=list)
+    tracking_diagnostics: dict[str, float | int | bool] = Field(default_factory=dict)
+    composition_quality_status: Literal["passed", "passed_with_warning", "failed_repairable", "failed"] = "passed"
+    composition_quality_reasons: list[str] = Field(default_factory=list)
+    composition_diagnostics: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _valid_composition_segment(self) -> "CompositionSegment":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("composition segment must have positive duration")
+        if (self.source_start_seconds is None) != (self.source_end_seconds is None):
+            raise ValueError("composition segment source timestamps must be provided together")
+        if self.source_start_seconds is not None and self.source_end_seconds is not None:
+            if self.source_end_seconds <= self.source_start_seconds:
+                raise ValueError("composition segment source range must be positive")
+        dynamic = {"face_tracking", "person_tracking", "active_speaker_tracking", "object_tracking"}
+        if self.tracking_mode in dynamic and not self.tracking_required:
+            raise ValueError("dynamic tracking mode must be marked as required")
+        if self.static_crop_sufficient and self.tracking_required:
+            raise ValueError("tracking cannot be required when a static crop is sufficient")
+        if self.tracking_mode in dynamic and self.tracking_target == "none":
+            raise ValueError("dynamic tracking needs a concrete target")
+        return self
 
 
 class ReframePlan(BaseModel):
@@ -79,17 +177,23 @@ class ReframePlan(BaseModel):
     canvas_height: int = Field(gt=0)
     subtitle_reserved_bottom_ratio: float = Field(ge=0, le=0.5)
     keyframes: list[ReframeKeyframe] = Field(default_factory=list)
+    composition_segments: list[CompositionSegment] = Field(default_factory=list)
     subject_detection_used: bool = False
     fallback_reason: str | None = None
 
     @model_validator(mode="after")
     def _valid_plan(self) -> "ReframePlan":
-        if self.strategy == "subject_crop" and not self.keyframes:
+        if self.strategy == "subject_crop" and not self.keyframes and not self.composition_segments:
             raise ValueError("subject crop needs at least one keyframe")
-        if self.subject_detection_used and self.strategy != "subject_crop":
-            raise ValueError("subject detection must resolve to subject crop")
+        if self.subject_detection_used and self.strategy != "subject_crop" and not self.composition_segments:
+            raise ValueError("subject detection must resolve to a documented composition segment")
         if self.fallback_reason and self.strategy == "subject_crop":
             raise ValueError("subject crop cannot carry a fallback reason")
+        if any(
+            right.start_seconds < left.end_seconds - 0.02
+            for left, right in zip(self.composition_segments, self.composition_segments[1:])
+        ):
+            raise ValueError("composition segments must be ordered without overlap")
         return self
 
 

@@ -20,6 +20,7 @@ from app.sources import Source
 from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, write_bytes_atomic, write_json
 from app.video_models import (
     CanvasConfig,
+    CompositionSegment,
     CropPlan,
     FillClip,
     FreezeFrameClip,
@@ -33,6 +34,7 @@ from app.video_models import (
     ReframePlan,
     SourceVideoClip,
     SubtitleProject,
+    SubjectBounds,
     VideoClipModel,
     VideoProject,
     VideoTimeline,
@@ -41,7 +43,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "3D.2"
+PRODUCTION_RENDER_ENGINE_VERSION = "3D.3"
 
 
 class VideoCompositionService:
@@ -62,6 +64,9 @@ class VideoCompositionService:
         source_info = probe_media(source.path, require_video=True)
         if visual_analysis and isinstance(visual_analysis.get("subject_keyframes"), list):
             source_info["subject_keyframes"] = visual_analysis["subject_keyframes"]
+        scene_analysis = read_json(work_directory / "scene_boundaries.json", {})
+        if isinstance(scene_analysis, dict) and isinstance(scene_analysis.get("boundaries"), list):
+            source_info["scene_boundaries"] = scene_analysis["boundaries"]
         mixed_path = Path(audio_project.mix.mixed_audio_path or "")
         if not mixed_path.is_file():
             raise ProductionRenderError("mixed_audio.wav не найден для production render.")
@@ -76,6 +81,12 @@ class VideoCompositionService:
             plan, audio_project, transcript, source.path, source_info, canvas, render_config,
         )
         reframe_plan = build_reframe_plan(source_info, canvas, render_config, timeline)
+        timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
+        composition_fallbacks = [
+            f"{segment.segment_id}: {segment.fallback_reason}"
+            for segment in reframe_plan.composition_segments
+            if segment.fallback_reason
+        ]
         actual_audio_duration = float(mixed_info["audio_duration"])
         if abs(timeline.duration_seconds - actual_audio_duration) > render_config.maximum_duration_difference:
             raise ProductionRenderError(
@@ -102,7 +113,7 @@ class VideoCompositionService:
         )
         track = VideoTrack(
             track_id="track-visual", clips=timeline.clips,
-            status="fallback" if fallback_reasons else "ready",
+            status="fallback" if fallback_reasons or composition_fallbacks else "ready",
         )
         project = VideoProject(
             project_id=project_id, status="skipped", source_video_path=str(source.path), source_checksum=source_checksum,
@@ -111,7 +122,11 @@ class VideoCompositionService:
             timeline=timeline, reframe_plan=reframe_plan, tracks=[track], subtitle_project=subtitle_project, render_request=request,
             metadata=metadata,
             warnings=list(subtitle_project.warnings),
-            fallback_reasons=[*fallback_reasons, *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else [])],
+            fallback_reasons=[
+                *fallback_reasons,
+                *composition_fallbacks,
+                *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else []),
+            ],
         )
         render_root = output_directory / "production-render"
         cache_path = self.root / "work" / "production-render-cache" / f"{cache_key}.json"
@@ -180,7 +195,7 @@ class VideoCompositionService:
             temporary = _temporary_path(temp_root, ".mp4")
             encoder, hardware_fallback, encoder_warning = self._mux_final(
                 prepared, Path(project.mixed_audio_path), ass_path if self.config.production_render.subtitles_enabled else None,
-                temporary, project.canvas, [clip.duration_seconds for clip in project.timeline.clips],
+                temporary, project.canvas, [clip.duration_seconds for clip in project.timeline.clips], project.timeline.transitions,
             )
             validation = validate_final_video(temporary, project.canvas, Path(project.mixed_audio_path), self.config.production_render)
             if validation.status == "invalid":
@@ -256,7 +271,7 @@ class VideoCompositionService:
 
     def _mux_final(
         self, clips: list[Path], mixed_audio: Path, ass_path: Path | None,
-        destination: Path, canvas: CanvasConfig, durations: list[float],
+        destination: Path, canvas: CanvasConfig, durations: list[float], transitions: list[VideoTransition],
     ) -> tuple[str, bool, str | None]:
         if not clips:
             raise ProductionRenderError("Video timeline has no renderable visual clips.")
@@ -265,7 +280,12 @@ class VideoCompositionService:
         for clip in clips:
             inputs.extend(["-i", str(clip)])
         inputs.extend(["-i", str(mixed_audio)])
-        graph, video_label = _timeline_filter(durations, self.config.production_render.transitions)
+        transition_plan: str | list[VideoTransition] = self.config.production_render.transitions
+        if self.config.production_render.transitions == "short_crossfade" and any(
+            item.transition_type == "cut" for item in transitions
+        ):
+            transition_plan = transitions
+        graph, video_label = _timeline_filter(durations, transition_plan)
         if ass_path is not None:
             graph += f";{video_label}ass='{_filter_path(ass_path)}'[vout]"
         else:
@@ -332,7 +352,7 @@ def build_video_timeline(
     timeline = VideoTimeline(
         clips=clips, transitions=transitions, duration_seconds=round(float(audio_project.timeline.duration_seconds), 3),
     )
-    return timeline, fallback_reasons
+    return _split_timeline_at_scene_boundaries(timeline, source_info, config), fallback_reasons
 
 
 def _source_range_for_audio(
@@ -434,12 +454,81 @@ def _transitions(clips: list[VideoClipModel], config: ProductionRenderConfig) ->
     ]
 
 
+def _split_timeline_at_scene_boundaries(
+    timeline: VideoTimeline, source_info: dict[str, Any], config: ProductionRenderConfig,
+) -> VideoTimeline:
+    """Turn reliable source shot boundaries into renderable visual intervals.
+
+    Source and output time are one-to-one for ordinary mapped clips.  Short
+    freeze-pad clips keep their established fallback intact rather than being
+    split into potentially invalid source ranges.
+    """
+
+    boundaries = _scene_boundary_times(source_info)
+    if not boundaries:
+        return timeline
+    expanded: list[VideoClipModel] = []
+    source_parents: list[str | None] = []
+    for clip in timeline.clips:
+        if not isinstance(clip, SourceVideoClip) or clip.freeze_duration_seconds > 0:
+            expanded.append(clip)
+            source_parents.append(None)
+            continue
+        assert clip.source_start_seconds is not None and clip.source_end_seconds is not None
+        source_duration = clip.source_end_seconds - clip.source_start_seconds
+        if abs(source_duration - clip.duration_seconds) > 0.02:
+            expanded.append(clip)
+            source_parents.append(None)
+            continue
+        cuts = [
+            item for item in boundaries
+            if clip.source_start_seconds + 0.04 < item < clip.source_end_seconds - 0.04
+        ]
+        if not cuts:
+            expanded.append(clip)
+            source_parents.append(None)
+            continue
+        points = [clip.source_start_seconds, *cuts, clip.source_end_seconds]
+        for index, (left, right) in enumerate(zip(points, points[1:]), start=1):
+            duration = round(right - left, 3)
+            if duration <= 0.02:
+                continue
+            expanded.append(clip.model_copy(update={
+                "clip_id": f"{clip.clip_id}-scene-{index:02d}",
+                "duration_seconds": duration, "source_start_seconds": round(left, 3),
+                "source_end_seconds": round(right, 3), "freeze_duration_seconds": 0.0,
+            }))
+            source_parents.append(clip.clip_id)
+    if len(expanded) == len(timeline.clips):
+        return timeline
+    normalized: list[VideoClipModel] = []
+    cursor = 0.0
+    for order, clip in enumerate(expanded, start=1):
+        # Preserve the exact total timeline duration after decimal rounding.
+        duration = clip.duration_seconds if order < len(expanded) else round(timeline.duration_seconds - cursor, 3)
+        normalized.append(clip.model_copy(update={
+            "order": order, "timeline_start_seconds": round(cursor, 3),
+            "timeline_end_seconds": round(cursor + duration, 3), "duration_seconds": duration,
+        }))
+        cursor += duration
+    transitions: list[VideoTransition] = []
+    for index, (left, right) in enumerate(zip(normalized, normalized[1:])):
+        same_source_shot_parent = source_parents[index] is not None and source_parents[index] == source_parents[index + 1]
+        transition_type = "cut" if same_source_shot_parent else config.transitions
+        transitions.append(VideoTransition(
+            transition_type=transition_type, from_clip_id=left.clip_id, to_clip_id=right.clip_id,
+            duration_seconds=0 if transition_type == "cut" else 0.15,
+        ))
+    return VideoTimeline(clips=normalized, transitions=transitions, duration_seconds=timeline.duration_seconds)
+
+
 def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig) -> CropPlan:
     width, height = int(source_info["display_width"]), int(source_info["display_height"])
     rotation = int(source_info.get("rotation", 0))
     target = canvas.width / canvas.height
     strategy = config.crop_strategy
     subject = _subject_anchor(source_info)
+    automatic_subject_crop = strategy == "safe_auto"
     # Auto mode must never make a destructive landscape crop without reliable
     # subject evidence. The full frame with a background is safer than guessing.
     if strategy == "safe_auto":
@@ -457,7 +546,7 @@ def make_crop_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: Pr
     if strategy == "top_crop":
         x, y = (width - crop_width) // 2, 0
         normalized_x, normalized_y, strategy = 0.5, 0.0, "top_crop"
-    elif subject is not None and strategy == "center_crop":
+    elif automatic_subject_crop and subject is not None and strategy == "center_crop":
         normalized_x, normalized_y = subject
         x = _even_down((width - crop_width) * normalized_x)
         y = _even_down((height - crop_height) * normalized_y)
@@ -498,34 +587,140 @@ def _subject_anchor(source_info: dict[str, Any]) -> tuple[float, float] | None:
     )
 
 
+_STATIC_SUBJECT_CONFIDENCE = 0.55
+_TRACKING_CONFIDENCE = 0.70
+_MINIMUM_FOCUS_HOLD_SECONDS = 1.25
+_ACTIVE_SPEAKER_HYSTERESIS = 0.08
+_MAX_SAFE_TRACKING_SPEED = 0.28
+_TRACKING_MODES = {"face_tracking", "person_tracking", "active_speaker_tracking", "object_tracking"}
+_TRACKING_TARGETS = {
+    "primary_face", "primary_person", "active_speaker", "important_object",
+    "screen_region", "subject_group", "scene_center", "none",
+}
+
+
 def build_reframe_plan(
     source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig, timeline: VideoTimeline,
 ) -> ReframePlan:
-    """Persist the composition decision independently of FFmpeg filter generation.
+    """Build explainable scene-level composition decisions before selecting a crop.
 
-    ``subject_keyframes`` is an optional, cacheable input from a visual-analysis
-    provider.  Until that provider has high-confidence detections, the plan uses
-    a deterministic centred crop or a documented contain/blur fallback rather
-    than pretending subject tracking happened.
+    A crop is static unless it demonstrably cannot retain the relevant subject.
+    Dynamic tracking is only emitted for a confident, single target with enough
+    time to move smoothly.  The resulting decisions are persisted even when a
+    safe wide composition is selected, so a report can explain why tracking was
+    deliberately avoided.
     """
+
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    if not timeline.clips:
+        return _legacy_reframe_plan(source_info, canvas, config)
+    segments = build_composition_segments(source_info, canvas, config, timeline)
+    segments = _apply_active_speaker_hysteresis(segments, canvas)
+    segments = _validate_tracking_decisions(segments, canvas)
+    segments = _apply_composition_quality_diagnostics(segments, canvas)
+    observations = [
+        ReframeKeyframe(
+            time_seconds=bound.time_seconds, normalized_x=bound.center_x,
+            normalized_y=bound.center_y, confidence=bound.confidence,
+        )
+        for segment in segments for bound in segment.subject_bounds
+        if bound.confidence >= _STATIC_SUBJECT_CONFIDENCE
+    ]
+    subject_strategies = {"subject_crop", "face_crop"}
+    if any(segment.strategy in subject_strategies for segment in segments):
+        strategy = "subject_crop"
+        fallback_reason = None
+    elif all(segment.strategy == "original_vertical" for segment in segments):
+        strategy = "original_vertical"
+        fallback_reason = None
+    elif any(segment.strategy == "center_crop" for segment in segments):
+        strategy = "center_crop"
+        fallback_reason = next((segment.fallback_reason for segment in segments if segment.fallback_reason), None)
+    elif any(segment.strategy == "fit_with_blur" for segment in segments):
+        strategy = "blur_fallback"
+        fallback_reason = next((segment.fallback_reason for segment in segments if segment.fallback_reason), None)
+    else:
+        strategy = "contain"
+        fallback_reason = next((segment.fallback_reason for segment in segments if segment.fallback_reason), None)
+    return ReframePlan(
+        strategy=strategy, source_width=width, source_height=height,
+        canvas_width=canvas.width, canvas_height=canvas.height,
+        subtitle_reserved_bottom_ratio=0.16 if strategy != "blur_fallback" else 0.20,
+        keyframes=_smooth_reframe_keyframes(observations) if observations else [],
+        composition_segments=segments, subject_detection_used=bool(observations),
+        fallback_reason=fallback_reason,
+    )
+
+
+def build_composition_segments(
+    source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig, timeline: VideoTimeline,
+) -> list[CompositionSegment]:
+    """Return one deterministic decision per visual timeline interval.
+
+    Input observations are intentionally sparse and non-identifying.  Missing
+    evidence therefore selects a wider composition instead of inventing a face
+    target or silently using the last subject seen elsewhere in the source.
+    """
+
+    result: list[CompositionSegment] = []
+    outgoing_transitions = {item.from_clip_id: item.transition_type for item in timeline.transitions}
+    for index, clip in enumerate(timeline.clips, start=1):
+        transition = outgoing_transitions.get(clip.clip_id, "cut")
+        segment_id = f"composition-{index:03d}"
+        if not isinstance(clip, (SourceVideoClip, FreezeFrameClip)):
+            result.append(CompositionSegment(
+                segment_id=segment_id, visual_clip_id=clip.clip_id,
+                start_seconds=clip.timeline_start_seconds, end_seconds=clip.timeline_end_seconds,
+                strategy="safe_fallback", confidence=0, fallback_reason=clip.fallback_reason or "No source visual is available.",
+                transition_type=transition, tracking_mode="safe_fallback", tracking_target="none",
+                tracking_required=False, tracking_confidence=0,
+                tracking_reason="A fill visual has no trackable source subject.", static_crop_sufficient=False,
+                tracking_risk="unsafe", fallback_strategy="safe_fallback", wide_safe_layout_required=True,
+                tracking_validation_status="not_applicable",
+            ))
+            continue
+        assert clip.source_start_seconds is not None and clip.source_end_seconds is not None
+        observations = _subject_observations(
+            source_info, clip.source_start_seconds, clip.source_end_seconds,
+        )
+        result.append(_decide_composition_segment(
+            segment_id, clip, observations, source_info, canvas, config, transition,
+        ))
+    return result
+
+
+def apply_composition_segments(timeline: VideoTimeline, segments: list[CompositionSegment]) -> VideoTimeline:
+    """Apply the resolved segment crop to its corresponding renderable visual clip."""
+
+    by_clip = {segment.visual_clip_id: segment for segment in segments if segment.visual_clip_id}
+    clips: list[VideoClipModel] = []
+    for clip in timeline.clips:
+        segment = by_clip.get(clip.clip_id)
+        if not isinstance(clip, (SourceVideoClip, FreezeFrameClip)) or segment is None or segment.target_crop is None:
+            clips.append(clip)
+            continue
+        updates: dict[str, Any] = {"crop_plan": segment.target_crop}
+        if segment.fallback_reason:
+            updates.update({"status": "fallback", "fallback_reason": segment.fallback_reason})
+        clips.append(clip.model_copy(update=updates))
+    return timeline.model_copy(update={"clips": clips})
+
+
+def _legacy_reframe_plan(source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig) -> ReframePlan:
+    """Keep the public no-timeline helper compatible with the former contract."""
 
     width, height = int(source_info["display_width"]), int(source_info["display_height"])
     target = canvas.width / canvas.height
     ratio = width / height
-    raw_keyframes = source_info.get("subject_keyframes", [])
-    keyframes: list[ReframeKeyframe] = []
-    if isinstance(raw_keyframes, list):
-        for item in raw_keyframes:
-            if not isinstance(item, dict):
-                continue
-            try:
-                keyframes.append(ReframeKeyframe(
-                    time_seconds=float(item["time_seconds"]), normalized_x=float(item["normalized_x"]),
-                    normalized_y=float(item["normalized_y"]), confidence=float(item.get("confidence", 0)),
-                ))
-            except (KeyError, TypeError, ValueError):
-                continue
-    confident = [item for item in keyframes if item.confidence >= 0.55]
+    observations = _subject_observations(source_info, 0, float(source_info.get("video_duration") or float("inf")))
+    keyframes = [
+        ReframeKeyframe(
+            time_seconds=item.time_seconds, normalized_x=item.center_x,
+            normalized_y=item.center_y, confidence=item.confidence,
+        )
+        for item in observations
+    ]
+    confident = [item for item in keyframes if item.confidence >= _STATIC_SUBJECT_CONFIDENCE]
     if ratio <= target * 1.03:
         return ReframePlan(
             strategy="original_vertical", source_width=width, source_height=height,
@@ -537,23 +732,660 @@ def build_reframe_plan(
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.20,
             fallback_reason="Subject confidence is insufficient; full-frame blur fallback avoids an unsafe crop.",
         )
-    if config.crop_strategy in {"safe_auto", "center_crop"} and confident:
+    if config.crop_strategy == "safe_auto" and confident:
         return ReframePlan(
             strategy="subject_crop", source_width=width, source_height=height,
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
             keyframes=_smooth_reframe_keyframes(confident), subject_detection_used=True,
         )
-    if config.crop_strategy in {"safe_auto", "center_crop"}:
+    if config.crop_strategy == "safe_auto":
         return ReframePlan(
             strategy="center_crop", source_width=width, source_height=height,
             canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
             fallback_reason="No high-confidence subject observations are available.",
+        )
+    if config.crop_strategy == "center_crop":
+        return ReframePlan(
+            strategy="center_crop", source_width=width, source_height=height,
+            canvas_width=canvas.width, canvas_height=canvas.height, subtitle_reserved_bottom_ratio=0.16,
+            fallback_reason="Manual centre crop takes priority over automatic subject tracking.",
         )
     return ReframePlan(
         strategy="blur_fallback" if config.crop_strategy == "fit_blur_background" else "contain",
         source_width=width, source_height=height, canvas_width=canvas.width, canvas_height=canvas.height,
         subtitle_reserved_bottom_ratio=0.16, fallback_reason="Crop strategy preserves the full source frame.",
     )
+
+
+def _decide_composition_segment(
+    segment_id: str, clip: SourceVideoClip | FreezeFrameClip, observations: list[SubjectBounds],
+    source_info: dict[str, Any], canvas: CanvasConfig, config: ProductionRenderConfig, transition: str,
+) -> CompositionSegment:
+    assert clip.source_start_seconds is not None and clip.source_end_seconds is not None
+    scene_change_count = _scene_change_count(source_info, clip.source_start_seconds, clip.source_end_seconds)
+    common = {
+        "segment_id": segment_id, "visual_clip_id": clip.clip_id,
+        "start_seconds": clip.timeline_start_seconds, "end_seconds": clip.timeline_end_seconds,
+        "source_start_seconds": clip.source_start_seconds, "source_end_seconds": clip.source_end_seconds,
+        "speaker_id": clip.speaker,
+        "scene_change_count": scene_change_count,
+        "subject_bounds": observations, "transition_type": transition,
+    }
+    if scene_change_count:
+        common["transition_type"] = "cut"
+    duration = max(0.01, clip.source_end_seconds - clip.source_start_seconds)
+    if config.crop_strategy in {"center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"}:
+        crop = make_crop_plan(source_info, canvas, config)
+        strategy = "fit_with_blur" if crop.strategy == "fit_blur_background" else "center_crop"
+        return CompositionSegment(
+            **common, strategy=strategy, target_crop=crop, confidence=_mean_confidence(observations),
+            target_center_x=crop.normalized_x, target_center_y=crop.normalized_y,
+            target_scale=_crop_scale(crop), tracking_mode="none", tracking_target="none",
+            tracking_required=False, tracking_confidence=0,
+            tracking_reason=f"Manual crop strategy '{config.crop_strategy}' takes priority over automatic tracking.",
+            static_crop_sufficient=True, tracking_risk="none", fallback_strategy="none",
+        )
+    if _source_is_vertical(source_info, canvas):
+        return CompositionSegment(
+            **common, strategy="original_vertical", target_crop=_crop_plan_for_center(source_info, canvas, 0.5, 0.5),
+            confidence=_mean_confidence(observations), tracking_mode="scene_wide", tracking_target="scene_center",
+            tracking_required=False, tracking_confidence=_mean_confidence(observations),
+            tracking_reason="The source already fits the vertical canvas; a wider stable composition is safer.",
+            static_crop_sufficient=True, tracking_risk="none", fallback_strategy="none",
+        )
+    if not observations:
+        if config.crop_strategy == "safe_auto":
+            crop = _wide_crop(source_info, canvas)
+            return CompositionSegment(
+                **common, strategy="fit_with_blur", target_crop=crop, confidence=0,
+                target_scale=_crop_scale(crop), tracking_mode="safe_fallback", tracking_target="none",
+                tracking_required=False, tracking_confidence=0,
+                tracking_reason="No segment-local subject detection is reliable enough to justify a crop.",
+                static_crop_sufficient=False, tracking_risk="unsafe", fallback_strategy="fit_with_blur",
+                wide_safe_layout_required=True,
+                fallback_reason="No reliable local subject observations; full-frame layout avoids an unsafe crop.",
+            )
+        crop = _crop_plan_for_center(source_info, canvas, 0.5, 0.5)
+        return CompositionSegment(
+            **common, strategy="center_crop", target_crop=crop, confidence=0,
+            target_center_x=0.5, target_center_y=0.5, target_scale=_crop_scale(crop),
+            tracking_mode="none", tracking_target="scene_center", tracking_required=False, tracking_confidence=0,
+            tracking_reason="No reliable local subject observations; use the configured static centre crop.",
+            static_crop_sufficient=True, tracking_risk="low", fallback_strategy="scene_wide",
+            fallback_reason="No high-confidence subject observations are available.",
+        )
+
+    confidence = _mean_confidence(observations)
+    target = _dominant_target(observations)
+    center_x, center_y = _weighted_center(observations)
+    static_sufficient = _static_crop_sufficient(observations, source_info, canvas)
+    risk = _tracking_risk(observations, scene_change_count)
+    face_too_small_for_tracking = target == "primary_face" and max(
+        (min(item.width, item.height) for item in observations), default=0,
+    ) < 0.07
+    face_count = max((item.visible_face_count for item in observations), default=0)
+    active_speaker_confidence = sum(item.active_speaker_confidence * item.confidence for item in observations) / max(
+        sum(item.confidence for item in observations), 0.001,
+    )
+
+    if scene_change_count:
+        crop = _wide_crop(source_info, canvas)
+        reason = "Shot changes occur inside this interval; a controlled cut/wide composition is safer than tracking across unrelated frames."
+        return CompositionSegment(
+            **common, strategy="fit_with_blur" if crop.strategy == "fit_blur_background" else "scene_wide",
+            target_crop=crop, confidence=confidence, target_center_x=0.5, target_center_y=0.5,
+            target_scale=_crop_scale(crop), tracking_mode="scene_wide", tracking_target="scene_center",
+            tracking_required=False, tracking_confidence=confidence, tracking_reason=reason,
+            static_crop_sufficient=False, tracking_risk="unsafe", fallback_strategy="scene_wide",
+            wide_safe_layout_required=True, fallback_reason=reason,
+        )
+
+    if target == "screen_region":
+        crop = _wide_crop(source_info, canvas)
+        return CompositionSegment(
+            **common, strategy="fit_with_blur", target_crop=crop, confidence=confidence,
+            target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+            tracking_mode="scene_wide", tracking_target="screen_region", tracking_required=False,
+            tracking_confidence=confidence,
+            tracking_reason="Screen content is the primary visual; a wide stable layout is more readable than face tracking.",
+            static_crop_sufficient=False, tracking_risk="none", fallback_strategy="none", wide_safe_layout_required=True,
+        )
+
+    if face_count > 1 or target == "subject_group":
+        group_fits = _group_crop_sufficient(observations, source_info, canvas)
+        crop = _crop_plan_for_center(source_info, canvas, center_x, center_y) if group_fits else _wide_crop(source_info, canvas)
+        if active_speaker_confidence >= 0.80 and clip.speaker and duration >= _MINIMUM_FOCUS_HOLD_SECONDS and not static_sufficient and risk in {"none", "low", "medium"}:
+            dynamic_crop = _tracking_crop(source_info, canvas, observations, clip.source_start_seconds, duration)
+            return CompositionSegment(
+                **common, strategy="face_crop", target_crop=dynamic_crop, confidence=confidence,
+                target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(dynamic_crop),
+                tracking_mode="active_speaker_tracking", tracking_target="active_speaker", tracking_required=True,
+                tracking_confidence=active_speaker_confidence,
+                tracking_reason="A confident active-speaker signal persists beyond the minimum focus hold duration.",
+                static_crop_sufficient=False, tracking_risk=risk, fallback_strategy="group_framing",
+                minimum_focus_hold_seconds=_MINIMUM_FOCUS_HOLD_SECONDS,
+            )
+        return CompositionSegment(
+            **common, strategy="group_framing" if group_fits else "fit_with_blur", target_crop=crop, confidence=confidence,
+            target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+            tracking_mode="group_framing", tracking_target="subject_group", tracking_required=False,
+            tracking_confidence=confidence,
+            tracking_reason="Multiple relevant faces are present; hold the group rather than switching on short or uncertain turns.",
+            static_crop_sufficient=group_fits, tracking_risk="low" if group_fits else "medium",
+            fallback_strategy="none" if group_fits else "fit_with_blur", wide_safe_layout_required=not group_fits,
+            fallback_reason=None if group_fits else "Multiple important people do not fit safely in a narrow crop.",
+        )
+
+    if static_sufficient:
+        crop = _crop_plan_for_center(source_info, canvas, center_x, center_y)
+        return CompositionSegment(
+            **common, strategy="face_crop" if target == "primary_face" else "subject_crop", target_crop=crop,
+            confidence=confidence, target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+            tracking_mode="static_subject_crop", tracking_target=target, tracking_required=False,
+            tracking_confidence=confidence,
+            tracking_reason="A single static crop keeps the important subject inside the safe area for this segment.",
+            static_crop_sufficient=True, tracking_risk="none" if confidence >= _TRACKING_CONFIDENCE else "low",
+            fallback_strategy="none",
+        )
+
+    dynamic_target = "important_object" if target == "important_object" else ("primary_face" if target == "primary_face" else "primary_person")
+    if (
+        len(observations) >= 2 and confidence >= _TRACKING_CONFIDENCE
+        and risk in {"none", "low", "medium"} and not face_too_small_for_tracking
+    ):
+        crop = _tracking_crop(source_info, canvas, observations, clip.source_start_seconds, duration)
+        mode = "object_tracking" if dynamic_target == "important_object" else (
+            "face_tracking" if dynamic_target == "primary_face" else "person_tracking"
+        )
+        return CompositionSegment(
+            **common, strategy="face_crop" if mode == "face_tracking" else "subject_crop", target_crop=crop,
+            confidence=confidence, target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+            tracking_mode=mode, tracking_target=dynamic_target, tracking_required=True,
+            tracking_confidence=confidence,
+            tracking_reason="The subject moves beyond a safe static crop and confident observations support smooth tracking.",
+            static_crop_sufficient=False, tracking_risk=risk, fallback_strategy="fit_with_blur",
+        )
+
+    crop = _wide_crop(source_info, canvas)
+    reason = (
+        "Face is too small for stable tracking; preserve the wider scene instead."
+        if face_too_small_for_tracking
+        else "Subject movement exceeds a static crop, but tracking confidence or stability is below the safe threshold."
+    )
+    return CompositionSegment(
+        **common, strategy="fit_with_blur", target_crop=crop, confidence=confidence,
+        target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+        tracking_mode="safe_fallback", tracking_target="none", tracking_required=False,
+        tracking_confidence=confidence, tracking_reason=reason, static_crop_sufficient=False,
+        tracking_risk="unsafe" if risk in {"high", "unsafe"} else "high", fallback_strategy="fit_with_blur",
+        wide_safe_layout_required=True, fallback_reason=reason,
+    )
+
+
+def _subject_observations(source_info: dict[str, Any], start: float, end: float) -> list[SubjectBounds]:
+    raw = source_info.get("subject_keyframes")
+    if not isinstance(raw, list):
+        return []
+    result: list[SubjectBounds] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            time_seconds = float(item.get("time_seconds", start))
+            if time_seconds < start - 0.02 or time_seconds > end + 0.02:
+                continue
+            target = str(item.get("tracking_target", item.get("target", "primary_person")))
+            if target not in _TRACKING_TARGETS:
+                target = "primary_person"
+            result.append(SubjectBounds(
+                time_seconds=max(start, min(end, time_seconds)),
+                center_x=float(item["normalized_x"]), center_y=float(item["normalized_y"]),
+                width=max(0.02, min(1.0, float(item.get("normalized_width", item.get("width", 0.16))))),
+                height=max(0.02, min(1.0, float(item.get("normalized_height", item.get("height", 0.20))))),
+                confidence=float(item.get("confidence", 0)), target=target,
+                visible_face_count=max(0, int(item.get("visible_face_count", item.get("face_count", 1)))),
+                active_speaker_confidence=float(item.get("active_speaker_confidence", 0)),
+                scene_id=str(item["scene_id"])[:160] if item.get("scene_id") is not None else None,
+            ))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return sorted(result, key=lambda value: value.time_seconds)
+
+
+def _mean_confidence(observations: list[SubjectBounds]) -> float:
+    if not observations:
+        return 0.0
+    return round(sum(item.confidence for item in observations) / len(observations), 3)
+
+
+def _weighted_center(observations: list[SubjectBounds]) -> tuple[float, float]:
+    weight = sum(item.confidence for item in observations)
+    if weight <= 0:
+        return 0.5, 0.5
+    return (
+        sum(item.center_x * item.confidence for item in observations) / weight,
+        sum(item.center_y * item.confidence for item in observations) / weight,
+    )
+
+
+def _dominant_target(observations: list[SubjectBounds]) -> str:
+    if any(item.target == "screen_region" for item in observations):
+        return "screen_region"
+    if any(item.target == "subject_group" for item in observations):
+        return "subject_group"
+    weights: dict[str, float] = {}
+    for item in observations:
+        weights[item.target] = weights.get(item.target, 0) + item.confidence
+    return max(weights, key=weights.get, default="primary_person")
+
+
+def _source_is_vertical(source_info: dict[str, Any], canvas: CanvasConfig) -> bool:
+    return int(source_info["display_width"]) / int(source_info["display_height"]) <= (canvas.width / canvas.height) * 1.03
+
+
+def _crop_dimensions(source_info: dict[str, Any], canvas: CanvasConfig) -> tuple[int, int]:
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    target = canvas.width / canvas.height
+    if width / height >= target:
+        return _even_down(height * target), height
+    return width, _even_down(width / target)
+
+
+def _static_crop_sufficient(observations: list[SubjectBounds], source_info: dict[str, Any], canvas: CanvasConfig) -> bool:
+    if not observations or _mean_confidence(observations) < _STATIC_SUBJECT_CONFIDENCE:
+        return False
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    crop_width, crop_height = _crop_dimensions(source_info, canvas)
+    span_x = max(item.center_x + item.width / 2 for item in observations) - min(item.center_x - item.width / 2 for item in observations)
+    span_y = max(item.center_y + item.height / 2 for item in observations) - min(item.center_y - item.height / 2 for item in observations)
+    return span_x <= (crop_width / width) * 0.72 and span_y <= (crop_height / height) * 0.56
+
+
+def _group_crop_sufficient(observations: list[SubjectBounds], source_info: dict[str, Any], canvas: CanvasConfig) -> bool:
+    if not observations:
+        return False
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    crop_width, crop_height = _crop_dimensions(source_info, canvas)
+    group_width = max(item.center_x + item.width / 2 for item in observations) - min(item.center_x - item.width / 2 for item in observations)
+    group_height = max(item.center_y + item.height / 2 for item in observations) - min(item.center_y - item.height / 2 for item in observations)
+    return group_width <= (crop_width / width) * 0.84 and group_height <= (crop_height / height) * 0.70
+
+
+def _tracking_risk(observations: list[SubjectBounds], scene_change_count: int = 0) -> str:
+    if scene_change_count or len({item.scene_id for item in observations if item.scene_id}) > 1:
+        return "unsafe"
+    confidence = _mean_confidence(observations)
+    if confidence < _STATIC_SUBJECT_CONFIDENCE:
+        return "unsafe"
+    speeds: list[float] = []
+    for left, right in zip(observations, observations[1:]):
+        elapsed = right.time_seconds - left.time_seconds
+        if elapsed <= 0:
+            return "high"
+        speeds.append(max(abs(right.center_x - left.center_x), abs(right.center_y - left.center_y)) / elapsed)
+    max_speed = max(speeds, default=0.0)
+    if max_speed > _MAX_SAFE_TRACKING_SPEED:
+        return "high"
+    if confidence < _TRACKING_CONFIDENCE or len(observations) < 3 or max_speed > 0.12:
+        return "medium"
+    return "low" if max_speed else "none"
+
+
+def _scene_change_count(source_info: dict[str, Any], start: float, end: float) -> int:
+    return sum(start + 0.02 < timestamp < end - 0.02 for timestamp in _scene_boundary_times(source_info))
+
+
+def _scene_boundary_times(source_info: dict[str, Any]) -> list[float]:
+    raw = source_info.get("scene_boundaries", [])
+    if not isinstance(raw, list):
+        return []
+    timestamps: list[float] = []
+    for item in raw:
+        try:
+            timestamp = float(item["timestamp"] if isinstance(item, dict) else item)
+        except (TypeError, KeyError, ValueError):
+            continue
+        if timestamp >= 0:
+            timestamps.append(round(timestamp, 3))
+    return sorted(set(timestamps))
+
+
+def _crop_plan_for_center(source_info: dict[str, Any], canvas: CanvasConfig, center_x: float, center_y: float) -> CropPlan:
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    crop_width, crop_height = _crop_dimensions(source_info, canvas)
+    x = max(0, min(_even_down(center_x * width - crop_width / 2), width - crop_width))
+    y = max(0, min(_even_down(center_y * height - crop_height / 2), height - crop_height))
+    return CropPlan(
+        strategy="manual_normalized_crop", source_width=width, source_height=height,
+        display_rotation_degrees=int(source_info.get("rotation", 0)), normalized_x=center_x, normalized_y=center_y,
+        crop_width=crop_width, crop_height=crop_height, crop_x=x, crop_y=y,
+    )
+
+
+def _wide_crop(source_info: dict[str, Any], canvas: CanvasConfig) -> CropPlan:
+    if not _source_is_vertical(source_info, canvas):
+        return CropPlan(
+            strategy="fit_blur_background", source_width=int(source_info["display_width"]),
+            source_height=int(source_info["display_height"]), display_rotation_degrees=int(source_info.get("rotation", 0)),
+        )
+    return _crop_plan_for_center(source_info, canvas, 0.5, 0.5)
+
+
+def _tracking_crop(
+    source_info: dict[str, Any], canvas: CanvasConfig, observations: list[SubjectBounds], source_start: float, duration: float,
+) -> CropPlan:
+    center_x, center_y = _weighted_center(observations)
+    crop = _crop_plan_for_center(source_info, canvas, center_x, center_y)
+    raw: list[ReframeKeyframe] = []
+    for item in observations:
+        relative_time = max(0.0, min(duration, item.time_seconds - source_start))
+        if raw and relative_time <= raw[-1].time_seconds:
+            raw[-1] = ReframeKeyframe(
+                time_seconds=raw[-1].time_seconds, normalized_x=item.center_x,
+                normalized_y=item.center_y, confidence=item.confidence,
+            )
+        else:
+            raw.append(ReframeKeyframe(
+                time_seconds=relative_time, normalized_x=item.center_x,
+                normalized_y=item.center_y, confidence=item.confidence,
+            ))
+    if raw and raw[0].time_seconds > 0:
+        raw.insert(0, raw[0].model_copy(update={"time_seconds": 0.0}))
+    if raw and raw[-1].time_seconds < duration:
+        raw.append(raw[-1].model_copy(update={"time_seconds": duration}))
+    return crop.model_copy(update={"tracking_keyframes": _smooth_reframe_keyframes(raw)})
+
+
+def _crop_scale(crop: CropPlan) -> float | None:
+    if not crop.crop_width or not crop.crop_height:
+        return None
+    return round(max(crop.source_width / crop.crop_width, crop.source_height / crop.crop_height), 3)
+
+
+def _apply_active_speaker_hysteresis(
+    segments: list[CompositionSegment], canvas: CanvasConfig,
+) -> list[CompositionSegment]:
+    """Avoid ping-pong speaker cuts unless the new focus is clearly stronger.
+
+    The sparse visual analyzer cannot safely attribute every short utterance to
+    a face.  A new speaker therefore needs both the minimum hold interval and a
+    confidence advantage over the held focus.  Otherwise the composition holds
+    the group in a wide, stable frame.
+    """
+
+    result: list[CompositionSegment] = []
+    held: CompositionSegment | None = None
+    for segment in segments:
+        if segment.tracking_mode != "active_speaker_tracking":
+            result.append(segment)
+            continue
+        duration = segment.end_seconds - segment.start_seconds
+        switch_is_uncertain = (
+            held is not None and segment.speaker_id != held.speaker_id
+            and segment.tracking_confidence < held.tracking_confidence + _ACTIVE_SPEAKER_HYSTERESIS
+        )
+        if duration >= segment.minimum_focus_hold_seconds and not switch_is_uncertain:
+            result.append(segment)
+            held = segment
+            continue
+        crop = _wide_crop_from_segment(segment, canvas)
+        reason = (
+            "Active-speaker switch did not clear the confidence hysteresis; keep both participants visible."
+            if switch_is_uncertain
+            else "Active-speaker turn is shorter than the minimum focus hold duration; keep both participants visible."
+        )
+        result.append(segment.model_copy(update={
+            "strategy": "fit_with_blur" if crop.strategy == "fit_blur_background" else "group_framing",
+            "target_crop": crop, "target_center_x": 0.5, "target_center_y": 0.5,
+            "target_scale": _crop_scale(crop), "tracking_mode": "group_framing",
+            "tracking_target": "subject_group", "tracking_required": False,
+            "tracking_reason": reason, "tracking_risk": "medium",
+            "fallback_strategy": "group_framing", "wide_safe_layout_required": True,
+            "tracking_validation_status": "not_applicable",
+        }))
+    return result
+
+
+def _validate_tracking_decisions(segments: list[CompositionSegment], canvas: CanvasConfig) -> list[CompositionSegment]:
+    """Repair dynamic plans that fail the persisted tracking-quality contract."""
+
+    result: list[CompositionSegment] = []
+    for segment in segments:
+        if segment.tracking_mode not in _TRACKING_MODES:
+            result.append(segment)
+            continue
+        reasons: list[str] = []
+        crop = segment.target_crop
+        frames = crop.tracking_keyframes if crop is not None else []
+        diagnostics = _tracking_quality_metrics(segment)
+        if segment.static_crop_sufficient:
+            reasons.append("A static crop is already sufficient.")
+        if segment.tracking_risk in {"high", "unsafe"}:
+            reasons.append("Crop movement is too abrupt or detection is unstable.")
+        if len(frames) < 2:
+            reasons.append("Tracking does not have enough independent keyframes.")
+        if not diagnostics["target_visible"]:
+            reasons.append("The selected crop does not keep the target fully visible.")
+        if not diagnostics["target_in_safe_zone"]:
+            reasons.append("The target would leave the crop safe zone or lose required headroom.")
+        if not diagnostics["subtitle_safe"]:
+            reasons.append("The tracked target risks persistent overlap with the subtitle zone.")
+        if float(diagnostics["max_crop_speed"]) > _MAX_SAFE_TRACKING_SPEED:
+            reasons.append("The crop would need a visibly abrupt correction.")
+        if int(diagnostics["minor_correction_count"]) > 2:
+            reasons.append("The tracker would make repeated small corrective moves instead of holding a stable crop.")
+        if not diagnostics["movement_justified"]:
+            reasons.append("Crop movement is not justified by meaningful subject movement.")
+        if (
+            segment.tracking_mode == "active_speaker_tracking"
+            and max((item.visible_face_count for item in segment.subject_bounds), default=0) > 1
+            and segment.tracking_confidence < 0.80
+        ):
+            reasons.append("The active-speaker signal is too weak to switch focus between visible faces.")
+        if not reasons:
+            result.append(segment.model_copy(update={
+                "tracking_validation_status": "passed", "tracking_diagnostics": diagnostics,
+                "composition_quality_status": "passed",
+            }))
+            continue
+        message = "Tracking disabled: " + " ".join(reasons)
+        if segment.static_crop_sufficient and segment.subject_bounds:
+            center_x, center_y = _weighted_center(segment.subject_bounds)
+            assert crop is not None
+            static_crop = _crop_plan_for_center({
+                "display_width": crop.source_width, "display_height": crop.source_height,
+                "rotation": crop.display_rotation_degrees,
+            }, canvas, center_x, center_y)
+            result.append(segment.model_copy(update={
+                "strategy": "face_crop" if segment.tracking_target == "primary_face" else "subject_crop",
+                "target_crop": static_crop, "target_center_x": center_x, "target_center_y": center_y,
+                "target_scale": _crop_scale(static_crop), "tracking_mode": "static_subject_crop",
+                "tracking_required": False, "tracking_reason": message,
+                "tracking_risk": "low", "fallback_strategy": "static_subject_crop",
+                "fallback_reason": message, "tracking_validation_status": "failed_repaired",
+                "tracking_validation_reasons": reasons, "tracking_diagnostics": diagnostics,
+                "composition_quality_status": "passed_with_warning", "composition_quality_reasons": reasons,
+            }))
+            continue
+        fallback_crop = _wide_crop_from_segment(segment, canvas)
+        result.append(segment.model_copy(update={
+            "strategy": "fit_with_blur" if fallback_crop.strategy == "fit_blur_background" else "scene_wide",
+            "target_crop": fallback_crop, "target_center_x": 0.5, "target_center_y": 0.5,
+            "target_scale": _crop_scale(fallback_crop), "tracking_mode": "safe_fallback",
+            "tracking_target": "scene_center", "tracking_required": False,
+            "tracking_reason": message, "tracking_risk": "unsafe", "fallback_strategy": "fit_with_blur",
+            "wide_safe_layout_required": True, "fallback_reason": message,
+            "tracking_validation_status": "failed_repaired", "tracking_validation_reasons": reasons,
+            "tracking_diagnostics": diagnostics, "composition_quality_status": "passed_with_warning",
+            "composition_quality_reasons": reasons,
+        }))
+    return result
+
+
+def _tracking_quality_metrics(segment: CompositionSegment) -> dict[str, float | int | bool]:
+    """Measure actual tracked crop coverage against the observed target bounds."""
+
+    crop = segment.target_crop
+    if crop is None or not crop.crop_width or not crop.crop_height:
+        return {
+            "target_visible": False, "target_in_safe_zone": False, "subtitle_safe": False,
+            "max_crop_speed": 0.0, "minor_correction_count": 0,
+            "subject_motion": 0.0, "crop_motion": 0.0, "movement_justified": False,
+            "subject_screen_ratio": 0.0,
+        }
+    frames = crop.tracking_keyframes
+    if not frames or not segment.subject_bounds:
+        return {
+            "target_visible": False, "target_in_safe_zone": False, "subtitle_safe": False,
+            "max_crop_speed": 0.0, "minor_correction_count": 0,
+            "subject_motion": 0.0, "crop_motion": 0.0, "movement_justified": False,
+            "subject_screen_ratio": 0.0,
+        }
+    source_start = segment.source_start_seconds or 0.0
+    target_visible = True
+    target_in_safe_zone = True
+    subtitle_safe = True
+    subject_ratios: list[float] = []
+    for bound in segment.subject_bounds:
+        center_x, center_y = _tracking_center_at(frames, max(0.0, bound.time_seconds - source_start))
+        crop_x = _crop_origin_for_center(center_x, crop.source_width, crop.crop_width)
+        crop_y = _crop_origin_for_center(center_y, crop.source_height, crop.crop_height)
+        left = (bound.center_x - bound.width / 2) * crop.source_width
+        right = (bound.center_x + bound.width / 2) * crop.source_width
+        top = (bound.center_y - bound.height / 2) * crop.source_height
+        bottom = (bound.center_y + bound.height / 2) * crop.source_height
+        target_visible = target_visible and (
+            left >= crop_x and right <= crop_x + crop.crop_width
+            and top >= crop_y and bottom <= crop_y + crop.crop_height
+        )
+        safe_left = crop_x + crop.crop_width * 0.05
+        safe_right = crop_x + crop.crop_width * 0.95
+        safe_top = crop_y + crop.crop_height * 0.06
+        safe_bottom = crop_y + crop.crop_height * 0.84
+        target_in_safe_zone = target_in_safe_zone and (
+            left >= safe_left and right <= safe_right and top >= safe_top and bottom <= safe_bottom
+        )
+        subtitle_safe = subtitle_safe and bottom <= safe_bottom
+        subject_ratios.append(min(1.0, (bound.width * bound.height) / max(
+            (crop.crop_width / crop.source_width) * (crop.crop_height / crop.source_height), 0.001,
+        )))
+    crop_centers = [
+        (
+            (_crop_origin_for_center(item.normalized_x, crop.source_width, crop.crop_width) + crop.crop_width / 2) / crop.source_width,
+            (_crop_origin_for_center(item.normalized_y, crop.source_height, crop.crop_height) + crop.crop_height / 2) / crop.source_height,
+        )
+        for item in frames
+    ]
+    crop_steps = [
+        max(abs(right[0] - left[0]), abs(right[1] - left[1]))
+        for left, right in zip(crop_centers, crop_centers[1:])
+    ]
+    crop_speeds = [
+        step / max(0.001, right.time_seconds - left.time_seconds)
+        for step, left, right in zip(crop_steps, frames, frames[1:])
+    ]
+    subject_steps = [
+        max(abs(right.center_x - left.center_x), abs(right.center_y - left.center_y))
+        for left, right in zip(segment.subject_bounds, segment.subject_bounds[1:])
+    ]
+    subject_motion = max(subject_steps, default=0.0)
+    crop_motion = max(crop_steps, default=0.0)
+    return {
+        "target_visible": target_visible,
+        "target_in_safe_zone": target_in_safe_zone,
+        "subtitle_safe": subtitle_safe,
+        "max_crop_speed": round(max(crop_speeds, default=0.0), 4),
+        "minor_correction_count": sum(0 < step <= 0.012 for step in crop_steps),
+        "subject_motion": round(subject_motion, 4),
+        "crop_motion": round(crop_motion, 4),
+        "movement_justified": subject_motion >= 0.035 and crop_motion >= 0.01,
+        "subject_screen_ratio": round(sum(subject_ratios) / len(subject_ratios), 4),
+    }
+
+
+def _tracking_center_at(keyframes: list[ReframeKeyframe], time_seconds: float) -> tuple[float, float]:
+    if time_seconds <= keyframes[0].time_seconds:
+        return keyframes[0].normalized_x, keyframes[0].normalized_y
+    for left, right in zip(keyframes, keyframes[1:]):
+        if time_seconds <= right.time_seconds:
+            progress = (time_seconds - left.time_seconds) / max(0.001, right.time_seconds - left.time_seconds)
+            return (
+                left.normalized_x + (right.normalized_x - left.normalized_x) * progress,
+                left.normalized_y + (right.normalized_y - left.normalized_y) * progress,
+            )
+    return keyframes[-1].normalized_x, keyframes[-1].normalized_y
+
+
+def _crop_origin_for_center(center: float, source_size: int, crop_size: int) -> int:
+    return max(0, min(_even_down(center * source_size - crop_size / 2), source_size - crop_size))
+
+
+def _apply_composition_quality_diagnostics(
+    segments: list[CompositionSegment], canvas: CanvasConfig,
+) -> list[CompositionSegment]:
+    """Persist blur/foreground/subject diagnostics for every composition segment."""
+
+    result: list[CompositionSegment] = []
+    for segment in segments:
+        diagnostics = _composition_diagnostics(segment, canvas)
+        reasons = list(segment.composition_quality_reasons)
+        if diagnostics["blur_coverage_ratio"] > 0.75:
+            reasons.append("Blur background occupies too much of the vertical canvas.")
+        if segment.subject_bounds and diagnostics["subject_screen_ratio"] < 0.025:
+            reasons.append("The detected subject would be too small to read reliably on a mobile screen.")
+        if segment.tracking_validation_status == "failed_repaired":
+            reasons.append("The composition was recalculated after tracking quality validation failed.")
+        status = "passed_with_warning" if reasons else "passed"
+        result.append(segment.model_copy(update={
+            "composition_diagnostics": diagnostics,
+            "composition_quality_status": status,
+            "composition_quality_reasons": list(dict.fromkeys(reasons)),
+        }))
+    return result
+
+
+def _composition_diagnostics(segment: CompositionSegment, canvas: CanvasConfig) -> dict[str, float]:
+    crop = segment.target_crop
+    if crop is None:
+        return {
+            "foreground_coverage_ratio": 0.0,
+            "blur_coverage_ratio": 0.0,
+            "subject_screen_ratio": 0.0,
+            "unused_visual_area_ratio": 1.0,
+        }
+    if crop.strategy == "fit_blur_background":
+        source_aspect = crop.source_width / crop.source_height
+        canvas_aspect = canvas.width / canvas.height
+        foreground = min(1.0, canvas_aspect / source_aspect) if source_aspect >= canvas_aspect else min(1.0, source_aspect / canvas_aspect)
+        blur = 1.0 - foreground
+    else:
+        foreground, blur = 1.0, 0.0
+    if crop.crop_width and crop.crop_height:
+        visible_area = (crop.crop_width / crop.source_width) * (crop.crop_height / crop.source_height)
+        subject_ratio = max((item.width * item.height / max(visible_area, 0.001) for item in segment.subject_bounds), default=0.0)
+    else:
+        subject_ratio = max((item.width * item.height * foreground for item in segment.subject_bounds), default=0.0)
+    return {
+        "foreground_coverage_ratio": round(foreground, 4),
+        "blur_coverage_ratio": round(blur, 4),
+        "subject_screen_ratio": round(min(1.0, subject_ratio), 4),
+        "unused_visual_area_ratio": round(blur if not segment.subject_bounds else max(0.0, blur - subject_ratio), 4),
+    }
+
+
+def _wide_crop_from_segment(segment: CompositionSegment, canvas: CanvasConfig) -> CropPlan:
+    crop = segment.target_crop
+    if crop is None:
+        raise ProductionRenderError("Tracking fallback cannot resolve a source crop.")
+    if crop.source_width / crop.source_height > (canvas.width / canvas.height) * 1.03:
+        return CropPlan(
+            strategy="fit_blur_background", source_width=crop.source_width, source_height=crop.source_height,
+            display_rotation_degrees=crop.display_rotation_degrees,
+        )
+    return _crop_plan_for_center({
+        "display_width": crop.source_width, "display_height": crop.source_height,
+        "rotation": crop.display_rotation_degrees,
+    }, canvas, 0.5, 0.5)
 
 
 def _smooth_reframe_keyframes(keyframes: list[ReframeKeyframe]) -> list[ReframeKeyframe]:
@@ -596,10 +1428,42 @@ def _visual_filter(clip: SourceVideoClip | FreezeFrameClip, canvas: CanvasConfig
             f"[bg][fit]overlay=(W-w)/2:(H-h),setsar=1" + tail
         )
     assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
+    if crop.tracking_keyframes:
+        x = _tracking_crop_expression(crop.tracking_keyframes, crop.source_width, crop.crop_width, "x")
+        y = _tracking_crop_expression(crop.tracking_keyframes, crop.source_height, crop.crop_height, "y")
+        return (
+            f"[0:v]crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
+            f"scale={canvas.width}:{canvas.height},setsar=1" + tail
+        )
     return (
         f"[0:v]crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
         f"scale={canvas.width}:{canvas.height},setsar=1" + tail
     )
+
+
+def _tracking_crop_expression(
+    keyframes: list[ReframeKeyframe], source_size: int, crop_size: int, axis: str,
+) -> str:
+    """Linearly interpolate a bounded crop origin using FFmpeg's frame time ``t``."""
+
+    values: list[tuple[float, int]] = []
+    for keyframe in keyframes:
+        center = keyframe.normalized_x if axis == "x" else keyframe.normalized_y
+        origin = max(0, min(_even_down(center * source_size - crop_size / 2), source_size - crop_size))
+        values.append((keyframe.time_seconds, origin))
+    if len(values) == 1:
+        return str(values[0][1])
+    expression = str(values[-1][1])
+    for index in range(len(values) - 2, -1, -1):
+        start_time, start_value = values[index]
+        end_time, end_value = values[index + 1]
+        delta = max(0.001, end_time - start_time)
+        linear = f"{start_value}+({end_value}-{start_value})*(t-{start_time:.6f})/{delta:.6f}"
+        expression = f"if(lt(t\\,{end_time:.6f})\\,{linear}\\,{expression})"
+    first_time, first_value = values[0]
+    if first_time > 0:
+        expression = f"if(lt(t\\,{first_time:.6f})\\,{first_value}\\,{expression})"
+    return expression
 
 
 def probe_media(path: Path, require_video: bool = False, require_audio: bool = False) -> dict[str, Any]:
@@ -774,9 +1638,11 @@ def _final_command(
     ]
 
 
-def _timeline_filter(durations: list[float], transition: str) -> tuple[str, str]:
+def _timeline_filter(durations: list[float], transition: str | list[VideoTransition]) -> tuple[str, str]:
     if not durations:
         raise ProductionRenderError("No visual durations were supplied for final mux.")
+    if isinstance(transition, list):
+        return _mixed_timeline_filter(durations, transition)
     if transition == "short_crossfade" and len(durations) > 1:
         fade = 0.15
         current = "[0:v]"
@@ -803,6 +1669,43 @@ def _timeline_filter(durations: list[float], transition: str) -> tuple[str, str]
         start = max(0.0, sum(durations) - min(0.15, durations[-1]))
         return graph + f";[vconcat]fade=t=out:st={start:.6f}:d={fade:.3f}[vfaded]", "[vfaded]"
     return graph, "[vconcat]"
+
+
+def _mixed_timeline_filter(durations: list[float], transitions: list[VideoTransition]) -> tuple[str, str]:
+    """Honor controlled scene cuts while retaining requested crossfades elsewhere."""
+
+    if len(durations) == 1:
+        return _timeline_filter(durations, "cut")
+    by_pair = [item.transition_type for item in transitions]
+    # concat outputs AVTB while decoded MP4 clips commonly use a stream-specific
+    # timebase. Normalize every branch before a later xfade can join it.
+    parts = [f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS[v{index}]" for index in range(len(durations))]
+    current = "[v0]"
+    elapsed = durations[0]
+    crossfade_loss = 0.0
+    for index, duration in enumerate(durations[1:], start=1):
+        kind = by_pair[index - 1] if index - 1 < len(by_pair) else "cut"
+        label = f"[mix{index}]"
+        incoming = f"[v{index}]"
+        if kind == "short_crossfade":
+            fade = min(0.15, duration, elapsed)
+            offset = max(0.0, elapsed - fade)
+            parts.append(
+                f"{current}{incoming}xfade=transition=fade:duration={fade:.3f}:offset={offset:.6f}{label}"
+            )
+            elapsed += duration - fade
+            crossfade_loss += fade
+        else:
+            parts.append(f"{current}{incoming}concat=n=2:v=1:a=0{label}")
+            elapsed += duration
+        current = label
+    if crossfade_loss:
+        parts.append(
+            f"{current}tpad=stop_mode=clone:stop_duration={crossfade_loss:.6f},"
+            f"trim=duration={sum(durations):.6f}[vconcat]"
+        )
+        return ";".join(parts), "[vconcat]"
+    return ";".join(parts), current
 
 
 def _run_ffmpeg(command: list[str], context: str) -> None:
@@ -885,6 +1788,14 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
     validation = result.validation if result else RenderValidation(status="invalid", messages=["Render result is unavailable."])
     quality = validate_output_quality(project, project.render_request.subtitles_enabled)
     subtitles = project.subtitle_project
+    composition_segments = project.reframe_plan.composition_segments
+    strategy_counts: dict[str, int] = {}
+    tracking_mode_counts: dict[str, int] = {}
+    for segment in composition_segments:
+        strategy_counts[segment.strategy] = strategy_counts.get(segment.strategy, 0) + 1
+        tracking_mode_counts[segment.tracking_mode] = tracking_mode_counts.get(segment.tracking_mode, 0) + 1
+    diagnostics = [segment.composition_diagnostics for segment in composition_segments]
+    mean = lambda name: round(sum(float(item.get(name, 0)) for item in diagnostics) / len(diagnostics), 4) if diagnostics else 0.0
     return {
         "enabled": True,
         "status": project.status,
@@ -925,6 +1836,36 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "validation": validation.status,
         "warnings": project.warnings,
         "fallback_reasons": project.fallback_reasons,
+        "composition": {
+            "strategy": project.reframe_plan.strategy,
+            "subject_detection_used": project.reframe_plan.subject_detection_used,
+            "summary": {
+                "strategy_counts": strategy_counts,
+                "tracking_mode_counts": tracking_mode_counts,
+                "mean_subject_detection_confidence": round(
+                    sum(segment.confidence for segment in composition_segments) / len(composition_segments), 4,
+                ) if composition_segments else 0.0,
+                "foreground_coverage_ratio": mean("foreground_coverage_ratio"),
+                "blur_coverage_ratio": mean("blur_coverage_ratio"),
+                "subject_screen_ratio": mean("subject_screen_ratio"),
+                "unused_visual_area_ratio": mean("unused_visual_area_ratio"),
+                "scene_transition_count": sum(
+                    transition.transition_type == "cut"
+                    and "-scene-" in (transition.from_clip_id or "")
+                    and "-scene-" in (transition.to_clip_id or "")
+                    for transition in project.timeline.transitions
+                ),
+                "fallback_reasons": [
+                    {"segment_id": segment.segment_id, "reason": segment.fallback_reason}
+                    for segment in composition_segments if segment.fallback_reason
+                ],
+            },
+            "segments": [
+                segment.model_dump(mode="json")
+                for segment in project.reframe_plan.composition_segments
+            ],
+            "tracking_validation": quality.get("tracking", {}),
+        },
         "quality": quality,
         "errors": [item.model_dump(mode="json") for item in result.errors] if result else [],
         "artifacts": project.artifact_paths,
