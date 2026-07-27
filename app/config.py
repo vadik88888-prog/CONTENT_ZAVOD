@@ -141,6 +141,7 @@ class ContentUnderstandingConfig:
     coverage_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_COVERAGE_SELECTION_WEIGHTS))
     strong_story_unit_threshold: float = 0.55
     semantic_duplicate_threshold: float = 0.78
+    coverage_min_quality_score: float = 55.0
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -181,6 +182,8 @@ class ContentUnderstandingConfig:
             raise ClipEngineError("content_understanding.coverage_weights должен содержать неотрицательные числа.")
         if not 0 <= self.strong_story_unit_threshold <= 1 or not 0 <= self.semantic_duplicate_threshold <= 1:
             raise ClipEngineError("content_understanding coverage thresholds должны быть от 0 до 1.")
+        if not 0 <= self.coverage_min_quality_score <= 100:
+            raise ClipEngineError("content_understanding.coverage_min_quality_score должен быть от 0 до 100.")
 
 
 DEFAULT_SCORING_WEIGHTS = {

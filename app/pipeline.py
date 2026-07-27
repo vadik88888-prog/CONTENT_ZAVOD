@@ -61,7 +61,7 @@ INTELLIGENCE_STAGES = (
     "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
     "global_content_map", "story_units", "semantic_boundaries", "coverage_map", "clip_count_recommendation", "render", "report",
 )
-INTELLIGENCE_ENGINE_VERSION = "1.7.0"
+INTELLIGENCE_ENGINE_VERSION = "1.7.1"
 TRANSFORMATION_STAGES = (
     "transformation_source_context", "transformation_semantic_representation",
     "transformation_narrative_plan", "transformation_script_draft",
@@ -408,6 +408,7 @@ class Pipeline:
                     "weights": self.config.content_understanding.coverage_weights,
                     "strong_story_unit_threshold": self.config.content_understanding.strong_story_unit_threshold,
                     "semantic_duplicate_threshold": self.config.content_understanding.semantic_duplicate_threshold,
+                    "coverage_min_quality_score": self.config.content_understanding.coverage_min_quality_score,
                 },
             },
             lambda: self._final_selection(scored, work_directory / "final_selection.json", content_map),

@@ -122,3 +122,38 @@ def test_coverage_selection_is_deterministic() -> None:
     second, _ = select_with_coverage(_scored(content_map, [90, 90, 90]), config, content_map)
 
     assert [item.candidate.id for item in first] == [item.candidate.id for item in second]
+
+
+def test_coverage_selection_rejects_subminimum_duration_candidates() -> None:
+    content_map = _content_map([
+        "Discipline creates progress when motivation disappears at the end of a hard day.",
+        "Courage starts after a person makes the first difficult decision.",
+        "Responsibility gives people control over the choices they make tomorrow.",
+        "Small repeated actions create durable results over a long period of time.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 3
+    scored = _scored(content_map, [99, 98, 97, 96])
+    short = scored[0]
+    short.candidate.end = short.candidate.start + config.min_clip_duration - 0.1
+
+    selected, _coverage = select_with_coverage(scored, config, content_map)
+
+    assert short not in selected
+    assert len(selected) == 3
+    assert "минимальных" in (short.selection_reason or "")
+
+
+def test_coverage_selection_uses_strong_story_above_coverage_floor() -> None:
+    content_map = _content_map([
+        "Discipline creates progress when motivation disappears at the end of a hard day.",
+        "Courage starts after a person makes the first difficult decision.",
+        "Responsibility gives people control over the choices they make tomorrow.",
+    ])
+    config = AppConfig(score_threshold=60)
+    config.ai_reranking.final_clip_count = 3
+
+    selected, _coverage = select_with_coverage(_scored(content_map, [64, 62, 57]), config, content_map)
+
+    assert len(selected) == 3
+    assert any(item.score == 57 for item in selected)

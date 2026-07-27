@@ -20,7 +20,7 @@ from app.utils import stable_text_hash
 
 
 VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
-CONTENT_STRATEGY_VERSION = "5A.1"
+CONTENT_STRATEGY_VERSION = "5A.2"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 
@@ -793,7 +793,15 @@ def _start_new_chapter(
     return (
         current_duration >= float(settings.max_chapter_seconds)
         or speaker_changed and terminal
-        or pause >= float(settings.chapter_pause_seconds) and terminal
+        # A pause is meaningful only after the current chapter has enough
+        # material to form a publishable StoryUnit.  Otherwise a sparse
+        # transcript turns every sentence into a chapter and leaves the final
+        # selector with sub-minimum "clips".
+        or (
+            pause >= float(settings.chapter_pause_seconds)
+            and terminal
+            and current_duration >= float(settings.min_story_unit_seconds)
+        )
         or marker and terminal and current_duration >= 18.0
     )
 
@@ -840,10 +848,10 @@ def _make_story_units(
         current.append(segment)
         following = group[position + 1] if position + 1 < len(group) else None
         if _close_story_unit(current, following, features, settings):
-            units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features))
+            units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features, settings))
             current = []
     if current:
-        units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features))
+        units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features, settings))
     chapter.candidate_story_count = len(units)
     return units
 
@@ -874,9 +882,10 @@ def _close_story_unit(
 
 
 def _make_story_unit(
-    unit_id: str, chapter: ContentChapter, group: list[dict[str, Any]], features: dict[int, dict[str, Any]],
+    unit_id: str, chapter: ContentChapter, group: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any,
 ) -> StoryUnit:
     start, end = float(group[0]["start"]), float(group[-1]["end"])
+    duration = end - start
     text = _group_text(group)
     first_feature = features.get(int(group[0]["id"]), {})
     last_feature = features.get(int(group[-1]["id"]), {})
@@ -890,10 +899,16 @@ def _make_story_unit(
     signature = _content_signature(chapter.chapter_id, start, end, text, narrative, _dominant_emotion(text))
     payoff = _last_sentence(text) if any(marker in text.casefold() for marker in _PAYOFF_MARKERS) else ""
     setup = _first_sentence(text) if any(marker in text.casefold() for marker in _SETUP_MARKERS) else ""
-    publishable = standalone >= 0.55 and complete >= 0.6 and context_dependency <= 0.6 and bool(text.strip())
+    publishable = (
+        duration >= float(settings.min_story_unit_seconds)
+        and standalone >= 0.55
+        and complete >= 0.6
+        and context_dependency <= 0.6
+        and bool(text.strip())
+    )
     return StoryUnit(
         story_unit_id=f"{chapter.chapter_id}-{unit_id}", chapter_id=chapter.chapter_id,
-        start=start, end=end, duration=round(end - start, 3), transcript_segment_ids=[int(item["id"]) for item in group],
+        start=start, end=end, duration=round(duration, 3), transcript_segment_ids=[int(item["id"]) for item in group],
         title=_title_from_text(text), core_idea=_first_sentence(text), hook_seed=_first_sentence(text)[:220],
         setup=setup, development=text, payoff=payoff, ending=_last_sentence(text),
         emotional_arc="rising_to_payoff" if payoff else "contained_statement", dominant_emotion=_dominant_emotion(text),
@@ -1335,9 +1350,22 @@ def select_with_coverage(
     requested = min(config.max_clips, config.ai_reranking.final_clip_count)
     for item in scored:
         boundary = item.candidate.boundary_diagnostics
+        story = stories.get(str(item.candidate.story_unit_id or ""))
+        strong_story = bool(
+            story
+            and story.publishability_precheck
+            and story.standalone_score >= settings.strong_story_unit_threshold
+        )
         if not item.selected:
             rejected[item.candidate.id] = item.rejection_reason or "Не прошёл базовый quality ranking."
-        elif item.score < config.score_threshold:
+        elif item.candidate.duration < float(config.min_clip_duration):
+            rejected[item.candidate.id] = (
+                f"Длительность {item.candidate.duration:.2f} с меньше минимальных "
+                f"{float(config.min_clip_duration):.2f} с."
+            )
+        elif item.score < config.score_threshold and (
+            not strong_story or item.score < settings.coverage_min_quality_score
+        ):
             rejected[item.candidate.id] = "Оценка ниже порога."
         elif boundary and not bool(boundary.get("eligible", False)):
             rejected[item.candidate.id] = str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation.")

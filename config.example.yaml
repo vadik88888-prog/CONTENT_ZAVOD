@@ -67,6 +67,9 @@ content_understanding:
   continuation_risk_threshold: 0.65
   strong_story_unit_threshold: 0.55
   semantic_duplicate_threshold: 0.78
+  # Coverage может выбрать самостоятельную StoryUnit ниже legacy score_threshold,
+  # но не ниже этого пола и только после semantic/boundary validation.
+  coverage_min_quality_score: 55
   coverage_weights:
     base_quality: 0.36
     standalone: 0.12

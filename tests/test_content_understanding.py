@@ -158,6 +158,18 @@ def test_content_map_covers_transcript_in_order_and_keeps_question_with_answer()
     validate_global_content_map(content_map, transcript)
 
 
+def test_chapter_pause_does_not_make_subminimum_chapters() -> None:
+    content_map, _transcript = _content_map([
+        {"id": 1, "start": 0.0, "end": 4.0, "text": "First complete sentence."},
+        {"id": 2, "start": 6.0, "end": 10.0, "text": "Second complete sentence."},
+        {"id": 3, "start": 12.0, "end": 16.0, "text": "Third complete sentence."},
+    ])
+
+    assert len(content_map["chapters"]) == 1
+    assert content_map["chapters"][0]["transcript_segment_ids"] == [1, 2, 3]
+    assert content_map["story_units"][0]["duration"] >= AppConfig().content_understanding.min_story_unit_seconds
+
+
 def test_story_units_have_grounded_signatures_and_detect_repeated_ideas() -> None:
     content_map, transcript = _content_map([
         {"start": 0.0, "end": 16.0, "text": "Дисциплина важнее настроения, потому что действие создаёт результат."},
