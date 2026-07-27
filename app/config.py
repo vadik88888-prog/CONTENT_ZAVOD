@@ -400,6 +400,10 @@ class ProductionRenderConfig:
     subtitle_min_duration: float = 0.45
     subtitle_max_duration: float = 3.5
     subtitle_reading_speed_cps: float = 15.0
+    subtitle_min_words_per_cue: int = 2
+    subtitle_max_words_per_cue: int = 9
+    subtitle_max_rendered_width_ratio: float = 0.95
+    subtitle_min_font_scale: float = 0.80
     maximum_freeze_duration: float = 1.5
     maximum_loop_duration: float = 0.0
     minimum_clip_duration: float = 0.10
@@ -432,12 +436,18 @@ class ProductionRenderConfig:
             raise ClipEngineError("production_render.subtitle_style: minimal, documentary, dynamic или clean.")
         if not isinstance(self.subtitle_font_family, str) or not self.subtitle_font_family.strip() or len(self.subtitle_font_family) > 160:
             raise ClipEngineError("production_render.subtitle_font_family должен быть непустой безопасной строкой.")
-        if not 8 <= self.subtitle_max_chars_per_line <= 80 or not 1 <= self.subtitle_max_lines <= 4:
+        if not 8 <= self.subtitle_max_chars_per_line <= 80 or not 1 <= self.subtitle_max_lines <= 2:
             raise ClipEngineError("production_render subtitle_max_chars_per_line/max_lines вне допустимого диапазона.")
         if not 0.05 <= self.subtitle_min_duration <= self.subtitle_max_duration <= 12:
             raise ClipEngineError("production_render subtitle duration limits некорректны.")
         if not 4 <= self.subtitle_reading_speed_cps <= 40:
             raise ClipEngineError("production_render.subtitle_reading_speed_cps должен быть от 4 до 40.")
+        if not 1 <= self.subtitle_min_words_per_cue <= self.subtitle_max_words_per_cue <= 30:
+            raise ClipEngineError("production_render subtitle word-per-cue limits некорректны.")
+        if not 0.60 <= self.subtitle_max_rendered_width_ratio <= 0.95:
+            raise ClipEngineError("production_render.subtitle_max_rendered_width_ratio должен быть от 0.45 до 0.95.")
+        if not 0.80 <= self.subtitle_min_font_scale <= 1.0:
+            raise ClipEngineError("production_render.subtitle_min_font_scale должен быть от 0.80 до 1.0.")
         if not 0 <= self.maximum_freeze_duration <= 5 or not 0 <= self.maximum_loop_duration <= 5:
             raise ClipEngineError("production_render maximum freeze/loop duration должны быть от 0 до 5.")
         if not 0.04 <= self.minimum_clip_duration <= 10:

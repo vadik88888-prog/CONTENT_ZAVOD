@@ -217,6 +217,13 @@ class SubtitleCue(BaseModel):
     style_id: str
     source_type: Literal["narration", "dialogue"]
     word_timings: list["SubtitleWordTiming"] = Field(default_factory=list)
+    original_text: str = ""
+    original_line_count: int = Field(default=1, ge=1, le=32)
+    resolved_lines: list[str] = Field(default_factory=list)
+    resolved_font_size: int | None = Field(default=None, ge=8, le=240)
+    split_reason: str | None = None
+    layout_state: Literal["raw", "segmented", "wrapped", "fitted", "fallback_fitted", "invalid"] = "fitted"
+    fallback_used: bool = False
 
     @model_validator(mode="after")
     def _ordered(self) -> "SubtitleCue":
@@ -273,6 +280,7 @@ class SubtitleProject(BaseModel):
     cues: list[SubtitleCue] = Field(default_factory=list)
     font_fallback_used: bool = False
     warnings: list[str] = Field(default_factory=list)
+    layout_contract_version: str = "4D.0"
 
     @model_validator(mode="after")
     def _valid_cues(self) -> "SubtitleProject":

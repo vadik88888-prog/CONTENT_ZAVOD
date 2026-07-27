@@ -159,6 +159,9 @@ class VideoCompositionService:
         self, project: VideoProject, source_info: dict[str, Any], mixed_info: dict[str, Any],
         render_root: Path, cache_path: Path,
     ) -> VideoProject:
+        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        if quality["status"] == "failed":
+            raise ProductionRenderError("Resolved subtitle quality validation failed: " + "; ".join(quality["errors"]))
         clips_root = render_root / "clips"
         temp_root = render_root / "temp"
         render_root.mkdir(parents=True, exist_ok=True)
@@ -193,9 +196,6 @@ class VideoCompositionService:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
             raise ProductionRenderError(f"Production render failed: {_safe_error(error)}") from error
-        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
-        if quality["status"] == "failed":
-            raise ProductionRenderError("Output quality validation failed: " + "; ".join(quality["errors"]))
         warnings = [*project.warnings, *validation.messages, *quality["warnings"]]
         if encoder_warning:
             warnings.append(encoder_warning)

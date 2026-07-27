@@ -21,9 +21,18 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
         if not subtitles.cues and float(getattr(project, "target_duration_seconds", 0) or 0) > 0.5:
             warnings.append("Subtitles are enabled but no timed cues were produced.")
         for cue in subtitles.cues:
-            if cue.line_count > subtitles.style.max_lines:
+            if cue.layout_state not in {"fitted", "fallback_fitted"}:
+                errors.append(f"Subtitle cue {cue.cue_id} does not have a resolved layout.")
+                break
+            resolved_lines = list(cue.resolved_lines or [cue.text])
+            if len(resolved_lines) > subtitles.style.max_lines:
                 errors.append(f"Subtitle cue {cue.cue_id} exceeds the configured line limit.")
                 break
+            if cue.line_count != len(resolved_lines):
+                errors.append(f"Subtitle cue {cue.cue_id} has an inconsistent resolved line count.")
+                break
+            if cue.fallback_used:
+                warnings.append(f"Subtitle cue {cue.cue_id} uses the safe fitted fallback.")
     reframe = getattr(project, "reframe_plan", None)
     fallback = getattr(reframe, "fallback_reason", None)
     return {
