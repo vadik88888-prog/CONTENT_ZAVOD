@@ -28,6 +28,7 @@ def make_report(
     tts: dict[str, Any] | None = None,
     audio: dict[str, Any] | None = None,
     production_render: dict[str, Any] | None = None,
+    content_understanding: dict[str, Any] | None = None,
     primary_results: list[dict[str, Any]] | None = None,
     run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -78,6 +79,7 @@ def make_report(
         "tts": tts or {"enabled": False, "status": "skipped"},
         "audio": audio or {"enabled": False, "status": "skipped"},
         "production_render": production_render or {"enabled": False, "status": "skipped"},
+        "content_understanding": content_understanding or {"enabled": False, "status": "skipped"},
         "state_persistence": state.get("state_persistence", {"status": "saved"}),
         "primary_results": primary_results or [],
         "produced_clips_count": len(primary_results or []),

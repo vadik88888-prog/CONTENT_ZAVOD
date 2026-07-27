@@ -27,3 +27,10 @@ def test_invalid_tts_provider_and_duration_limits_are_rejected() -> None:
     config.tts.maximum_segment_duration = 0
     with pytest.raises(ClipEngineError, match="maximum_segment_duration"):
         config.validate()
+
+
+def test_content_understanding_versions_are_validated() -> None:
+    config = AppConfig()
+    config.content_understanding.strategy_version = ""
+    with pytest.raises(ClipEngineError, match="strategy_version"):
+        config.validate()

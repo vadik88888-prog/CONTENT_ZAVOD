@@ -98,6 +98,25 @@ class CandidateGenerationConfig:
             raise ClipEngineError("candidate_generation.overlap_limit должен быть от 0 до 1.")
 
 
+@dataclass(slots=True)
+class ContentUnderstandingConfig:
+    """Versioned semantic-analysis settings, isolated from render-only options."""
+
+    enabled: bool = True
+    strategy_version: str = "5A.1"
+    profile_schema_version: str = "5A.1"
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ClipEngineError("content_understanding.enabled должен быть true или false.")
+        for name, value in (
+            ("content_understanding.strategy_version", self.strategy_version),
+            ("content_understanding.profile_schema_version", self.profile_schema_version),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ClipEngineError(f"{name} не должен быть пустым.")
+
+
 DEFAULT_SCORING_WEIGHTS = {
     "hook": 0.18,
     "completeness": 0.18,
@@ -524,6 +543,7 @@ class AppConfig:
     audio_analysis: AudioAnalysisConfig = field(default_factory=AudioAnalysisConfig)
     scene_detection: SceneDetectionConfig = field(default_factory=SceneDetectionConfig)
     candidate_generation: CandidateGenerationConfig = field(default_factory=CandidateGenerationConfig)
+    content_understanding: ContentUnderstandingConfig = field(default_factory=ContentUnderstandingConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     ai_reranking: AIRerankingConfig = field(default_factory=AIRerankingConfig)
     transformation: TransformationConfig = field(default_factory=TransformationConfig)
@@ -561,6 +581,7 @@ class AppConfig:
         self.audio_analysis.validate()
         self.scene_detection.validate()
         self.candidate_generation.validate()
+        self.content_understanding.validate()
         self.scoring.validate()
         self.ai_reranking.validate()
         self.transformation.validate()
@@ -604,6 +625,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "audio_analysis": AudioAnalysisConfig,
             "scene_detection": SceneDetectionConfig,
             "candidate_generation": CandidateGenerationConfig,
+            "content_understanding": ContentUnderstandingConfig,
             "scoring": ScoringConfig,
             "ai_reranking": AIRerankingConfig,
             "transformation": TransformationConfig,

@@ -17,6 +17,7 @@ from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
+from app.content_understanding import CONTENT_STRATEGY_VERSION, build_video_content_profile
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -50,9 +51,9 @@ from app.visual_analysis import analyse_video_subjects
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "render", "report",
+    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile", "render", "report",
 )
-INTELLIGENCE_ENGINE_VERSION = "1.6.3"
+INTELLIGENCE_ENGINE_VERSION = "1.7.0"
 TRANSFORMATION_STAGES = (
     "transformation_source_context", "transformation_semantic_representation",
     "transformation_narrative_plan", "transformation_script_draft",
@@ -275,6 +276,28 @@ class Pipeline:
             lambda: _write(work_directory / "visual_analysis.json", analyse_video_subjects(source.path, float(metadata.get("duration") or 0), self.config)),
             cache_tracker=source_cache,
         )
+        content_profile = self._cached(
+            tracker, "video_content_profile", work_directory / "video_content_profile.json",
+            {
+                "source": source.id,
+                "transcript": _hash(transcript),
+                "transcript_features": _hash(transcript_features),
+                "audio_features": _hash(audio_features),
+                "scenes": _hash(scenes),
+                "visual_analysis": _hash(visual_analysis),
+                "strategy_version": self.config.content_understanding.strategy_version,
+                "profile_schema_version": self.config.content_understanding.profile_schema_version,
+                "implementation_version": CONTENT_STRATEGY_VERSION,
+            },
+            lambda: _write(
+                work_directory / "video_content_profile.json",
+                build_video_content_profile(
+                    source_data, metadata, transcript, transcript_features, audio_features, scenes,
+                    visual_analysis, self.config,
+                ),
+            ),
+            cache_tracker=source_cache,
+        )
         raw_candidates = self._cached(
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
             {"transcript_features": _hash(transcript_features), "audio": _hash(audio_features), "scenes": _hash(scenes), "settings": self.config.candidate_generation},
@@ -395,6 +418,12 @@ class Pipeline:
             tts=tts,
             audio=audio,
             production_render=production_render,
+            content_understanding={
+                "enabled": True,
+                "profile": content_profile,
+                "strategy_version": self.config.content_understanding.strategy_version,
+                "fallback_used": bool(content_profile.get("fallback_used", True)),
+            },
             primary_results=[item.to_dict() for item in registry],
             run={
                 "run_id": self.run_id,
