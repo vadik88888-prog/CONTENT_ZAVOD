@@ -42,6 +42,44 @@ candidate_generation:
   boundary_search_radius_seconds: 4
   max_candidates: 100
   overlap_limit: 0.75
+content_understanding:
+  # Goal 5A: source-scoped semantic analysis. These settings never depend on
+  # subtitle style, export bitrate or render-only revisions.
+  enabled: true
+  strategy_version: 5A.1
+  profile_schema_version: 5A.1
+  content_map_schema_version: 5A.1
+  story_unit_schema_version: 5A.1
+  boundary_schema_version: 5A.1
+  coverage_schema_version: 5A.1
+  coverage_selection_version: 5A.1
+  chapter_pause_seconds: 1.25
+  max_chapter_seconds: 110
+  min_story_unit_seconds: 12
+  target_story_unit_seconds: 38
+  max_story_unit_seconds: 90
+  max_head_padding_seconds: 0.5
+  target_head_padding_seconds: 0.25
+  min_tail_padding_seconds: 0.25
+  target_tail_padding_seconds: 0.65
+  max_tail_padding_seconds: 1.5
+  max_semantic_extension_seconds: 12
+  continuation_risk_threshold: 0.65
+  strong_story_unit_threshold: 0.55
+  semantic_duplicate_threshold: 0.78
+  coverage_weights:
+    base_quality: 0.36
+    standalone: 0.12
+    completeness: 0.10
+    boundary: 0.11
+    incremental_coverage: 0.12
+    chapter_diversity: 0.05
+    topic_diversity: 0.06
+    emotional_diversity: 0.02
+    temporal_diversity: 0.02
+    semantic_duplicate_penalty: 0.25
+    context_dependency_penalty: 0.10
+    repetition_penalty: 0.08
 scoring:
   weights:
     hook: 0.18

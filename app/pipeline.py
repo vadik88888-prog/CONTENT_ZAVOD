@@ -19,9 +19,11 @@ from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
 from app.content_understanding import (
     CONTENT_STRATEGY_VERSION,
+    build_coverage_map,
     build_global_content_map,
     build_video_content_profile,
     generate_semantic_candidates,
+    recommend_clip_count,
     story_units_artifact,
 )
 from app.content_transformation import (
@@ -57,7 +59,7 @@ from app.visual_analysis import analyse_video_subjects
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
     "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
-    "global_content_map", "story_units", "semantic_boundaries", "render", "report",
+    "global_content_map", "story_units", "semantic_boundaries", "coverage_map", "clip_count_recommendation", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.7.0"
 TRANSFORMATION_STAGES = (
@@ -397,8 +399,40 @@ class Pipeline:
         scored = [scored_from_dict(item) for item in ai_data.get("candidates", [])]
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
-            {"policy_version": "temporal-diversity-v2", "scored": _hash(ai_data), "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold, "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count},
-            lambda: self._final_selection(scored, work_directory / "final_selection.json"),
+            {
+                "policy_version": "coverage-aware-v1", "scored": _hash(ai_data), "content_map": _hash(content_map),
+                "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold,
+                "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count,
+                "coverage": {
+                    "version": self.config.content_understanding.coverage_selection_version,
+                    "weights": self.config.content_understanding.coverage_weights,
+                    "strong_story_unit_threshold": self.config.content_understanding.strong_story_unit_threshold,
+                    "semantic_duplicate_threshold": self.config.content_understanding.semantic_duplicate_threshold,
+                },
+            },
+            lambda: self._final_selection(scored, work_directory / "final_selection.json", content_map),
+            cache_tracker=source_cache,
+        )
+        coverage_map = self._cached(
+            tracker, "coverage_map", work_directory / "coverage_map.json",
+            {"final_selection": _hash(final_data), "schema_version": self.config.content_understanding.coverage_schema_version},
+            lambda: _write(
+                work_directory / "coverage_map.json",
+                dict(final_data.get("coverage") or build_coverage_map(content_map, scored, [], self.config)),
+            ),
+            cache_tracker=source_cache,
+        )
+        clip_count_recommendation = self._cached(
+            tracker, "clip_count_recommendation", work_directory / "clip_count_recommendation.json",
+            {
+                "profile": _hash(content_profile), "content_map": _hash(content_map),
+                "requested_count": self.config.ai_reranking.final_clip_count,
+                "strategy_version": self.config.content_understanding.strategy_version,
+            },
+            lambda: _write(
+                work_directory / "clip_count_recommendation.json",
+                recommend_clip_count(content_map, content_profile, self.config.ai_reranking.final_clip_count),
+            ),
             cache_tracker=source_cache,
         )
         self.warnings.extend(str(value) for value in final_data.get("warnings", []) if str(value))
@@ -464,7 +498,7 @@ class Pipeline:
             str(ai_data.get("selection_mode", "local")), int(raw_candidates.get("candidates_generated", len(candidates))),
         )
         report_path = output_directory / "report.json"
-        tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
+        tracker.start("report", _hash({"final": final_data, "coverage": coverage_map, "recommendation": clip_count_recommendation, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
         tracker.finish("report")
         report = make_report(
             report_path, source_data, metadata, self.config, tracker.data, len(selected), len(candidates),
@@ -491,7 +525,12 @@ class Pipeline:
                 "content_map": content_map,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
+                "coverage_map_ref": str(work_directory / "coverage_map.json"),
+                "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "story_unit_count": len(story_units.get("story_units", [])),
+                "coverage": coverage_map,
+                "coverage_map": coverage_map,
+                "clip_count_recommendation": clip_count_recommendation,
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "fallback_used": bool(content_profile.get("fallback_used", True)),
             },
@@ -509,6 +548,16 @@ class Pipeline:
             output_directory / "manifest.json", run_id=self.run_id, source=source_data,
             started_at=self.started_at, requested_clip_count=self.config.ai_reranking.final_clip_count,
             production_render=production_render, results=registry, run_directory=output_directory, project_id=self.project_id,
+            content_understanding={
+                "content_profile_ref": str(work_directory / "video_content_profile.json"),
+                "content_map_ref": str(work_directory / "global_content_map.json"),
+                "story_units_ref": str(work_directory / "story_units.json"),
+                "semantic_boundary_ref": str(work_directory / "semantic_boundaries.json"),
+                "coverage_map_ref": str(work_directory / "coverage_map.json"),
+                "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
+                "strategy_version": self.config.content_understanding.strategy_version,
+                "analysis_fingerprint": _hash({"profile": content_profile, "map": content_map, "coverage": coverage_map}),
+            },
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
@@ -619,8 +668,8 @@ class Pipeline:
         write_json(path, data)
         return data
 
-    def _final_selection(self, scored: list, path: Path) -> dict[str, Any]:
-        selected = select_clips(scored, self.config)
+    def _final_selection(self, scored: list, path: Path, content_map: dict[str, Any] | None = None) -> dict[str, Any]:
+        selected = select_clips(scored, self.config, content_map)
         requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
         warnings: list[str] = []
         if len(selected) < requested:
@@ -628,11 +677,12 @@ class Pipeline:
                 f"Найдено только {len(selected)} достаточно разных сильных фрагмента из запрошенных {requested}."
             )
         data = {
-            "policy_version": "temporal-diversity-v2",
+            "policy_version": "coverage-aware-v1" if content_map is not None else "temporal-diversity-v2",
             "candidates": [item.to_dict() for item in scored],
             "selected_ids": [item.candidate.id for item in selected],
             "requested_count": requested,
             "warnings": warnings,
+            "coverage": build_coverage_map(content_map, scored, selected, self.config) if content_map is not None else {},
         }
         write_json(path, data)
         return data

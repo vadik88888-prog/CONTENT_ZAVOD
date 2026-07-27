@@ -15,7 +15,7 @@ MANIFEST_VERSION = "4D.0"
 def write_run_manifest(
     path: Path, *, run_id: str, source: dict[str, Any], started_at: str,
     requested_clip_count: int, production_render: dict[str, Any], results: list[ClipResult],
-    run_directory: Path, project_id: str | None = None,
+    run_directory: Path, project_id: str | None = None, content_understanding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = run_directory.resolve()
     seen_clip_results: set[str] = set()
@@ -73,6 +73,7 @@ def write_run_manifest(
         "subtitle_status": _subtitle_status(production_render),
         "audio_mode": production_render.get("audio_mode"),
         "composition_mode": production_render.get("resolution"),
+        "content_understanding": content_understanding or {},
     }
     write_json(path, data)
     return data

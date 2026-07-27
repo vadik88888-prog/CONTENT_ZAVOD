@@ -8,8 +8,16 @@ from app.models import ScoredCandidate
 TRANSCRIPT_DUPLICATE_THRESHOLD = 0.90
 
 
-def select_clips(scored: list[ScoredCandidate], config: AppConfig) -> list[ScoredCandidate]:
+def select_clips(
+    scored: list[ScoredCandidate], config: AppConfig, content_map: dict | None = None,
+) -> list[ScoredCandidate]:
     """Select the strongest candidates while preserving source-content diversity."""
+
+    if content_map is not None:
+        from app.content_understanding import select_with_coverage
+
+        selected, _coverage = select_with_coverage(scored, config, content_map)
+        return selected
 
     accepted: list[ScoredCandidate] = []
     for item in sorted(scored, key=lambda value: value.score, reverse=True):

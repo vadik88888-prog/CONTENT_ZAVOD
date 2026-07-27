@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from app.gui.components import ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
 from app.gui.viewmodels import ProjectViewModel
-from app.utils import format_seconds
+from app.utils import format_seconds, read_json
 
 
 _STATUS = {
@@ -59,6 +59,9 @@ class ProjectScreen(QWidget):
         left.addWidget(self.metadata)
         self.estimate = self._card("Предварительная оценка")
         left.addWidget(self.estimate)
+        self.content_summary = self._card("Что найдено в видео")
+        self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
+        left.addWidget(self.content_summary)
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
         left.addWidget(self.progress)
@@ -200,6 +203,7 @@ class ProjectScreen(QWidget):
 
     def _runs_changed(self, runs: list[ProjectRun]) -> None:
         self.runs = runs
+        self._update_content_summary(runs)
         while self.history_layout.count() > 1:
             item = self.history_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -226,6 +230,39 @@ class ProjectScreen(QWidget):
         if runs:
             result = next((Path(item) for item in runs[0].artifact_paths if Path(item).suffix.lower() == ".mp4" and Path(item).is_file()), None)
             if result: self.preview.set_file(result)
+
+    def _update_content_summary(self, runs: list[ProjectRun]) -> None:
+        for run in runs:
+            if not run.report_path:
+                continue
+            report = read_json(Path(run.report_path), {})
+            understanding = report.get("content_understanding", {}) if isinstance(report, dict) else {}
+            if not isinstance(understanding, dict) or not understanding.get("enabled"):
+                continue
+            profile = understanding.get("profile", {})
+            content_map = understanding.get("content_map", {})
+            recommendation = understanding.get("clip_count_recommendation", {})
+            coverage = understanding.get("coverage_map", understanding.get("coverage", {}))
+            if not all(isinstance(item, dict) for item in (profile, content_map, recommendation, coverage)):
+                continue
+            clip_range = recommendation.get("estimated_publishable_clip_range", {})
+            lower = clip_range.get("min", "—")
+            upper = clip_range.get("max", "—")
+            selected_chapters = coverage.get("selected_chapters", [])
+            coverage_status = (
+                "Подборка охватывает разные части видео."
+                if isinstance(selected_chapters, list) and len(selected_chapters) > 1
+                else "Подборка покрывает найденные самостоятельные фрагменты."
+            )
+            self._replace_card_text(self.content_summary, [
+                f"Тип: {profile.get('detected_content_type', 'не определён')}",
+                f"Смысловых частей: {len(content_map.get('chapters', []))}",
+                f"Самостоятельных историй: {recommendation.get('estimated_story_count', understanding.get('story_unit_count', 0))}",
+                f"Рекомендуем создать: {lower}–{upper} ролика(ов)",
+                coverage_status,
+            ])
+            return
+        self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
 
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}

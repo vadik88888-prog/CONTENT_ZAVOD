@@ -13,7 +13,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from app.models import Candidate
+from app.diversity import interval_metrics, is_temporal_duplicate, transcript_similarity
+from app.models import Candidate, ScoredCandidate
 from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
@@ -373,6 +374,27 @@ class ContentStrategy(Protocol):
     ) -> VideoContentProfile:
         ...
 
+    def detect_chapters(self, segments: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any) -> list[list[dict[str, Any]]]:
+        ...
+
+    def build_story_units(self, chapter: ContentChapter, segments: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any) -> list[StoryUnit]:
+        ...
+
+    def recommend_duration(self, profile: VideoContentProfile) -> dict[str, float]:
+        ...
+
+    def evaluate_standalone(self, story_unit: StoryUnit) -> float:
+        ...
+
+    def resolve_boundaries(self, story_unit: StoryUnit, transcript: dict[str, Any], transcript_features: dict[str, Any], scenes: dict[str, Any], settings: Any) -> "SemanticBoundaryResolution":
+        ...
+
+    def estimate_clip_count(self, content_map: "GlobalContentMap", profile: VideoContentProfile, requested_count: int) -> dict[str, Any]:
+        ...
+
+    def coverage_dimensions(self) -> tuple[str, ...]:
+        ...
+
 
 @dataclass(slots=True)
 class DeterministicContentStrategy:
@@ -462,6 +484,27 @@ class DeterministicContentStrategy:
         )
         profile.validate()
         return profile
+
+    def detect_chapters(self, segments: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any) -> list[list[dict[str, Any]]]:
+        return _chapter_groups(segments, features, settings)
+
+    def build_story_units(self, chapter: ContentChapter, segments: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any) -> list[StoryUnit]:
+        return _make_story_units(chapter, segments, features, settings)
+
+    def recommend_duration(self, profile: VideoContentProfile) -> dict[str, float]:
+        return dict(profile.recommended_clip_duration_range)
+
+    def evaluate_standalone(self, story_unit: StoryUnit) -> float:
+        return story_unit.standalone_score
+
+    def resolve_boundaries(self, story_unit: StoryUnit, transcript: dict[str, Any], transcript_features: dict[str, Any], scenes: dict[str, Any], settings: Any) -> "SemanticBoundaryResolution":
+        return SemanticBoundaryEngine(settings).resolve(story_unit, transcript, transcript_features, scenes)
+
+    def estimate_clip_count(self, content_map: "GlobalContentMap", profile: VideoContentProfile, requested_count: int) -> dict[str, Any]:
+        return recommend_clip_count(content_map.to_dict(), profile.to_dict(), requested_count)
+
+    def coverage_dimensions(self) -> tuple[str, ...]:
+        return ("temporal", "chapter", "topic", "story_unit", "emotional", "speaker", "narrative_function")
 
 
 def build_video_content_profile(
@@ -1276,3 +1319,245 @@ def _boundary_failure_reason(
     if not payoff_preserved:
         return "Граница отбрасывает обязательный payoff StoryUnit."
     return "Boundary не прошла безопасный semantic contract."
+
+
+def select_with_coverage(
+    scored: list[ScoredCandidate], config: Any, content_map_data: dict[str, Any],
+) -> tuple[list[ScoredCandidate], dict[str, Any]]:
+    """Deterministically select strong, non-clone StoryUnits across the source."""
+
+    content_map = GlobalContentMap.from_dict(content_map_data)
+    settings = config.content_understanding
+    weights = settings.coverage_weights
+    stories = {item.story_unit_id: item for item in content_map.story_units}
+    selected: list[ScoredCandidate] = []
+    rejected: dict[str, str] = {}
+    requested = min(config.max_clips, config.ai_reranking.final_clip_count)
+    for item in scored:
+        boundary = item.candidate.boundary_diagnostics
+        if not item.selected:
+            rejected[item.candidate.id] = item.rejection_reason or "Не прошёл базовый quality ranking."
+        elif item.score < config.score_threshold:
+            rejected[item.candidate.id] = "Оценка ниже порога."
+        elif boundary and not bool(boundary.get("eligible", False)):
+            rejected[item.candidate.id] = str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation.")
+    while len(selected) < requested:
+        ranked: list[tuple[float, str, ScoredCandidate, dict[str, Any]]] = []
+        for item in scored:
+            if item.candidate.id in rejected or item in selected:
+                continue
+            duplicate = _coverage_duplicate(item, selected, config, settings.semantic_duplicate_threshold)
+            if duplicate:
+                rejected[item.candidate.id] = duplicate
+                continue
+            details = _coverage_increment(item, selected, stories, config)
+            story = stories.get(str(item.candidate.story_unit_id or ""))
+            standalone = story.standalone_score if story else 0.0
+            completeness = story.completeness_score if story else item.completeness_score / 100
+            context_dependency = story.context_dependency_score if story else item.context_dependency_score / 100
+            repetition = story.repetition_score if story else float(item.candidate.feature_vector.get("repetition_score", 0))
+            boundary_score = float(item.candidate.boundary_diagnostics.get("overall_boundary_score", 0.65))
+            score = (
+                (item.score / 100) * weights["base_quality"]
+                + standalone * weights["standalone"]
+                + completeness * weights["completeness"]
+                + boundary_score * weights["boundary"]
+                + details["incremental_coverage_score"] * weights["incremental_coverage"]
+                + details["new_chapter"] * weights["chapter_diversity"]
+                + details["new_topic_ratio"] * weights["topic_diversity"]
+                + details["new_emotion"] * weights["emotional_diversity"]
+                + details["new_temporal_region"] * weights["temporal_diversity"]
+                - details["semantic_duplicate_similarity"] * weights["semantic_duplicate_penalty"]
+                - context_dependency * weights["context_dependency_penalty"]
+                - repetition * weights["repetition_penalty"]
+            )
+            details["coverage_selection_score"] = round(score, 6)
+            ranked.append((score, item.candidate.id, item, details))
+        if not ranked:
+            break
+        _score, _candidate_id, best, details = max(ranked, key=lambda item: (item[0], item[1]))
+        best.candidate.incremental_coverage_score = float(details["incremental_coverage_score"])
+        best.selection_reason = "Выбран: качество, завершённость и новое semantic coverage подтверждены."
+        best.selection_diagnostics = {"decision": "accepted_coverage", **details}
+        selected.append(best)
+    selected_ids = {item.candidate.id for item in selected}
+    for item in scored:
+        if item.candidate.id in selected_ids:
+            item.selected = True
+            continue
+        item.selected = False
+        reason = rejected.get(item.candidate.id, "Не вошёл в лимит после coverage-aware selection.")
+        item.selection_reason = reason
+        item.selection_diagnostics = {"decision": "rejected_coverage", "reason": reason}
+    coverage = build_coverage_map(content_map_data, scored, selected, config)
+    return selected, coverage
+
+
+def build_coverage_map(
+    content_map_data: dict[str, Any], candidates: list[ScoredCandidate], selected: list[ScoredCandidate], config: Any,
+) -> dict[str, Any]:
+    content_map = GlobalContentMap.from_dict(content_map_data)
+    stories = {item.story_unit_id: item for item in content_map.story_units}
+    strong = [item for item in content_map.story_units if item.publishability_precheck and item.standalone_score >= config.content_understanding.strong_story_unit_threshold]
+    selected_story_ids = [str(item.candidate.story_unit_id) for item in selected if item.candidate.story_unit_id]
+    selected_chapters = list(dict.fromkeys(str(item.candidate.chapter_id) for item in selected if item.candidate.chapter_id))
+    all_topics = _all_topics(content_map.story_units)
+    covered_topics = sorted({topic for item in selected for topic in item.candidate.content_signature.get("topic_ids", [])})
+    covered_ranges = _merge_ranges([(item.candidate.start, item.candidate.end) for item in selected])
+    covered_emotions = {str(item.candidate.content_signature.get("emotional_signature") or "neutral") for item in selected}
+    all_emotions = {str(item.content_signature.get("emotional_signature") or "neutral") for item in content_map.story_units}
+    covered_narrative = {str(item.candidate.content_signature.get("narrative_function") or "unknown") for item in selected}
+    all_narrative = {str(item.content_signature.get("narrative_function") or "unknown") for item in content_map.story_units}
+    covered_speakers = {stories[story_id].speaker_context for story_id in selected_story_ids if story_id in stories}
+    all_speakers = {item.speaker_context for item in content_map.story_units}
+    selected_story_set = set(selected_story_ids)
+    clusters = _duplicate_clusters(content_map.story_units)
+    explanations = [
+        {
+            "candidate_id": item.candidate.id, "chapter_id": item.candidate.chapter_id,
+            "story_unit_id": item.candidate.story_unit_id, "core_idea": item.candidate.core_idea,
+            "incremental_coverage_score": item.candidate.incremental_coverage_score,
+            "reason": item.selection_reason, "diagnostics": item.selection_diagnostics,
+        }
+        for item in selected
+    ]
+    return {
+        "schema_version": str(config.content_understanding.coverage_schema_version),
+        "available_chapters": [item.chapter_id for item in content_map.chapters],
+        "available_story_units": [item.story_unit_id for item in content_map.story_units],
+        "strong_story_units": [item.story_unit_id for item in strong],
+        "selected_story_units": selected_story_ids,
+        "uncovered_strong_story_units": [item.story_unit_id for item in strong if item.story_unit_id not in selected_story_set],
+        "covered_topics": covered_topics,
+        "uncovered_topics": sorted(set(all_topics) - set(covered_topics)),
+        "covered_temporal_ranges": [{"start": round(start, 3), "end": round(end, 3)} for start, end in covered_ranges],
+        "coverage_ratio_by_dimension": {
+            "temporal": round(sum(end - start for start, end in covered_ranges) / max(1.0, content_map.source_duration_seconds), 3),
+            "chapter": _ratio(len(selected_chapters), len(content_map.chapters)),
+            "topic": _ratio(len(covered_topics), len(all_topics)),
+            "story_unit": _ratio(len(selected_story_set), len(strong) or len(content_map.story_units)),
+            "emotional": _ratio(len(covered_emotions), len(all_emotions)),
+            "speaker": _ratio(len(covered_speakers), len(all_speakers)),
+            "narrative_function": _ratio(len(covered_narrative), len(all_narrative)),
+        },
+        "duplicate_content_clusters": clusters,
+        "selection_explanations": explanations,
+        "selected_chapters": selected_chapters,
+        "selected_candidate_count": len(selected),
+    }
+
+
+def recommend_clip_count(content_map_data: dict[str, Any], profile_data: dict[str, Any], requested_count: int) -> dict[str, Any]:
+    """Post-analysis recommendation based on distinct publishable StoryUnits."""
+
+    content_map = GlobalContentMap.from_dict(content_map_data)
+    profile = VideoContentProfile.from_dict(profile_data)
+    strong = [item for item in content_map.story_units if item.publishability_precheck and item.standalone_score >= 0.55]
+    distinct: dict[str, StoryUnit] = {}
+    for item in strong:
+        key = str(item.content_signature.get("transcript_fingerprint") or item.story_unit_id)
+        distinct.setdefault(key, item)
+    count = len(distinct)
+    minimum = 0 if count == 0 else max(1, count - (2 if count >= 4 else 1))
+    maximum = count
+    if count == 0:
+        explanation = "После анализа не найдено самостоятельных publishable StoryUnits; клипы не рекомендуются без ручной проверки."
+    else:
+        explanation = (
+            f"Найдено {count} самостоятельных сильных фрагмента(ов) из {len(content_map.story_units)} StoryUnits; "
+            f"рекомендуем создать {minimum}–{maximum} ролика(ов), не дублируя одну историю."
+        )
+    return {
+        "schema_version": "5A.1", "post_analysis": True, "estimated_story_count": len(content_map.story_units),
+        "strong_story_unit_count": count, "estimated_publishable_clip_range": {"min": minimum, "max": maximum},
+        "requested_clip_count": requested_count, "recommended_clip_duration_range": profile.recommended_clip_duration_range,
+        "explanation": explanation, "strategy_id": profile.strategy_id,
+    }
+
+
+def _coverage_increment(
+    item: ScoredCandidate, selected: list[ScoredCandidate], stories: dict[str, StoryUnit], config: Any,
+) -> dict[str, Any]:
+    candidate = item.candidate
+    chosen_chapters = {other.candidate.chapter_id for other in selected}
+    chosen_stories = {other.candidate.story_unit_id for other in selected}
+    chosen_topics = {topic for other in selected for topic in other.candidate.content_signature.get("topic_ids", [])}
+    candidate_topics = set(candidate.content_signature.get("topic_ids", []))
+    new_topic_ratio = _ratio(len(candidate_topics - chosen_topics), len(candidate_topics)) if candidate_topics else 0.0
+    emotion = str(candidate.content_signature.get("emotional_signature") or "neutral")
+    chosen_emotions = {str(other.candidate.content_signature.get("emotional_signature") or "neutral") for other in selected}
+    narrative = str(candidate.content_signature.get("narrative_function") or "unknown")
+    chosen_narrative = {str(other.candidate.content_signature.get("narrative_function") or "unknown") for other in selected}
+    temporal_new = 1.0 if not selected or all(abs(candidate.start - other.candidate.start) >= config.min_selected_clip_distance_seconds for other in selected) else 0.0
+    semantic_similarity = max((
+        max(
+            transcript_similarity(candidate.text, other.candidate.text),
+            _signature_similarity(candidate.content_signature, other.candidate.content_signature),
+        )
+        for other in selected
+    ), default=0.0)
+    signals = [
+        1.0 if candidate.story_unit_id not in chosen_stories else 0.0,
+        1.0 if candidate.chapter_id not in chosen_chapters else 0.0,
+        new_topic_ratio,
+        1.0 if emotion not in chosen_emotions else 0.0,
+        1.0 if narrative not in chosen_narrative else 0.0,
+        temporal_new,
+    ]
+    return {
+        "incremental_coverage_score": round(sum(signals) / len(signals), 3),
+        "new_story_unit": signals[0], "new_chapter": signals[1], "new_topic_ratio": round(new_topic_ratio, 3),
+        "new_emotion": signals[3], "new_narrative_function": signals[4], "new_temporal_region": temporal_new,
+        "semantic_duplicate_similarity": round(semantic_similarity, 3),
+    }
+
+
+def _coverage_duplicate(item: ScoredCandidate, selected: list[ScoredCandidate], config: Any, semantic_threshold: float) -> str | None:
+    for chosen in selected:
+        metrics = interval_metrics(item.candidate.start, item.candidate.end, chosen.candidate.start, chosen.candidate.end)
+        if is_temporal_duplicate(metrics, overlap_threshold=config.overlap_threshold, minimum_distance_seconds=config.min_selected_clip_distance_seconds):
+            return f"Дублирует временной диапазон {chosen.candidate.id}."
+        similarity = max(
+            transcript_similarity(item.candidate.text, chosen.candidate.text),
+            _signature_similarity(item.candidate.content_signature, chosen.candidate.content_signature),
+        )
+        if similarity >= semantic_threshold:
+            return f"Семантически повторяет StoryUnit {chosen.candidate.story_unit_id or chosen.candidate.id}."
+    return None
+
+
+def _signature_similarity(first: dict[str, Any], second: dict[str, Any]) -> float:
+    first_tokens = set(_tokens(str(first.get("normalized_core_idea") or ""))) | set(first.get("keyword_set", []))
+    second_tokens = set(_tokens(str(second.get("normalized_core_idea") or ""))) | set(second.get("keyword_set", []))
+    if not first_tokens or not second_tokens:
+        return 0.0
+    return len(first_tokens & second_tokens) / len(first_tokens | second_tokens)
+
+
+def _all_topics(stories: list[StoryUnit]) -> list[str]:
+    return sorted({topic for item in stories for topic in item.content_signature.get("topic_ids", [])})
+
+
+def _duplicate_clusters(stories: list[StoryUnit]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[str]] = {}
+    for story in stories:
+        fingerprint = str(story.content_signature.get("transcript_fingerprint") or story.story_unit_id)
+        grouped.setdefault(fingerprint, []).append(story.story_unit_id)
+    return [
+        {"fingerprint": fingerprint, "story_unit_ids": identifiers}
+        for fingerprint, identifiers in sorted(grouped.items()) if len(identifiers) > 1
+    ]
+
+
+def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted((start, end) for start, end in ranges if start < end):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator, 3) if denominator else 0.0

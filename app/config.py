@@ -7,6 +7,22 @@ from typing import Any
 from app.errors import ClipEngineError
 
 
+DEFAULT_COVERAGE_SELECTION_WEIGHTS = {
+    "base_quality": 0.36,
+    "standalone": 0.12,
+    "completeness": 0.10,
+    "boundary": 0.11,
+    "incremental_coverage": 0.12,
+    "chapter_diversity": 0.05,
+    "topic_diversity": 0.06,
+    "emotional_diversity": 0.02,
+    "temporal_diversity": 0.02,
+    "semantic_duplicate_penalty": 0.25,
+    "context_dependency_penalty": 0.10,
+    "repetition_penalty": 0.08,
+}
+
+
 @dataclass(slots=True)
 class AIConfig:
     """Configuration shared by every AI provider."""
@@ -120,6 +136,11 @@ class ContentUnderstandingConfig:
     max_tail_padding_seconds: float = 1.5
     max_semantic_extension_seconds: float = 12.0
     continuation_risk_threshold: float = 0.65
+    coverage_schema_version: str = "5A.1"
+    coverage_selection_version: str = "5A.1"
+    coverage_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_COVERAGE_SELECTION_WEIGHTS))
+    strong_story_unit_threshold: float = 0.55
+    semantic_duplicate_threshold: float = 0.78
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -130,6 +151,8 @@ class ContentUnderstandingConfig:
             ("content_understanding.content_map_schema_version", self.content_map_schema_version),
             ("content_understanding.story_unit_schema_version", self.story_unit_schema_version),
             ("content_understanding.boundary_schema_version", self.boundary_schema_version),
+            ("content_understanding.coverage_schema_version", self.coverage_schema_version),
+            ("content_understanding.coverage_selection_version", self.coverage_selection_version),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
@@ -152,6 +175,12 @@ class ContentUnderstandingConfig:
             raise ClipEngineError("content_understanding.max_semantic_extension_seconds должен быть от 0 до 30.")
         if not 0 <= self.continuation_risk_threshold <= 1:
             raise ClipEngineError("content_understanding.continuation_risk_threshold должен быть от 0 до 1.")
+        if set(self.coverage_weights) != set(DEFAULT_COVERAGE_SELECTION_WEIGHTS):
+            raise ClipEngineError("content_understanding.coverage_weights должен содержать все заданные компоненты coverage selection.")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in self.coverage_weights.values()):
+            raise ClipEngineError("content_understanding.coverage_weights должен содержать неотрицательные числа.")
+        if not 0 <= self.strong_story_unit_threshold <= 1 or not 0 <= self.semantic_duplicate_threshold <= 1:
+            raise ClipEngineError("content_understanding coverage thresholds должны быть от 0 до 1.")
 
 
 DEFAULT_SCORING_WEIGHTS = {
