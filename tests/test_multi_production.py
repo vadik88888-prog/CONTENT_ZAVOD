@@ -79,7 +79,7 @@ def test_every_production_plan_gets_an_isolated_output_and_partial_results_survi
             return {"enabled": True, "status": "failed", "errors": ["simulated render failure"]}
         artifact = destination / "production-render" / f"{plan.metadata.candidate_id}.mp4"
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_bytes(b"mp4")
+        artifact.write_bytes(f"mp4:{plan.metadata.candidate_id}".encode("utf-8"))
         return {"enabled": True, "status": "completed", "output_file": str(artifact)}
 
     monkeypatch.setattr("app.pipeline.TTSService", FakeTTSService)

@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from app.clip_results import ClipResult, result_paths
+from app.clip_results import ClipResult, result_paths, unique_primary_results
 from app.config import load_config
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
 from app.gui.services.desktop_project_store import validate_video_path
@@ -229,6 +229,10 @@ class PipelineFacade:
                 item for value in registry_value
                 if (item := ClipResult.from_dict(value)) is not None and item.primary
             ]
+            distinct_registry = unique_primary_results(registry)
+            if len(distinct_registry) != len(registry):
+                warnings.append("Повторяющиеся итоговые ролики скрыты; доступны только уникальные результаты.")
+            registry = distinct_registry
             if not registry:
                 return self._failed_completion(
                     prepared,

@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "3D.1"
+PRODUCTION_RENDER_ENGINE_VERSION = "3D.2"
 
 
 class VideoCompositionService:
@@ -83,7 +84,9 @@ class VideoCompositionService:
             )
         subtitle_project = build_subtitle_project(plan, audio_project, render_config, transcript)
         cache_key = _render_cache_key(
-            source_checksum, mixed_checksum, audio_project, timeline, subtitle_project, canvas, render_config,
+            plan, source_checksum, mixed_checksum, audio_project, timeline, subtitle_project, canvas, render_config,
+            platform=self.config.product_flow.platform,
+            product_flow_revision=self.config.product_flow.preset_version,
         )
         project_id = f"video-{plan.plan_id}-{audio_project.project_id}-{cache_key[:12]}"
         request = RenderRequest(
@@ -677,16 +680,31 @@ def validate_final_video(path: Path, canvas: CanvasConfig, mixed_audio: Path, co
 
 
 def _render_cache_key(
-    source_checksum: str, mixed_checksum: str, audio_project: AudioProject, timeline: VideoTimeline,
+    plan: ProductionPlan, source_checksum: str, mixed_checksum: str, audio_project: AudioProject, timeline: VideoTimeline,
     subtitles: SubtitleProject, canvas: CanvasConfig, config: ProductionRenderConfig,
+    *, platform: str, product_flow_revision: str,
 ) -> str:
     return stable_text_hash(json.dumps({
         "source_checksum": source_checksum, "mixed_audio_checksum": mixed_checksum,
+        "production_plan": {
+            "plan_id": plan.plan_id,
+            "candidate_id": plan.metadata.candidate_id,
+            "source_id": plan.metadata.source_id,
+            "source_range": [
+                min((item.source_start_seconds for item in plan.dialogue_mappings), default=None),
+                max((item.source_end_seconds for item in plan.dialogue_mappings), default=None),
+            ],
+            "final_script_hash": plan.metadata.final_script_hash,
+            "audio_mode": plan.audio_mode,
+            "plan_fingerprint": stable_text_hash(plan.model_dump_json()),
+        },
         "audio_project_checksum": stable_text_hash(audio_project.model_dump_json()),
         "timeline": timeline.model_dump(mode="json"), "subtitle_project": subtitles.model_dump(mode="json"),
         "canvas": canvas.model_dump(mode="json"), "crop": config.crop_strategy,
         "encoder": config.encoder, "codec": config.video_codec, "bitrate": config.video_bitrate,
-        "subtitles_enabled": config.subtitles_enabled, "version": config.render_config_version,
+        "subtitles_enabled": config.subtitles_enabled, "render_config": asdict(config),
+        "platform": platform, "product_flow_revision": product_flow_revision,
+        "version": config.render_config_version,
         "engine_version": PRODUCTION_RENDER_ENGINE_VERSION,
     }, sort_keys=True, ensure_ascii=False))
 

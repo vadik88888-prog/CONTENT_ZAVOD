@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from app.config import AppConfig
+from app.diversity import interval_metrics, is_temporal_duplicate, transcript_similarity
 from app.models import ScoredCandidate
 
 
+TRANSCRIPT_DUPLICATE_THRESHOLD = 0.90
+
+
 def select_clips(scored: list[ScoredCandidate], config: AppConfig) -> list[ScoredCandidate]:
+    """Select the strongest candidates while preserving source-content diversity."""
+
     accepted: list[ScoredCandidate] = []
     for item in sorted(scored, key=lambda value: value.score, reverse=True):
         if not item.selected:
@@ -13,26 +19,18 @@ def select_clips(scored: list[ScoredCandidate], config: AppConfig) -> list[Score
             item.selected = False
             item.selection_reason = "Оценка ниже порога."
             continue
-        conflict = next((chosen for chosen in accepted if _overlap(item, chosen) >= config.overlap_threshold), None)
-        if conflict:
+        duplicate = _duplicate_against(item, accepted, config)
+        if duplicate is not None:
+            kind, chosen, details = duplicate
             item.selected = False
-            item.selection_reason = f"Сильно пересекается с более высоким кандидатом {conflict.candidate.id}."
+            item.selection_diagnostics = details
+            if kind == "transcript":
+                item.selection_reason = f"Почти повторяет текст кандидата {chosen.candidate.id}."
+            else:
+                item.selection_reason = f"Дублирует исходниковый диапазон кандидата {chosen.candidate.id}."
             continue
-        nearby = next(
-            (
-                chosen for chosen in accepted
-                if abs(item.candidate.start - chosen.candidate.start) < config.min_selected_clip_distance_seconds
-            ),
-            None,
-        )
-        if nearby:
-            item.selected = False
-            item.selection_reason = (
-                f"Слишком близок по времени к выбранному кандидату {nearby.candidate.id}; "
-                "сохранено разнообразие клипов."
-            )
-            continue
-        item.selection_reason = "Выбран: прошёл порог качества и не пересекается с лучшими моментами."
+        item.selection_reason = "Выбран: качество и временное разнообразие подтверждены."
+        item.selection_diagnostics = {"decision": "accepted"}
         accepted.append(item)
         if len(accepted) >= min(config.max_clips, config.ai_reranking.final_clip_count):
             break
@@ -40,11 +38,35 @@ def select_clips(scored: list[ScoredCandidate], config: AppConfig) -> list[Score
         if item not in accepted and item.selected:
             item.selected = False
             item.selection_reason = "Не вошёл в лимит количества клипов."
+            item.selection_diagnostics = {"decision": "limit"}
     return accepted
 
 
-def _overlap(first: ScoredCandidate, second: ScoredCandidate) -> float:
-    left, right = first.candidate, second.candidate
-    overlap = max(0.0, min(left.end, right.end) - max(left.start, right.start))
-    shortest = min(left.duration, right.duration)
-    return overlap / shortest if shortest else 0.0
+def _duplicate_against(
+    item: ScoredCandidate, accepted: list[ScoredCandidate], config: AppConfig,
+) -> tuple[str, ScoredCandidate, dict[str, float | str]] | None:
+    for chosen in accepted:
+        metrics = interval_metrics(
+            item.candidate.start,
+            item.candidate.end,
+            chosen.candidate.start,
+            chosen.candidate.end,
+        )
+        details: dict[str, float | str] = {
+            "against_candidate_id": chosen.candidate.id,
+            "overlap_seconds": round(metrics.overlap_seconds, 3),
+            "iou": round(metrics.iou, 4),
+            "containment": round(metrics.containment, 4),
+            "midpoint_distance_seconds": round(metrics.midpoint_distance_seconds, 3),
+        }
+        if is_temporal_duplicate(
+            metrics,
+            overlap_threshold=config.overlap_threshold,
+            minimum_distance_seconds=config.min_selected_clip_distance_seconds,
+        ):
+            return "temporal", chosen, details
+        similarity = transcript_similarity(item.candidate.text, chosen.candidate.text)
+        if similarity >= TRANSCRIPT_DUPLICATE_THRESHOLD:
+            details["transcript_similarity"] = round(similarity, 4)
+            return "transcript", chosen, details
+    return None

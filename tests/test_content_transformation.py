@@ -14,7 +14,7 @@ from app.content_transformation import run_content_transformation
 from app.errors import NarrativePlanningError, SemanticExtractionError, TransformationProviderError
 from app.models import Candidate, ScoredCandidate
 from app.narrative_planning import build_narrative_plan
-from app.pipeline import Pipeline, StageTracker
+from app.pipeline import Pipeline, StageTracker, _deduplicate_transformation_outcomes
 from app.script_generation import generate_script_draft, recompute_script_metrics
 from app.script_validation import score_script_quality, validate_script_grounding
 from app.semantic_extraction import build_source_context, extract_semantic_representation
@@ -61,6 +61,26 @@ def _draft(text: str | None = None):
 def _set_sentence_text(draft, text: str) -> None:
     draft.sentences[0].text = text
     recompute_script_metrics(draft, 2.4)
+
+
+def test_transformation_duplicate_collapse_is_downgraded_before_production() -> None:
+    first = {
+        "candidate_id": "first", "status": "completed",
+        "source_context": {"start_time": 10, "end_time": 30, "transcript_text": "A distinct source thought."},
+        "final_script": {"full_text": "A transformed script for the first thought."},
+    }
+    second = {
+        "candidate_id": "second", "status": "completed",
+        "source_context": {"start_time": 80, "end_time": 100, "transcript_text": "A different source thought."},
+        "final_script": {"full_text": "A transformed script for the first thought."},
+    }
+
+    outcomes, warnings = _deduplicate_transformation_outcomes([first, second])
+
+    assert outcomes[0]["status"] == "completed"
+    assert outcomes[1]["status"] == "skipped"
+    assert outcomes[1]["reason"] == "transformation_duplicate"
+    assert warnings and "копий" in warnings[0]
 
 
 def test_semantic_facts_require_evidence_and_known_segments() -> None:

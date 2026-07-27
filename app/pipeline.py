@@ -9,6 +9,7 @@ from typing import Any, Callable
 from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.audio_modes import tts_eligibility
 from app.clip_results import primary_clip_results, result_paths
+from app.diversity import interval_metrics, transcript_similarity
 from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
@@ -38,7 +39,7 @@ from app.semantic_extraction import build_source_context
 from app.transformation_prompts import PROMPT_VERSIONS
 from app.transformation_models import FINAL_SCRIPT_CONTRACT_VERSION, validate_final_script
 from app.tts_service import TTSService, tts_report_section
-from app.utils import AtomicWriteError, read_json, safe_name, stable_text_hash, utc_now, write_json
+from app.utils import AtomicWriteError, read_json, safe_name, stable_file_hash, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
 
@@ -277,9 +278,10 @@ class Pipeline:
         scored = [scored_from_dict(item) for item in ai_data.get("candidates", [])]
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
-            {"scored": _hash(ai_data), "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold, "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count},
+            {"policy_version": "temporal-diversity-v2", "scored": _hash(ai_data), "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold, "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count},
             lambda: self._final_selection(scored, work_directory / "final_selection.json"),
         )
+        self.warnings.extend(str(value) for value in final_data.get("warnings", []) if str(value))
         selected_ids = set(final_data.get("selected_ids", []))
         final_scored = [scored_from_dict(item) for item in final_data.get("candidates", [])]
         write_json(
@@ -291,6 +293,7 @@ class Pipeline:
             tracker, source_data, metadata, selected, transcript, transcript_features,
             audio_features, scenes, work_directory, output_directory,
         )
+        self.warnings.extend(transformation.get("warnings", []))
         production = self._build_production_plans(
             tracker, transformation, work_directory, output_directory,
         )
@@ -302,6 +305,7 @@ class Pipeline:
         production_render = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
+        self.warnings.extend(production_render.get("warnings", []))
         production_is_primary = bool(
             self.config.production_render.enabled and not self.disable_production_render and not self.production_plan_only
         )
@@ -443,7 +447,19 @@ class Pipeline:
 
     def _final_selection(self, scored: list, path: Path) -> dict[str, Any]:
         selected = select_clips(scored, self.config)
-        data = {"candidates": [item.to_dict() for item in scored], "selected_ids": [item.candidate.id for item in selected]}
+        requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
+        warnings: list[str] = []
+        if len(selected) < requested:
+            warnings.append(
+                f"Найдено только {len(selected)} достаточно разных сильных фрагмента из запрошенных {requested}."
+            )
+        data = {
+            "policy_version": "temporal-diversity-v2",
+            "candidates": [item.to_dict() for item in scored],
+            "selected_ids": [item.candidate.id for item in selected],
+            "requested_count": requested,
+            "warnings": warnings,
+        }
         write_json(path, data)
         return data
 
@@ -486,7 +502,10 @@ class Pipeline:
         work_directory: Path, output_directory: Path,
     ) -> dict[str, Any]:
         enabled = self.config.production.enabled or self.production_plan_only
-        items = transformation.get("items", []) if isinstance(transformation, dict) else []
+        items = [
+            item for item in (transformation.get("items", []) if isinstance(transformation, dict) else [])
+            if isinstance(item, dict) and item.get("status") in {"completed", "fallback"}
+        ]
         if not enabled:
             tracker.skip("production_plan", "Production Plan отключён конфигурацией.")
             return {"enabled": False, "status": "skipped", "reason": "disabled", "items": []}
@@ -495,6 +514,9 @@ class Pipeline:
             return {"enabled": True, "status": "skipped", "reason": "no_final_script", "items": []}
         outcomes: list[dict[str, Any]] = []
         artifacts: list[str] = []
+        seen_candidate_ids: set[str] = set()
+        seen_plan_ids: set[str] = set()
+        seen_source_ranges: list[tuple[float, float]] = []
         for index, transformation_item in enumerate(items, start=1):
             final = transformation_item.get("final_script", {}) if isinstance(transformation_item, dict) else {}
             candidate_id = str(final.get("candidate_id") or transformation_item.get("candidate_id") or f"candidate-{index:03d}")
@@ -543,8 +565,32 @@ class Pipeline:
                 write_json(artifact, plan_data)
                 tracker.finish(stage_name)
                 outcomes.append({"status": "completed", "candidate_id": candidate_id, "plan": plan_data, "cache_hit": False})
-            if outcomes[-1].get("status") == "completed":
-                artifacts.extend(self._write_production_artifacts(output_directory, suffix, index, outcomes[-1]["plan"]))
+            outcome = outcomes[-1]
+            if outcome.get("status") == "completed":
+                plan = ProductionPlan.model_validate(outcome["plan"])
+                source_range = _plan_source_range(plan)
+                duplicate_reason = _production_plan_duplicate_reason(
+                    candidate_id, plan.plan_id, source_range,
+                    seen_candidate_ids, seen_plan_ids, seen_source_ranges,
+                )
+                if duplicate_reason:
+                    outcome.update({"status": "skipped", "reason": duplicate_reason})
+                    self.warnings.append(
+                        f"Production plan {candidate_id} исключён: он дублирует уже выбранный ролик ({duplicate_reason})."
+                    )
+                    tracker.finish(stage_name, "skipped", duplicate_reason)
+                    continue
+                seen_candidate_ids.add(candidate_id)
+                seen_plan_ids.add(plan.plan_id)
+                if source_range is not None:
+                    seen_source_ranges.append(source_range)
+                outcome.update({
+                    "requested_index": index,
+                    "production_plan_id": plan.plan_id,
+                    "source_start_seconds": source_range[0] if source_range else None,
+                    "source_end_seconds": source_range[1] if source_range else None,
+                })
+                artifacts.extend(self._write_production_artifacts(output_directory, suffix, index, outcome["plan"]))
         completed = [item for item in outcomes if item.get("status") == "completed"]
         if not completed:
             return {"enabled": True, "status": "failed", "items": outcomes, "artifacts": artifacts}
@@ -584,9 +630,10 @@ class Pipeline:
             tracker.skip("tts_generation", "Нет ProductionPlan для TTS.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
         outcomes: list[dict[str, Any]] = []
-        eligible: list[tuple[int, str, ProductionPlan]] = []
-        for index, item in enumerate(plan_items, start=1):
+        eligible: list[tuple[int, str, ProductionPlan, dict[str, Any]]] = []
+        for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
+            index = int(item.get("requested_index") or default_index)
             try:
                 plan = ProductionPlan.model_validate(plan_data)
             except Exception as error:
@@ -599,7 +646,7 @@ class Pipeline:
                     "tts_invoked": False, "estimated_cost": 0.0, "actual_cost": 0.0,
                 })
                 continue
-            eligible.append((index, candidate_id, plan))
+            eligible.append((index, candidate_id, plan, item))
         if not eligible:
             reason = str(outcomes[0].get("reason", "no_eligible_narration")) if outcomes else "no_eligible_narration"
             tracker.skip("tts_generation", f"TTS skipped: {reason}.")
@@ -608,7 +655,7 @@ class Pipeline:
                 "tts_invoked": False, "estimated_cost": 0.0, "actual_cost": 0.0,
                 "items": outcomes,
             }
-        for index, candidate_id, plan in eligible:
+        for index, candidate_id, plan, plan_item in eligible:
             candidate_output = _candidate_output_directory(output_directory, candidate_id, index)
             stage_name = f"tts_generation:{plan.plan_id}"
             tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
@@ -624,7 +671,12 @@ class Pipeline:
                 continue
             tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
             report = tts_report_section(result)
-            outcomes.append({"candidate_id": candidate_id, "status": result.status, "output_directory": str(candidate_output), "report": report, "tts_invoked": bool(report.get("tts_invoked", True))})
+            outcomes.append({
+                "candidate_id": candidate_id, "status": result.status,
+                "output_directory": str(candidate_output), "report": report,
+                "tts_invoked": bool(report.get("tts_invoked", True)),
+                **_production_item_identity(plan_item),
+            })
             self.warnings.extend(result.warnings)
             self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
         return _multi_stage_report("tts", outcomes)
@@ -646,8 +698,9 @@ class Pipeline:
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
         tts_items = {str(item.get("candidate_id")): item for item in tts.get("items", []) if isinstance(item, dict)}
         outcomes: list[dict[str, Any]] = []
-        for index, item in enumerate(plan_items, start=1):
+        for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
+            index = int(item.get("requested_index") or default_index)
             try:
                 plan = ProductionPlan.model_validate(plan_data)
             except Exception as error:
@@ -681,7 +734,11 @@ class Pipeline:
                 self.errors.append(f"audio:{candidate_id}: {safe}")
                 continue
             tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
-            outcomes.append({"candidate_id": candidate_id, "status": project.status, "output_directory": str(candidate_output), "report": audio_report_section(project)})
+            outcomes.append({
+                "candidate_id": candidate_id, "status": project.status,
+                "output_directory": str(candidate_output), "report": audio_report_section(project),
+                **_production_item_identity(item),
+            })
             self.warnings.extend(project.warnings)
             self.errors.extend([f"audio:{candidate_id}: {entry}" for entry in project.errors])
         return _multi_stage_report("audio", outcomes)
@@ -709,9 +766,10 @@ class Pipeline:
         outcomes: list[dict[str, Any]] = []
         for item in plan_items:
             candidate_id, plan_data = item["candidate_id"], item["plan"]
+            identity = _production_item_identity(item)
             audio_item = audio_items.get(candidate_id)
             if not audio_item or audio_item.get("status") not in {"completed", "partial"}:
-                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "audio_unavailable"})
+                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "audio_unavailable", **identity})
                 continue
             candidate_output = Path(str(audio_item["output_directory"]))
             try:
@@ -719,14 +777,28 @@ class Pipeline:
                 audio_project = AudioProject.model_validate(read_json(candidate_output / "audio" / "audio-project.json", {}))
             except Exception as error:
                 safe = sanitize_api_error(error)
-                outcomes.append({"candidate_id": candidate_id, "status": "failed", "errors": [safe]})
+                outcomes.append({"candidate_id": candidate_id, "status": "failed", "errors": [safe], **identity})
                 self.errors.append(f"production_render:{candidate_id}: {safe}")
                 continue
             report = self._compose_production_render(
                 tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
                 raise_on_error=False, visual_analysis=visual_analysis,
             )
-            outcomes.append({"candidate_id": candidate_id, "status": report.get("status", "failed"), "output_directory": str(candidate_output), "report": report, "output_file": report.get("output_file")})
+            output_file = str(report.get("output_file") or "")
+            outcomes.append({
+                "clip_result_id": f"{candidate_id}:{plan.plan_id}",
+                "candidate_id": candidate_id,
+                "status": report.get("status", "failed"),
+                "output_directory": str(candidate_output),
+                "report": report,
+                "output_file": output_file,
+                "production_plan_id": plan.plan_id,
+                "source_start_seconds": identity.get("source_start_seconds"),
+                "source_end_seconds": identity.get("source_end_seconds"),
+                "source_fingerprint": _source_range_fingerprint(source.id, identity),
+                "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
+                **identity,
+            })
         return _multi_stage_report("production_render", outcomes)
 
     def _compose_production_render(
@@ -753,6 +825,20 @@ class Pipeline:
             return {"enabled": True, "status": "failed", "errors": [safe], "ai_called": False}
         tracker.finish(stage_name, "completed" if project.status in {"completed", "warning"} else project.status)
         report = production_render_report_section(project)
+        source_range = _plan_source_range(plan)
+        identity = {
+            "source_start_seconds": source_range[0] if source_range else None,
+            "source_end_seconds": source_range[1] if source_range else None,
+        }
+        report.update({
+            "clip_result_id": f"{plan.metadata.candidate_id}:{plan.plan_id}",
+            "candidate_id": plan.metadata.candidate_id,
+            "production_plan_id": plan.plan_id,
+            **identity,
+            "source_fingerprint": _source_range_fingerprint(source.id, identity),
+            "content_fingerprint": _render_content_fingerprint(Path(str(report.get("output_file") or "")), report),
+            "primary": True,
+        })
         self.warnings.extend(project.warnings)
         return report
 
@@ -1043,6 +1129,7 @@ class Pipeline:
                     if reason == "ai_disabled"
                     else "AI transformation failed -> local fallback used."
                 )
+        outcomes, diversity_warnings = _deduplicate_transformation_outcomes(outcomes)
         statuses = [str(item.get("status", "failed")) for item in outcomes]
         overall = "failed" if all(item == "failed" for item in statuses) else "fallback" if "fallback" in statuses else "completed"
         first = outcomes[0]
@@ -1072,6 +1159,7 @@ class Pipeline:
             },
             "artifacts": artifacts,
             "items": outcomes,
+            "warnings": diversity_warnings,
             "production_note": "Transformed script is separate; original audio and subtitles were not changed.",
         }
 
@@ -1163,17 +1251,137 @@ def _file_fingerprint(path: Path) -> dict[str, Any] | None:
     return {"path": str(path), "size": stat.st_size, "modified_ns": stat.st_mtime_ns}
 
 
+def _deduplicate_transformation_outcomes(
+    outcomes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Stop a transformed-script collapse before TTS/audio/render fan-out."""
+
+    accepted: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for outcome in outcomes:
+        if outcome.get("status") not in {"completed", "fallback"}:
+            accepted.append(outcome)
+            continue
+        duplicate_of = next((chosen for chosen in accepted if _transformation_duplicate(outcome, chosen)), None)
+        if duplicate_of is None:
+            accepted.append(outcome)
+            continue
+        candidate_id = str(outcome.get("candidate_id") or "candidate")
+        prior_id = str(duplicate_of.get("candidate_id") or "candidate")
+        outcome.update({
+            "status": "skipped",
+            "reason": "transformation_duplicate",
+            "duplicate_of_candidate_id": prior_id,
+        })
+        accepted.append(outcome)
+        warnings.append(
+            f"Фрагмент {candidate_id} исключён после transformation: он дублирует {prior_id}; готовых копий не будет."
+        )
+    return accepted, warnings
+
+
+def _transformation_duplicate(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    first_range = _outcome_source_range(first)
+    second_range = _outcome_source_range(second)
+    if first_range is not None and second_range is not None:
+        metrics = interval_metrics(*first_range, *second_range)
+        if metrics.containment >= 0.98 or metrics.iou >= 0.90:
+            return True
+    first_context = first.get("source_context", {}) if isinstance(first.get("source_context"), dict) else {}
+    second_context = second.get("source_context", {}) if isinstance(second.get("source_context"), dict) else {}
+    if transcript_similarity(
+        str(first_context.get("transcript_text") or ""),
+        str(second_context.get("transcript_text") or ""),
+    ) >= 0.94:
+        return True
+    first_final = first.get("final_script", {}) if isinstance(first.get("final_script"), dict) else {}
+    second_final = second.get("final_script", {}) if isinstance(second.get("final_script"), dict) else {}
+    return transcript_similarity(
+        str(first_final.get("full_text") or ""), str(second_final.get("full_text") or ""),
+    ) >= 0.96
+
+
+def _outcome_source_range(outcome: dict[str, Any]) -> tuple[float, float] | None:
+    context = outcome.get("source_context", {}) if isinstance(outcome.get("source_context"), dict) else {}
+    candidates = (
+        (context.get("start_time"), context.get("end_time")),
+        (context.get("source_start_seconds"), context.get("source_end_seconds")),
+        (outcome.get("source_start_seconds"), outcome.get("source_end_seconds")),
+    )
+    for start, end in candidates:
+        try:
+            start_value, end_value = float(start), float(end)
+        except (TypeError, ValueError):
+            continue
+        if end_value >= start_value:
+            return start_value, end_value
+    return None
+
+
+def _plan_source_range(plan: ProductionPlan) -> tuple[float, float] | None:
+    if not plan.dialogue_mappings:
+        return None
+    return (
+        min(item.source_start_seconds for item in plan.dialogue_mappings),
+        max(item.source_end_seconds for item in plan.dialogue_mappings),
+    )
+
+
+def _production_plan_duplicate_reason(
+    candidate_id: str, plan_id: str, source_range: tuple[float, float] | None,
+    seen_candidate_ids: set[str], seen_plan_ids: set[str], seen_source_ranges: list[tuple[float, float]],
+) -> str | None:
+    if candidate_id in seen_candidate_ids:
+        return "candidate_id"
+    if plan_id in seen_plan_ids:
+        return "production_plan_id"
+    if source_range is not None and any(
+        abs(source_range[0] - prior[0]) <= 0.25 and abs(source_range[1] - prior[1]) <= 0.25
+        for prior in seen_source_ranges
+    ):
+        return "source_range"
+    return None
+
+
+def _production_item_identity(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item[key]
+        for key in ("requested_index", "production_plan_id", "source_start_seconds", "source_end_seconds")
+        if key in item
+    }
+
+
+def _source_range_fingerprint(source_id: str, identity: dict[str, Any]) -> str:
+    return _hash({
+        "source_id": source_id,
+        "start": identity.get("source_start_seconds"),
+        "end": identity.get("source_end_seconds"),
+    })
+
+
+def _render_content_fingerprint(path: Path, report: dict[str, Any]) -> str:
+    """Exact media fingerprint; a whole-file SHA is stronger than sparse frames."""
+
+    if not path.is_file():
+        return ""
+    return _hash({"sha256": stable_file_hash(path), "duration": report.get("duration")})
+
+
 def _production_items(production: dict[str, Any]) -> list[dict[str, Any]]:
     raw_items = production.get("items", []) if isinstance(production, dict) else []
     result: list[dict[str, Any]] = []
     for item in raw_items if isinstance(raw_items, list) else []:
         if not isinstance(item, dict) or item.get("status") != "completed" or not isinstance(item.get("plan"), dict):
             continue
-        result.append({"candidate_id": str(item.get("candidate_id") or "candidate"), "plan": item["plan"]})
+        result.append({
+            "candidate_id": str(item.get("candidate_id") or "candidate"),
+            "plan": item["plan"],
+            **_production_item_identity(item),
+        })
     # Old reports expose only the primary plan. Keep render-only and existing
     # cache layouts operational while new full runs fan out to every item.
     if not result and isinstance(production, dict) and isinstance(production.get("production_plan"), dict):
-        result.append({"candidate_id": "primary", "plan": production["production_plan"]})
+        result.append({"candidate_id": "primary", "plan": production["production_plan"], "requested_index": 1})
     return result
 
 
@@ -1189,9 +1397,15 @@ def _multi_stage_report(stage: str, outcomes: list[dict[str, Any]]) -> dict[str,
     status = "completed" if len(successful) == len(outcomes) else "warning" if stage == "production_render" else "partial"
     primary.update({"enabled": True, "status": status, "items": outcomes})
     if stage == "production_render":
-        primary["output_file"] = successful[0].get("output_file") or primary.get("output_file")
-        primary["output_files"] = [item["output_file"] for item in successful if isinstance(item.get("output_file"), str)]
-        primary["clip_results"] = [item.to_dict() for item in primary_clip_results({"items": outcomes})]
+        registry = primary_clip_results({"items": outcomes})
+        primary["output_file"] = registry[0].output_file if registry else (successful[0].get("output_file") or primary.get("output_file"))
+        primary["output_files"] = [item.output_file for item in registry]
+        primary["clip_results"] = [item.to_dict() for item in registry]
+        if len(registry) < len(successful):
+            primary["status"] = "warning"
+            primary.setdefault("warnings", []).append(
+                f"Сохранено только {len(registry)} уникальных ролика из {len(successful)} завершённых; копии скрыты."
+            )
         if len(successful) != len(outcomes):
             primary.setdefault("warnings", []).append("Не все ролики удалось экспортировать; готовые результаты сохранены.")
     return primary
