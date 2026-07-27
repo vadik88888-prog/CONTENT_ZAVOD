@@ -23,6 +23,8 @@ class ClipResult:
     source_end_seconds: float | None = None
     source_fingerprint: str = ""
     content_fingerprint: str = ""
+    run_id: str = ""
+    revision_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +36,8 @@ class ClipResult:
             "source_end_seconds": self.source_end_seconds,
             "source_fingerprint": self.source_fingerprint,
             "content_fingerprint": self.content_fingerprint,
+            "run_id": self.run_id,
+            "revision_id": self.revision_id,
             "status": self.status,
             "primary": self.primary,
         }
@@ -58,6 +62,8 @@ class ClipResult:
             source_end_seconds=_as_float(value.get("source_end_seconds")),
             source_fingerprint=str(value.get("source_fingerprint") or "").strip(),
             content_fingerprint=str(value.get("content_fingerprint") or "").strip(),
+            run_id=str(value.get("run_id") or "").strip(),
+            revision_id=str(value.get("revision_id") or "").strip(),
         )
 
 

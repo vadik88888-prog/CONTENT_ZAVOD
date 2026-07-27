@@ -291,12 +291,18 @@ def _measure_width(text: str, style: SubtitleStyle, font_size: int) -> float:
 
     global _METRICS_APPLICATION
     try:
+        from PySide6.QtCore import QCoreApplication
         from PySide6.QtGui import QFont, QFontMetricsF, QGuiApplication
 
         application = QGuiApplication.instance()
         if application is None:
+            if QCoreApplication.instance() is not None:
+                raise RuntimeError("A non-GUI Qt application is already active.")
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
             _METRICS_APPLICATION = QGuiApplication([])
+            application = _METRICS_APPLICATION
+        if not isinstance(application, QGuiApplication):
+            raise RuntimeError("Qt GUI font metrics are unavailable in this process.")
         font = QFont(style.font_family)
         font.setPixelSize(font_size)
         font.setBold(style.font_weight == "bold")

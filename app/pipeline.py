@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import time
+import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.audio_modes import tts_eligibility
-from app.clip_results import primary_clip_results, result_paths
+from app.clip_results import ClipResult, primary_clip_results, result_paths
 from app.diversity import interval_metrics, transcript_similarity
 from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
@@ -27,6 +30,7 @@ from app.media import prepare_media
 from app.models import Candidate, candidate_from_dict, scored_from_dict
 from app.rendering import render_clip
 from app.reporting import make_report
+from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
 from app.production_plan import PRODUCTION_PLAN_VERSION, build_production_plan, production_summary
 from app.scene_detection import detect_scene_boundaries
@@ -152,6 +156,8 @@ class Pipeline:
         audio_only: bool = False, recompute_audio: bool = False,
         production_render_only: bool = False, recompute_production_render: bool = False,
         disable_production_render: bool = False,
+        run_id: str | None = None,
+        upstream_run_directory: Path | None = None,
     ) -> None:
         self.root = root.resolve()
         self.config = config
@@ -171,13 +177,19 @@ class Pipeline:
         self.production_render_only = production_render_only
         self.recompute_production_render = recompute_production_render
         self.disable_production_render = disable_production_render
+        self.run_id = safe_name(run_id or f"run-{uuid.uuid4().hex}", "run")
+        self.upstream_run_directory = upstream_run_directory
+        self.started_at = ""
+        self.run_work_directory: Path | None = None
         self.warnings: list[str] = []
         self.errors: list[str] = []
 
     def run(self, input_path: str | None = None, url: str | None = None) -> PipelineResult:
         validate_source_arguments(input_path, url)
+        self.started_at = utc_now()
         source, work_directory, output_directory = self._prepare_source(input_path, url)
-        tracker = StageTracker(work_directory / "state.json")
+        assert self.run_work_directory is not None
+        tracker = StageTracker(self.run_work_directory / "state.json")
         if self.recompute_tts:
             tts_names = tuple(
                 name for name in tracker.data.get("stages", {})
@@ -323,6 +335,7 @@ class Pipeline:
                 )
             )
         registry = primary_clip_results(production_render)
+        self._assert_current_run_results(registry, output_directory)
         outputs = result_paths(registry, output_directory) if production_is_primary else [
             Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()
         ]
@@ -345,7 +358,7 @@ class Pipeline:
         report_path = output_directory / "report.json"
         tracker.start("report", _hash({"final": final_data, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
         tracker.finish("report")
-        make_report(
+        report = make_report(
             report_path, source_data, metadata, self.config, tracker.data, len(selected), len(candidates),
             [str(item) for item in outputs], self.warnings, self.errors, ai_usage,
             gpu_used=transcript.get("runtime", {}).get("device") == "cuda",
@@ -365,7 +378,22 @@ class Pipeline:
             audio=audio,
             production_render=production_render,
             primary_results=[item.to_dict() for item in registry],
+            run={
+                "run_id": self.run_id,
+                "source_id": source.id,
+                "run_directory": str(output_directory),
+                "started_at": self.started_at,
+                "requested_clip_count": self.config.ai_reranking.final_clip_count,
+            },
         )
+        manifest = write_run_manifest(
+            output_directory / "manifest.json", run_id=self.run_id, source=source_data,
+            started_at=self.started_at, requested_clip_count=self.config.ai_reranking.final_clip_count,
+            production_render=production_render, results=registry, run_directory=output_directory,
+        )
+        report["run"]["manifest_path"] = str(output_directory / "manifest.json")
+        report["run"]["finished_at"] = manifest["finished_at"]
+        write_json(report_path, report)
         return PipelineResult(work_directory, output_directory, report_path, len(outputs), outputs, self.warnings)
 
     def _source_stage(self, tracker: StageTracker, artifact: Path, source: Source) -> dict[str, Any]:
@@ -390,9 +418,12 @@ class Pipeline:
             old = read_json(work_directory / "source.json", {})
             old_path = Path(str(old.get("path", ""))) if old else None
             source = Source(str(old["id"]), old_path, str(old["display_name"]), str(old["origin"]), bool(old.get("downloaded"))) if old and old_path.is_file() else url_source(url, work_directory / "download")
-        output_directory = self.root / "output" / run_key
+        output_root = self.root / "output" / run_key
+        output_directory = output_root / "runs" / self.run_id
+        self.run_work_directory = work_directory / "runs" / self.run_id
         work_directory.mkdir(parents=True, exist_ok=True)
         output_directory.mkdir(parents=True, exist_ok=True)
+        self.run_work_directory.mkdir(parents=True, exist_ok=True)
         return source, work_directory, output_directory
 
     def _cached(self, tracker: StageTracker, stage: str, artifact: Path, fingerprint: Any, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -764,9 +795,10 @@ class Pipeline:
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
         audio_items = {str(item.get("candidate_id")): item for item in audio.get("items", []) if isinstance(item, dict)}
         outcomes: list[dict[str, Any]] = []
-        for item in plan_items:
+        for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
             identity = _production_item_identity(item)
+            requested_index = int(identity.get("requested_index") or default_index)
             audio_item = audio_items.get(candidate_id)
             if not audio_item or audio_item.get("status") not in {"completed", "partial"}:
                 outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "audio_unavailable", **identity})
@@ -785,6 +817,12 @@ class Pipeline:
                 raise_on_error=False, visual_analysis=visual_analysis,
             )
             output_file = str(report.get("output_file") or "")
+            if report.get("status") in {"completed", "warning"} and output_file:
+                canonical = self._publish_run_result(Path(output_file), output_directory, requested_index)
+                report = dict(report)
+                report["intermediate_output_file"] = output_file
+                report["output_file"] = str(canonical)
+                output_file = str(canonical)
             outcomes.append({
                 "clip_result_id": f"{candidate_id}:{plan.plan_id}",
                 "candidate_id": candidate_id,
@@ -797,6 +835,8 @@ class Pipeline:
                 "source_end_seconds": identity.get("source_end_seconds"),
                 "source_fingerprint": _source_range_fingerprint(source.id, identity),
                 "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
+                "run_id": self.run_id,
+                "revision_id": f"render-{requested_index:02d}",
                 **identity,
             })
         return _multi_stage_report("production_render", outcomes)
@@ -841,6 +881,33 @@ class Pipeline:
         })
         self.warnings.extend(project.warnings)
         return report
+
+    def _publish_run_result(self, source: Path, run_directory: Path, index: int) -> Path:
+        """Publish an immutable canonical copy; renderer files stay intermediate-only."""
+
+        if not source.is_file():
+            raise ProductionRenderError(f"Production render did not produce an MP4: {source}")
+        destination = run_directory / "results" / f"final-short-{index:02d}.mp4"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if not is_run_scoped_path(destination, run_directory):
+            raise ProductionRenderError("Canonical result escaped current run directory.")
+        return destination
+
+    @staticmethod
+    def _assert_current_run_results(results: list[ClipResult], run_directory: Path) -> None:
+        for result in results:
+            if not result.run_id:
+                raise ProductionRenderError("Canonical ClipResult is missing run_id.")
+            if not is_run_scoped_path(Path(result.output_file), run_directory):
+                raise ProductionRenderError(
+                    f"Canonical ClipResult points outside current run directory: {result.output_file}"
+                )
 
     def _run_tts_only(
         self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
@@ -953,8 +1020,9 @@ class Pipeline:
     ) -> PipelineResult:
         """Execute only Goal 3D artifacts; this branch cannot invoke AI, TTS, audio mix, or legacy render."""
 
-        plan_path = output_directory / "production-plan.json"
-        audio_path = output_directory / "audio" / "audio-project.json"
+        upstream_directory = self.upstream_run_directory or output_directory
+        plan_path = upstream_directory / "production-plan.json"
+        audio_path = upstream_directory / "audio" / "audio-project.json"
         if not plan_path.is_file():
             raise ProductionRenderError(
                 "ProductionPlan не найден для --production-render-only. Сначала создайте его через "
@@ -1001,14 +1069,38 @@ class Pipeline:
             write_json(report_path, existing)
             raise
         existing["production_render"] = production_render
+        intermediate = str(production_render.get("output_file") or "")
+        if intermediate:
+            canonical = self._publish_run_result(Path(intermediate), output_directory, 1)
+            production_render = dict(production_render)
+            production_render.update({
+                "intermediate_output_file": intermediate,
+                "output_file": str(canonical),
+                "clip_result_id": f"{plan.metadata.candidate_id}:{plan.plan_id}",
+                "candidate_id": plan.metadata.candidate_id,
+                "production_plan_id": plan.plan_id,
+                "run_id": self.run_id,
+                "revision_id": "render-01",
+            })
+            existing["production_render"] = production_render
         registry = primary_clip_results(production_render)
+        self._assert_current_run_results(registry, output_directory)
         existing["primary_results"] = [item.to_dict() for item in registry]
         existing["produced_clips_count"] = len(registry)
         existing["output_files"] = [str(path) for path in result_paths(registry, output_directory) if path.is_file()]
         existing["stages"] = tracker.data.get("stages", {})
         existing["warnings"] = [*existing.get("warnings", []), *self.warnings]
         existing["errors"] = [*existing.get("errors", []), *self.errors]
+        existing["run"] = {
+            "run_id": self.run_id, "source_id": source.id, "run_directory": str(output_directory),
+            "started_at": self.started_at or utc_now(), "manifest_path": str(output_directory / "manifest.json"),
+        }
         write_json(report_path, existing)
+        write_run_manifest(
+            output_directory / "manifest.json", run_id=self.run_id, source=source.to_dict(),
+            started_at=self.started_at or utc_now(), requested_clip_count=1,
+            production_render=production_render, results=registry, run_directory=output_directory,
+        )
         output_files = [path for path in result_paths(registry, output_directory) if path.is_file()]
         return PipelineResult(
             work_directory, output_directory, report_path,

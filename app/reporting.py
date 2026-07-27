@@ -29,6 +29,7 @@ def make_report(
     audio: dict[str, Any] | None = None,
     production_render: dict[str, Any] | None = None,
     primary_results: list[dict[str, Any]] | None = None,
+    run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stages = state.get("stages", {})
     durations = {
@@ -80,6 +81,7 @@ def make_report(
         "state_persistence": state.get("state_persistence", {"status": "saved"}),
         "primary_results": primary_results or [],
         "produced_clips_count": len(primary_results or []),
+        "run": run or {},
     }
     write_json(path, report)
     return report

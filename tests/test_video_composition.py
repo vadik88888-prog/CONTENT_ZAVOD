@@ -410,5 +410,5 @@ def test_production_render_only_preserves_existing_legacy_mp4(tmp_path: Path) ->
     result = pipeline._run_production_render_only(StageTracker(work_directory / "state.json"), prepared_source, work_directory, output_directory)
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert old_mp4.read_bytes() == b"legacy-video"
-    assert result.output_files and result.output_files[0].name == "final-short.mp4"
+    assert result.output_files and result.output_files[0].name == "final-short-01.mp4"
     assert report["production_render"]["ai_called"] is False

@@ -10,9 +10,10 @@ from typing import Any
 import yaml
 
 from app.clip_results import ClipResult, result_paths, unique_primary_results
+from app.run_manifest import is_run_scoped_path
 from app.config import load_config
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
-from app.gui.services.desktop_project_store import validate_video_path
+from app.gui.services.desktop_project_store import InputValidationError, validate_video_path
 from app.media import probe_video
 from app.product_flow import (
     ProcessingEstimate,
@@ -40,6 +41,8 @@ class PreparedPipelineRun:
     runtime_config_path: Path
     source_path: Path | None = None
     runtime_flags: dict[str, str] = field(default_factory=dict)
+    run_id: str | None = None
+    manifest_path: Path | None = None
 
     def command_line(self) -> str:
         """Return the Windows-safe command line used by the desktop runner."""
@@ -115,11 +118,11 @@ class PipelineFacade:
 
         source = local_source(str(source_path))
         run_key = f"{source.display_name}-{source.id[:12]}"
-        work_directory = self.engine_root / "work" / run_key
-        output_directory = self.engine_root / "output" / run_key
+        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
+        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         # The engine is executed as a child of QProcess, where Python's normal
         # stdout buffering hides useful diagnostics until the process exits.
-        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--transform-script"]
+        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--transform-script"]
         if settings.local_test_mode:
             arguments.extend(["--mock-ai", "--no-ai-transformation"])
         if project.settings.recompute_all or not project.settings.use_cache:
@@ -136,6 +139,8 @@ class PipelineFacade:
             output_directory=output_directory,
             runtime_config_path=config_path,
             source_path=source_path,
+            run_id=run.run_id,
+            manifest_path=output_directory / "manifest.json",
             runtime_flags={
                 "device": str(config.device),
                 "encoder": str(config.production_render.encoder),
@@ -147,7 +152,9 @@ class PipelineFacade:
             },
         )
 
-    def prepare_render_revision(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
+    def prepare_render_revision(
+        self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, parent_run: ProjectRun,
+    ) -> PreparedPipelineRun:
         """Prepare the dependency-bounded CLI path: render only, never analysis or audio."""
 
         source_path = validate_video_path(project.source)
@@ -158,17 +165,24 @@ class PipelineFacade:
         config_path = run_directory / "runtime-config.yaml"
         config_path.write_text(yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
         source = local_source(str(source_path))
+        parent_execution = parent_run.settings_snapshot.get("execution", {})
+        parent_value = parent_execution.get("output_directory") if isinstance(parent_execution, dict) else None
+        parent_output = Path(str(parent_value)) if isinstance(parent_value, str) and parent_value.strip() else None
+        if parent_output is None or not parent_output.is_dir():
+            raise InputValidationError("Не найдена run directory исходного успешного запуска для повторного экспорта.")
         run_key = f"{source.display_name}-{source.id[:12]}"
-        work_directory = self.engine_root / "work" / run_key
-        output_directory = self.engine_root / "output" / run_key
+        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
+        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         arguments = [
-            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path),
+            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id,
+            "--upstream-run-directory", str(parent_output),
             "--production-render-only", "--recompute-production-render",
         ]
         return PreparedPipelineRun(
             program=sys.executable, arguments=arguments, working_directory=self.engine_root,
             state_path=work_directory / "state.json", report_path=output_directory / "report.json",
             output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
+            run_id=run.run_id, manifest_path=output_directory / "manifest.json",
             runtime_flags={
                 "render_only": "true", "device": str(config.device), "encoder": str(config.production_render.encoder),
                 "cache": str(config.production_render.cache_enabled).lower(), "processing_mode": resolved.processing_mode,
@@ -194,6 +208,19 @@ class PipelineFacade:
                 prepared, "Не удалось прочитать итоговый отчёт обработки.",
                 f"Report root is not a JSON object: {prepared.report_path}",
             )
+        manifest: dict[str, Any] | None = None
+        if prepared.run_id:
+            manifest_path = prepared.manifest_path or prepared.output_directory / "manifest.json"
+            try:
+                manifest_value = read_json(manifest_path, {})
+            except (OSError, ValueError) as error:
+                return self._failed_completion(prepared, "Не удалось прочитать manifest текущего запуска.", str(error))
+            if not isinstance(manifest_value, dict) or manifest_value.get("run_id") != prepared.run_id:
+                return self._failed_completion(
+                    prepared, "Manifest текущего запуска отсутствует или повреждён.",
+                    f"Expected run_id={prepared.run_id} in {manifest_path}",
+                )
+            manifest = manifest_value
         production = raw.get("production_render", {})
         if not isinstance(production, dict):
             return self._failed_completion(
@@ -223,7 +250,7 @@ class PipelineFacade:
         tts = raw.get("tts", {}) if isinstance(raw.get("tts"), dict) else {}
         values = [ai.get("estimated_cost"), tts.get("estimated_cost")]
         estimate = sum(float(item) for item in values if isinstance(item, (int, float)))
-        registry_value = raw.get("primary_results")
+        registry_value = manifest.get("primary_results") if manifest is not None else raw.get("primary_results")
         if isinstance(registry_value, list):
             registry = [
                 item for value in registry_value
@@ -239,6 +266,11 @@ class PipelineFacade:
                     "Не удалось создать итоговый видеофайл.",
                     "report.primary_results is present but contains no successful primary ClipResult entries.",
                 )
+            if manifest is not None:
+                if any(result.run_id != prepared.run_id for result in registry):
+                    return self._failed_completion(prepared, "Manifest содержит результат другого запуска.", "ClipResult.run_id mismatch.")
+                if any(not is_run_scoped_path(Path(result.output_file), prepared.output_directory) for result in registry):
+                    return self._failed_completion(prepared, "Manifest содержит путь вне текущего запуска.", "Canonical result path escapes run directory.")
             output_files = result_paths(registry, prepared.output_directory)
             for candidate in output_files:
                 artifact_error = self._validate_final_mp4(candidate)
@@ -273,7 +305,7 @@ class PipelineFacade:
         still validate every primary MP4.
         """
 
-        if not self._report_is_current(prepared.report_path, started_at):
+        if not prepared.run_id and not self._report_is_current(prepared.report_path, started_at):
             return None
         completion = self.completion(prepared)
         if completion.error_summary or not completion.canonical_results:
@@ -298,6 +330,11 @@ class PipelineFacade:
         if not all(str(path) for path in (report_path, output_directory, state_path)):
             return None
         runtime_config = execution.get("runtime_config_path", "")
+        run_id = str(execution.get("run_id") or "").strip() or None
+        manifest_value = str(execution.get("manifest_path") or "").strip()
+        if run_id and not manifest_value:
+            return None
+        manifest_path = Path(manifest_value) if manifest_value else None
         source = execution.get("source_path")
         runtime_flags = execution.get("runtime_flags", {})
         return PreparedPipelineRun(
@@ -306,6 +343,8 @@ class PipelineFacade:
             runtime_config_path=Path(str(runtime_config or report_path.with_name("runtime-config.yaml"))),
             source_path=Path(str(source)) if source else None,
             runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
+            run_id=run_id,
+            manifest_path=manifest_path,
         )
 
     @staticmethod

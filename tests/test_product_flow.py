@@ -163,6 +163,9 @@ def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Pat
     history = RunHistoryStore(projects)
     parent = history.create(project, {}, {"path": str(source)}, "0.1.0")
     parent.status = RunStatus.COMPLETED
+    parent_output = tmp_path / "parent-run-output"
+    parent_output.mkdir()
+    parent.settings_snapshot["execution"] = {"output_directory": str(parent_output)}
     history.save(parent)
     services = DesktopServices(
         engine_root=engine_root, settings_store=SettingsStore(data), settings=settings,

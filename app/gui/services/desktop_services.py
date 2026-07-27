@@ -215,7 +215,7 @@ class DesktopServices:
         run.cost_estimate = 0.0
         self.runs.save(run)
         try:
-            prepared = self.pipeline.prepare_render_revision(project, run, self.settings)
+            prepared = self.pipeline.prepare_render_revision(project, run, self.settings, parent_run)
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить повторный экспорт."
             self.runs.save(run)
@@ -233,6 +233,8 @@ class DesktopServices:
             "report_path": str(prepared.report_path),
             "output_directory": str(prepared.output_directory),
             "runtime_config_path": str(prepared.runtime_config_path),
+            "run_id": prepared.run_id,
+            "manifest_path": str(prepared.manifest_path) if prepared.manifest_path else None,
             "source_path": str(prepared.source_path) if prepared.source_path else None,
             "runtime_flags": dict(prepared.runtime_flags),
         }

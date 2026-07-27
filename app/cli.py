@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--input", help="Путь к локальному видеофайлу.")
     source.add_argument("--url", help="Публичная поддерживаемая ссылка для yt-dlp.")
     process.add_argument("--config", type=Path, help="Путь к YAML-конфигурации.")
+    process.add_argument("--run-id", help="Обязательный идентификатор desktop run; без него CLI создаст новый isolated run.")
+    process.add_argument("--upstream-run-directory", type=Path, help=argparse.SUPPRESS)
     process.add_argument(
         "--mock-ai", action="store_true",
         help="Детерминированная локальная оценка без внешнего AI API.",
@@ -187,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             production_render_only=arguments.production_render_only,
             recompute_production_render=arguments.recompute_production_render,
             disable_production_render=arguments.disable_production_render,
+            run_id=arguments.run_id,
+            upstream_run_directory=arguments.upstream_run_directory,
         ).run(
             input_path=arguments.input, url=arguments.url
         )
