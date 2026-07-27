@@ -175,6 +175,16 @@ def _semantic_groups(tokens: list[_Token], config: ProductionRenderConfig) -> li
         within_duration = [index for index in candidates if tokens[index - 1].end <= duration_limit]
         if within_duration:
             candidates = within_duration
+        # Prefer a readable minimum cue duration whenever the source timings
+        # offer one.  If even the longest permitted group is shorter, retain
+        # the words rather than inventing an artificial pause or moving their
+        # timestamps beyond the speech.
+        readable = [
+            index for index in candidates
+            if tokens[index - 1].end - tokens[cursor].start >= config.subtitle_min_duration
+        ]
+        if readable:
+            candidates = readable
         if not candidates:
             candidates = [max(cursor + 1, maximum)]
         end = max(candidates, key=lambda index: _boundary_score(tokens, index, cursor, len(tokens)))

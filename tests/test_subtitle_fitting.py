@@ -8,6 +8,7 @@ from app.production_subtitles import (
     _Token,
     _ass_font_size,
     _fit_tokens,
+    _semantic_groups,
     _resolved_cues,
     resolve_subtitle_style,
     write_production_ass,
@@ -39,13 +40,14 @@ def _fitted_cues(words: list[str]):
 
 def test_long_russian_phrase_is_split_without_word_loss_or_timestamp_regression() -> None:
     words = "или чуть позже и у тебя не вышло потому что между жизнью и смертью есть один шаг".split()
-    _config_value, style, _groups, cues = _fitted_cues(words)
+    config, style, _groups, cues = _fitted_cues(words)
 
     assert len(cues) > 1
     assert [word.text for cue in cues for word in cue.word_timings] == words
     assert all(cue.line_count <= style.max_lines for cue in cues)
     assert all(cue.layout_state in {"fitted", "fallback_fitted"} for cue in cues)
     assert all(cue.start_seconds >= 0 and cue.end_seconds > cue.start_seconds for cue in cues)
+    assert all(cue.end_seconds - cue.start_seconds <= config.production_render.subtitle_max_duration for cue in cues)
     assert all(left.end_seconds <= right.start_seconds for left, right in zip(cues, cues[1:]))
 
 
@@ -96,3 +98,32 @@ def test_dynamic_ass_uses_the_same_resolved_lines_as_quality_validation(tmp_path
         subtitles_enabled=True,
     )
     assert invalid_quality["status"] == "failed"
+
+
+def test_cue_dialogue_006_regression_fixture_fits_without_losing_words_or_exceeding_duration() -> None:
+    words = (
+        "и вот когда кажется что уже поздно потому что между жизнью и смертью "
+        "остаётся всего один последний решающий шаг"
+    ).split()
+    config, _style, _groups, cues = _fitted_cues(words)
+    project = SubtitleProject(
+        project_id="subtitle-cue-dialogue-006", audio_project_id="audio-test",
+        duration_seconds=max(cue.end_seconds for cue in cues), style=resolve_subtitle_style(config.production_render)[0], cues=cues,
+    )
+
+    assert all(cue.cue_id.startswith("cue-dialogue-006-") for cue in project.cues)
+    assert [word.text for cue in project.cues for word in cue.word_timings] == words
+    assert all(cue.line_count <= 2 for cue in project.cues)
+    assert all(0 <= cue.start_seconds < cue.end_seconds <= project.duration_seconds for cue in project.cues)
+    assert all(left.end_seconds <= right.start_seconds for left, right in zip(project.cues, project.cues[1:]))
+
+
+def test_semantic_grouping_prefers_minimum_duration_when_source_timing_allows_it() -> None:
+    config = _config()
+    config.production_render.subtitle_min_duration = 0.45
+    tokens = [_Token(f"слово{index}", index * 0.1, index * 0.1 + 0.09) for index in range(9)]
+
+    groups = _semantic_groups(tokens, config.production_render)
+
+    first, _reason = groups[0]
+    assert first[-1].end - first[0].start >= config.production_render.subtitle_min_duration

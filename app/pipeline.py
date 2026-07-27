@@ -158,6 +158,7 @@ class Pipeline:
         disable_production_render: bool = False,
         run_id: str | None = None,
         upstream_run_directory: Path | None = None,
+        project_id: str | None = None,
     ) -> None:
         self.root = root.resolve()
         self.config = config
@@ -179,6 +180,7 @@ class Pipeline:
         self.disable_production_render = disable_production_render
         self.run_id = safe_name(run_id or f"run-{uuid.uuid4().hex}", "run")
         self.upstream_run_directory = upstream_run_directory
+        self.project_id = project_id
         self.started_at = ""
         self.run_work_directory: Path | None = None
         self.warnings: list[str] = []
@@ -190,6 +192,11 @@ class Pipeline:
         source, work_directory, output_directory = self._prepare_source(input_path, url)
         assert self.run_work_directory is not None
         tracker = StageTracker(self.run_work_directory / "state.json")
+        # Result lifecycle state belongs to exactly one run.  Source analysis
+        # artifacts remain reusable across runs, with a separately locked cache
+        # index.  This keeps a new render from inheriting an old final-output
+        # state while retaining the expensive media/transcript cache.
+        source_cache = StageTracker(work_directory / "cache-state.json")
         if self.recompute_tts:
             tts_names = tuple(
                 name for name in tracker.data.get("stages", {})
@@ -216,6 +223,7 @@ class Pipeline:
             return self._run_production_render_only(tracker, source, work_directory, output_directory)
         if self.recompute_intelligence:
             tracker.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
+            source_cache.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
         if self.recompute_transformation:
             transformation_names = tuple(
                 name for name in tracker.data.get("stages", {})
@@ -230,10 +238,10 @@ class Pipeline:
                 if name == "report" or any(name.startswith(f"{base}:") for base in PRODUCTION_PLAN_STAGES)
             )
             tracker.invalidate("Запрошен --recompute-production-plan.", production_names)
-        source_data = self._source_stage(tracker, work_directory / "source.json", source)
+        source_data = self._source_stage(tracker, source_cache, work_directory / "source.json", source)
         metadata = self._cached(
             tracker, "metadata", work_directory / "metadata.json", {"source": source.id},
-            lambda: prepare_media(source.path, work_directory),
+            lambda: prepare_media(source.path, work_directory), cache_tracker=source_cache,
         )
         if not metadata.get("audio_path"):
             return self._finish_without_audio(tracker, source_data, metadata, work_directory, output_directory)
@@ -241,31 +249,37 @@ class Pipeline:
             tracker, "transcription", work_directory / "transcript.json",
             {"source": source.id, "whisper": self.config.whisper_model, "language": self.config.language, "device": self.config.device},
             lambda: transcribe(Path(str(metadata["audio_path"])), source.id, float(metadata["duration"]), self.config, work_directory / "transcript.json"),
+            cache_tracker=source_cache,
         )
         transcript_features = self._cached(
             tracker, "transcript_features", work_directory / "transcript_features.json",
             {"transcript": _hash(transcript), "settings": self.config.transcript_features},
             lambda: _write(work_directory / "transcript_features.json", analyse_transcript(transcript, self.config.transcript_features)),
+            cache_tracker=source_cache,
         )
         audio_features = self._cached(
             tracker, "audio_features", work_directory / "audio_features.json",
             {"audio": str(metadata["audio_path"]), "settings": self.config.audio_analysis},
             lambda: _write(work_directory / "audio_features.json", analyse_audio(Path(str(metadata["audio_path"])), self.config.audio_analysis)),
+            cache_tracker=source_cache,
         )
         scenes = self._cached(
             tracker, "scene_detection", work_directory / "scene_boundaries.json",
             {"source": source.id, "settings": self.config.scene_detection},
             lambda: _write(work_directory / "scene_boundaries.json", detect_scene_boundaries(source.path, float(metadata["duration"]), self.config.scene_detection)),
+            cache_tracker=source_cache,
         )
         visual_analysis = self._cached(
             tracker, "visual_analysis", work_directory / "visual_analysis.json",
             {"source": source.id, "duration": metadata.get("duration"), "enabled": self.config.optional_visual_features, "model": self.config.ai.model},
             lambda: _write(work_directory / "visual_analysis.json", analyse_video_subjects(source.path, float(metadata.get("duration") or 0), self.config)),
+            cache_tracker=source_cache,
         )
         raw_candidates = self._cached(
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
             {"transcript_features": _hash(transcript_features), "audio": _hash(audio_features), "scenes": _hash(scenes), "settings": self.config.candidate_generation},
             lambda: _write_generated_candidates(work_directory / "candidates_v2.json", generate_candidates_with_stats(transcript, transcript_features, audio_features, scenes, self.config.candidate_generation)),
+            cache_tracker=source_cache,
         )
         # Compatibility artifact retained for existing users of the pre-1.6 cache layout.
         write_json(work_directory / "candidates.raw.json", raw_candidates)
@@ -274,24 +288,28 @@ class Pipeline:
             tracker, "local_scoring", work_directory / "candidates.local.json",
             {"candidates": _hash(raw_candidates), "settings": self.config.scoring},
             lambda: _write_candidates(work_directory / "candidates.local.json", score_candidates(candidates, audio_features, scenes, self.config.scoring)),
+            cache_tracker=source_cache,
         )
         candidates = [candidate_from_dict(item) for item in local_data.get("candidates", [])]
         shortlist_data = self._cached(
             tracker, "shortlist", work_directory / "shortlist.json",
             {"candidates": _hash(local_data), "size": self.config.ai_reranking.shortlist_size},
             lambda: _write_candidates(work_directory / "shortlist.json", shortlist(candidates, self.config.ai_reranking.shortlist_size)),
+            cache_tracker=source_cache,
         )
         short_candidates = [candidate_from_dict(item) for item in shortlist_data.get("candidates", [])]
         ai_data = self._cached(
             tracker, "ai_ranking", work_directory / "ai_ranking.json",
             {"shortlist": _hash(shortlist_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
             lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
+            cache_tracker=source_cache,
         )
         scored = [scored_from_dict(item) for item in ai_data.get("candidates", [])]
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {"policy_version": "temporal-diversity-v2", "scored": _hash(ai_data), "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold, "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count},
             lambda: self._final_selection(scored, work_directory / "final_selection.json"),
+            cache_tracker=source_cache,
         )
         self.warnings.extend(str(value) for value in final_data.get("warnings", []) if str(value))
         selected_ids = set(final_data.get("selected_ids", []))
@@ -384,25 +402,32 @@ class Pipeline:
                 "run_directory": str(output_directory),
                 "started_at": self.started_at,
                 "requested_clip_count": self.config.ai_reranking.final_clip_count,
+                "project_id": self.project_id,
             },
         )
         manifest = write_run_manifest(
             output_directory / "manifest.json", run_id=self.run_id, source=source_data,
             started_at=self.started_at, requested_clip_count=self.config.ai_reranking.final_clip_count,
-            production_render=production_render, results=registry, run_directory=output_directory,
+            production_render=production_render, results=registry, run_directory=output_directory, project_id=self.project_id,
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
         write_json(report_path, report)
         return PipelineResult(work_directory, output_directory, report_path, len(outputs), outputs, self.warnings)
 
-    def _source_stage(self, tracker: StageTracker, artifact: Path, source: Source) -> dict[str, Any]:
+    def _source_stage(
+        self, tracker: StageTracker, cache_tracker: StageTracker, artifact: Path, source: Source,
+    ) -> dict[str, Any]:
         stored = read_json(artifact, {})
-        if tracker.completed("source", artifact) and stored.get("id") == source.id and stored.get("path") == str(source.path):
+        if cache_tracker.completed("source", artifact, source.id) and stored.get("id") == source.id and stored.get("path") == str(source.path):
+            tracker.start("source", source.id)
+            tracker.finish("source")
             return stored
         tracker.start("source", source.id)
+        cache_tracker.start("source", source.id)
         data = source.to_dict()
         write_json(artifact, data)
+        cache_tracker.finish("source")
         tracker.finish("source")
         return data
 
@@ -426,22 +451,40 @@ class Pipeline:
         self.run_work_directory.mkdir(parents=True, exist_ok=True)
         return source, work_directory, output_directory
 
-    def _cached(self, tracker: StageTracker, stage: str, artifact: Path, fingerprint: Any, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    def _cached(
+        self, tracker: StageTracker, stage: str, artifact: Path, fingerprint: Any,
+        action: Callable[[], dict[str, Any]], *, cache_tracker: StageTracker | None = None,
+    ) -> dict[str, Any]:
         if stage in INTELLIGENCE_STAGES:
             fingerprint = {"engine_version": INTELLIGENCE_ENGINE_VERSION, "input": fingerprint}
         cache_key = _hash(fingerprint)
-        if tracker.completed(stage, artifact, cache_key):
+        cache = cache_tracker or tracker
+        if cache.completed(stage, artifact, cache_key):
+            # Keep the per-run report truthful even when the source-level
+            # cache supplied the artifact.  The cache index and the run state
+            # are different files and both writes are process-locked by
+            # write_json, so runs never replace one another's state.json.
+            tracker.start(stage, cache_key)
+            tracker.finish(stage)
             return read_json(artifact, {})
         tracker.start(stage, cache_key)
+        if cache is not tracker:
+            cache.start(stage, cache_key)
         try:
             data = action()
         except ClipEngineError as error:
             tracker.finish(stage, "failed", str(error))
+            if cache is not tracker:
+                cache.finish(stage, "failed", str(error))
             raise
         except Exception as error:
             message = f"Непредвиденная ошибка этапа {stage}: {error}"
             tracker.finish(stage, "failed", message)
+            if cache is not tracker:
+                cache.finish(stage, "failed", message)
             raise StageError(message) from error
+        if cache is not tracker:
+            cache.finish(stage)
         tracker.finish(stage)
         return data
 
@@ -836,7 +879,7 @@ class Pipeline:
                 "source_fingerprint": _source_range_fingerprint(source.id, identity),
                 "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
                 "run_id": self.run_id,
-                "revision_id": f"render-{requested_index:02d}",
+                "revision_id": f"{self.run_id}:render-{requested_index:02d}",
                 **identity,
             })
         return _multi_stage_report("production_render", outcomes)
@@ -865,6 +908,7 @@ class Pipeline:
             return {"enabled": True, "status": "failed", "errors": [safe], "ai_called": False}
         tracker.finish(stage_name, "completed" if project.status in {"completed", "warning"} else project.status)
         report = production_render_report_section(project)
+        report["audio_mode"] = plan.audio_mode
         source_range = _plan_source_range(plan)
         identity = {
             "source_start_seconds": source_range[0] if source_range else None,
@@ -899,11 +943,14 @@ class Pipeline:
             raise ProductionRenderError("Canonical result escaped current run directory.")
         return destination
 
-    @staticmethod
-    def _assert_current_run_results(results: list[ClipResult], run_directory: Path) -> None:
+    def _assert_current_run_results(self, results: list[ClipResult], run_directory: Path) -> None:
         for result in results:
-            if not result.run_id:
-                raise ProductionRenderError("Canonical ClipResult is missing run_id.")
+            if result.run_id != self.run_id:
+                raise ProductionRenderError(
+                    f"Canonical ClipResult belongs to another run: {result.run_id or '<missing>'} != {self.run_id}."
+                )
+            if not result.revision_id:
+                raise ProductionRenderError("Canonical ClipResult is missing revision_id.")
             if not is_run_scoped_path(Path(result.output_file), run_directory):
                 raise ProductionRenderError(
                     f"Canonical ClipResult points outside current run directory: {result.output_file}"
@@ -1080,7 +1127,7 @@ class Pipeline:
                 "candidate_id": plan.metadata.candidate_id,
                 "production_plan_id": plan.plan_id,
                 "run_id": self.run_id,
-                "revision_id": "render-01",
+                "revision_id": f"{self.run_id}:render-01",
             })
             existing["production_render"] = production_render
         registry = primary_clip_results(production_render)
@@ -1099,7 +1146,7 @@ class Pipeline:
         write_run_manifest(
             output_directory / "manifest.json", run_id=self.run_id, source=source.to_dict(),
             started_at=self.started_at or utc_now(), requested_clip_count=1,
-            production_render=production_render, results=registry, run_directory=output_directory,
+            production_render=production_render, results=registry, run_directory=output_directory, project_id=self.project_id,
         )
         output_files = [path for path in result_paths(registry, output_directory) if path.is_file()]
         return PipelineResult(

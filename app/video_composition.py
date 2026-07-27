@@ -883,6 +883,8 @@ def _safe_error(error: BaseException) -> str:
 def production_render_report_section(project: VideoProject) -> dict[str, Any]:
     result = project.result
     validation = result.validation if result else RenderValidation(status="invalid", messages=["Render result is unavailable."])
+    quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+    subtitles = project.subtitle_project
     return {
         "enabled": True,
         "status": project.status,
@@ -898,12 +900,32 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "audio_duration": validation.audio_duration_seconds,
         "sync_difference_ms": validation.sync_difference_ms,
         "clip_count": len(project.timeline.clips),
-        "subtitle_cue_count": len(project.subtitle_project.cues) if project.subtitle_project else 0,
+        "subtitles_enabled": project.render_request.subtitles_enabled,
+        "subtitle_cue_count": len(subtitles.cues) if subtitles else 0,
+        "subtitle_layout": {
+            "contract_version": subtitles.layout_contract_version if subtitles else None,
+            "resolved_cue_count": len(subtitles.cues) if subtitles else 0,
+            "cues": [
+                {
+                    "cue_id": cue.cue_id,
+                    "segment_id": cue.segment_id,
+                    "original_text": cue.original_text or cue.text,
+                    "original_line_count": cue.original_line_count,
+                    "resolved_lines": list(cue.resolved_lines),
+                    "resolved_font_size": cue.resolved_font_size,
+                    "split_reason": cue.split_reason,
+                    "fallback_used": cue.fallback_used,
+                    "layout_state": cue.layout_state,
+                }
+                for cue in subtitles.cues
+            ] if subtitles else [],
+            "final_validation": quality,
+        },
         "cache_hit": bool(result.cache_hit) if result else False,
         "validation": validation.status,
         "warnings": project.warnings,
         "fallback_reasons": project.fallback_reasons,
-        "quality": validate_output_quality(project, project.render_request.subtitles_enabled),
+        "quality": quality,
         "errors": [item.model_dump(mode="json") for item in result.errors] if result else [],
         "artifacts": project.artifact_paths,
         "ai_called": False,

@@ -183,6 +183,8 @@ def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Pat
     assert "--production-render-only" in prepared.arguments
     assert "--recompute-production-render" in prepared.arguments
     assert "--transform-script" not in prepared.arguments
+    assert prepared.arguments[prepared.arguments.index("--project-id") + 1] == project.project_id
+    assert prepared.arguments[prepared.arguments.index("--upstream-run-directory") + 1] == str(parent_output)
     assert prepared.runtime_flags["render_only"] == "true"
 
 

@@ -323,6 +323,15 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
     report = production_render_report_section(second)
     assert report["cache_hit"] and "sk-" not in json.dumps(report)
     assert report["quality"]["status"] in {"passed", "warning"}
+    assert report["subtitles_enabled"] is True
+    layout = report["subtitle_layout"]
+    assert layout["contract_version"] == "4D.0"
+    assert layout["resolved_cue_count"] == report["subtitle_cue_count"]
+    assert layout["final_validation"] == report["quality"]
+    assert all({
+        "original_text", "original_line_count", "resolved_lines", "resolved_font_size",
+        "split_reason", "fallback_used", "layout_state",
+    } <= cue.keys() for cue in layout["cues"])
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:

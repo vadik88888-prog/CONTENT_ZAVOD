@@ -70,8 +70,12 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
 
     second = Pipeline(tmp_path, config, mock_ai=True).run(input_path=str(source))
 
-    assert second.output_files == first.output_files
-    assert calls == {"media": 1, "transcription": 1, "render": 1}
+    # Analysis artifacts are source-cached, while every run gets its own
+    # canonical output directory and therefore performs its own final render.
+    assert second.output_files != first.output_files
+    assert second.output_files[0].is_relative_to(second.output_directory)
+    assert first.output_files[0].is_relative_to(first.output_directory)
+    assert calls == {"media": 1, "transcription": 1, "render": 2}
 
 
 def test_pipeline_reports_video_without_audio_without_crashing(tmp_path, monkeypatch) -> None:

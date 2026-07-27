@@ -122,7 +122,7 @@ class PipelineFacade:
         output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         # The engine is executed as a child of QProcess, where Python's normal
         # stdout buffering hides useful diagnostics until the process exits.
-        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--transform-script"]
+        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id, "--transform-script"]
         if settings.local_test_mode:
             arguments.extend(["--mock-ai", "--no-ai-transformation"])
         if project.settings.recompute_all or not project.settings.use_cache:
@@ -174,7 +174,7 @@ class PipelineFacade:
         work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
         output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         arguments = [
-            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id,
+            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id,
             "--upstream-run-directory", str(parent_output),
             "--production-render-only", "--recompute-production-render",
         ]
@@ -269,6 +269,12 @@ class PipelineFacade:
             if manifest is not None:
                 if any(result.run_id != prepared.run_id for result in registry):
                     return self._failed_completion(prepared, "Manifest содержит результат другого запуска.", "ClipResult.run_id mismatch.")
+                if any(not result.clip_result_id or not result.revision_id for result in registry):
+                    return self._failed_completion(
+                        prepared,
+                        "Manifest не содержит идентификатор результата или revision.",
+                        "Canonical ClipResult must provide clip_result_id and revision_id.",
+                    )
                 if any(not is_run_scoped_path(Path(result.output_file), prepared.output_directory) for result in registry):
                     return self._failed_completion(prepared, "Manifest содержит путь вне текущего запуска.", "Canonical result path escapes run directory.")
             output_files = result_paths(registry, prepared.output_directory)
