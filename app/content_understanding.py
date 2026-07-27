@@ -9,12 +9,17 @@ proposals, but can always fall back to this local implementation.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
+
+from app.utils import stable_text_hash
 
 
 VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
 CONTENT_STRATEGY_VERSION = "5A.1"
+GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
+STORY_UNIT_SCHEMA_VERSION = "5A.1"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -37,6 +42,13 @@ _EDUCATIONAL_TERMS = (
     "how ", "why ", "lesson", "because", "example",
 )
 _DIALOGUE_TERMS = ("вопрос", "ответ", "спросил", "интервью", "question", "answer")
+_TOPIC_MARKERS = ("теперь", "другая тема", "важно понять", "первое", "второе", "finally", "next")
+_PAYOFF_MARKERS = ("поэтому", "значит", "вывод", "итог", "вот почему", "therefore", "that is why", "the point")
+_SETUP_MARKERS = ("если", "когда", "проблем", "вопрос", "почему", "if ", "when ", "question", "problem")
+_STOP_WORDS = frozenset({
+    "и", "а", "но", "что", "это", "как", "в", "на", "с", "по", "к", "за", "из", "у", "не", "мы", "вы",
+    "the", "a", "an", "and", "or", "but", "to", "of", "in", "is", "it", "that", "this", "for", "with",
+})
 
 
 @dataclass(slots=True)
@@ -130,6 +142,215 @@ class VideoContentProfile:
         )
         profile.validate()
         return profile
+
+
+@dataclass(slots=True)
+class ContentChapter:
+    chapter_id: str
+    start: float
+    end: float
+    duration: float
+    title: str
+    summary: str
+    main_topic: str
+    subtopics: list[str]
+    speaker_ids: list[str]
+    transcript_segment_ids: list[int]
+    opening_function: str
+    narrative_function: str
+    emotional_tone: str
+    emotional_intensity: float
+    information_density: float
+    visual_activity: float
+    dependency_on_previous: float
+    dependency_on_next: float
+    standalone_potential: float
+    candidate_story_count: int
+    confidence: float
+    evidence: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ContentChapter":
+        return cls(
+            chapter_id=str(data.get("chapter_id") or ""),
+            start=float(data.get("start", 0)), end=float(data.get("end", 0)),
+            duration=float(data.get("duration", 0)), title=str(data.get("title") or ""),
+            summary=str(data.get("summary") or ""), main_topic=str(data.get("main_topic") or ""),
+            subtopics=[str(item) for item in data.get("subtopics", [])],
+            speaker_ids=[str(item) for item in data.get("speaker_ids", [])],
+            transcript_segment_ids=[int(item) for item in data.get("transcript_segment_ids", [])],
+            opening_function=str(data.get("opening_function") or "unknown"),
+            narrative_function=str(data.get("narrative_function") or "unknown"),
+            emotional_tone=str(data.get("emotional_tone") or "neutral"),
+            emotional_intensity=float(data.get("emotional_intensity", 0)),
+            information_density=float(data.get("information_density", 0)),
+            visual_activity=float(data.get("visual_activity", 0)),
+            dependency_on_previous=float(data.get("dependency_on_previous", 0)),
+            dependency_on_next=float(data.get("dependency_on_next", 0)),
+            standalone_potential=float(data.get("standalone_potential", 0)),
+            candidate_story_count=int(data.get("candidate_story_count", 0)),
+            confidence=float(data.get("confidence", 0)), evidence=dict(data.get("evidence", {})),
+        )
+
+
+@dataclass(slots=True)
+class ContentSignature:
+    normalized_core_idea: str
+    topic_ids: list[str]
+    chapter_id: str
+    narrative_function: str
+    emotional_signature: str
+    key_entities: list[str]
+    key_claims: list[str]
+    keyword_set: list[str]
+    lexical_signature: str
+    semantic_embedding_ref: str | None
+    source_range: dict[str, float]
+    transcript_fingerprint: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class StoryUnit:
+    story_unit_id: str
+    chapter_id: str
+    start: float
+    end: float
+    duration: float
+    transcript_segment_ids: list[int]
+    title: str
+    core_idea: str
+    hook_seed: str
+    setup: str
+    development: str
+    payoff: str
+    ending: str
+    emotional_arc: str
+    dominant_emotion: str
+    speaker_context: str
+    required_previous_context: str
+    required_next_context: str
+    standalone_score: float
+    completeness_score: float
+    clarity_score: float
+    context_dependency_score: float
+    information_density: float
+    repetition_score: float
+    transformation_potential: float
+    publishability_precheck: bool
+    content_signature: dict[str, Any]
+    confidence: float
+    evidence: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StoryUnit":
+        return cls(
+            story_unit_id=str(data.get("story_unit_id") or ""), chapter_id=str(data.get("chapter_id") or ""),
+            start=float(data.get("start", 0)), end=float(data.get("end", 0)), duration=float(data.get("duration", 0)),
+            transcript_segment_ids=[int(item) for item in data.get("transcript_segment_ids", [])],
+            title=str(data.get("title") or ""), core_idea=str(data.get("core_idea") or ""),
+            hook_seed=str(data.get("hook_seed") or ""), setup=str(data.get("setup") or ""),
+            development=str(data.get("development") or ""), payoff=str(data.get("payoff") or ""),
+            ending=str(data.get("ending") or ""), emotional_arc=str(data.get("emotional_arc") or "neutral"),
+            dominant_emotion=str(data.get("dominant_emotion") or "neutral"),
+            speaker_context=str(data.get("speaker_context") or "unknown"),
+            required_previous_context=str(data.get("required_previous_context") or ""),
+            required_next_context=str(data.get("required_next_context") or ""),
+            standalone_score=float(data.get("standalone_score", 0)),
+            completeness_score=float(data.get("completeness_score", 0)),
+            clarity_score=float(data.get("clarity_score", 0)),
+            context_dependency_score=float(data.get("context_dependency_score", 0)),
+            information_density=float(data.get("information_density", 0)),
+            repetition_score=float(data.get("repetition_score", 0)),
+            transformation_potential=float(data.get("transformation_potential", 0)),
+            publishability_precheck=bool(data.get("publishability_precheck", False)),
+            content_signature=dict(data.get("content_signature", {})),
+            confidence=float(data.get("confidence", 0)), evidence=dict(data.get("evidence", {})),
+        )
+
+
+@dataclass(slots=True)
+class GlobalContentMap:
+    schema_version: str
+    source_id: str
+    source_duration_seconds: float
+    chapters: list[ContentChapter]
+    story_units: list[StoryUnit]
+    analysis_confidence: float
+    fallback_used: bool
+    warnings: list[str]
+    evidence: dict[str, Any]
+
+    def validate(self, transcript: dict[str, Any] | None = None) -> None:
+        if self.schema_version != GLOBAL_CONTENT_MAP_SCHEMA_VERSION:
+            raise ValueError("Unsupported GlobalContentMap schema version.")
+        previous_end = -1.0
+        chapter_ids: set[str] = set()
+        covered_ids: list[int] = []
+        for chapter in self.chapters:
+            if not chapter.chapter_id or chapter.chapter_id in chapter_ids:
+                raise ValueError("ContentMap chapters must have unique ids.")
+            if not chapter.start < chapter.end or abs(chapter.duration - (chapter.end - chapter.start)) > 0.02:
+                raise ValueError("ContentMap chapter duration is invalid.")
+            if chapter.start < previous_end - 0.01:
+                raise ValueError("ContentMap chapters must be chronological without uncontrolled overlap.")
+            if not chapter.transcript_segment_ids or not chapter.evidence.get("evidence_text"):
+                raise ValueError("ContentMap chapters require grounded transcript evidence.")
+            previous_end = chapter.end
+            chapter_ids.add(chapter.chapter_id)
+            covered_ids.extend(chapter.transcript_segment_ids)
+        if transcript is not None:
+            expected = [
+                item["id"] for index, raw in enumerate(transcript.get("segments", []))
+                if (item := _valid_segment(raw, index)) is not None
+            ]
+            if sorted(covered_ids) != expected:
+                raise ValueError("ContentMap must cover every valid transcript segment exactly once.")
+        for unit in self.story_units:
+            chapter = next((item for item in self.chapters if item.chapter_id == unit.chapter_id), None)
+            if chapter is None or not unit.start < unit.end or not unit.transcript_segment_ids:
+                raise ValueError("StoryUnit must have a valid containing chapter and range.")
+            if unit.start < chapter.start - 0.01 or unit.end > chapter.end + 0.01:
+                raise ValueError("StoryUnit must stay within its ContentChapter.")
+            if not set(unit.transcript_segment_ids).issubset(chapter.transcript_segment_ids):
+                raise ValueError("StoryUnit must reference only its chapter transcript segments.")
+            if not unit.evidence.get("evidence_text") or not unit.content_signature.get("transcript_fingerprint"):
+                raise ValueError("StoryUnit requires grounded evidence and a content signature.")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "schema_version": self.schema_version,
+            "source_id": self.source_id,
+            "source_duration_seconds": self.source_duration_seconds,
+            "chapters": [item.to_dict() for item in self.chapters],
+            "story_units": [item.to_dict() for item in self.story_units],
+            "analysis_confidence": self.analysis_confidence,
+            "fallback_used": self.fallback_used,
+            "warnings": self.warnings,
+            "evidence": self.evidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], transcript: dict[str, Any] | None = None) -> "GlobalContentMap":
+        result = cls(
+            schema_version=str(data.get("schema_version") or ""), source_id=str(data.get("source_id") or ""),
+            source_duration_seconds=float(data.get("source_duration_seconds", 0)),
+            chapters=[ContentChapter.from_dict(item) for item in data.get("chapters", []) if isinstance(item, dict)],
+            story_units=[StoryUnit.from_dict(item) for item in data.get("story_units", []) if isinstance(item, dict)],
+            analysis_confidence=float(data.get("analysis_confidence", 0)), fallback_used=bool(data.get("fallback_used", True)),
+            warnings=[str(item) for item in data.get("warnings", [])], evidence=dict(data.get("evidence", {})),
+        )
+        result.validate(transcript)
+        return result
 
 
 class ContentStrategy(Protocol):
@@ -392,3 +613,359 @@ def _average(items: list[dict[str, Any]], field_name: str) -> float:
 
 def _bounded(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def build_global_content_map(
+    source: dict[str, Any],
+    metadata: dict[str, Any],
+    transcript: dict[str, Any],
+    transcript_features: dict[str, Any],
+    audio_features: dict[str, Any],
+    scenes: dict[str, Any],
+    visual_analysis: dict[str, Any],
+    profile_data: dict[str, Any],
+    config: Any,
+) -> dict[str, Any]:
+    """Create a fully grounded fallback ContentMap from ordered transcript evidence.
+
+    The algorithm intentionally favours safe continuity over speculative topic
+    labels: every valid transcript segment belongs to one chapter, and every
+    StoryUnit is a contiguous subset of its chapter.
+    """
+
+    profile = VideoContentProfile.from_dict(profile_data)
+    segments = [item for index, raw in enumerate(transcript.get("segments", [])) if (item := _valid_segment(raw, index))]
+    if not segments:
+        empty = GlobalContentMap(
+            schema_version=GLOBAL_CONTENT_MAP_SCHEMA_VERSION,
+            source_id=profile.source_id,
+            source_duration_seconds=float(metadata.get("duration") or profile.source_duration_seconds),
+            chapters=[], story_units=[], analysis_confidence=0.0, fallback_used=True,
+            warnings=["ContentMap не построен: в транскрипте нет валидных сегментов."],
+            evidence={"transcript_segment_count": 0, "strategy_id": profile.strategy_id},
+        )
+        return empty.to_dict()
+    feature_rows = [item for item in transcript_features.get("segments", []) if isinstance(item, dict)]
+    # TranscriptFeatures historically indexes rows by position while a future
+    # transcript may expose stable explicit ids.  Bind both sources by their
+    # ordered evidence position, so all downstream references stay grounded in
+    # the ids exposed by the original transcript.
+    features = {
+        int(segment["id"]): feature_rows[index]
+        for index, segment in enumerate(segments) if index < len(feature_rows)
+    }
+    chapter_groups = _chapter_groups(segments, features, config.content_understanding)
+    chapters = [
+        _make_chapter(index, group, features, scenes, visual_analysis, profile)
+        for index, group in enumerate(chapter_groups, start=1)
+    ]
+    story_units: list[StoryUnit] = []
+    for chapter, group in zip(chapters, chapter_groups, strict=True):
+        story_units.extend(_make_story_units(chapter, group, features, config.content_understanding))
+    result = GlobalContentMap(
+        schema_version=GLOBAL_CONTENT_MAP_SCHEMA_VERSION,
+        source_id=profile.source_id,
+        source_duration_seconds=float(metadata.get("duration") or profile.source_duration_seconds),
+        chapters=chapters,
+        story_units=story_units,
+        analysis_confidence=round(min(profile.analysis_confidence, 0.82), 3),
+        fallback_used=True,
+        warnings=list(profile.warnings),
+        evidence={
+            "strategy_id": profile.strategy_id,
+            "transcript_segment_count": len(segments),
+            "chaptering": "deterministic: pauses, speaker turns, topic markers, bounded chapter duration",
+            "story_extraction": "deterministic: sentence closure, question-answer continuity, setup-payoff continuity",
+            "ai_grounding": "not_requested; local fallback is grounded in transcript segment ids",
+        },
+    )
+    result.validate(transcript)
+    return result.to_dict()
+
+
+def story_units_artifact(content_map_data: dict[str, Any], transcript: dict[str, Any]) -> dict[str, Any]:
+    """Write a small independently cacheable reference artifact without duplicating inference."""
+
+    content_map = GlobalContentMap.from_dict(content_map_data, transcript)
+    return {
+        "schema_version": STORY_UNIT_SCHEMA_VERSION,
+        "source_id": content_map.source_id,
+        "content_map_schema_version": content_map.schema_version,
+        "story_units": [item.to_dict() for item in content_map.story_units],
+        "fallback_used": content_map.fallback_used,
+    }
+
+
+def validate_global_content_map(data: dict[str, Any], transcript: dict[str, Any]) -> GlobalContentMap:
+    """Public validation point for local or future structured AI content maps."""
+
+    return GlobalContentMap.from_dict(data, transcript)
+
+
+def _valid_segment(raw: Any, fallback_id: int) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        start = float(raw.get("start", 0))
+        end = float(raw.get("end", start))
+    except (TypeError, ValueError):
+        return None
+    text = str(raw.get("text", "")).strip()
+    if not text or not start < end:
+        return None
+    return {
+        "id": int(raw.get("id", fallback_id)), "start": round(start, 3), "end": round(end, 3),
+        "text": text, "speaker_id": str(raw.get("speaker_id") or raw.get("speaker") or "").strip(),
+    }
+
+
+def _chapter_groups(
+    segments: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any,
+) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments):
+        if current and _start_new_chapter(current, segment, segments[index - 1], features, settings):
+            groups.append(current)
+            current = []
+        current.append(segment)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _start_new_chapter(
+    current: list[dict[str, Any]], candidate: dict[str, Any], previous: dict[str, Any],
+    features: dict[int, dict[str, Any]], settings: Any,
+) -> bool:
+    previous_feature = features.get(int(previous["id"]), {})
+    pause = max(0.0, float(candidate["start"]) - float(previous["end"]))
+    current_duration = float(previous["end"]) - float(current[0]["start"])
+    speaker_changed = bool(candidate.get("speaker_id") and previous.get("speaker_id") and candidate["speaker_id"] != previous["speaker_id"])
+    text = str(candidate["text"]).casefold()
+    marker = any(text.startswith(item) for item in _TOPIC_MARKERS)
+    terminal = bool(previous_feature.get("sentence_end", _sentence_end(str(previous["text"]))))
+    return (
+        current_duration >= float(settings.max_chapter_seconds)
+        or speaker_changed and terminal
+        or pause >= float(settings.chapter_pause_seconds) and terminal
+        or marker and terminal and current_duration >= 18.0
+    )
+
+
+def _make_chapter(
+    index: int,
+    group: list[dict[str, Any]],
+    features: dict[int, dict[str, Any]],
+    scenes: dict[str, Any],
+    visual_analysis: dict[str, Any],
+    profile: VideoContentProfile,
+) -> ContentChapter:
+    start, end = float(group[0]["start"]), float(group[-1]["end"])
+    text = _group_text(group)
+    keywords = _keywords(text)
+    first_feature = features.get(int(group[0]["id"]), {})
+    last_feature = features.get(int(group[-1]["id"]), {})
+    information = _bounded(_average([features.get(int(item["id"]), {}) for item in group], "speech_density") * (1 - _average([features.get(int(item["id"]), {}) for item in group], "filler_word_ratio")))
+    visual = _visual_activity(start, end, scenes, visual_analysis)
+    dependency_previous = _bounded(float(first_feature.get("context_dependency_score", 25)) / 100)
+    dependency_next = _continuation_risk(group[-1], last_feature)
+    standalone = _bounded((information * 0.45) + ((1 - dependency_previous) * 0.25) + ((1 - dependency_next) * 0.30))
+    narrative = _narrative_function(text, index == 1, False)
+    return ContentChapter(
+        chapter_id=f"chapter-{index:03d}", start=start, end=end, duration=round(end - start, 3),
+        title=_title_from_text(text), summary=_summary_from_text(text), main_topic=(keywords[0] if keywords else "общая тема"),
+        subtopics=keywords[1:5], speaker_ids=_speaker_ids(group), transcript_segment_ids=[int(item["id"]) for item in group],
+        opening_function="hook" if index == 1 and ("?" in text or "!" in text) else "introduction" if index == 1 else "transition",
+        narrative_function=narrative, emotional_tone=_dominant_emotion(text),
+        emotional_intensity=round(_emotional_intensity(text), 3), information_density=round(information, 3),
+        visual_activity=round(visual, 3), dependency_on_previous=round(dependency_previous, 3),
+        dependency_on_next=round(dependency_next, 3), standalone_potential=round(standalone, 3),
+        candidate_story_count=0, confidence=round(min(0.85, profile.analysis_confidence), 3),
+        evidence={"segment_ids": [int(item["id"]) for item in group], "evidence_text": text[:1200]},
+    )
+
+
+def _make_story_units(
+    chapter: ContentChapter, group: list[dict[str, Any]], features: dict[int, dict[str, Any]], settings: Any,
+) -> list[StoryUnit]:
+    units: list[StoryUnit] = []
+    current: list[dict[str, Any]] = []
+    for position, segment in enumerate(group):
+        current.append(segment)
+        following = group[position + 1] if position + 1 < len(group) else None
+        if _close_story_unit(current, following, features, settings):
+            units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features))
+            current = []
+    if current:
+        units.append(_make_story_unit(f"story-{len(units) + 1:03d}", chapter, current, features))
+    chapter.candidate_story_count = len(units)
+    return units
+
+
+def _close_story_unit(
+    current: list[dict[str, Any]], following: dict[str, Any] | None,
+    features: dict[int, dict[str, Any]], settings: Any,
+) -> bool:
+    last = current[-1]
+    duration = float(last["end"]) - float(current[0]["start"])
+    feature = features.get(int(last["id"]), {})
+    terminal = bool(feature.get("sentence_end", _sentence_end(str(last["text"]))))
+    question = "?" in str(last["text"])
+    text = _group_text(current).casefold()
+    setup_waiting = any(marker in text for marker in _SETUP_MARKERS) and not any(marker in text for marker in _PAYOFF_MARKERS)
+    if following is None:
+        return True
+    if duration >= float(settings.max_story_unit_seconds):
+        return terminal and not question and not setup_waiting
+    if duration < float(settings.min_story_unit_seconds) or not terminal:
+        return False
+    if question:
+        return False
+    pause = max(0.0, float(following["start"]) - float(last["end"]))
+    if setup_waiting and duration < float(settings.target_story_unit_seconds) * 1.5:
+        return False
+    return duration >= float(settings.target_story_unit_seconds) or pause >= 0.35
+
+
+def _make_story_unit(
+    unit_id: str, chapter: ContentChapter, group: list[dict[str, Any]], features: dict[int, dict[str, Any]],
+) -> StoryUnit:
+    start, end = float(group[0]["start"]), float(group[-1]["end"])
+    text = _group_text(group)
+    first_feature = features.get(int(group[0]["id"]), {})
+    last_feature = features.get(int(group[-1]["id"]), {})
+    information = _bounded(_average([features.get(int(item["id"]), {}) for item in group], "speech_density") * (1 - _average([features.get(int(item["id"]), {}) for item in group], "filler_word_ratio")))
+    repetition = _bounded(_average([features.get(int(item["id"]), {}) for item in group], "repetition_score"))
+    context_dependency = _bounded(float(first_feature.get("context_dependency_score", 25)) / 100)
+    complete = _bounded(0.45 + (0.3 if bool(last_feature.get("sentence_end", _sentence_end(str(group[-1]["text"])))) else 0) + (0.15 if not _continuation_risk(group[-1], last_feature) else 0))
+    clarity = _bounded(0.7 - repetition * 0.25 - _average([features.get(int(item["id"]), {}) for item in group], "filler_word_ratio") * 0.25)
+    standalone = _bounded(complete * 0.42 + clarity * 0.25 + (1 - context_dependency) * 0.23 + information * 0.10)
+    narrative = _narrative_function(text, False, False)
+    signature = _content_signature(chapter.chapter_id, start, end, text, narrative, _dominant_emotion(text))
+    payoff = _last_sentence(text) if any(marker in text.casefold() for marker in _PAYOFF_MARKERS) else ""
+    setup = _first_sentence(text) if any(marker in text.casefold() for marker in _SETUP_MARKERS) else ""
+    publishable = standalone >= 0.55 and complete >= 0.6 and context_dependency <= 0.6 and bool(text.strip())
+    return StoryUnit(
+        story_unit_id=f"{chapter.chapter_id}-{unit_id}", chapter_id=chapter.chapter_id,
+        start=start, end=end, duration=round(end - start, 3), transcript_segment_ids=[int(item["id"]) for item in group],
+        title=_title_from_text(text), core_idea=_first_sentence(text), hook_seed=_first_sentence(text)[:220],
+        setup=setup, development=text, payoff=payoff, ending=_last_sentence(text),
+        emotional_arc="rising_to_payoff" if payoff else "contained_statement", dominant_emotion=_dominant_emotion(text),
+        speaker_context=", ".join(_speaker_ids(group)) or "primary_speaker",
+        required_previous_context="" if context_dependency <= 0.45 else "Начало может зависеть от предыдущей фразы.",
+        required_next_context="" if complete >= 0.6 else "Нужно следующее предложение для завершения мысли.",
+        standalone_score=round(standalone, 3), completeness_score=round(complete, 3), clarity_score=round(clarity, 3),
+        context_dependency_score=round(context_dependency, 3), information_density=round(information, 3),
+        repetition_score=round(repetition, 3), transformation_potential=round(_bounded(standalone * 0.7 + information * 0.3), 3),
+        publishability_precheck=publishable, content_signature=signature.to_dict(),
+        confidence=round(_bounded(0.45 + complete * 0.35 + clarity * 0.20), 3),
+        evidence={"segment_ids": [int(item["id"]) for item in group], "evidence_text": text[:1200]},
+    )
+
+
+def _content_signature(
+    chapter_id: str, start: float, end: float, text: str, narrative: str, emotion: str,
+) -> ContentSignature:
+    keywords = _keywords(text)
+    core = _normalise_idea(_first_sentence(text))
+    entities = _entities(text)
+    return ContentSignature(
+        normalized_core_idea=core, topic_ids=[f"topic:{item}" for item in keywords[:5]], chapter_id=chapter_id,
+        narrative_function=narrative, emotional_signature=emotion, key_entities=entities,
+        key_claims=[_first_sentence(text)] if text else [], keyword_set=keywords,
+        lexical_signature="|".join(keywords[:12]), semantic_embedding_ref=None,
+        source_range={"start": round(start, 3), "end": round(end, 3)},
+        transcript_fingerprint=stable_text_hash(_normalise_idea(text)),
+    )
+
+
+def _group_text(group: list[dict[str, Any]]) -> str:
+    return " ".join(str(item["text"]).strip() for item in group).strip()
+
+
+def _keywords(text: str) -> list[str]:
+    counts = Counter(token for token in _tokens(text) if len(token) > 2 and token not in _STOP_WORDS)
+    return [token for token, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:12]]
+
+
+def _summary_from_text(text: str) -> str:
+    return " ".join(_sentences(text)[:2])[:500] or text[:500]
+
+
+def _title_from_text(text: str) -> str:
+    return _first_sentence(text)[:120].rstrip(".,!?…") or "Смысловая часть"
+
+
+def _sentences(text: str) -> list[str]:
+    return [item.strip() for item in re.split(r"(?<=[.!?…])\s+", text) if item.strip()]
+
+
+def _first_sentence(text: str) -> str:
+    return (_sentences(text) or [text.strip()])[0]
+
+
+def _last_sentence(text: str) -> str:
+    return (_sentences(text) or [text.strip()])[-1]
+
+
+def _sentence_end(text: str) -> bool:
+    return text.rstrip().endswith((".", "!", "?", "…"))
+
+
+def _narrative_function(text: str, is_first: bool, is_last: bool) -> str:
+    lowered = text.casefold()
+    if is_first and ("?" in text or "!" in text):
+        return "hook"
+    if any(term in lowered for term in ("итог", "вывод", "в конце", "conclusion")) or is_last:
+        return "conclusion"
+    if "?" in text:
+        return "problem"
+    if any(term in lowered for term in _PAYOFF_MARKERS):
+        return "payoff"
+    if any(term in lowered for term in ("например", "example", "к примеру")):
+        return "example"
+    if any(term in lowered for term in ("потому", "объясн", "because", "how ", "why ")):
+        return "explanation"
+    if any(term in lowered for term in _SETUP_MARKERS):
+        return "setup"
+    return "context"
+
+
+def _dominant_emotion(text: str) -> str:
+    lowered = text.casefold()
+    if any(term in lowered for term in ("страх", "боюсь", "fear", "afraid")):
+        return "tension"
+    if "!" in text:
+        return "emphatic"
+    if "?" in text:
+        return "curious"
+    return "neutral"
+
+
+def _emotional_intensity(text: str) -> float:
+    return _bounded((text.count("!") * 0.18) + (text.count("?") * 0.12))
+
+
+def _continuation_risk(segment: dict[str, Any], feature: dict[str, Any]) -> float:
+    text = str(segment["text"]).strip().casefold()
+    if not bool(feature.get("sentence_end", _sentence_end(text))):
+        return 1.0
+    if text.endswith(("и", "а", "но", "or", "and", "but")) or any(text.endswith(marker) for marker in ("если", "когда", "because", "if")):
+        return 0.85
+    return 0.15 if not any(marker in text for marker in _SETUP_MARKERS) else 0.45
+
+
+def _visual_activity(start: float, end: float, scenes: dict[str, Any], visual_analysis: dict[str, Any]) -> float:
+    span = max(1.0, end - start)
+    boundary_count = sum(start <= float(item.get("timestamp", -1)) <= end for item in scenes.get("boundaries", []) if isinstance(item, dict))
+    sample_count = sum(start <= float(item.get("timestamp", -1)) <= end for item in visual_analysis.get("samples", []) if isinstance(item, dict))
+    return _bounded(boundary_count / max(1.0, span / 8.0) * 0.5 + sample_count / max(1.0, span / 4.0) * 0.1)
+
+
+def _normalise_idea(text: str) -> str:
+    return " ".join(_tokens(text))[:500]
+
+
+def _entities(text: str) -> list[str]:
+    return list(dict.fromkeys(re.findall(r"\b(?:[A-ZА-ЯЁ][a-zа-яё]{2,}|[A-Z]{2,})\b", text)))[:12]

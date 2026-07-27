@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.config import AppConfig
 from app.content_understanding import (
     VIDEO_CONTENT_PROFILE_SCHEMA_VERSION,
     VideoContentProfile,
+    build_global_content_map,
     build_video_content_profile,
+    story_units_artifact,
+    validate_global_content_map,
 )
 from app.pipeline import Pipeline, StageTracker
 from app.transcript_features import analyse_transcript
@@ -116,3 +121,63 @@ def test_profile_cache_key_changes_when_strategy_version_changes(tmp_path: Path)
     pipeline._cached(run, "video_content_profile", artifact, {"strategy_version": "two"}, build, cache_tracker=source_cache)
 
     assert calls == {"count": 2}
+
+
+def _content_map(segments: list[dict]) -> tuple[dict, dict]:
+    transcript = {
+        "source_id": "source-1", "language": "ru", "duration": float(segments[-1]["end"]), "segments": segments,
+    }
+    config = AppConfig()
+    features = analyse_transcript(transcript, config.transcript_features)
+    profile = build_video_content_profile(
+        {"id": "source-1", "display_name": "source.mp4"}, {"duration": transcript["duration"]},
+        transcript, features, {"windows": []}, {"boundaries": []}, {"samples": []}, config,
+    )
+    return build_global_content_map(
+        {"id": "source-1", "display_name": "source.mp4"}, {"duration": transcript["duration"]},
+        transcript, features, {"windows": []}, {"boundaries": []}, {"samples": []}, profile, config,
+    ), transcript
+
+
+def test_content_map_covers_transcript_in_order_and_keeps_question_with_answer() -> None:
+    content_map, transcript = _content_map([
+        {"id": 10, "start": 0.0, "end": 8.0, "text": "Почему люди сдаются слишком рано?"},
+        {"id": 11, "start": 8.2, "end": 20.0, "text": "Потому что они не видят результат до последнего шага."},
+        {"id": 12, "start": 22.0, "end": 33.0, "text": "Теперь другой урок: дисциплина важнее настроения."},
+        {"id": 13, "start": 33.1, "end": 46.0, "text": "Поэтому побеждает тот, кто продолжает действовать каждый день."},
+    ])
+
+    chapters = content_map["chapters"]
+    stories = content_map["story_units"]
+    assert len(chapters) == 2
+    assert [item["chapter_id"] for item in chapters] == ["chapter-001", "chapter-002"]
+    assert [identifier for chapter in chapters for identifier in chapter["transcript_segment_ids"]] == [10, 11, 12, 13]
+    assert any(unit["transcript_segment_ids"] == [10, 11] for unit in stories)
+    assert all(unit["chapter_id"] in {chapter["chapter_id"] for chapter in chapters} for unit in stories)
+    assert all(unit["start"] >= next(chapter for chapter in chapters if chapter["chapter_id"] == unit["chapter_id"])["start"] for unit in stories)
+    validate_global_content_map(content_map, transcript)
+
+
+def test_story_units_have_grounded_signatures_and_detect_repeated_ideas() -> None:
+    content_map, transcript = _content_map([
+        {"start": 0.0, "end": 16.0, "text": "Дисциплина важнее настроения, потому что действие создаёт результат."},
+        {"start": 18.0, "end": 34.0, "text": "Дисциплина важнее настроения, потому что действие создаёт результат."},
+    ])
+    signatures = [item["content_signature"] for item in content_map["story_units"]]
+
+    assert len(signatures) == 2
+    assert signatures[0]["transcript_fingerprint"] == signatures[1]["transcript_fingerprint"]
+    assert signatures[0]["semantic_embedding_ref"] is None
+    artifact = story_units_artifact(content_map, transcript)
+    assert artifact["schema_version"] == "5A.1"
+    assert len(artifact["story_units"]) == 2
+
+
+def test_content_map_rejects_ungrounded_or_out_of_chapter_story_unit() -> None:
+    content_map, transcript = _content_map([
+        {"start": 0.0, "end": 16.0, "text": "Завершённая понятная мысль с естественной точкой."},
+    ])
+    content_map["story_units"][0]["transcript_segment_ids"] = [999]
+
+    with pytest.raises(ValueError, match="StoryUnit"):
+        validate_global_content_map(content_map, transcript)

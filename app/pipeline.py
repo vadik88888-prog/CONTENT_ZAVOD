@@ -17,7 +17,12 @@ from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
-from app.content_understanding import CONTENT_STRATEGY_VERSION, build_video_content_profile
+from app.content_understanding import (
+    CONTENT_STRATEGY_VERSION,
+    build_global_content_map,
+    build_video_content_profile,
+    story_units_artifact,
+)
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -51,7 +56,8 @@ from app.visual_analysis import analyse_video_subjects
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile", "render", "report",
+    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
+    "global_content_map", "story_units", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.7.0"
 TRANSFORMATION_STAGES = (
@@ -298,6 +304,34 @@ class Pipeline:
             ),
             cache_tracker=source_cache,
         )
+        content_map = self._cached(
+            tracker, "global_content_map", work_directory / "global_content_map.json",
+            {
+                "source": source.id,
+                "transcript": _hash(transcript),
+                "transcript_features": _hash(transcript_features),
+                "audio_features": _hash(audio_features),
+                "scenes": _hash(scenes),
+                "visual_analysis": _hash(visual_analysis),
+                "profile": _hash(content_profile),
+                "content_understanding": self.config.content_understanding,
+                "implementation_version": CONTENT_STRATEGY_VERSION,
+            },
+            lambda: _write(
+                work_directory / "global_content_map.json",
+                build_global_content_map(
+                    source_data, metadata, transcript, transcript_features, audio_features, scenes,
+                    visual_analysis, content_profile, self.config,
+                ),
+            ),
+            cache_tracker=source_cache,
+        )
+        story_units = self._cached(
+            tracker, "story_units", work_directory / "story_units.json",
+            {"content_map": _hash(content_map), "schema_version": self.config.content_understanding.story_unit_schema_version},
+            lambda: _write(work_directory / "story_units.json", story_units_artifact(content_map, transcript)),
+            cache_tracker=source_cache,
+        )
         raw_candidates = self._cached(
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
             {"transcript_features": _hash(transcript_features), "audio": _hash(audio_features), "scenes": _hash(scenes), "settings": self.config.candidate_generation},
@@ -421,6 +455,9 @@ class Pipeline:
             content_understanding={
                 "enabled": True,
                 "profile": content_profile,
+                "content_map": content_map,
+                "story_units_ref": str(work_directory / "story_units.json"),
+                "story_unit_count": len(story_units.get("story_units", [])),
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "fallback_used": bool(content_profile.get("fallback_used", True)),
             },

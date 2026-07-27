@@ -105,6 +105,13 @@ class ContentUnderstandingConfig:
     enabled: bool = True
     strategy_version: str = "5A.1"
     profile_schema_version: str = "5A.1"
+    content_map_schema_version: str = "5A.1"
+    story_unit_schema_version: str = "5A.1"
+    chapter_pause_seconds: float = 1.25
+    max_chapter_seconds: float = 110.0
+    min_story_unit_seconds: float = 12.0
+    target_story_unit_seconds: float = 38.0
+    max_story_unit_seconds: float = 90.0
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -112,9 +119,22 @@ class ContentUnderstandingConfig:
         for name, value in (
             ("content_understanding.strategy_version", self.strategy_version),
             ("content_understanding.profile_schema_version", self.profile_schema_version),
+            ("content_understanding.content_map_schema_version", self.content_map_schema_version),
+            ("content_understanding.story_unit_schema_version", self.story_unit_schema_version),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
+        if not 0 <= self.chapter_pause_seconds <= 20:
+            raise ClipEngineError("content_understanding.chapter_pause_seconds должен быть от 0 до 20.")
+        if not 10 <= self.max_chapter_seconds <= 900:
+            raise ClipEngineError("content_understanding.max_chapter_seconds должен быть от 10 до 900.")
+        if not (
+            1 <= self.min_story_unit_seconds <= self.target_story_unit_seconds
+            <= self.max_story_unit_seconds <= 180
+        ):
+            raise ClipEngineError(
+                "content_understanding: min StoryUnit ≤ target StoryUnit ≤ max StoryUnit ≤ 180."
+            )
 
 
 DEFAULT_SCORING_WEIGHTS = {
