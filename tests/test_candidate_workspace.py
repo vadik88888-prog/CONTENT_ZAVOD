@@ -7,7 +7,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.gui.models import DesktopSettings, ProjectStatus
@@ -75,6 +76,16 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.content_scroll.widget() is screen.content_host
         assert screen.draft_button.isEnabled() is False
         assert screen.production_button.isEnabled() is False
+
+        # Regression: the primary "Проверка кандидатов" action must enter the
+        # review workspace without a NameError and move focus to it.
+        screen.show()
+        app.processEvents()
+        QTest.mouseClick(screen.run_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert screen.candidate_review.hasFocus()
+        assert screen.candidate_review.focusPolicy() == Qt.FocusPolicy.StrongFocus
+
         screen._select_recommended()
 
         assert viewmodel.project is not None

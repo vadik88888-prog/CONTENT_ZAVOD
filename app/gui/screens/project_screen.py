@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import (
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
@@ -78,6 +82,10 @@ class ProjectScreen(QWidget):
         self._replace_card_text(self.candidate_detail, ["Выберите момент в списке, чтобы просмотреть исходный фрагмент."])
         left.addWidget(self.candidate_detail)
         self.candidate_review = self._card("Кандидаты и черновики")
+        # The primary action scrolls directly to this workspace.  Make the
+        # destination focusable as well, so keyboard focus follows the review
+        # action instead of remaining on the header button.
+        self.candidate_review.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.candidate_review_layout = self.candidate_review.layout()
         self._candidate_checks: dict[str, QCheckBox] = {}
         self._candidate_filter = "all"
