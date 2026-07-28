@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
@@ -44,6 +45,19 @@ EMOTIONS = frozenset({
     "excitement", "anger", "fear", "tension", "sadness", "inspiration", "hope", "surprise",
     "humor", "empathy", "determination", "frustration", "relief", "neutral", "mixed",
 })
+RETENTION_LEVELS = frozenset({"low", "medium", "high", "very_high"})
+PUBLISHABILITY_LEVELS = frozenset({"ready", "limited", "blocked"})
+ELIGIBILITY_STATUSES = frozenset({
+    "publishable_now", "publishable_with_minor_adjustment", "needs_reconstruction", "weak", "rejected",
+})
+RETENTION_ZONE_DEFINITIONS = (
+    ("opening", 0.00, 0.10),
+    ("early", 0.10, 0.25),
+    ("mid", 0.25, 0.50),
+    ("late", 0.50, 0.75),
+    ("pre_payoff", 0.75, 0.90),
+    ("ending", 0.90, 1.00),
+)
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+")
@@ -111,6 +125,7 @@ class FeatureEvidence:
     confidence: float
     segment_ids: list[int] = field(default_factory=list)
     excerpt: str = ""
+    feature_name: str = ""
 
     def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
         if not self.source:
@@ -132,6 +147,7 @@ class FeatureEvidence:
             confidence=_bounded(float(data.get("confidence", 0))),
             segment_ids=[int(item) for item in data.get("segment_ids", [])],
             excerpt=str(data.get("excerpt") or "")[:800],
+            feature_name=str(data.get("feature_name") or ""),
         )
         result.validate()
         return result
@@ -154,11 +170,18 @@ class FeatureScore:
         for item in self.evidence:
             item.validate(allowed_segment_ids)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, feature_name: str | None = None) -> dict[str, Any]:
         self.validate()
         return {
             "score": round(self.score, 6), "confidence": round(self.confidence, 6),
-            "evidence": [item.to_dict() for item in self.evidence], "explanation": self.explanation,
+            "evidence": [
+                {
+                    **item.to_dict(),
+                    "feature_name": feature_name or item.feature_name,
+                }
+                for item in self.evidence
+            ],
+            "explanation": self.explanation,
         }
 
     @classmethod
@@ -468,7 +491,7 @@ class ViralityFeatureProfile:
             "candidate_id": self.candidate_id,
             "story_unit_id": self.story_unit_id,
             "content_strategy": self.content_strategy,
-            "features": {name: value.to_dict() for name, value in self.features.items()},
+            "features": {name: value.to_dict(name) for name, value in self.features.items()},
             "hook_assessment": self.hook_assessment.to_dict(),
             "emotional_arc": self.emotional_arc.to_dict(),
             "conflict_assessment": self.conflict_assessment.to_dict(),
@@ -500,6 +523,289 @@ class ViralityFeatureProfile:
             analysis_confidence=FeatureScore.from_dict(dict(data.get("analysis_confidence") or {})),
             analysis_mode=str(data.get("analysis_mode") or "deterministic"),
             warnings=[str(item) for item in data.get("warnings", [])],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class RetentionZone:
+    """One normalized candidate section; values are internal comparative indices."""
+
+    name: str
+    start: float
+    end: float
+    attention_strength: FeatureScore
+    information_gain: FeatureScore
+    emotional_energy: FeatureScore
+    curiosity_state: str
+    narrative_momentum: FeatureScore
+    repetition: FeatureScore
+    confusion: FeatureScore
+    drop_risk: FeatureScore
+    evidence: list[FeatureEvidence]
+
+    def validate(self, candidate_start: float | None = None, candidate_end: float | None = None, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.name or self.end < self.start or self.curiosity_state not in {"none", "open", "resolved"}:
+            raise ValueError("RetentionZone identity or range is invalid.")
+        if candidate_start is not None and self.start < candidate_start - 0.001:
+            raise ValueError("RetentionZone starts outside its candidate.")
+        if candidate_end is not None and self.end > candidate_end + 0.001:
+            raise ValueError("RetentionZone ends outside its candidate.")
+        for score in (
+            self.attention_strength, self.information_gain, self.emotional_energy,
+            self.narrative_momentum, self.repetition, self.confusion, self.drop_risk,
+        ):
+            score.validate(allowed_segment_ids)
+        for item in self.evidence:
+            item.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return _nested_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RetentionZone":
+        result = cls(
+            name=str(data.get("name") or "unknown"), start=float(data.get("start", 0)), end=float(data.get("end", 0)),
+            attention_strength=FeatureScore.from_dict(dict(data.get("attention_strength") or {})),
+            information_gain=FeatureScore.from_dict(dict(data.get("information_gain") or {})),
+            emotional_energy=FeatureScore.from_dict(dict(data.get("emotional_energy") or {})),
+            curiosity_state=str(data.get("curiosity_state") or "none"),
+            narrative_momentum=FeatureScore.from_dict(dict(data.get("narrative_momentum") or {})),
+            repetition=FeatureScore.from_dict(dict(data.get("repetition") or {})),
+            confusion=FeatureScore.from_dict(dict(data.get("confusion") or {})),
+            drop_risk=FeatureScore.from_dict(dict(data.get("drop_risk") or {})),
+            evidence=[FeatureEvidence.from_dict(item) for item in data.get("evidence", []) if isinstance(item, dict)],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class DeadZone:
+    """A diagnostic only. Goal 5B never edits, removes, or moves this range."""
+
+    start: float
+    end: float
+    duration: float
+    reason: str
+    severity: FeatureScore
+    removable_in_future: bool
+    evidence: list[FeatureEvidence]
+
+    def validate(self, candidate_start: float | None = None, candidate_end: float | None = None, allowed_segment_ids: set[int] | None = None) -> None:
+        if self.end < self.start or self.duration < 0 or abs(self.duration - (self.end - self.start)) > 0.01:
+            raise ValueError("DeadZone range or duration is invalid.")
+        if not self.reason:
+            raise ValueError("DeadZone requires a diagnostic reason.")
+        if candidate_start is not None and self.start < candidate_start - 0.001:
+            raise ValueError("DeadZone starts outside its candidate.")
+        if candidate_end is not None and self.end > candidate_end + 0.001:
+            raise ValueError("DeadZone ends outside its candidate.")
+        self.severity.validate(allowed_segment_ids)
+        for item in self.evidence:
+            item.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return _nested_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DeadZone":
+        result = cls(
+            start=float(data.get("start", 0)), end=float(data.get("end", 0)), duration=float(data.get("duration", 0)),
+            reason=str(data.get("reason") or "unknown"),
+            severity=FeatureScore.from_dict(dict(data.get("severity") or {})),
+            removable_in_future=bool(data.get("removable_in_future", False)),
+            evidence=[FeatureEvidence.from_dict(item) for item in data.get("evidence", []) if isinstance(item, dict)],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class EstimatedRetentionProfile:
+    """Relative candidate-local retention signal, never a platform-view forecast."""
+
+    candidate_id: str
+    candidate_start: float
+    candidate_end: float
+    zones: list[RetentionZone]
+    opening_retention: FeatureScore
+    early_retention: FeatureScore
+    mid_retention: FeatureScore
+    late_retention: FeatureScore
+    completion_potential: FeatureScore
+    estimated_drop_points: list[float]
+    strongest_moment_timestamp: float
+    weakest_moment_timestamp: float
+    dead_zone_ranges: list[DeadZone]
+    retention_confidence: FeatureScore
+    analysis_mode: str = "deterministic"
+    warnings: list[str] = field(default_factory=list)
+
+    def relative_level(self, score: float) -> str:
+        if score >= 0.8:
+            return "very_high"
+        if score >= 0.62:
+            return "high"
+        if score >= 0.42:
+            return "medium"
+        return "low"
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.candidate_id or self.candidate_end <= self.candidate_start:
+            raise ValueError("EstimatedRetentionProfile has an invalid candidate range.")
+        if len(self.zones) != len(RETENTION_ZONE_DEFINITIONS):
+            raise ValueError("EstimatedRetentionProfile must retain every normalized zone.")
+        for zone in self.zones:
+            zone.validate(self.candidate_start, self.candidate_end, allowed_segment_ids)
+        for point in self.estimated_drop_points:
+            if not self.candidate_start <= point <= self.candidate_end:
+                raise ValueError("Retention drop point must stay inside candidate.")
+        for timestamp in (self.strongest_moment_timestamp, self.weakest_moment_timestamp):
+            if not self.candidate_start <= timestamp <= self.candidate_end:
+                raise ValueError("Retention moment timestamp must stay inside candidate.")
+        for zone in self.dead_zone_ranges:
+            zone.validate(self.candidate_start, self.candidate_end, allowed_segment_ids)
+        for score in (
+            self.opening_retention, self.early_retention, self.mid_retention,
+            self.late_retention, self.completion_potential, self.retention_confidence,
+        ):
+            score.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "candidate_id": self.candidate_id,
+            "candidate_start": round(self.candidate_start, 3),
+            "candidate_end": round(self.candidate_end, 3),
+            "zones": [item.to_dict() for item in self.zones],
+            "opening_retention": self.opening_retention.to_dict(),
+            "early_retention": self.early_retention.to_dict(),
+            "mid_retention": self.mid_retention.to_dict(),
+            "late_retention": self.late_retention.to_dict(),
+            "completion_potential": self.completion_potential.to_dict(),
+            "estimated_drop_points": [round(item, 3) for item in self.estimated_drop_points],
+            "strongest_moment_timestamp": round(self.strongest_moment_timestamp, 3),
+            "weakest_moment_timestamp": round(self.weakest_moment_timestamp, 3),
+            "dead_zone_ranges": [item.to_dict() for item in self.dead_zone_ranges],
+            "retention_confidence": self.retention_confidence.to_dict(),
+            "analysis_mode": self.analysis_mode,
+            "warnings": self.warnings,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EstimatedRetentionProfile":
+        result = cls(
+            candidate_id=str(data.get("candidate_id") or ""), candidate_start=float(data.get("candidate_start", 0)),
+            candidate_end=float(data.get("candidate_end", 0)),
+            zones=[RetentionZone.from_dict(item) for item in data.get("zones", []) if isinstance(item, dict)],
+            opening_retention=FeatureScore.from_dict(dict(data.get("opening_retention") or {})),
+            early_retention=FeatureScore.from_dict(dict(data.get("early_retention") or {})),
+            mid_retention=FeatureScore.from_dict(dict(data.get("mid_retention") or {})),
+            late_retention=FeatureScore.from_dict(dict(data.get("late_retention") or {})),
+            completion_potential=FeatureScore.from_dict(dict(data.get("completion_potential") or {})),
+            estimated_drop_points=[float(item) for item in data.get("estimated_drop_points", [])],
+            strongest_moment_timestamp=float(data.get("strongest_moment_timestamp", 0)),
+            weakest_moment_timestamp=float(data.get("weakest_moment_timestamp", 0)),
+            dead_zone_ranges=[DeadZone.from_dict(item) for item in data.get("dead_zone_ranges", []) if isinstance(item, dict)],
+            retention_confidence=FeatureScore.from_dict(dict(data.get("retention_confidence") or {})),
+            analysis_mode=str(data.get("analysis_mode") or "deterministic"),
+            warnings=[str(item) for item in data.get("warnings", [])],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class PublishabilityAssessment:
+    """Can the unedited candidate be published as an understandable standalone short?"""
+
+    candidate_id: str
+    level: str
+    publishability_score: FeatureScore
+    opening_clarity: FeatureScore
+    standalone_strength: FeatureScore
+    story_completeness: FeatureScore
+    boundary_safety: FeatureScore
+    context_independence: FeatureScore
+    duration_fit: FeatureScore
+    source_signal_quality: FeatureScore
+    payoff_presence: FeatureScore
+    filler_control: FeatureScore
+    visual_usability: FeatureScore
+    subtitle_compatibility: FeatureScore
+    reasons: list[str]
+    critical_failures: list[str]
+    warnings: list[str] = field(default_factory=list)
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.candidate_id or self.level not in PUBLISHABILITY_LEVELS:
+            raise ValueError("PublishabilityAssessment identity or level is invalid.")
+        for score in (
+            self.publishability_score, self.opening_clarity, self.standalone_strength,
+            self.story_completeness, self.boundary_safety, self.context_independence,
+            self.duration_fit, self.source_signal_quality, self.payoff_presence,
+            self.filler_control, self.visual_usability, self.subtitle_compatibility,
+        ):
+            score.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return _nested_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PublishabilityAssessment":
+        result = cls(
+            candidate_id=str(data.get("candidate_id") or ""), level=str(data.get("level") or "blocked"),
+            publishability_score=FeatureScore.from_dict(dict(data.get("publishability_score") or {})),
+            opening_clarity=FeatureScore.from_dict(dict(data.get("opening_clarity") or {})),
+            standalone_strength=FeatureScore.from_dict(dict(data.get("standalone_strength") or {})),
+            story_completeness=FeatureScore.from_dict(dict(data.get("story_completeness") or {})),
+            boundary_safety=FeatureScore.from_dict(dict(data.get("boundary_safety") or {})),
+            context_independence=FeatureScore.from_dict(dict(data.get("context_independence") or {})),
+            duration_fit=FeatureScore.from_dict(dict(data.get("duration_fit") or {})),
+            source_signal_quality=FeatureScore.from_dict(dict(data.get("source_signal_quality") or {})),
+            payoff_presence=FeatureScore.from_dict(dict(data.get("payoff_presence") or {})),
+            filler_control=FeatureScore.from_dict(dict(data.get("filler_control") or {})),
+            visual_usability=FeatureScore.from_dict(dict(data.get("visual_usability") or {})),
+            subtitle_compatibility=FeatureScore.from_dict(dict(data.get("subtitle_compatibility") or {})),
+            reasons=[str(item) for item in data.get("reasons", [])],
+            critical_failures=[str(item) for item in data.get("critical_failures", [])],
+            warnings=[str(item) for item in data.get("warnings", [])],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class EligibilityAssessment:
+    candidate_id: str
+    status: str
+    reasons: list[str]
+    critical_failures: list[str]
+    reconstruction_opportunities: list[str]
+    confidence: FeatureScore
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.candidate_id or self.status not in ELIGIBILITY_STATUSES:
+            raise ValueError("EligibilityAssessment identity or status is invalid.")
+        self.confidence.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return _nested_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EligibilityAssessment":
+        result = cls(
+            candidate_id=str(data.get("candidate_id") or ""), status=str(data.get("status") or "weak"),
+            reasons=[str(item) for item in data.get("reasons", [])],
+            critical_failures=[str(item) for item in data.get("critical_failures", [])],
+            reconstruction_opportunities=[str(item) for item in data.get("reconstruction_opportunities", [])],
+            confidence=FeatureScore.from_dict(dict(data.get("confidence") or {})),
         )
         result.validate()
         return result
@@ -742,7 +1048,26 @@ def _score_payoff(candidate: Candidate, story: StoryUnit | None, segments: list[
     strength = _bounded((0.46 if present else 0.0) + (0.20 if marker else 0) + (0.17 if resolved else 0) + (0.10 if ending_natural else 0))
     alignment = _bounded(0.82 if question and resolved else 0.62 if present else 0.0)
     confidence = _transcript_confidence(segments)
-    timestamp = float(segments[-1].get("end", candidate.end)) if present and segments else (candidate.end if present else None)
+    payoff_segment: dict[str, Any] | None = None
+    if resolved and hook and hook.resolution_timestamp is not None:
+        payoff_segment = next(
+            (item for item in segments if float(item.get("start", candidate.end)) <= hook.resolution_timestamp <= float(item.get("end", candidate.end))),
+            None,
+        )
+    if payoff_segment is None and marker:
+        payoff_segment = next(
+            (item for item in segments if _contains_any(str(item.get("text") or ""), _PAYOFF_MARKERS)),
+            None,
+        )
+    if payoff_segment is None and story_payoff:
+        payoff_segment = next(
+            (item for item in segments if str(story.payoff).casefold() in str(item.get("text") or "").casefold()),
+            None,
+        )
+    timestamp = (
+        max(candidate.start, float(payoff_segment.get("start", candidate.end)))
+        if payoff_segment is not None else candidate.end if present else None
+    )
     return PayoffAssessment(
         payoff_present=present, payoff_type=payoff_type,
         payoff_strength=_feature(strength, confidence, "Сила завершения, которое отвечает на setup или даёт самостоятельный вывод.", source="candidate_ending", raw=marker or story_payoff, segment_ids=segment_ids[-1:], excerpt=ending),
@@ -878,4 +1203,353 @@ def build_virality_feature_profile(
         analysis_confidence=features["analysis_confidence"], warnings=[] if visual_available else ["Недостаточно визуальных данных: использована transcript/audio оценка."],
     )
     result.validate(allowed_ids)
+    return result
+
+
+def _candidate_zone_segments(start: float, end: float, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item for item in segments
+        if float(item.get("end", start)) > start and float(item.get("start", end)) < end
+    ]
+
+
+def _filler_ratio_for_zone(segments: list[dict[str, Any]], text: str) -> float:
+    explicit = _average(float(item.get("filler_word_ratio", 0)) for item in segments)
+    words = _words(text)
+    lexical = sum(word in {"um", "uh", "erm", "like", "well", "ну", "ээ", "это"} for word in words) / max(1, len(words))
+    return _bounded(max(explicit, lexical * 2.5))
+
+
+def _repetition_ratio_for_zone(segments: list[dict[str, Any]], text: str) -> float:
+    explicit = _average(float(item.get("repetition_score", 0)) for item in segments)
+    words = _words(text)
+    if not words:
+        return _bounded(explicit)
+    repeated = sum(count - 1 for count in Counter(words).values() if count > 1)
+    lexical = repeated / len(words)
+    return _bounded(max(explicit, lexical))
+
+
+def _retention_zone(
+    candidate: Candidate, profile: ViralityFeatureProfile, name: str, start_ratio: float, end_ratio: float,
+    segments: list[dict[str, Any]], prior_words: set[str], audio_features: dict[str, Any],
+) -> RetentionZone:
+    start = candidate.start + candidate.duration * start_ratio
+    end = candidate.start + candidate.duration * end_ratio
+    rows = _candidate_zone_segments(start, end, segments)
+    ids = [int(item.get("id", -1)) for item in rows if int(item.get("id", -1)) >= 0]
+    text = " ".join(str(item.get("text") or "") for item in rows).strip()
+    words = _words(text)
+    audio = window_audio_features(start, end, audio_features)
+    new_words = set(words) - prior_words
+    density = _average(float(item.get("speech_density", 0)) for item in rows)
+    information_gain = _bounded(0.14 + density * 0.32 + min(0.32, len(new_words) / max(1, len(words)) * 0.36)) if words else 0.12
+    filler = _filler_ratio_for_zone(rows, text)
+    repetition = _repetition_ratio_for_zone(rows, text)
+    emotion_label, emotion = _emotion(text)
+    if rows:
+        emotion = _bounded(emotion + _average(float(item.get("exclamation_count", 0)) for item in rows) * 0.06)
+    contextual = any(str(item.get("text") or "").strip().casefold().startswith(_CONTEXTUAL_PREFIXES) for item in rows)
+    confusion = _bounded(
+        (0.46 if contextual else 0.0)
+        + _average(float(item.get("context_dependency_score", 0)) for item in rows) / 100 * 0.34
+        + (0.18 if not words else 0.0)
+    )
+    payoff_time = profile.payoff_assessment.payoff_timestamp
+    hook_open = profile.hook_assessment.curiosity_opened
+    if hook_open and payoff_time is not None and end >= payoff_time:
+        curiosity_state = "resolved"
+    elif hook_open and start < (payoff_time if payoff_time is not None else candidate.end):
+        curiosity_state = "open"
+    else:
+        curiosity_state = "none"
+    zone_hook = profile.hook_assessment.hook_strength.score if name == "opening" else 0.0
+    payoff_bonus = profile.payoff_assessment.payoff_strength.score if payoff_time is not None and start <= payoff_time <= end else 0.0
+    momentum = _bounded(
+        profile.features["narrative_momentum"].score * 0.42 + information_gain * 0.28
+        + min(0.16, float(audio.get("audio_energy_change", 0)) * 0.45)
+        + (0.12 if curiosity_state in {"open", "resolved"} else 0.0) + payoff_bonus * 0.14
+        - repetition * 0.18 - filler * 0.16 - confusion * 0.18
+    )
+    attention = _bounded(
+        0.14 + zone_hook * 0.30 + information_gain * 0.23 + emotion * 0.18 + momentum * 0.23
+        + payoff_bonus * 0.12 - repetition * 0.20 - filler * 0.22 - confusion * 0.22
+    )
+    drop_risk = _bounded(
+        (1 - attention) * 0.40 + repetition * 0.23 + filler * 0.24 + confusion * 0.20
+        + (0.12 if not words else 0.0) - payoff_bonus * 0.08
+    )
+    confidence = _bounded(_transcript_confidence(rows) * 0.72 + (0.20 if audio_features.get("energy_frames") else 0.0))
+    excerpt = text[:480]
+    common = {
+        "source": "retention_zone", "segment_ids": ids, "excerpt": excerpt,
+    }
+    evidence = [FeatureEvidence("retention_zone", name, attention, confidence, ids, excerpt)]
+    prior_words.update(words)
+    return RetentionZone(
+        name=name, start=round(start, 3), end=round(end, 3),
+        attention_strength=_feature(attention, confidence, "Внутренний сравнительный сигнал внимания для временной зоны, не прогноз реальных просмотров.", raw=attention, **common),
+        information_gain=_feature(information_gain, confidence, "Новая информация относительно уже пройденной части candidate.", raw=len(new_words), **common),
+        emotional_energy=_feature(emotion, confidence, f"Эмоциональная энергия зоны: {emotion_label}.", raw=emotion_label, **common),
+        curiosity_state=curiosity_state,
+        narrative_momentum=_feature(momentum, confidence, "Темп развития мысли в этой зоне с учётом новой информации и payoff.", raw=momentum, **common),
+        repetition=_feature(repetition, confidence, "Повтор внутри временной зоны повышает риск потери внимания.", raw=repetition, **common),
+        confusion=_feature(confusion, confidence, "Контекстная неясность в зоне отделена от качества истории в целом.", raw=confusion, **common),
+        drop_risk=_feature(drop_risk, confidence, "Сравнительный риск потери внимания; не оценка реального процента удержания.", raw=drop_risk, **common),
+        evidence=evidence,
+    )
+
+
+def _dead_zones_from_retention(
+    candidate: Candidate, zones: list[RetentionZone], minimum_seconds: float,
+) -> list[DeadZone]:
+    result: list[DeadZone] = []
+    for zone in zones:
+        severity = _bounded(
+            zone.repetition.score * 0.27 + zone.confusion.score * 0.23
+            + zone.drop_risk.score * 0.34 + (1 - zone.information_gain.score) * 0.16
+        )
+        if zone.end - zone.start < minimum_seconds or severity < 0.56:
+            continue
+        reasons: list[str] = []
+        if zone.repetition.score >= 0.25:
+            reasons.append("repetition")
+        if zone.confusion.score >= 0.35:
+            reasons.append("context_or_transition")
+        if zone.information_gain.score <= 0.35:
+            reasons.append("low_information_gain")
+        if zone.drop_risk.score >= 0.60:
+            reasons.append("drop_risk")
+        reason = ", ".join(reasons) or "flat_development"
+        ids = [item for evidence in zone.evidence for item in evidence.segment_ids]
+        confidence = _average((zone.drop_risk.confidence, zone.information_gain.confidence), 0.5)
+        result.append(DeadZone(
+            start=zone.start, end=zone.end, duration=round(zone.end - zone.start, 3), reason=reason,
+            severity=_feature(severity, confidence, "Диагностика слабой зоны для будущей реконструкции; этот этап не меняет исходный candidate.", source="retention_zone", raw=reason, segment_ids=ids, excerpt=zone.evidence[0].excerpt if zone.evidence else ""),
+            removable_in_future=True,
+            evidence=[FeatureEvidence("retention_zone", reason, severity, confidence, ids, zone.evidence[0].excerpt if zone.evidence else "")],
+        ))
+    return result
+
+
+def _retention_summary_feature(
+    score: float, confidence: float, explanation: str, candidate: Candidate, source: str,
+) -> FeatureScore:
+    return _feature(
+        score, confidence, explanation, source=source, raw=score,
+        segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:360],
+    )
+
+
+def build_estimated_retention_profile(
+    candidate: Candidate, feature_profile: ViralityFeatureProfile, transcript_features: dict[str, Any],
+    audio_features: dict[str, Any], *, dead_zone_minimum_seconds: float = 1.4,
+) -> EstimatedRetentionProfile:
+    """Estimate internal retention signals without inventing platform analytics."""
+
+    if candidate.id != feature_profile.candidate_id or candidate.duration <= 0:
+        raise ValueError("Retention profile must use the matching positive-duration candidate.")
+    if not 0.2 <= dead_zone_minimum_seconds <= 20:
+        raise ValueError("dead_zone_minimum_seconds must stay in the safe configured range.")
+    segments = _candidate_segments(candidate, transcript_features)
+    prior_words: set[str] = set()
+    zones = [
+        _retention_zone(candidate, feature_profile, name, start_ratio, end_ratio, segments, prior_words, audio_features)
+        for name, start_ratio, end_ratio in RETENTION_ZONE_DEFINITIONS
+    ]
+    dead_zones = _dead_zones_from_retention(candidate, zones, dead_zone_minimum_seconds)
+    by_name = {item.name: item for item in zones}
+    opening = by_name["opening"].attention_strength.score
+    early = _average((by_name["opening"].attention_strength.score, by_name["early"].attention_strength.score))
+    mid = _average((by_name["mid"].attention_strength.score, by_name["late"].attention_strength.score))
+    late = _average((by_name["pre_payoff"].attention_strength.score, by_name["ending"].attention_strength.score))
+    payoff_position = (
+        (feature_profile.payoff_assessment.payoff_timestamp - candidate.start) / candidate.duration
+        if feature_profile.payoff_assessment.payoff_timestamp is not None else None
+    )
+    delayed_payoff = payoff_position is not None and payoff_position > 0.78
+    if delayed_payoff:
+        mid = _bounded(mid - 0.10)
+    dead_ratio = sum(zone.duration for zone in dead_zones) / candidate.duration
+    completion = _bounded(
+        late * 0.28 + feature_profile.payoff_assessment.payoff_strength.score * 0.34
+        + feature_profile.features["narrative_momentum"].score * 0.17
+        + feature_profile.payoff_assessment.ending_satisfaction.score * 0.17
+        + (0.08 if payoff_position is not None and 0.55 <= payoff_position <= 0.92 else 0)
+        - dead_ratio * 0.30 - (0.12 if delayed_payoff else 0)
+    )
+    if candidate.duration < 8 and feature_profile.features["narrative_momentum"].score < 0.60:
+        completion = min(completion, 0.58)
+    zone_strengths = {
+        item.name: _bounded(item.attention_strength.score * 0.48 + item.narrative_momentum.score * 0.32 + item.emotional_energy.score * 0.20)
+        for item in zones
+    }
+    strongest = max(zones, key=lambda item: (zone_strengths[item.name], -item.start))
+    weakest = min(zones, key=lambda item: (zone_strengths[item.name], item.start))
+    drop_points = sorted({
+        round((item.start + item.end) / 2, 3) for item in zones if item.drop_risk.score >= 0.56
+    } | {round((item.start + item.end) / 2, 3) for item in dead_zones})
+    confidence = _bounded(
+        feature_profile.analysis_confidence.score * 0.70
+        + (0.18 if audio_features.get("energy_frames") else 0.0)
+        + (0.12 if segments else 0.0)
+    )
+    result = EstimatedRetentionProfile(
+        candidate_id=candidate.id, candidate_start=round(candidate.start, 3), candidate_end=round(candidate.end, 3), zones=zones,
+        opening_retention=_retention_summary_feature(opening, confidence, "Сравнительный opening retention index, не процент реальных просмотров.", candidate, "retention_opening"),
+        early_retention=_retention_summary_feature(early, confidence, "Сравнительный early retention index по первым двум зонам.", candidate, "retention_early"),
+        mid_retention=_retention_summary_feature(mid, confidence, "Сравнительный mid retention index; поздний payoff учитывает риск провисания середины.", candidate, "retention_mid"),
+        late_retention=_retention_summary_feature(late, confidence, "Сравнительный late retention index перед естественным завершением.", candidate, "retention_late"),
+        completion_potential=_retention_summary_feature(completion, confidence, "Сравнительный потенциал досмотра по payoff, завершению и слабым зонам; не прогноз платформы.", candidate, "retention_completion"),
+        estimated_drop_points=drop_points,
+        strongest_moment_timestamp=round((strongest.start + strongest.end) / 2, 3),
+        weakest_moment_timestamp=round((weakest.start + weakest.end) / 2, 3),
+        dead_zone_ranges=dead_zones,
+        retention_confidence=_retention_summary_feature(confidence, confidence, "Надёжность retention-диагностики отображается отдельно от её качества.", candidate, "retention_confidence"),
+        warnings=["Retention values are comparative internal indices, not projected viewer percentages."],
+    )
+    result.validate(set(candidate.transcript_segment_ids))
+    return result
+
+
+def build_publishability_assessment(
+    candidate: Candidate, feature_profile: ViralityFeatureProfile, retention_profile: EstimatedRetentionProfile,
+    visual_diagnostics: dict[str, Any] | None = None,
+) -> PublishabilityAssessment:
+    """Assess unedited publishability separately from content-strength ranking."""
+
+    if candidate.id != feature_profile.candidate_id or candidate.id != retention_profile.candidate_id:
+        raise ValueError("Publishability assessment requires matching candidate diagnostics.")
+    visual = visual_diagnostics or {}
+    ids = list(candidate.transcript_segment_ids)
+    confidence = _bounded(_average((feature_profile.analysis_confidence.score, retention_profile.retention_confidence.score), 0.5))
+    diagnostics = candidate.boundary_diagnostics or {}
+    inferred_boundary = candidate.text.rstrip().endswith((".", "!", "?", "…"))
+    boundary_ok = bool(diagnostics.get("eligible", inferred_boundary))
+    boundary_value = _bounded(float(diagnostics.get("overall_boundary_score", 0.82 if boundary_ok else 0.08)))
+    visual_status = str(visual.get("composition_quality_status") or visual.get("status") or "unknown")
+    visual_warning = visual_status in {"passed_with_warning", "warning", "safe_fallback"} or bool(visual.get("warnings"))
+    visual_failed = visual_status in {"failed", "failed_repairable", "unsafe"}
+    visual_score = 0.28 if visual_failed else 0.62 if visual_warning else 0.74
+    subtitle_ready = visual.get("subtitle_compatible", visual.get("subtitle_ready", True))
+    subtitle_score = 0.35 if subtitle_ready is False else 0.74
+    duration_score = 0.82 if 12 <= candidate.duration <= 75 else 0.60 if 8 <= candidate.duration <= 90 else 0.26
+    opening = feature_profile.hook_assessment.immediate_clarity.score
+    standalone = feature_profile.features["standalone_strength"].score
+    completeness = _bounded(
+        feature_profile.payoff_assessment.ending_satisfaction.score * 0.58
+        + feature_profile.features["clarity"].score * 0.22
+        + (0.20 if boundary_ok else 0.0)
+    )
+    context = feature_profile.features["context_independence"].score
+    signal = feature_profile.analysis_confidence.score
+    payoff = feature_profile.payoff_assessment.payoff_strength.score
+    filler_control = _bounded(1 - feature_profile.features["filler_penalty"].score)
+    score = _bounded(
+        opening * 0.15 + standalone * 0.15 + completeness * 0.13 + boundary_value * 0.16
+        + context * 0.12 + duration_score * 0.08 + signal * 0.06 + payoff * 0.08
+        + filler_control * 0.03 + visual_score * 0.02 + subtitle_score * 0.02
+    )
+    critical: list[str] = []
+    if not boundary_ok:
+        critical.append("semantic_boundary_violation")
+    if context < 0.20:
+        critical.append("critical_context_dependency")
+    if visual_failed:
+        critical.append("visual_usability_failure")
+    if signal < 0.18:
+        critical.append("insufficient_source_signal")
+    if not feature_profile.payoff_assessment.payoff_present and feature_profile.payoff_assessment.ending_satisfaction.score < 0.35:
+        critical.append("incomplete_story")
+    level = "blocked" if critical or score < 0.42 else "ready" if score >= 0.70 else "limited"
+    reasons = [
+        "clear_opening" if opening >= 0.58 else "opening_needs_context",
+        "standalone_story" if standalone >= 0.58 else "standalone_is_limited",
+        "payoff_present" if payoff >= 0.50 else "payoff_is_weak_or_missing",
+        "boundary_safe" if boundary_ok else "boundary_is_not_safe",
+    ]
+    warnings = []
+    if visual_warning:
+        warnings.append("visual_composition_warning")
+    if subtitle_ready is False:
+        warnings.append("subtitle_compatibility_warning")
+    result = PublishabilityAssessment(
+        candidate_id=candidate.id, level=level,
+        publishability_score=_retention_summary_feature(score, confidence, "Пригодность к публикации без смыслового редактирования оценивается отдельно от viral potential.", candidate, "publishability"),
+        opening_clarity=_retention_summary_feature(opening, confidence, "Понятность первой законченной мысли.", candidate, "publishability_opening"),
+        standalone_strength=_retention_summary_feature(standalone, confidence, "Самостоятельность StoryUnit в исходном контексте.", candidate, "publishability_standalone"),
+        story_completeness=_retention_summary_feature(completeness, confidence, "Законченность мысли и естественное завершение.", candidate, "publishability_completeness"),
+        boundary_safety=_retention_summary_feature(boundary_value, confidence, "Безопасность semantic boundary без переписывания source.", candidate, "publishability_boundary"),
+        context_independence=_retention_summary_feature(context, confidence, "Понятность без отсутствующего предыдущего контекста.", candidate, "publishability_context"),
+        duration_fit=_retention_summary_feature(duration_score, 0.92, "Пригодность длительности для vertical short.", candidate, "publishability_duration"),
+        source_signal_quality=_retention_summary_feature(signal, confidence, "Качество доступных transcript/audio/visual observations.", candidate, "publishability_source_signal"),
+        payoff_presence=_retention_summary_feature(payoff, confidence, "Наличие самостоятельного payoff внутри candidate.", candidate, "publishability_payoff"),
+        filler_control=_retention_summary_feature(filler_control, confidence, "Отсутствие чрезмерного filler в исходном candidate.", candidate, "publishability_filler"),
+        visual_usability=_retention_summary_feature(visual_score, 0.65 if visual_status == "unknown" else 0.82, "Визуальная пригодность использует только доступные diagnostics и не дублирует quality validator.", candidate, "publishability_visual"),
+        subtitle_compatibility=_retention_summary_feature(subtitle_score, 0.65 if visual_status == "unknown" else 0.82, "Совместимость с субтитрами — отдельный мягкий сигнал.", candidate, "publishability_subtitles"),
+        reasons=reasons, critical_failures=critical, warnings=warnings,
+    )
+    result.validate(set(ids))
+    return result
+
+
+def assess_candidate_eligibility(
+    candidate: Candidate, feature_profile: ViralityFeatureProfile, retention_profile: EstimatedRetentionProfile,
+    publishability: PublishabilityAssessment,
+) -> EligibilityAssessment:
+    """Return deterministic Goal 5B routing without reconstructing the source."""
+
+    if len({candidate.id, feature_profile.candidate_id, retention_profile.candidate_id, publishability.candidate_id}) != 1:
+        raise ValueError("Eligibility assessment requires matching candidate diagnostics.")
+    critical = list(publishability.critical_failures)
+    serious_dead = [zone for zone in retention_profile.dead_zone_ranges if zone.severity.score >= 0.72]
+    minor_dead = [zone for zone in retention_profile.dead_zone_ranges if zone.severity.score >= 0.56]
+    payoff_position = (
+        (feature_profile.payoff_assessment.payoff_timestamp - candidate.start) / candidate.duration
+        if feature_profile.payoff_assessment.payoff_timestamp is not None else None
+    )
+    strong_core = _average((
+        feature_profile.features["standalone_strength"].score,
+        feature_profile.features["clarity"].score,
+        feature_profile.features["usefulness"].score,
+        feature_profile.features["narrative_momentum"].score,
+        retention_profile.completion_potential.score,
+    ))
+    opportunities: list[str] = []
+    if feature_profile.hook_assessment.hook_strength.score < 0.46:
+        opportunities.append("weak_original_opening")
+    if payoff_position is not None and payoff_position > 0.78:
+        opportunities.append("late_payoff")
+    if serious_dead:
+        opportunities.append("critical_dead_zone")
+    elif minor_dead:
+        opportunities.append("local_dead_zone")
+    if critical:
+        status = "rejected"
+    elif strong_core < 0.40:
+        status = "weak"
+    elif (
+        publishability.level == "ready" and feature_profile.payoff_assessment.payoff_present
+        and feature_profile.hook_assessment.immediate_clarity.score >= 0.55 and not serious_dead
+    ):
+        status = "publishable_now"
+    elif strong_core >= 0.58 and (opportunities or publishability.level == "limited"):
+        status = "needs_reconstruction"
+    elif publishability.publishability_score.score >= 0.52:
+        status = "publishable_with_minor_adjustment"
+    else:
+        status = "weak"
+    reasons = list(publishability.reasons)
+    reasons.append(f"retention_{retention_profile.relative_level(retention_profile.completion_potential.score)}")
+    if status == "needs_reconstruction":
+        reasons.append("strong_idea_requires_future_story_reconstruction")
+    if status == "rejected":
+        reasons.append("critical_publishability_failure")
+    confidence = _bounded(_average((feature_profile.analysis_confidence.score, retention_profile.retention_confidence.score, publishability.publishability_score.confidence)))
+    result = EligibilityAssessment(
+        candidate_id=candidate.id, status=status, reasons=reasons, critical_failures=critical,
+        reconstruction_opportunities=opportunities,
+        confidence=_retention_summary_feature(confidence, confidence, "Уверенность в eligibility основана на доступных source diagnostics, а не на viral score.", candidate, "eligibility_confidence"),
+    )
+    result.validate(set(candidate.transcript_segment_ids))
     return result

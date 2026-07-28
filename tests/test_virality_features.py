@@ -80,6 +80,7 @@ def test_profile_has_complete_grounded_contract_and_round_trips_to_dict():
     restored = ViralityFeatureProfile.from_dict(serialized)
     assert restored.to_dict() == serialized
     assert serialized["features"]["hook_strength"]["evidence"][0]["segment_ids"] == [0]
+    assert serialized["features"]["hook_strength"]["evidence"][0]["feature_name"] == "hook_strength"
     for feature in profile.features.values():
         for evidence in feature.evidence:
             assert set(evidence.segment_ids) <= {0, 1, 2}
