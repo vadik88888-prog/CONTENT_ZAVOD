@@ -40,6 +40,7 @@ class ProjectScreen(QWidget):
         self.runs: list[ProjectRun] = []
         self._active_candidate_id: str | None = None
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
+        self._candidate_cards: dict[str, QFrame] = {}
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.thumbnail_unavailable.connect(self._thumbnail_unavailable)
@@ -70,6 +71,7 @@ class ProjectScreen(QWidget):
         left = QVBoxLayout(self.content_host)
         left.setContentsMargins(0, 0, 0, 0)
         self.preview = VideoPreview()
+        self.preview.preview_ready.connect(self._focus_preview_player)
         left.addWidget(self.preview)
         self.metadata = self._card("Сведения о видео")
         left.addWidget(self.metadata)
@@ -265,6 +267,7 @@ class ProjectScreen(QWidget):
                 item.widget().deleteLater()
         self._candidate_checks = {}
         self._candidate_thumbnail_labels = {}
+        self._candidate_cards = {}
         analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
         analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
         candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
@@ -365,6 +368,7 @@ class ProjectScreen(QWidget):
                 "selected": "подтверждён", "production_rendering": "создаём ролик", "rendered": "готово",
             }.get(state, "готов к просмотру")
             frame = QFrame(); frame.setObjectName("card")
+            self._candidate_cards[candidate_id] = frame
             row = QHBoxLayout(frame); row.setContentsMargins(10, 8, 10, 8)
             thumbnail = QLabel("Кадр\nзагружается")
             thumbnail.setObjectName("muted")
@@ -433,6 +437,7 @@ class ProjectScreen(QWidget):
                 actions.addWidget(button)
             row.addLayout(actions)
             layout.addWidget(frame)
+        self._mark_active_candidate()
         selected_count = len(project.review_selected_candidate_ids)
         self.draft_button.setText(
             f"Собрать {selected_count} черновик(а)" if draftable_exists else f"Подтвердить {selected_count} черновик(а)"
@@ -539,9 +544,22 @@ class ProjectScreen(QWidget):
         self.preview.set_range(
             self.project.source, start, end,
             cache_directory=self.project.directory / "preview-proxies",
+            candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
         )
         self._active_candidate_id = str(candidate.get("candidate_id") or "") or None
+        self._mark_active_candidate()
+        self._focus_preview_player()
         self._show_candidate_detail(candidate, start, end)
+
+    def _mark_active_candidate(self) -> None:
+        for candidate_id, card in self._candidate_cards.items():
+            active = candidate_id == self._active_candidate_id
+            card.setProperty("activeCandidate", active)
+            card.setStyleSheet("border: 2px solid #4f9cff;" if active else "")
+
+    def _focus_preview_player(self, *_: object) -> None:
+        self.content_scroll.ensureWidgetVisible(self.preview, 0, 16)
+        self.preview.play_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _candidate_range(self, candidate: dict) -> tuple[float, float]:
         candidate_id = str(candidate.get("candidate_id") or "")
@@ -625,7 +643,9 @@ class ProjectScreen(QWidget):
             self.preview.set_range(
                 project.source, start, end,
                 cache_directory=project.directory / "preview-proxies",
+                candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
             )
+            self._mark_active_candidate()
             self._show_candidate_detail(candidate, start, end)
 
     def _thumbnail_ready(self, candidate_id: str, path: str) -> None:

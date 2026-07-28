@@ -50,6 +50,7 @@ class VideoPreview(QFrame):
         self._path: Path | None = None
         self._source_path: Path | None = None
         self._source_range_seconds: tuple[float, float] | None = None
+        self._active_candidate_title: str | None = None
         self._range_start_ms: int | None = None
         self._range_end_ms: int | None = None
         self._range_autoplay = False
@@ -79,6 +80,13 @@ class VideoPreview(QFrame):
         self.placeholder.setObjectName("muted")
         self.placeholder.setMinimumHeight(220)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.active_candidate = QLabel()
+        self.active_candidate.setObjectName("active-candidate")
+        self.active_candidate.setWordWrap(True)
+        self.active_candidate.setStyleSheet("font-weight: 600;")
+        self.active_candidate.hide()
+        layout.addWidget(self.active_candidate)
         layout.addWidget(self.video)
         layout.addWidget(self.placeholder)
         self.preview_status = QLabel()
@@ -115,10 +123,17 @@ class VideoPreview(QFrame):
     def active_media_path(self) -> Path | None:
         return self._path
 
+    @property
+    def active_candidate_title(self) -> str | None:
+        return self._active_candidate_title
+
     def set_file(self, path: str | Path | None) -> None:
         self._selection_token += 1
         self._cancel_proxy()
         self._source_range_seconds = None
+        self._active_candidate_title = None
+        self.active_candidate.clear()
+        self.active_candidate.hide()
         self._range_start_ms = None
         self._range_end_ms = None
         self._range_autoplay = False
@@ -144,6 +159,7 @@ class VideoPreview(QFrame):
         *,
         autoplay: bool = True,
         cache_directory: Path | None = None,
+        candidate_title: str | None = None,
     ) -> None:
         """Bind the player to one candidate's source interval.
 
@@ -158,6 +174,11 @@ class VideoPreview(QFrame):
         self._cancel_proxy()
         self._source_range_seconds = (start, end)
         self._source_path = Path(path)
+        self._active_candidate_title = candidate_title or "Выбранный кандидат"
+        self.active_candidate.setText(
+            f"Кандидат: {self._active_candidate_title}\nФрагмент: {start:.1f}–{end:.1f} с"
+        )
+        self.active_candidate.show()
         self._range_autoplay = autoplay
         self._clear_status()
         if not self.usable_media_path(self._source_path):
@@ -183,7 +204,7 @@ class VideoPreview(QFrame):
         self.placeholder.hide()
         self.video.show()
         self._set_available(True)
-        self._show_status(f"Фрагмент: {start:.1f}–{end:.1f} с")
+        self._show_status("Загружаем исходный фрагмент…")
 
     def _qt_can_decode_source(self, source_path: Path) -> bool:
         """Use Qt's own decoder capability table for the AV1/WebM decision."""
@@ -250,7 +271,9 @@ class VideoPreview(QFrame):
         self._proxy_process.setProgram(executable)
         self._proxy_process.setArguments([
             "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(request.source_path), "-ss", f"{request.start_seconds:.3f}", "-t", f"{duration:.3f}",
+            # Input seek avoids decoding the full source before a late PUBG
+            # candidate.  Transcoding keeps FFmpeg's accurate-seek discard.
+            "-ss", f"{request.start_seconds:.3f}", "-i", str(request.source_path), "-t", f"{duration:.3f}",
             "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", "scale=-2:480", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(request.destination),
@@ -344,6 +367,7 @@ class VideoPreview(QFrame):
         # frame while remaining a stable, paused position.
         last_frame = max(self._range_start_ms or 0, self._range_end_ms - 1)
         QTimer.singleShot(0, lambda position=last_frame: self.player.setPosition(position))
+        self._show_status("Просмотр завершён на конце выбранного фрагмента.")
 
     def open_externally(self) -> None:
         target = self._source_path or self._path
@@ -365,6 +389,7 @@ class VideoPreview(QFrame):
             return
         self.player.setPosition(self._range_start_ms)
         QTimer.singleShot(0, self.player.play)
+        self._show_status("Воспроизведение выбранного фрагмента…")
 
     def _media_error(self, *_: object) -> None:
         if self._source_path and self._source_range_seconds and not self._using_proxy:

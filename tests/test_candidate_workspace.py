@@ -68,12 +68,13 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
     app = QApplication.instance() or QApplication([])
     services, project = _workspace(tmp_path)
     viewmodel = ProjectViewModel(services)
-    preview_ranges: list[tuple[Path, float, float, Path | None]] = []
+    preview_ranges: list[tuple[Path, float, float, Path | None, str | None]] = []
 
     def capture_preview_range(
-        _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None,
+        _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None, candidate_title=None,
     ) -> None:
-        preview_ranges.append((Path(path), float(start_seconds), float(end_seconds), cache_directory))
+        _preview.play_button.setEnabled(True)
+        preview_ranges.append((Path(path), float(start_seconds), float(end_seconds), cache_directory, candidate_title))
 
     monkeypatch.setattr(VideoPreview, "set_range", capture_preview_range)
     screen = ProjectScreen(viewmodel)
@@ -105,11 +106,14 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         first_preview, second_preview = candidate_previews
         QTest.mouseClick(first_preview, Qt.MouseButton.LeftButton)
         QTest.mouseClick(second_preview, Qt.MouseButton.LeftButton)
+        app.processEvents()
         assert preview_ranges == [
-            (project.source, 1.0, 18.0, project.directory / "preview-proxies"),
-            (project.source, 19.0, 29.0, project.directory / "preview-proxies"),
+            (project.source, 1.0, 18.0, project.directory / "preview-proxies", "Сильное начало"),
+            (project.source, 19.0, 29.0, project.directory / "preview-proxies", "Другой момент"),
         ]
         assert screen._active_candidate_id and screen._active_candidate_id.endswith("other")
+        assert screen._candidate_cards[screen._active_candidate_id].property("activeCandidate") is True
+        assert screen.preview.play_button.hasFocus()
 
         screen._select_recommended()
 
