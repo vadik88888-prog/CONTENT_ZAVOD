@@ -208,6 +208,11 @@ class PipelineFacade:
                 prepared, "Не удалось прочитать итоговый отчёт обработки.",
                 f"Report root is not a JSON object: {prepared.report_path}",
             )
+        terminal = raw.get("terminal", {})
+        if isinstance(terminal, dict) and terminal.get("status") == "failed":
+            code = str(terminal.get("error_code") or "PIPELINE_FAILED")
+            message = str(terminal.get("message") or "Pipeline завершился без финального ролика.")
+            return self._failed_completion(prepared, message, f"{code}: {message}")
         manifest: dict[str, Any] | None = None
         if prepared.run_id:
             manifest_path = prepared.manifest_path or prepared.output_directory / "manifest.json"

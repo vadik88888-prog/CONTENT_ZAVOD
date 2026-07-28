@@ -80,6 +80,23 @@ def test_zero_exit_report_without_final_mp4_is_failed_and_logged(tmp_path: Path)
     assert stored.technical_details == finished.technical_details
 
 
+def test_terminal_no_renderable_clips_exposes_the_concrete_gui_reason(tmp_path: Path) -> None:
+    services, _project, _run, prepared = _context(tmp_path)
+    write_json(prepared.report_path, {
+        "terminal": {
+            "status": "failed",
+            "error_code": "NO_RENDERABLE_CLIPS",
+            "message": "Не удалось подготовить ни одного ролика к созданию.",
+        },
+        "production_render": {"enabled": True, "status": "skipped", "reason": "no_production_plan"},
+    })
+
+    completion = services.pipeline.completion(prepared)
+
+    assert completion.error_summary == "Не удалось подготовить ни одного ролика к созданию."
+    assert "NO_RENDERABLE_CLIPS" in (completion.technical_details or "")
+
+
 def test_valid_report_mp4_with_warnings_is_completed_with_warnings(tmp_path: Path, valid_video_probe) -> None:
     services, project, run, prepared = _context(tmp_path)
     final = tmp_path / "reported-location" / "actual-final.mp4"

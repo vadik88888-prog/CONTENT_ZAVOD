@@ -199,11 +199,18 @@ def main(argv: list[str] | None = None) -> int:
     except ClipEngineError as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return 2
+    report = read_json(result.report_path, {})
+    terminal = report.get("terminal", {}) if isinstance(report, dict) else {}
+    if isinstance(terminal, dict) and terminal.get("status") == "failed":
+        code = str(terminal.get("error_code") or "PIPELINE_FAILED")
+        message = str(terminal.get("message") or "Pipeline завершился без финального ролика.")
+        print(f"Ошибка [{code}]: {message}", file=sys.stderr)
+        print(f"Отчёт: {result.report_path}", file=sys.stderr)
+        return 2
     print("Готово.")
     print(f"Клипов: {len(result.output_files)} (выбрано: {result.selected_clips})")
     print(f"Результаты: {result.output_directory}")
     print(f"Отчёт: {result.report_path}")
-    report = read_json(result.report_path, {})
     production = report.get("production_plan", {}) if isinstance(report, dict) else {}
     if isinstance(production, dict) and production.get("enabled"):
         print(

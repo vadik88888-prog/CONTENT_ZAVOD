@@ -2,6 +2,13 @@ class ClipEngineError(RuntimeError):
     """Ошибка, которую можно безопасно показать пользователю."""
 
 
+NO_RENDERABLE_CLIPS = "NO_RENDERABLE_CLIPS"
+NO_RENDERABLE_CLIPS_MESSAGE = (
+    "Не удалось подготовить ни одного ролика к созданию. "
+    "Проверьте отчёт анализа или попробуйте другой режим."
+)
+
+
 class DependencyError(ClipEngineError):
     """Не установлена или недоступна внешняя программа."""
 

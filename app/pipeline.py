@@ -31,7 +31,17 @@ from app.content_transformation import (
     run_content_transformation,
     validate_transformation_outcome,
 )
-from app.errors import AudioCompositionError, ClipEngineError, ProductionPlanError, ProductionRenderError, StageError, TTSError, TransformationProviderError
+from app.errors import (
+    NO_RENDERABLE_CLIPS,
+    NO_RENDERABLE_CLIPS_MESSAGE,
+    AudioCompositionError,
+    ClipEngineError,
+    ProductionPlanError,
+    ProductionRenderError,
+    StageError,
+    TTSError,
+    TransformationProviderError,
+)
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.local_scoring import score_candidates
 from app.media import prepare_media
@@ -83,6 +93,8 @@ class PipelineResult:
     selected_clips: int
     output_files: list[Path]
     warnings: list[str]
+    terminal_status: str = "completed"
+    error_code: str | None = None
 
 
 class StageTracker:
@@ -551,6 +563,24 @@ class Pipeline:
         outputs = result_paths(registry, output_directory) if production_is_primary else [
             Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()
         ]
+        candidate_flow = build_candidate_flow(
+            final_scored, selected_ids, transformation, production, production_render,
+        )
+        terminal = build_terminal_state(
+            self.config.ai_reranking.final_clip_count,
+            outputs,
+            candidate_flow,
+            delivery_required=not self.production_plan_only and not self.tts_only and not self.audio_only,
+        )
+        tracker.start("terminal")
+        tracker.finish(
+            "terminal", terminal["status"],
+            terminal.get("message") if terminal.get("status") == "failed" else None,
+        )
+        if terminal["status"] == "failed":
+            self.errors.append(f"{terminal['error_code']}: {terminal['message']}")
+        elif terminal["status"] == "completed_with_warnings":
+            self.warnings.append("Часть отобранных кандидатов не дошла до финального рендера; см. candidate_flow в report.json.")
         self.warnings.extend(render_data.get("warnings", []))
         self.errors.extend(render_data.get("errors", []))
         if source.downloaded and self.config.delete_downloaded_source and outputs:
@@ -609,6 +639,8 @@ class Pipeline:
             tts=tts,
             audio=audio,
             production_render=production_render,
+            candidate_flow=candidate_flow,
+            terminal=terminal,
             content_understanding={
                 "enabled": True,
                 "profile": content_profile,
@@ -633,6 +665,8 @@ class Pipeline:
                 "started_at": self.started_at,
                 "requested_clip_count": self.config.ai_reranking.final_clip_count,
                 "project_id": self.project_id,
+                "terminal_status": terminal["status"],
+                "error_code": terminal.get("error_code"),
             },
         )
         manifest = write_run_manifest(
@@ -653,11 +687,15 @@ class Pipeline:
                 **virality_report,
                 "analysis_fingerprint": _hash({"profiles": virality_profiles, "ranking": virality_ranking}) if self.config.virality.enabled else None,
             },
+            terminal=terminal,
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
         write_json(report_path, report)
-        return PipelineResult(work_directory, output_directory, report_path, len(outputs), outputs, self.warnings)
+        return PipelineResult(
+            work_directory, output_directory, report_path, len(outputs), outputs, self.warnings,
+            terminal_status=terminal["status"], error_code=terminal.get("error_code"),
+        )
 
     def _source_stage(
         self, tracker: StageTracker, cache_tracker: StageTracker, artifact: Path, source: Source,
@@ -1496,6 +1534,7 @@ class Pipeline:
                 tracker.finish(
                     stage_name,
                     outcome_status if outcome_status in {"completed", "fallback", "failed"} else "failed",
+                    _outcome_detail(outcome) if outcome_status == "failed" else None,
                 )
                 self._record_transformation_substages(tracker, candidate.id, cache_key, outcome)
             outcomes.append(outcome)
@@ -1769,6 +1808,192 @@ def _production_items(production: dict[str, Any]) -> list[dict[str, Any]]:
     if not result and isinstance(production, dict) and isinstance(production.get("production_plan"), dict):
         result.append({"candidate_id": "primary", "plan": production["production_plan"], "requested_index": 1})
     return result
+
+
+def build_candidate_flow(
+    final_scored: list[Any], selected_ids: set[str], transformation: dict[str, Any],
+    production: dict[str, Any], production_render: dict[str, Any],
+) -> dict[str, Any]:
+    """Make every ranked candidate's path to a canonical clip explicit.
+
+    A candidate may be intentionally rejected by selection, fail a later
+    contract, or become a canonical rendered result.  Those are distinct
+    states; never infer success merely from an intermediate transformation
+    substage having run.
+    """
+
+    transformation_items = _items_by_candidate(transformation)
+    production_items = _items_by_candidate(production)
+    render_items = _items_by_candidate(production_render)
+    items: list[dict[str, Any]] = []
+    for scored in final_scored:
+        candidate = getattr(scored, "candidate", None)
+        candidate_id = str(getattr(candidate, "id", "") or "")
+        if not candidate_id:
+            continue
+        if candidate_id not in selected_ids:
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "rejected",
+                "reason": _selection_rejection_reason(scored),
+                "message": _selection_rejection_message(scored),
+            })
+            continue
+        transformed = transformation_items.get(candidate_id)
+        if not transformed:
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "failed",
+                "reason": "transformation_missing",
+                "message": "Transformation outcome отсутствует.",
+            })
+            continue
+        if str(transformed.get("status") or "failed") not in {"completed", "fallback"}:
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "failed",
+                "reason": "transformation_failed",
+                "message": _outcome_detail(transformed),
+            })
+            continue
+        plan_item = production_items.get(candidate_id)
+        if not plan_item or str(plan_item.get("status") or "failed") != "completed":
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "failed",
+                "reason": "production_plan_failed",
+                "message": _outcome_detail(plan_item) if plan_item else "ProductionPlan не был создан.",
+            })
+            continue
+        rendered = render_items.get(candidate_id)
+        if rendered and str(rendered.get("status") or "failed") in {"completed", "warning"}:
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "selected",
+                "reason": "rendered",
+                "production_plan_id": plan_item.get("production_plan_id"),
+                "clip_result_id": rendered.get("clip_result_id"),
+            })
+            continue
+        if str(production_render.get("status") or "") == "skipped" and not production_render.get("enabled", False):
+            items.append({
+                "candidate_id": candidate_id,
+                "outcome": "selected",
+                "reason": "render_not_requested",
+                "production_plan_id": plan_item.get("production_plan_id"),
+            })
+            continue
+        items.append({
+            "candidate_id": candidate_id,
+            "outcome": "failed",
+            "reason": "render_failed",
+            "message": _outcome_detail(rendered) if rendered else "Render job не был создан.",
+            "production_plan_id": plan_item.get("production_plan_id"),
+        })
+    return {
+        "found": len(final_scored),
+        "selected": len(selected_ids),
+        "transformed": sum(
+            str(item.get("status") or "") in {"completed", "fallback"}
+            for item in transformation_items.values()
+        ),
+        "production_plans": sum(
+            str(item.get("status") or "") == "completed" for item in production_items.values()
+        ),
+        "render_attempts": len(render_items),
+        "rendered": sum(item["outcome"] == "selected" and item["reason"] == "rendered" for item in items),
+        "rejected": sum(item["outcome"] == "rejected" for item in items),
+        "failed": sum(item["outcome"] == "failed" for item in items),
+        "items": items,
+    }
+
+
+def build_terminal_state(
+    requested_clip_count: int, output_files: list[Path], candidate_flow: dict[str, Any], *, delivery_required: bool,
+) -> dict[str, Any]:
+    """Return a terminal contract after reportable artifacts already exist."""
+
+    produced = len(output_files)
+    details = {
+        key: int(candidate_flow.get(key, 0) or 0)
+        for key in ("found", "selected", "transformed", "production_plans", "render_attempts", "rendered", "rejected", "failed")
+    }
+    if delivery_required and requested_clip_count > 0 and produced == 0:
+        return {
+            "status": "failed",
+            "error_code": NO_RENDERABLE_CLIPS,
+            "message": NO_RENDERABLE_CLIPS_MESSAGE,
+            "requested_clip_count": requested_clip_count,
+            "produced_clips_count": produced,
+            "candidate_counts": details,
+        }
+    if produced and details["failed"]:
+        return {
+            "status": "completed_with_warnings",
+            "error_code": None,
+            "message": "Часть кандидатов не дошла до финального рендера.",
+            "requested_clip_count": requested_clip_count,
+            "produced_clips_count": produced,
+            "candidate_counts": details,
+        }
+    return {
+        "status": "completed",
+        "error_code": None,
+        "message": "",
+        "requested_clip_count": requested_clip_count,
+        "produced_clips_count": produced,
+        "candidate_counts": details,
+    }
+
+
+def _items_by_candidate(stage: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_items = stage.get("items", []) if isinstance(stage, dict) else []
+    result: dict[str, dict[str, Any]] = {}
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "")
+        if candidate_id:
+            result[candidate_id] = item
+    return result
+
+
+def _outcome_detail(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return "Неизвестная причина."
+    error = str(item.get("error") or "").strip()
+    if error:
+        return error
+    validation = item.get("validation", {})
+    if isinstance(validation, dict):
+        errors = validation.get("errors", [])
+        if isinstance(errors, list) and errors:
+            return "; ".join(str(value) for value in errors[:3] if str(value))
+    errors = item.get("errors", [])
+    if isinstance(errors, list) and errors:
+        return "; ".join(str(value) for value in errors[:3] if str(value))
+    reason = str(item.get("reason") or "").strip()
+    return reason or "Неизвестная причина."
+
+
+def _selection_rejection_reason(scored: Any) -> str:
+    candidate = getattr(scored, "candidate", None)
+    boundary = getattr(candidate, "boundary_diagnostics", {}) if candidate is not None else {}
+    if isinstance(boundary, dict) and boundary and not boundary.get("eligible", True):
+        return "invalid_boundary"
+    message = _selection_rejection_message(scored).lower()
+    if "payoff" in message:
+        return "missing_payoff"
+    if "publish" in message or "quality" in message or "оценк" in message:
+        return "not_publishable"
+    return "not_selected"
+
+
+def _selection_rejection_message(scored: Any) -> str:
+    diagnostics = getattr(scored, "selection_diagnostics", {})
+    if isinstance(diagnostics, dict) and diagnostics.get("reason"):
+        return str(diagnostics["reason"])
+    return str(getattr(scored, "rejection_reason", "") or getattr(scored, "selection_reason", "") or "Не прошёл selection.")
 
 
 def _candidate_output_directory(root: Path, candidate_id: str, index: int) -> Path:
