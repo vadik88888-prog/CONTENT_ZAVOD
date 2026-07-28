@@ -140,6 +140,17 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def set_draft_approval(self, candidate_id: str, approved: bool) -> None:
+        """Record an explicit keep/reject decision for one ready draft."""
+
+        if not self.project or self.active:
+            return
+        try:
+            self.project = self.services.set_draft_approval(self.project, candidate_id, approved)
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+
     def set_review_selection(self, candidate_ids: list[str]) -> None:
         if not self.project or self.active:
             return

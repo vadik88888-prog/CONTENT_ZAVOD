@@ -9,7 +9,7 @@ from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
-from app.gui.services.pipeline_facade import PipelineFacade
+from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
@@ -125,3 +125,55 @@ def test_approved_render_enables_the_required_delivery_stages() -> None:
     assert config.tts.enabled is True
     assert config.audio_composition.enabled is True
     assert config.production_render.enabled is True
+
+
+def test_individual_draft_approval_is_persistent_and_does_not_change_review_selection(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    draft_a = tmp_path / "draft-a.json"; draft_a.write_text("{}", encoding="utf-8")
+    draft_b = tmp_path / "draft-b.json"; draft_b.write_text("{}", encoding="utf-8")
+    project.candidate_states = {"candidate-a": "draft_ready", "candidate-b": "draft_ready"}
+    project.candidate_draft_artifacts = {"candidate-a": str(draft_a), "candidate-b": str(draft_b)}
+    project.review_selected_candidate_ids = ["candidate-a", "candidate-b"]
+    services.projects.save(project)
+
+    services.set_draft_approval(project, "candidate-a", True)
+
+    assert project.review_selected_candidate_ids == ["candidate-a", "candidate-b"]
+    assert project.selected_candidate_ids == ["candidate-a"]
+    assert project.candidate_states["candidate-a"] == "selected"
+    restored = services.projects.load(project.project_id)
+    assert restored.selected_candidate_ids == ["candidate-a"]
+
+    services.set_draft_approval(project, "candidate-a", False)
+
+    assert project.review_selected_candidate_ids == ["candidate-a", "candidate-b"]
+    assert project.selected_candidate_ids == []
+    assert project.candidate_states["candidate-a"] == "draft_ready"
+
+
+def test_completed_selected_render_with_warnings_is_not_marked_partial(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    project.selected_candidate_ids = ["candidate-a"]
+    project.candidate_states = {"candidate-a": "production_rendering"}
+    services.projects.save(project)
+    run = services.runs.create(
+        project, {}, {}, "test", run_kind=RunKind.SELECTED_RENDER,
+    )
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"final")
+    report_path = tmp_path / "report.json"
+    write_json(report_path, {
+        "production_render": {
+            "items": [{"candidate_id": "candidate-a", "status": "warning"}],
+        },
+    })
+    completion = PipelineCompletion(
+        report_path, [final], ["Subtitle fallback fit used"], None, None, 0.0,
+    )
+
+    finished = services._finish_completion(project, run, completion)
+
+    assert finished.status == RunStatus.COMPLETED_WITH_WARNINGS
+    assert project.status == ProjectStatus.COMPLETED_WITH_WARNINGS
+    assert project.selected_candidate_ids == []
+    assert project.candidate_states["candidate-a"] == "rendered"

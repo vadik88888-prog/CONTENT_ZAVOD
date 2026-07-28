@@ -111,6 +111,8 @@ class DesktopServices:
         """Persist the user's candidate choice before any draft or render starts."""
 
         unique = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
+        if len(unique) > 3:
+            raise InputValidationError("Для одного прохода выберите от одного до трёх моментов.")
         unknown = [item for item in unique if item not in project.candidate_states]
         if unknown:
             raise InputValidationError("Один из выбранных моментов отсутствует в сохранённом анализе.")
@@ -274,6 +276,40 @@ class DesktopServices:
             project.candidate_states[candidate_id] = "selected"
         project.selected_candidate_ids = list(candidate_ids)
         project.review_selected_candidate_ids = list(candidate_ids)
+        project.status = ProjectStatus.REVIEWING_CANDIDATES
+        self.projects.save(project)
+        return project
+
+    def set_draft_approval(
+        self, project: DesktopProject, candidate_id: str, approved: bool,
+    ) -> DesktopProject:
+        """Persist one explicit production decision without changing draft selection.
+
+        ``review_selected_candidate_ids`` answers "which moments are being
+        prepared or reviewed".  ``selected_candidate_ids`` remains the much
+        narrower, deliberate hand-off to the expensive production render.
+        Keeping those choices separate prevents an accidental render when a
+        user is merely looking through ready drafts.
+        """
+
+        if candidate_id not in project.candidate_states:
+            raise InputValidationError("Черновик отсутствует в сохранённом анализе.")
+        if approved:
+            if project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}:
+                raise InputValidationError("Подтвердить можно только готовый черновик.")
+            if not Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file():
+                raise InputValidationError("Не удалось найти сохранённый черновик для этого момента.")
+            if candidate_id not in project.selected_candidate_ids:
+                project.selected_candidate_ids.append(candidate_id)
+            if candidate_id not in project.review_selected_candidate_ids:
+                project.review_selected_candidate_ids.append(candidate_id)
+            project.candidate_states[candidate_id] = "selected"
+        else:
+            project.selected_candidate_ids = [
+                item for item in project.selected_candidate_ids if item != candidate_id
+            ]
+            if project.candidate_states.get(candidate_id) == "selected":
+                project.candidate_states[candidate_id] = "draft_ready"
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
         return project
@@ -540,12 +576,21 @@ class DesktopServices:
                     project.candidate_states[candidate_id] = "draft_ready"
                     if candidate_id in failures:
                         project.candidate_errors[candidate_id] = failures[candidate_id]
-            run.status = RunStatus.PARTIALLY_RENDERED if warnings or len(completed_ids) < len(project.selected_candidate_ids) else RunStatus.COMPLETED
-            project.status = ProjectStatus.PARTIALLY_RENDERED if run.status == RunStatus.PARTIALLY_RENDERED else ProjectStatus.COMPLETED
-            if run.status == RunStatus.PARTIALLY_RENDERED:
+            render_incomplete = len(completed_ids) < len(project.selected_candidate_ids)
+            if render_incomplete:
+                run.status = RunStatus.PARTIALLY_RENDERED
+                project.status = ProjectStatus.PARTIALLY_RENDERED
                 project.selected_candidate_ids = [
                     candidate_id for candidate_id in project.selected_candidate_ids if candidate_id not in completed_ids
                 ]
+            elif warnings:
+                run.status = RunStatus.COMPLETED_WITH_WARNINGS
+                project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
+                project.selected_candidate_ids = []
+            else:
+                run.status = RunStatus.COMPLETED
+                project.status = ProjectStatus.COMPLETED
+                project.selected_candidate_ids = []
         else:
             project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
         project.latest_run_id = run.run_id

@@ -7,6 +7,7 @@
 QMainWindow, QWidget#appShell, QWidget#screen, QStackedWidget#contentStack { background: #0D0F12; }
 QFrame#sidebar { background: #111419; border-right: 1px solid #272D36; }
 QFrame#card, QFrame#dropZone, QFrame#preview { background: #15191F; border: 1px solid #272D36; border-radius: 12px; }
+QWidget#phoneStage { background: #050607; border: 1px solid #303946; border-radius: 18px; }
 QFrame#dropZone { border: 1px dashed #4A5361; min-height: 132px; }
 QLabel#title { font-size: 26px; font-weight: 700; }
 QLabel#subtitle { color: #A8B0BC; }

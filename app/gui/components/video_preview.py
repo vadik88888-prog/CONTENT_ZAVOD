@@ -5,14 +5,17 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from PySide6.QtCore import QProcess, QTimer, QUrl, Signal, Qt
+from PySide6.QtCore import QProcess, QSize, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtMultimedia import QAudioOutput, QMediaFormat, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from app.media import probe_video
 from app.utils import safe_name, stable_text_hash
+
+
+PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +25,24 @@ class _ProxyRequest:
     start_seconds: float
     end_seconds: float
     destination: Path
+
+
+class _BoundedVideoWidget(QVideoWidget):
+    """A video surface whose native stream size cannot widen the page."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._preview_size = QSize(840, 420)
+
+    def set_preview_size(self, width: int, height: int) -> None:
+        self._preview_size = QSize(width, height)
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API name
+        return self._preview_size
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API name
+        return QSize(0, 0)
 
 
 def preview_proxy_path(
@@ -34,7 +55,9 @@ def preview_proxy_path(
         revision = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     except OSError:
         revision = str(source_path)
-    digest = stable_text_hash(f"{revision}:{start_seconds:.3f}:{end_seconds:.3f}")[:20]
+    digest = stable_text_hash(
+        f"{PREVIEW_PROXY_FORMAT_VERSION}:{revision}:{start_seconds:.3f}:{end_seconds:.3f}"
+    )[:20]
     return cache_directory / f"{safe_name(source_path.stem, 'source')}-{digest}.mp4"
 
 
@@ -47,6 +70,7 @@ class VideoPreview(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("preview")
+        self.setMinimumSize(0, 0)
         self._path: Path | None = None
         self._source_path: Path | None = None
         self._source_range_seconds: tuple[float, float] | None = None
@@ -54,7 +78,9 @@ class VideoPreview(QFrame):
         self._range_start_ms: int | None = None
         self._range_end_ms: int | None = None
         self._range_autoplay = False
+        self._range_media_ready = False
         self._using_proxy = False
+        self._presentation = "source"
         self._selection_token = 0
         self._proxy_cache_directory = Path(tempfile.gettempdir()) / "content-factory-preview-proxies"
         self._support_cache: dict[str, bool] = {}
@@ -67,19 +93,31 @@ class VideoPreview(QFrame):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
-        self.video = QVideoWidget(self)
-        self.video.setMinimumHeight(220)
+        # QVideoWidget changes its native size hint after a stream is loaded.
+        # Without a bound, a 1080/1440p source can make the whole review page
+        # several screens wide even though the visible player is small.
+        self.video = _BoundedVideoWidget(self)
         self.player.setVideoOutput(self.video)
         self.player.errorOccurred.connect(self._media_error)
         self.player.mediaStatusChanged.connect(self._media_status_changed)
         self.player.positionChanged.connect(self._position_changed)
 
         layout = QVBoxLayout(self)
+        # Do not let a loaded stream's native frame size become a hard
+        # minimum for the whole page.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(12, 12, 12, 12)
         self.placeholder = QLabel("Выберите видео, чтобы увидеть предпросмотр")
         self.placeholder.setObjectName("muted")
-        self.placeholder.setMinimumHeight(220)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.media_stage = QWidget(self)
+        self.media_stage_layout = QHBoxLayout(self.media_stage)
+        self.media_stage_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.media_stage_layout.setContentsMargins(0, 0, 0, 0)
+        self.media_stage_layout.addStretch()
+        self.media_stage_layout.addWidget(self.video)
+        self.media_stage_layout.addWidget(self.placeholder)
+        self.media_stage_layout.addStretch()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.active_candidate = QLabel()
         self.active_candidate.setObjectName("active-candidate")
@@ -87,8 +125,7 @@ class VideoPreview(QFrame):
         self.active_candidate.setStyleSheet("font-weight: 600;")
         self.active_candidate.hide()
         layout.addWidget(self.active_candidate)
-        layout.addWidget(self.video)
-        layout.addWidget(self.placeholder)
+        layout.addWidget(self.media_stage, 0, Qt.AlignmentFlag.AlignHCenter)
         self.preview_status = QLabel()
         self.preview_status.setObjectName("muted")
         self.preview_status.setWordWrap(True)
@@ -104,6 +141,7 @@ class VideoPreview(QFrame):
         buttons.addStretch()
         layout.addLayout(buttons)
         self._set_available(False)
+        self._set_presentation("source")
 
     @property
     def source_path(self) -> Path | None:
@@ -127,18 +165,59 @@ class VideoPreview(QFrame):
     def active_candidate_title(self) -> str | None:
         return self._active_candidate_title
 
-    def set_file(self, path: str | Path | None) -> None:
+    @property
+    def presentation(self) -> str:
+        """The visual framing of the current media: source or vertical."""
+
+        return self._presentation
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API name
+        if self._presentation == "vertical":
+            return QSize(500, 600)
+        return QSize(864, 520)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API name
+        # QVideoWidget's native frame size can change after media loads.  The
+        # outer player must still be allowed to fit a normal desktop window.
+        return QSize(0, 0)
+
+    def show_source(self, path: str | Path | None) -> None:
+        """Show the original landscape source in a normal wide player."""
+
+        self.set_file(path, presentation="source", title="Исходное видео")
+
+    def show_draft(self, path: str | Path | None, candidate_title: str | None = None) -> None:
+        """Show a draft in a phone-sized 9:16 player."""
+
+        suffix = f" · {candidate_title}" if candidate_title else ""
+        self.set_file(path, presentation="vertical", title=f"Черновик{suffix}")
+
+    def show_final(self, path: str | Path | None, candidate_title: str | None = None) -> None:
+        """Show a completed short in a phone-sized 9:16 player."""
+
+        suffix = f" · {candidate_title}" if candidate_title else ""
+        self.set_file(path, presentation="vertical", title=f"Готовый ролик{suffix}")
+
+    def set_file(
+        self, path: str | Path | None, *, presentation: str = "auto", title: str | None = None,
+    ) -> None:
         self._selection_token += 1
         self._cancel_proxy()
         self._source_range_seconds = None
-        self._active_candidate_title = None
-        self.active_candidate.clear()
-        self.active_candidate.hide()
+        self._active_candidate_title = title
         self._range_start_ms = None
         self._range_end_ms = None
         self._range_autoplay = False
+        self._range_media_ready = False
         self._using_proxy = False
         candidate = Path(path) if path else None
+        self._set_presentation(self._file_presentation(candidate, presentation))
+        if title:
+            self.active_candidate.setText(title)
+            self.active_candidate.show()
+        else:
+            self.active_candidate.clear()
+            self.active_candidate.hide()
         self._source_path = candidate if self.usable_media_path(candidate) else None
         self._path = self._source_path
         self._clear_status()
@@ -163,9 +242,9 @@ class VideoPreview(QFrame):
     ) -> None:
         """Bind the player to one candidate's source interval.
 
-        AV1/WebM is evaluated against Qt Multimedia capabilities.  If the
-        backend cannot decode it (or a direct load later fails), only this
-        interval gets a cheap H.264/AAC proxy; no production render is used.
+        AV1/WebM candidate intervals are played from a small H.264/AAC proxy.
+        This keeps seeking reliable on Windows without starting a production
+        render or converting the original source.
         """
 
         start = max(0.0, float(start_seconds))
@@ -174,12 +253,14 @@ class VideoPreview(QFrame):
         self._cancel_proxy()
         self._source_range_seconds = (start, end)
         self._source_path = Path(path)
+        self._set_presentation("source")
         self._active_candidate_title = candidate_title or "Выбранный кандидат"
         self.active_candidate.setText(
             f"Кандидат: {self._active_candidate_title}\nФрагмент: {start:.1f}–{end:.1f} с"
         )
         self.active_candidate.show()
         self._range_autoplay = autoplay
+        self._range_media_ready = False
         self._clear_status()
         if not self.usable_media_path(self._source_path):
             self._show_error("Не удалось открыть исходный файл для предпросмотра.")
@@ -199,6 +280,7 @@ class VideoPreview(QFrame):
         self._using_proxy = False
         self._range_start_ms = int(round(start * 1000))
         self._range_end_ms = int(round(end * 1000))
+        self._range_media_ready = False
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(str(self._path)))
         self.placeholder.hide()
@@ -206,8 +288,49 @@ class VideoPreview(QFrame):
         self._set_available(True)
         self._show_status("Загружаем исходный фрагмент…")
 
+    def _file_presentation(self, candidate: Path | None, presentation: str) -> str:
+        if presentation in {"source", "vertical"}:
+            return presentation
+        if candidate and self.usable_media_path(candidate):
+            try:
+                metadata = probe_video(candidate)
+                if float(metadata.get("height") or 0) > float(metadata.get("width") or 0):
+                    return "vertical"
+            except Exception:
+                pass
+        return "source"
+
+    def _set_presentation(self, presentation: str) -> None:
+        """Keep short-form outputs recognisable as phone-video previews."""
+
+        self._presentation = "vertical" if presentation == "vertical" else "source"
+        vertical = self._presentation == "vertical"
+        if vertical:
+            width, height = 270, 480
+            self.setMaximumWidth(500)
+            self.video.set_preview_size(width, height)
+            self.video.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.placeholder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.video.setFixedSize(width, height)
+            self.placeholder.setFixedSize(width, height)
+            self.media_stage.setFixedSize(width, height)
+            self.media_stage.setObjectName("phoneStage")
+        else:
+            self.setMaximumWidth(864)
+            self.video.set_preview_size(840, 420)
+            for widget in (self.video, self.placeholder):
+                widget.setMinimumSize(0, 260)
+                widget.setMaximumSize(840, 420)
+                widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            self.media_stage.setMinimumSize(0, 260)
+            self.media_stage.setMaximumSize(840, 420)
+            self.media_stage.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            self.media_stage.setObjectName("")
+        self.media_stage.style().unpolish(self.media_stage)
+        self.media_stage.style().polish(self.media_stage)
+
     def _qt_can_decode_source(self, source_path: Path) -> bool:
-        """Use Qt's own decoder capability table for the AV1/WebM decision."""
+        """Return whether a candidate interval is safe for direct Qt playback."""
 
         try:
             stat = source_path.stat()
@@ -221,9 +344,10 @@ class VideoPreview(QFrame):
         try:
             metadata = probe_video(source_path)
             if str(metadata.get("video_codec") or "").lower() == "av1" and source_path.suffix.lower() == ".webm":
-                media_format = QMediaFormat(QMediaFormat.FileFormat.WebM)
-                media_format.setVideoCodec(QMediaFormat.VideoCodec.AV1)
-                supported = media_format.isSupported(QMediaFormat.ConversionMode.Decode)
+                # Media Foundation can report AV1/WebM as supported yet show a
+                # black frame after a later range seek. Candidate previews
+                # need predictable seeking, so use the existing short proxy.
+                supported = False
         except Exception:
             # Probe failure is not a reason to reject a potentially playable
             # file; the QMediaPlayer error path still has the proxy fallback.
@@ -275,7 +399,8 @@ class VideoPreview(QFrame):
             # candidate.  Transcoding keeps FFmpeg's accurate-seek discard.
             "-ss", f"{request.start_seconds:.3f}", "-i", str(request.source_path), "-t", f"{duration:.3f}",
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale=-2:480", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-vf", "scale=-2:480,fps=30,setsar=1", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(request.destination),
         ])
         self._proxy_process.start()
@@ -322,6 +447,7 @@ class VideoPreview(QFrame):
         self._using_proxy = True
         self._range_start_ms = 0
         self._range_end_ms = int(round((request.end_seconds - request.start_seconds) * 1000))
+        self._range_media_ready = False
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(str(self._path)))
         self.placeholder.hide()
@@ -335,7 +461,11 @@ class VideoPreview(QFrame):
     def _media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if self._path is None:
             return
-        if status == QMediaPlayer.MediaStatus.EndOfMedia and self._range_end_ms is not None:
+        if (
+            status == QMediaPlayer.MediaStatus.EndOfMedia
+            and self._range_media_ready
+            and self._range_end_ms is not None
+        ):
             # Windows Media Foundation can reset position to zero after the
             # terminal frame.  Keep the stopped candidate visibly at its end.
             self._stop_at_range_end()
@@ -349,13 +479,29 @@ class VideoPreview(QFrame):
         if self._range_start_ms is None:
             return
         if status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
-            self.player.setPosition(self._range_start_ms)
+            if self._range_media_ready:
+                return
+            # Media Foundation updates QVideoWidget's native size after the
+            # source is loaded.  Reapply the bounded presentation afterwards
+            # so a 1440p landscape source cannot widen the review page.
+            self._set_presentation(self._presentation)
+            self._range_media_ready = True
+            if self._range_start_ms > 0:
+                self.player.setPosition(self._range_start_ms)
             if self._range_autoplay:
                 self._range_autoplay = False
                 self._start_range_playback()
 
     def _position_changed(self, position: int) -> None:
-        if self._range_end_ms is not None and position >= self._range_end_ms:
+        if not self._range_media_ready or self._range_end_ms is None:
+            return
+        if self._using_proxy:
+            duration = self.player.duration()
+            if duration > 0 and position > duration:
+                # A queued position notification may still belong to the
+                # previous source. It cannot be valid for this short proxy.
+                return
+        if position >= self._range_end_ms:
             self._stop_at_range_end()
 
     def _stop_at_range_end(self) -> None:
@@ -387,7 +533,8 @@ class VideoPreview(QFrame):
     def _start_range_playback(self) -> None:
         if self._range_start_ms is None:
             return
-        self.player.setPosition(self._range_start_ms)
+        if self._range_start_ms > 0:
+            self.player.setPosition(self._range_start_ms)
         QTimer.singleShot(0, self.player.play)
         self._show_status("Воспроизведение выбранного фрагмента…")
 
@@ -407,6 +554,7 @@ class VideoPreview(QFrame):
         self.player.stop()
         self.player.setSource(QUrl())
         self._path = None
+        self._range_media_ready = False
         self.video.hide()
         self.placeholder.show()
         self._set_available(False)
@@ -423,6 +571,7 @@ class VideoPreview(QFrame):
     def _show_error(self, message: str) -> None:
         self.player.stop()
         self._path = None
+        self._range_media_ready = False
         self.placeholder.setText(message)
         self.placeholder.show()
         self.video.hide()
