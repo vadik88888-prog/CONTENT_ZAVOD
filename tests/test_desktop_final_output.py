@@ -224,6 +224,32 @@ def test_failed_process_with_current_canonical_results_keeps_outputs(tmp_path: P
     assert [Path(value).name for value in run.artifact_paths] == ["report.json", "final-short.mp4"]
 
 
+def test_cancelled_process_preserves_verified_partial_output(tmp_path: Path, valid_video_probe) -> None:
+    from PySide6.QtCore import QCoreApplication
+
+    _application = QCoreApplication.instance() or QCoreApplication([])
+    services, project, run, prepared = _context(tmp_path)
+    final = prepared.output_directory / "production-render" / "final-short.mp4"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"valid final artifact")
+    _write_report(prepared, final, warnings=["second candidate was cancelled"])
+    report = read_json(prepared.report_path)
+    report["primary_results"] = [{
+        "candidate_id": "clip-one", "output_file": str(final), "status": "completed", "primary": True,
+    }]
+    write_json(prepared.report_path, report)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    viewmodel.run = run
+    viewmodel.prepared = prepared
+
+    viewmodel._cancelled()
+
+    assert run.status == RunStatus.COMPLETED_WITH_WARNINGS
+    assert viewmodel.snapshot.phase == ProcessingPhase.COMPLETED_WITH_WARNINGS
+    assert [Path(value).name for value in run.artifact_paths] == ["report.json", "final-short.mp4"]
+
+
 def test_startup_recovery_uses_current_report_and_canonical_results(tmp_path: Path, valid_video_probe) -> None:
     services, project, run, prepared = _context(tmp_path)
     final = prepared.output_directory / "production-render" / "final-short.mp4"

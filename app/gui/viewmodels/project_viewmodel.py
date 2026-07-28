@@ -358,6 +358,19 @@ class ProjectViewModel(QObject):
     def _cancelled(self) -> None:
         if not self.project or not self.run:
             return
+        if self.prepared:
+            # A cancellation can race the final persistence step after one or
+            # more candidate MP4s were already completed.  Preserve verified
+            # canonical outputs instead of replacing that partial success with
+            # an opaque cancelled run.
+            recovered = self.services.recover_failed_process(self.project, self.run, self.prepared)
+            if recovered:
+                self._finish(
+                    ProcessingPhase.COMPLETED_WITH_WARNINGS,
+                    "Часть роликов готова; незавершённые можно запустить снова",
+                    recovered,
+                )
+                return
         run = self.services.finish_cancelled(self.project, self.run)
         self._finish(ProcessingPhase.CANCELLED, "Создание отменено", run)
 
