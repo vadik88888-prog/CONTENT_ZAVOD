@@ -105,6 +105,7 @@ class ScoredCandidate:
     selected: bool
     selection_reason: str | None = None
     selection_diagnostics: dict[str, Any] = field(default_factory=dict)
+    virality: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +123,7 @@ class ScoredCandidate:
             "selected": self.selected,
             "selection_reason": self.selection_reason,
             "selection_diagnostics": self.selection_diagnostics,
+            "virality": self.virality,
         }
 
 
@@ -165,4 +167,5 @@ def scored_from_dict(data: dict[str, Any]) -> ScoredCandidate:
         selected=bool(data.get("selected", False)),
         selection_reason=data.get("selection_reason"),
         selection_diagnostics=dict(data.get("selection_diagnostics", {})),
+        virality=dict(data.get("virality", {})),
     )

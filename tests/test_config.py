@@ -45,3 +45,8 @@ def test_virality_policy_validates_complete_normalized_weights() -> None:
     policy = ViralityScoringConfig(semantic_ai_mode="invalid")
     with pytest.raises(ClipEngineError, match="semantic_ai_mode"):
         policy.validate()
+
+    policy = ViralityScoringConfig()
+    policy.strategy_weights.pop("generic_dialogue")
+    with pytest.raises(ClipEngineError, match="strategy_weights"):
+        policy.validate()

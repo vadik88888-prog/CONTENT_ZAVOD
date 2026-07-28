@@ -54,12 +54,14 @@ from app.tts_service import TTSService, tts_report_section
 from app.utils import AtomicWriteError, read_json, safe_name, stable_file_hash, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
+from app.virality import apply_virality_ranking, build_virality_assessments
 
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
     "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
-    "global_content_map", "story_units", "semantic_boundaries", "coverage_map", "clip_count_recommendation", "render", "report",
+    "global_content_map", "story_units", "semantic_boundaries", "virality_profiles", "virality_ranking",
+    "coverage_map", "clip_count_recommendation", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.7.1"
 TRANSFORMATION_STAGES = (
@@ -396,11 +398,64 @@ class Pipeline:
             lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
             cache_tracker=source_cache,
         )
-        scored = [scored_from_dict(item) for item in ai_data.get("candidates", [])]
+        virality_profiles: dict[str, Any] = {}
+        virality_ranking: dict[str, Any] = {}
+        ranked_data = ai_data
+        if self.config.virality.enabled:
+            virality_profiles = self._cached(
+                tracker, "virality_profiles", work_directory / "virality_profiles.json",
+                {
+                    "source": source.id, "candidates": _hash(local_data), "content_map": _hash(content_map),
+                    "transcript_features": _hash(transcript_features), "audio_features": _hash(audio_features),
+                    "visual_features": _hash(visual_analysis), "content_profile": _hash(content_profile),
+                    "virality": {
+                        "schema_version": self.config.virality.schema_version,
+                        "strategy_version": self.config.virality.strategy_version,
+                        "semantic_ai_mode": self.config.virality.semantic_ai_mode,
+                        "dead_zone_minimum_seconds": self.config.virality.dead_zone_minimum_seconds,
+                    },
+                },
+                lambda: _write(
+                    work_directory / "virality_profiles.json",
+                    build_virality_assessments(
+                        [candidate_from_dict(item) for item in local_data.get("candidates", [])], content_map,
+                        transcript_features, audio_features, visual_analysis, content_profile, self.config.virality,
+                    ),
+                ),
+                cache_tracker=source_cache,
+            )
+            virality_ranking = self._cached(
+                tracker, "virality_ranking", work_directory / "virality_ranking.json",
+                {
+                    "legacy_candidates": _hash(ai_data), "assessments": _hash(virality_profiles),
+                    "content_profile": _hash(content_profile),
+                    "virality": {
+                        "schema_version": self.config.virality.schema_version,
+                        "scoring_config_version": self.config.virality.scoring_config_version,
+                        "strategy_version": self.config.virality.strategy_version,
+                        "weights": self.config.virality.weights,
+                        "strategy_weights": self.config.virality.strategy_weights,
+                        "minimum_quality_score": self.config.virality.minimum_quality_score,
+                        "minimum_publishability_score": self.config.virality.minimum_publishability_score,
+                        "dead_zone_penalty_weight": self.config.virality.dead_zone_penalty_weight,
+                    },
+                },
+                lambda: _write(
+                    work_directory / "virality_ranking.json",
+                    apply_virality_ranking(
+                        [scored_from_dict(item) for item in ai_data.get("candidates", [])], virality_profiles,
+                        self.config.virality, content_profile,
+                    ),
+                ),
+                cache_tracker=source_cache,
+            )
+            ranked_data = virality_ranking
+        scored = [scored_from_dict(item) for item in ranked_data.get("candidates", [])]
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {
-                "policy_version": "coverage-aware-v1", "scored": _hash(ai_data), "content_map": _hash(content_map),
+                "policy_version": "coverage-aware-virality-v1" if self.config.virality.enabled else "coverage-aware-v1",
+                "scored": _hash(ranked_data), "content_map": _hash(content_map),
                 "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold,
                 "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count,
                 "coverage": {
@@ -409,6 +464,12 @@ class Pipeline:
                     "strong_story_unit_threshold": self.config.content_understanding.strong_story_unit_threshold,
                     "semantic_duplicate_threshold": self.config.content_understanding.semantic_duplicate_threshold,
                     "coverage_min_quality_score": self.config.content_understanding.coverage_min_quality_score,
+                },
+                "virality": {
+                    "enabled": self.config.virality.enabled,
+                    "schema_version": self.config.virality.schema_version,
+                    "minimum_quality_score": self.config.virality.minimum_quality_score,
+                    "minimum_publishability_score": self.config.virality.minimum_publishability_score,
                 },
             },
             lambda: self._final_selection(scored, work_directory / "final_selection.json", content_map),
@@ -441,7 +502,10 @@ class Pipeline:
         final_scored = [scored_from_dict(item) for item in final_data.get("candidates", [])]
         write_json(
             work_directory / "candidates.scored.json",
-            {"candidates": [item.to_dict() for item in final_scored], "ai": ai_data.get("ai", {})},
+            {
+                "candidates": [item.to_dict() for item in final_scored], "ai": ai_data.get("ai", {}),
+                "virality": {key: value for key, value in virality_ranking.items() if key != "candidates"},
+            },
         )
         selected = [item for item in final_scored if item.candidate.id in selected_ids]
         transformation = self._transform_selected(
@@ -514,6 +578,7 @@ class Pipeline:
                     if name in INTELLIGENCE_STAGES or name in {"metadata", "transcription"}
                 },
                 "candidates": [item.to_dict() for item in final_scored],
+                "virality": {key: value for key, value in virality_ranking.items() if key != "candidates"},
             },
             content_transformation=transformation,
             production_plan=production,
@@ -639,8 +704,10 @@ class Pipeline:
         return data
 
     def _ai_rerank(self, candidates: list[Candidate], short_candidates: list[Candidate], transcript: dict[str, Any], path: Path) -> dict[str, Any]:
-        if self.no_ai_rerank or not self.config.ai_reranking.enabled:
+        if self.no_ai_rerank or not self.config.ai_reranking.enabled or self.config.virality.enabled:
+            reason = "virality_code_owned" if self.config.virality.enabled else "disabled"
             data = {"candidates": [item.to_dict() for item in local_rank(candidates)], "ai": _local_ai_usage("disabled"), "ai_reranking_used": False, "ai_fallback_used": False, "selection_mode": "local"}
+            data["ai"]["reason"] = reason
             write_json(path, data)
             return data
         try:

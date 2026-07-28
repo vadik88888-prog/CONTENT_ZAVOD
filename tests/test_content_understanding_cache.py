@@ -96,3 +96,42 @@ def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypat
     Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True).run(input_path=str(second_source))
 
     assert calls == {"profile": 2, "map": 2, "boundaries": 2}
+
+
+def test_virality_cache_ignores_render_revisions_but_respects_scoring_weights(tmp_path: Path, monkeypatch) -> None:
+    import app.pipeline as pipeline_module
+
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0, "virality_profiles": 0, "virality_ranking": 0}
+    _wire_pipeline(monkeypatch, calls)
+    real_profiles = pipeline_module.build_virality_assessments
+    real_ranking = pipeline_module.apply_virality_ranking
+
+    def virality_profiles(*args, **kwargs):
+        calls["virality_profiles"] += 1
+        return real_profiles(*args, **kwargs)
+
+    def virality_ranking(*args, **kwargs):
+        calls["virality_ranking"] += 1
+        return real_ranking(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "build_virality_assessments", virality_profiles)
+    monkeypatch.setattr(pipeline_module, "apply_virality_ranking", virality_ranking)
+
+    first = AppConfig(score_threshold=0); first.virality.enabled = True
+    result = Pipeline(tmp_path, first, mock_ai=True).run(input_path=str(source))
+    assert (result.work_directory / "virality_profiles.json").is_file()
+    assert (result.work_directory / "virality_ranking.json").is_file()
+    assert calls["virality_profiles"] == 1 and calls["virality_ranking"] == 1
+
+    render_only = AppConfig(score_threshold=0); render_only.virality.enabled = True
+    render_only.production_render.subtitle_style = "clean"
+    Pipeline(tmp_path, render_only, mock_ai=True).run(input_path=str(source))
+    assert calls["virality_profiles"] == 1 and calls["virality_ranking"] == 1
+
+    changed_weights = AppConfig(score_threshold=0); changed_weights.virality.enabled = True
+    changed_weights.virality.strategy_weights["motivational_monologue"]["hook"] += 0.01
+    changed_weights.virality.strategy_weights["motivational_monologue"]["payoff"] -= 0.01
+    Pipeline(tmp_path, changed_weights, mock_ai=True).run(input_path=str(source))
+    assert calls["virality_profiles"] == 1
+    assert calls["virality_ranking"] == 2

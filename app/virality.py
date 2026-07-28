@@ -50,6 +50,19 @@ PUBLISHABILITY_LEVELS = frozenset({"ready", "limited", "blocked"})
 ELIGIBILITY_STATUSES = frozenset({
     "publishable_now", "publishable_with_minor_adjustment", "needs_reconstruction", "weak", "rejected",
 })
+VIRALITY_COMPONENTS = (
+    "hook", "curiosity", "emotion", "conflict", "specificity", "novelty", "usefulness", "quotability",
+    "momentum", "payoff", "retention", "publishability",
+)
+VIRALITY_PENALTIES = (
+    "slow_start", "context_dependency", "unresolved_curiosity", "missing_payoff", "repetition", "filler",
+    "confusion", "dead_zone", "weak_ending", "boundary_risk", "semantic_duplication",
+)
+PENALTY_WEIGHTS = {
+    "slow_start": 0.06, "context_dependency": 0.08, "unresolved_curiosity": 0.06, "missing_payoff": 0.10,
+    "repetition": 0.04, "filler": 0.05, "confusion": 0.06, "dead_zone": 0.10,
+    "weak_ending": 0.07, "boundary_risk": 0.14, "semantic_duplication": 0.06,
+}
 RETENTION_ZONE_DEFINITIONS = (
     ("opening", 0.00, 0.10),
     ("early", 0.10, 0.25),
@@ -811,6 +824,149 @@ class EligibilityAssessment:
         return result
 
 
+@dataclass(slots=True)
+class ScoreContribution:
+    name: str
+    raw_score: float
+    normalized_score: float
+    confidence_adjusted_score: float
+    confidence: float
+    strategy_weight: float
+    contribution: float
+    explanation: str
+    evidence: list[FeatureEvidence]
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.name or not self.explanation:
+            raise ValueError("ScoreContribution requires a name and explanation.")
+        for value in (self.raw_score, self.normalized_score, self.confidence_adjusted_score, self.confidence, self.strategy_weight, self.contribution):
+            if not 0 <= value <= 1:
+                raise ValueError("ScoreContribution values must be bounded.")
+        for item in self.evidence:
+            item.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return _nested_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ScoreContribution":
+        result = cls(
+            name=str(data.get("name") or "unknown"), raw_score=_bounded(float(data.get("raw_score", 0))),
+            normalized_score=_bounded(float(data.get("normalized_score", 0))),
+            confidence_adjusted_score=_bounded(float(data.get("confidence_adjusted_score", 0))),
+            confidence=_bounded(float(data.get("confidence", 0))), strategy_weight=_bounded(float(data.get("strategy_weight", 0))),
+            contribution=_bounded(float(data.get("contribution", 0))), explanation=str(data.get("explanation") or "No explanation."),
+            evidence=[FeatureEvidence.from_dict(item) for item in data.get("evidence", []) if isinstance(item, dict)],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class ViralityConfidence:
+    overall: FeatureScore
+    factors: dict[str, FeatureScore]
+    warnings: list[str] = field(default_factory=list)
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.factors:
+            raise ValueError("ViralityConfidence requires explainable factors.")
+        self.overall.validate(allowed_segment_ids)
+        for item in self.factors.values():
+            item.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "overall": self.overall.to_dict(),
+            "factors": {name: score.to_dict(name) for name, score in self.factors.items()},
+            "warnings": self.warnings,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ViralityConfidence":
+        raw_factors = data.get("factors", {})
+        result = cls(
+            overall=FeatureScore.from_dict(dict(data.get("overall") or {})),
+            factors={name: FeatureScore.from_dict(dict(value)) for name, value in raw_factors.items() if isinstance(value, dict)} if isinstance(raw_factors, dict) else {},
+            warnings=[str(item) for item in data.get("warnings", [])],
+        )
+        result.validate()
+        return result
+
+
+@dataclass(slots=True)
+class ViralPotentialScore:
+    candidate_id: str
+    strategy_id: str
+    components: dict[str, ScoreContribution]
+    penalties: dict[str, ScoreContribution]
+    positive_score: float
+    penalty_score: float
+    viral_potential_score: float
+    retention_potential_score: float
+    publishability_score: float
+    level: str
+    confidence: ViralityConfidence
+    strongest_factors: list[str]
+    weakest_factors: list[str]
+    ranking_explanation: str
+    eligibility_status: str
+
+    def validate(self, allowed_segment_ids: set[int] | None = None) -> None:
+        if not self.candidate_id or self.strategy_id not in {
+            "motivational_monologue", "generic_monologue", "generic_dialogue", "generic_educational",
+            "generic_scene_driven", "generic_fallback",
+        }:
+            raise ValueError("ViralPotentialScore identity or strategy is invalid.")
+        if set(self.components) != set(VIRALITY_COMPONENTS) or set(self.penalties) != set(VIRALITY_PENALTIES):
+            raise ValueError("ViralPotentialScore must expose every component and penalty.")
+        if self.level not in {"weak", "moderate", "strong", "excellent"} or self.eligibility_status not in ELIGIBILITY_STATUSES:
+            raise ValueError("ViralPotentialScore level or eligibility is invalid.")
+        for value in (self.positive_score, self.penalty_score, self.viral_potential_score, self.retention_potential_score, self.publishability_score):
+            if not 0 <= value <= 1:
+                raise ValueError("ViralPotentialScore values must be bounded.")
+        for item in [*self.components.values(), *self.penalties.values()]:
+            item.validate(allowed_segment_ids)
+        self.confidence.validate(allowed_segment_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "candidate_id": self.candidate_id, "strategy_id": self.strategy_id,
+            "components": {name: value.to_dict() for name, value in self.components.items()},
+            "penalties": {name: value.to_dict() for name, value in self.penalties.items()},
+            "positive_score": round(self.positive_score, 6), "penalty_score": round(self.penalty_score, 6),
+            "viral_potential_score": round(self.viral_potential_score, 6),
+            "retention_potential_score": round(self.retention_potential_score, 6),
+            "publishability_score": round(self.publishability_score, 6), "level": self.level,
+            "confidence": self.confidence.to_dict(), "strongest_factors": self.strongest_factors,
+            "weakest_factors": self.weakest_factors, "ranking_explanation": self.ranking_explanation,
+            "eligibility_status": self.eligibility_status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ViralPotentialScore":
+        raw_components, raw_penalties = data.get("components", {}), data.get("penalties", {})
+        result = cls(
+            candidate_id=str(data.get("candidate_id") or ""), strategy_id=str(data.get("strategy_id") or "generic_fallback"),
+            components={name: ScoreContribution.from_dict(dict(raw_components.get(name) or {})) for name in VIRALITY_COMPONENTS} if isinstance(raw_components, dict) else {},
+            penalties={name: ScoreContribution.from_dict(dict(raw_penalties.get(name) or {})) for name in VIRALITY_PENALTIES} if isinstance(raw_penalties, dict) else {},
+            positive_score=_bounded(float(data.get("positive_score", 0))), penalty_score=_bounded(float(data.get("penalty_score", 0))),
+            viral_potential_score=_bounded(float(data.get("viral_potential_score", 0))),
+            retention_potential_score=_bounded(float(data.get("retention_potential_score", 0))),
+            publishability_score=_bounded(float(data.get("publishability_score", 0))), level=str(data.get("level") or "weak"),
+            confidence=ViralityConfidence.from_dict(dict(data.get("confidence") or {})),
+            strongest_factors=[str(item) for item in data.get("strongest_factors", [])],
+            weakest_factors=[str(item) for item in data.get("weakest_factors", [])],
+            ranking_explanation=str(data.get("ranking_explanation") or "No explanation."),
+            eligibility_status=str(data.get("eligibility_status") or "weak"),
+        )
+        result.validate()
+        return result
+
+
 def _nested_dict(value: Any) -> dict[str, Any]:
     """Serialize nested FeatureScore models without leaking dataclass internals."""
 
@@ -1553,3 +1709,266 @@ def assess_candidate_eligibility(
     )
     result.validate(set(candidate.transcript_segment_ids))
     return result
+
+
+def resolve_virality_strategy(content_profile: dict[str, Any] | None) -> str:
+    strategy = str((content_profile or {}).get("strategy_id") or "generic_fallback")
+    return strategy if strategy in {
+        "motivational_monologue", "generic_monologue", "generic_dialogue", "generic_educational",
+        "generic_scene_driven", "generic_fallback",
+    } else "generic_fallback"
+
+
+def build_virality_assessments(
+    candidates: list[Candidate], content_map: dict[str, Any], transcript_features: dict[str, Any],
+    audio_features: dict[str, Any], visual_analysis: dict[str, Any] | None,
+    content_profile: dict[str, Any] | None, settings: Any,
+) -> dict[str, Any]:
+    """Build source-scoped deterministic diagnostics without changing source or render data."""
+
+    strategy_id = resolve_virality_strategy(content_profile)
+    items: list[dict[str, Any]] = []
+    for candidate in candidates:
+        feature = build_virality_feature_profile(
+            candidate, content_map, transcript_features, audio_features, visual_analysis, strategy_id,
+        )
+        retention = build_estimated_retention_profile(
+            candidate, feature, transcript_features, audio_features,
+            dead_zone_minimum_seconds=float(settings.dead_zone_minimum_seconds),
+        )
+        publishability = build_publishability_assessment(candidate, feature, retention, visual_analysis)
+        eligibility = assess_candidate_eligibility(candidate, feature, retention, publishability)
+        items.append({
+            "candidate_id": candidate.id, "feature_profile": feature.to_dict(), "retention_profile": retention.to_dict(),
+            "publishability": publishability.to_dict(), "eligibility": eligibility.to_dict(),
+        })
+    semantic_mode = str(getattr(settings, "semantic_ai_mode", "auto"))
+    return {
+        "schema_version": VIRALITY_SCHEMA_VERSION, "strategy_id": strategy_id,
+        "analysis_mode": "deterministic", "candidates": items,
+        "semantic_ai": {
+            "requested_mode": semantic_mode, "used": False,
+            "fallback_used": semantic_mode != "off",
+            "reason": "Grounded deterministic fallback is active; no semantic AI score was required for this source.",
+        },
+        "cost": {
+            "estimated_ai_cost": 0.0, "actual_ai_cost": 0.0, "cache_savings": 0.0,
+            "tokens_per_candidate": 0, "batch_count": 0, "fallback_usage": len(candidates) if semantic_mode != "off" else 0,
+        },
+    }
+
+
+def _contribution(name: str, signal: FeatureScore, weight: float, explanation: str) -> ScoreContribution:
+    normalized = _bounded(signal.score)
+    confidence_adjusted = _bounded(normalized * 0.88 + signal.confidence * 0.12)
+    return ScoreContribution(
+        name=name, raw_score=signal.score, normalized_score=normalized,
+        confidence_adjusted_score=confidence_adjusted, confidence=signal.confidence,
+        strategy_weight=_bounded(weight), contribution=_bounded(normalized * weight),
+        explanation=explanation, evidence=list(signal.evidence),
+    )
+
+
+def _confidence_model(
+    candidate: Candidate, profile: ViralityFeatureProfile, retention: EstimatedRetentionProfile,
+    publishability: PublishabilityAssessment, content_profile: dict[str, Any] | None,
+) -> ViralityConfidence:
+    ids = list(candidate.transcript_segment_ids)
+    source_confidence = _bounded(float((content_profile or {}).get("analysis_confidence", 0.6)))
+    visual_available = not any("визуаль" in warning.casefold() or "visual" in warning.casefold() for warning in profile.warnings)
+    evidence_coverage = _bounded(sum(bool(item.evidence) for item in profile.features.values()) / max(1, len(profile.features)))
+    completeness = publishability.story_completeness.score
+    consistency = _bounded(1 - max(
+        abs(profile.features["retention_potential"].score - retention.completion_potential.score),
+        abs(profile.features["publishability"].score - publishability.publishability_score.score),
+    ))
+    factors = {
+        "transcript": _retention_summary_feature(profile.analysis_confidence.confidence, profile.analysis_confidence.confidence, "Надёжность transcript-derived evidence.", candidate, "confidence_transcript"),
+        "semantic_evidence_coverage": _retention_summary_feature(evidence_coverage, profile.analysis_confidence.confidence, "Покрытие score components локальными evidence.", candidate, "confidence_evidence"),
+        "audio": _retention_summary_feature(profile.features["speech_energy"].confidence, profile.features["speech_energy"].confidence, "Доступность audio features.", candidate, "confidence_audio"),
+        "visual": _retention_summary_feature(0.82 if visual_available else 0.42, 0.82 if visual_available else 0.42, "Доступность visual observations отображается отдельно от качества истории.", candidate, "confidence_visual"),
+        "content_type": _retention_summary_feature(source_confidence, source_confidence, "Уверенность в source content strategy.", candidate, "confidence_content_type"),
+        "score_consistency": _retention_summary_feature(consistency, profile.analysis_confidence.confidence, "Согласованность independent deterministic signals.", candidate, "confidence_consistency"),
+        "candidate_completeness": _retention_summary_feature(completeness, publishability.story_completeness.confidence, "Завершённость candidate для надёжности оценки.", candidate, "confidence_completeness"),
+        "ai_local_agreement": _retention_summary_feature(0.72, 0.72, "Semantic AI не применялся: сохранён нейтральный deterministic agreement.", candidate, "confidence_ai_local"),
+    }
+    overall = _bounded(_average(item.score for item in factors.values()))
+    warnings = [] if visual_available else ["Visual observations are unavailable; content/audio evidence remains usable."]
+    result = ViralityConfidence(
+        overall=_retention_summary_feature(overall, overall, "Confidence is reported separately and only limits ranking tie-breaks.", candidate, "virality_confidence"),
+        factors=factors, warnings=warnings,
+    )
+    result.validate(set(ids))
+    return result
+
+
+def _potential_level(score: float) -> str:
+    if score >= 0.78:
+        return "excellent"
+    if score >= 0.62:
+        return "strong"
+    if score >= 0.43:
+        return "moderate"
+    return "weak"
+
+
+def aggregate_viral_potential(
+    candidate: Candidate, feature_profile: ViralityFeatureProfile, retention_profile: EstimatedRetentionProfile,
+    publishability: PublishabilityAssessment, eligibility: EligibilityAssessment,
+    strategy_weights: dict[str, float], content_profile: dict[str, Any] | None = None,
+    *, dead_zone_penalty_weight: float = 0.10,
+) -> ViralPotentialScore:
+    """Code-owned score aggregation; confidence is visible but never replaces quality."""
+
+    if set(strategy_weights) != set(VIRALITY_COMPONENTS):
+        raise ValueError("Strategy weights must cover each ViralPotentialScore component.")
+    if any(not math.isfinite(float(value)) or float(value) < 0 for value in strategy_weights.values()):
+        raise ValueError("Strategy weights must be finite non-negative values.")
+    if abs(sum(float(value) for value in strategy_weights.values()) - 1.0) > 0.001:
+        raise ValueError("Strategy weights must sum to one.")
+    if not 0 <= dead_zone_penalty_weight <= 1:
+        raise ValueError("dead_zone_penalty_weight must be bounded.")
+    components_signals = {
+        "hook": feature_profile.features["hook_strength"],
+        "curiosity": feature_profile.features["curiosity_gap"],
+        "emotion": _feature(
+            _average((feature_profile.features["emotional_intensity"].score, feature_profile.features["emotional_progression"].score)),
+            _average((feature_profile.features["emotional_intensity"].confidence, feature_profile.features["emotional_progression"].confidence)),
+            "Combined emotional intensity and progression.", source="feature_profile", raw="emotion", segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:320],
+        ),
+        "conflict": _feature(
+            _average((feature_profile.features["conflict_tension"].score, feature_profile.hook_assessment.stakes.score)),
+            _average((feature_profile.features["conflict_tension"].confidence, feature_profile.hook_assessment.stakes.confidence)),
+            "Conflict strength and visible stakes.", source="feature_profile", raw="conflict", segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:320],
+        ),
+        "specificity": feature_profile.features["specificity"],
+        "novelty": feature_profile.features["surprise_novelty"],
+        "usefulness": feature_profile.features["usefulness"],
+        "quotability": feature_profile.features["quotability"],
+        "momentum": feature_profile.features["narrative_momentum"],
+        "payoff": feature_profile.features["payoff_strength"],
+        "retention": _feature(
+            _average((retention_profile.completion_potential.score, retention_profile.early_retention.score, retention_profile.late_retention.score)),
+            retention_profile.retention_confidence.score, "Relative retention and completion potential.", source="retention_profile", raw="retention", segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:320],
+        ),
+        "publishability": publishability.publishability_score,
+    }
+    components = {
+        name: _contribution(name, signal, float(strategy_weights[name]), f"Strategy-weighted {name} contribution.")
+        for name, signal in components_signals.items()
+    }
+    boundary = candidate.boundary_diagnostics or {}
+    boundary_risk = _bounded(1 - float(boundary.get("overall_boundary_score", 0.82 if boundary.get("eligible", True) else 0.08)))
+    dead_ratio = _bounded(sum(zone.duration * zone.severity.score for zone in retention_profile.dead_zone_ranges) / max(candidate.duration, 0.01))
+    raw_penalties = {
+        "slow_start": feature_profile.features["slow_start_penalty"],
+        "context_dependency": _feature(1 - feature_profile.features["context_independence"].score, feature_profile.features["context_independence"].confidence, "Context dependence penalty.", source="feature_profile", raw="context", segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:320]),
+        "unresolved_curiosity": feature_profile.hook_assessment.unresolved_curiosity_penalty,
+        "missing_payoff": _feature(1 - feature_profile.features["payoff_strength"].score, feature_profile.features["payoff_strength"].confidence, "Missing payoff penalty.", source="feature_profile", raw="payoff", segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[-320:]),
+        "repetition": feature_profile.features["repetition_penalty"],
+        "filler": feature_profile.features["filler_penalty"],
+        "confusion": feature_profile.features["confusion_penalty"],
+        "dead_zone": _feature(dead_ratio, retention_profile.retention_confidence.score, "Dead-zone duration and severity are diagnostic only; no source is edited.", source="retention_profile", raw=dead_ratio, segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[:320]),
+        "weak_ending": feature_profile.features["weak_ending_penalty"],
+        "boundary_risk": _feature(boundary_risk, 0.9, "Semantic boundary risk has priority over high hook scores.", source="semantic_boundary", raw=boundary_risk, segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.text[-320:]),
+        "semantic_duplication": _feature(_bounded(float(candidate.feature_vector.get("semantic_duplicate_score", 0))), feature_profile.analysis_confidence.score, "Source-relative semantic duplication penalty.", source="content_signature", raw=candidate.feature_vector.get("semantic_duplicate_score", 0), segment_ids=list(candidate.transcript_segment_ids), excerpt=candidate.core_idea[:320]),
+    }
+    penalty_weights = dict(PENALTY_WEIGHTS)
+    penalty_weights["dead_zone"] = dead_zone_penalty_weight
+    penalties = {
+        name: _contribution(name, signal, penalty_weights[name], f"Bounded {name} penalty.")
+        for name, signal in raw_penalties.items()
+    }
+    positive = _bounded(sum(item.contribution for item in components.values()))
+    penalty = _bounded(sum(item.contribution for item in penalties.values()))
+    viral_score = _bounded(positive - penalty)
+    confidence = _confidence_model(candidate, feature_profile, retention_profile, publishability, content_profile)
+    strongest = [item.name for item in sorted(components.values(), key=lambda item: (-item.contribution, item.name))[:3] if item.contribution > 0]
+    weakest = [item.name for item in sorted(penalties.values(), key=lambda item: (-item.contribution, item.name))[:3] if item.contribution > 0]
+    reason = (
+        f"Comparative potential is driven by {', '.join(strongest) or 'available content signals'}"
+        f"; main constraints: {', '.join(weakest) or 'none detected'}.")
+    result = ViralPotentialScore(
+        candidate_id=candidate.id, strategy_id=feature_profile.content_strategy, components=components, penalties=penalties,
+        positive_score=positive, penalty_score=penalty, viral_potential_score=viral_score,
+        retention_potential_score=retention_profile.completion_potential.score,
+        publishability_score=publishability.publishability_score.score, level=_potential_level(viral_score), confidence=confidence,
+        strongest_factors=strongest, weakest_factors=weakest, ranking_explanation=reason, eligibility_status=eligibility.status,
+    )
+    result.validate(set(candidate.transcript_segment_ids))
+    return result
+
+
+def apply_virality_ranking(
+    scored: list[Any], assessment_data: dict[str, Any], settings: Any,
+    content_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Attach code-owned scoring to existing candidates before Goal 5A coverage selection."""
+
+    strategy = resolve_virality_strategy(content_profile)
+    all_weights = getattr(settings, "strategy_weights", {})
+    weights = dict(all_weights.get(strategy) or getattr(settings, "weights", {}))
+    raw_items = assessment_data.get("candidates", []) if isinstance(assessment_data, dict) else []
+    by_id = {str(item.get("candidate_id") or ""): item for item in raw_items if isinstance(item, dict)}
+    ranked: list[Any] = []
+    diagnostics: list[dict[str, Any]] = []
+    for item in scored:
+        raw = by_id.get(item.candidate.id)
+        if raw is None:
+            item.selected = False
+            item.rejection_reason = "Missing virality assessment."
+            item.virality = {"status": "missing_assessment"}
+            ranked.append(item)
+            continue
+        feature = ViralityFeatureProfile.from_dict(dict(raw.get("feature_profile") or {}))
+        retention = EstimatedRetentionProfile.from_dict(dict(raw.get("retention_profile") or {}))
+        publishability = PublishabilityAssessment.from_dict(dict(raw.get("publishability") or {}))
+        eligibility = EligibilityAssessment.from_dict(dict(raw.get("eligibility") or {}))
+        potential = aggregate_viral_potential(
+            item.candidate, feature, retention, publishability, eligibility, weights, content_profile,
+            dead_zone_penalty_weight=float(getattr(settings, "dead_zone_penalty_weight", 0.10)),
+        )
+        passes_floor = potential.viral_potential_score >= float(getattr(settings, "minimum_quality_score", 0.52))
+        publishable = publishability.publishability_score.score >= float(getattr(settings, "minimum_publishability_score", 0.55))
+        allowed = eligibility.status in {"publishable_now", "publishable_with_minor_adjustment"} and passes_floor and publishable
+        item.score = int(round(potential.viral_potential_score * 100))
+        item.hook_score = int(round(feature.hook_assessment.hook_strength.score * 100))
+        item.completeness_score = int(round(publishability.story_completeness.score * 100))
+        item.emotional_score = int(round(feature.features["emotional_progression"].score * 100))
+        item.clarity_score = int(round(feature.features["clarity"].score * 100))
+        item.context_dependency_score = int(round((1 - feature.features["context_independence"].score) * 100))
+        item.selected = allowed
+        item.rejection_reason = None if allowed else {
+            "rejected": "; ".join(eligibility.critical_failures) or "critical_publishability_failure",
+            "needs_reconstruction": "requires_future_story_reconstruction",
+            "weak": "weak_content_value",
+        }.get(eligibility.status, "below_virality_or_publishability_floor")
+        item.virality = {
+            "feature_profile": feature.to_dict(), "retention_profile": retention.to_dict(),
+            "publishability": publishability.to_dict(), "eligibility": eligibility.to_dict(),
+            "viral_potential": potential.to_dict(),
+            "selection_eligible": allowed,
+            "ranking_sort_score": potential.viral_potential_score,
+        }
+        diagnostics.append({
+            "candidate_id": item.candidate.id, "viral_potential_score": potential.viral_potential_score,
+            "retention_potential_score": potential.retention_potential_score,
+            "publishability_score": potential.publishability_score, "eligibility": eligibility.status,
+            "passes_quality_floor": passes_floor, "passes_publishability_floor": publishable,
+        })
+        ranked.append(item)
+    confidence_weight = _bounded(float(getattr(settings, "uncertainty_tiebreak_weight", 0.08)))
+    ranked.sort(key=lambda value: (
+        -float(value.virality.get("ranking_sort_score", value.score / 100)),
+        -float(value.virality.get("viral_potential", {}).get("confidence", {}).get("overall", {}).get("score", 0)) * confidence_weight,
+        value.candidate.id,
+    ))
+    for index, item in enumerate(ranked, 1):
+        if item.virality:
+            item.virality["overall_rank"] = index
+    return {
+        "schema_version": VIRALITY_SCHEMA_VERSION, "strategy_id": strategy,
+        "candidates": [item.to_dict() for item in ranked], "ranking": diagnostics,
+        "minimum_quality_score": float(getattr(settings, "minimum_quality_score", 0.52)),
+        "minimum_publishability_score": float(getattr(settings, "minimum_publishability_score", 0.55)),
+    }

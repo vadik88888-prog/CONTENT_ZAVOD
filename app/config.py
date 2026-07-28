@@ -200,13 +200,41 @@ DEFAULT_VIRALITY_WEIGHTS = {
     "retention": 0.08,
     "publishability": 0.05,
 }
+VIRALITY_STRATEGY_IDS = (
+    "motivational_monologue", "generic_monologue", "generic_dialogue", "generic_educational",
+    "generic_scene_driven", "generic_fallback",
+)
+DEFAULT_VIRALITY_STRATEGY_WEIGHTS = {
+    "motivational_monologue": {
+        "hook": 0.14, "curiosity": 0.06, "emotion": 0.13, "conflict": 0.06, "specificity": 0.06,
+        "novelty": 0.05, "usefulness": 0.05, "quotability": 0.11, "momentum": 0.09, "payoff": 0.14,
+        "retention": 0.07, "publishability": 0.04,
+    },
+    "generic_monologue": dict(DEFAULT_VIRALITY_WEIGHTS),
+    "generic_dialogue": {
+        "hook": 0.11, "curiosity": 0.11, "emotion": 0.08, "conflict": 0.13, "specificity": 0.05,
+        "novelty": 0.05, "usefulness": 0.06, "quotability": 0.06, "momentum": 0.10, "payoff": 0.13,
+        "retention": 0.08, "publishability": 0.04,
+    },
+    "generic_educational": {
+        "hook": 0.09, "curiosity": 0.05, "emotion": 0.06, "conflict": 0.07, "specificity": 0.15,
+        "novelty": 0.04, "usefulness": 0.17, "quotability": 0.05, "momentum": 0.08, "payoff": 0.13,
+        "retention": 0.07, "publishability": 0.04,
+    },
+    "generic_scene_driven": {
+        "hook": 0.12, "curiosity": 0.07, "emotion": 0.12, "conflict": 0.12, "specificity": 0.04,
+        "novelty": 0.09, "usefulness": 0.04, "quotability": 0.05, "momentum": 0.14, "payoff": 0.12,
+        "retention": 0.06, "publishability": 0.03,
+    },
+    "generic_fallback": dict(DEFAULT_VIRALITY_WEIGHTS),
+}
 
 
 @dataclass(slots=True)
 class ViralityScoringConfig:
     """Goal 5B policy. Scores are comparative content signals, never view predictions."""
 
-    enabled: bool = True
+    enabled: bool = False
     schema_version: str = "5B.1"
     scoring_config_version: str = "5B.1"
     strategy_version: str = "5B.1"
@@ -219,6 +247,9 @@ class ViralityScoringConfig:
     dead_zone_minimum_seconds: float = 1.4
     dead_zone_penalty_weight: float = 0.10
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_VIRALITY_WEIGHTS))
+    strategy_weights: dict[str, dict[str, float]] = field(
+        default_factory=lambda: {name: dict(values) for name, values in DEFAULT_VIRALITY_STRATEGY_WEIGHTS.items()}
+    )
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -251,6 +282,15 @@ class ViralityScoringConfig:
             raise ClipEngineError("virality.weights должен содержать неотрицательные числа.")
         if abs(sum(self.weights.values()) - 1.0) > 0.001:
             raise ClipEngineError("Сумма virality.weights должна быть равна 1.0.")
+        if set(self.strategy_weights) != set(VIRALITY_STRATEGY_IDS):
+            raise ClipEngineError("virality.strategy_weights должен содержать все поддерживаемые content strategies.")
+        for strategy, weights in self.strategy_weights.items():
+            if not isinstance(weights, dict) or set(weights) != set(DEFAULT_VIRALITY_WEIGHTS):
+                raise ClipEngineError(f"virality.strategy_weights.{strategy} должен содержать все компоненты ViralPotentialScore.")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in weights.values()):
+                raise ClipEngineError(f"virality.strategy_weights.{strategy} должен содержать неотрицательные числа.")
+            if abs(sum(weights.values()) - 1.0) > 0.001:
+                raise ClipEngineError(f"Сумма virality.strategy_weights.{strategy} должна быть равна 1.0.")
 
 
 DEFAULT_SCORING_WEIGHTS = {
