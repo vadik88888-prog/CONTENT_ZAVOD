@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
-from app.gui.components import ProcessingProgress, VideoPreview
+from app.gui.components import CandidateThumbnailLoader, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
@@ -34,6 +34,11 @@ class ProjectScreen(QWidget):
         self.viewmodel = viewmodel
         self.project: DesktopProject | None = None
         self.runs: list[ProjectRun] = []
+        self._active_candidate_id: str | None = None
+        self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
+        self._thumbnail_loader = CandidateThumbnailLoader(self)
+        self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
+        self._thumbnail_loader.thumbnail_unavailable.connect(self._thumbnail_unavailable)
         root = QVBoxLayout(self)
         root.setContentsMargins(34, 26, 34, 30)
         header = QHBoxLayout()
@@ -55,7 +60,11 @@ class ProjectScreen(QWidget):
         self.autosave.setObjectName("muted")
         root.addWidget(self.autosave)
         body = QHBoxLayout()
-        left = QVBoxLayout()
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_host = QWidget()
+        left = QVBoxLayout(self.content_host)
+        left.setContentsMargins(0, 0, 0, 0)
         self.preview = VideoPreview()
         left.addWidget(self.preview)
         self.metadata = self._card("Сведения о видео")
@@ -95,8 +104,10 @@ class ProjectScreen(QWidget):
         self.history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_layout.addStretch()
         self.history.setWidget(self.history_host)
+        self.history.setMinimumHeight(180)
         left.addWidget(self.history, 1)
-        body.addLayout(left, 3)
+        self.content_scroll.setWidget(self.content_host)
+        body.addWidget(self.content_scroll, 3)
         panel = QFrame()
         panel.setObjectName("card")
         panel.setMaximumWidth(300)
@@ -225,6 +236,7 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
         self._update_candidate_review(project)
+        self._refresh_active_candidate_detail(project)
 
     def _primary_action(self) -> None:
         if not self.project:
@@ -232,6 +244,7 @@ class ProjectScreen(QWidget):
         if self.project.analysis_artifact_path and self.project.status in {
             "analysis_ready", "reviewing_candidates", "partially_rendered", "completed",
         }:
+            self.content_scroll.ensureWidgetVisible(self.candidate_review, 0, 16)
             self.candidate_review.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         self.viewmodel.start_analysis()
@@ -243,6 +256,7 @@ class ProjectScreen(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._candidate_checks = {}
+        self._candidate_thumbnail_labels = {}
         analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
         analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
         candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
@@ -273,13 +287,27 @@ class ProjectScreen(QWidget):
             if isinstance(item, dict):
                 level = str(item.get("potential") or "low")
                 potential_counts[level if level in potential_counts else "low"] += 1
+        recommended_count = sum(
+            bool(item.get("recommended", item.get("selected_by_recommendation")))
+            for item in candidates if isinstance(item, dict)
+        )
+        rendered_count = sum(state == "rendered" for state in project.candidate_states.values())
+        processing_count = sum(state in {"draft_planning", "production_rendering"} for state in project.candidate_states.values())
+        error_count = len({
+            *[candidate_id for candidate_id, state in project.candidate_states.items() if state == "draft_failed"],
+            *project.candidate_errors,
+        })
         selection_toolbar = QFrame()
         toolbar_layout = QHBoxLayout(selection_toolbar)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.addWidget(QLabel(
-            f"Найдено: {len(candidates)} · Высокий: {potential_counts['high']} · "
-            f"Средний: {potential_counts['medium']} · Выбрано: {len(project.review_selected_candidate_ids)}"
-        ), 1)
+        summary = QLabel(
+            f"Найдено: {len(candidates)} · Рекомендуется: {recommended_count} · "
+            f"Высокий: {potential_counts['high']} · Средний: {potential_counts['medium']} · "
+            f"Выбрано: {len(project.review_selected_candidate_ids)} · Готово: {rendered_count} · "
+            f"В процессе: {processing_count} · Ошибки: {error_count}"
+        )
+        summary.setWordWrap(True)
+        toolbar_layout.addWidget(summary, 1)
         recommended_button = QPushButton("Выбрать рекомендованные")
         recommended_button.clicked.connect(self._select_recommended)
         clear_button = QPushButton("Снять выбор")
@@ -329,47 +357,83 @@ class ProjectScreen(QWidget):
                 "selected": "подтверждён", "production_rendering": "создаём ролик", "rendered": "готово",
             }.get(state, "готов к просмотру")
             frame = QFrame(); frame.setObjectName("card")
-            row = QHBoxLayout(frame); row.setContentsMargins(8, 6, 8, 6)
-            recommended = " · рекомендуем" if item.get("selected_by_recommendation") else ""
+            row = QHBoxLayout(frame); row.setContentsMargins(10, 8, 10, 8)
+            thumbnail = QLabel("Кадр\nзагружается")
+            thumbnail.setObjectName("muted")
+            thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumbnail.setFixedSize(112, 64)
+            thumbnail.setStyleSheet("border: 1px solid #303640; border-radius: 4px;")
+            row.addWidget(thumbnail)
+            self._candidate_thumbnail_labels.setdefault(candidate_id, []).append(thumbnail)
+            try:
+                start_seconds = float(start_value)
+                end_seconds = float(end_value)
+            except (TypeError, ValueError):
+                start_seconds, end_seconds = 0.0, 0.0
+            preview_contract = item.get("preview") if isinstance(item.get("preview"), dict) else {}
+            thumbnail_contract = preview_contract.get("thumbnail") if isinstance(preview_contract.get("thumbnail"), dict) else {}
+            thumbnail_time = thumbnail_contract.get("timestamp_seconds", start_seconds + max(0.0, min(1.0, (end_seconds - start_seconds) / 2)))
+            try:
+                thumbnail_seconds = float(thumbnail_time)
+            except (TypeError, ValueError):
+                thumbnail_seconds = start_seconds
+            if project.source.is_file():
+                self._thumbnail_loader.request(
+                    cache_directory=project.directory / "candidate-thumbnails",
+                    analysis_id=project.analysis_id or "analysis",
+                    candidate_id=candidate_id,
+                    source_path=project.source,
+                    timestamp_seconds=thumbnail_seconds,
+                )
+            information = QVBoxLayout()
+            title = QLabel(str(item.get("title") or item.get("core_idea") or "Момент из видео"))
+            title.setStyleSheet("font-weight: 600;")
+            title.setWordWrap(True)
+            information.addWidget(title)
+            recommended = " · рекомендуем" if item.get("recommended", item.get("selected_by_recommendation")) else ""
             check = QCheckBox(f"{start}–{end} · {potential} · уверенность {confidence * 100:.0f}%{recommended}")
             check.setToolTip(f"{status_label}. {item.get('title') or item.get('text') or item.get('reason') or ''}")
             check.setChecked(candidate_id in project.review_selected_candidate_ids)
             check.toggled.connect(lambda _checked=False: self._persist_review_selection())
             self._candidate_checks[candidate_id] = check
-            row.addWidget(check, 1)
+            information.addWidget(check)
+            reasons = [str(value) for value in item.get("reasons", []) if str(value)]
+            if reasons:
+                reason = QLabel("Почему: " + reasons[0])
+                reason.setObjectName("muted")
+                reason.setWordWrap(True)
+                information.addWidget(reason)
+            row.addLayout(information, 1)
+            actions = QVBoxLayout()
             status = QLabel(status_label)
             status.setObjectName("muted")
             candidate_error = project.candidate_errors.get(candidate_id)
             if candidate_error:
                 status.setText("есть ошибка")
                 status.setToolTip(candidate_error)
-            row.addWidget(status)
-            for text, boundary, delta in (
-                ("С−1", "start", -1.0), ("С−.5", "start", -0.5), ("С+.5", "start", 0.5), ("С+1", "start", 1.0),
-                ("К−1", "end", -1.0), ("К−.5", "end", -0.5), ("К+.5", "end", 0.5), ("К+1", "end", 1.0),
-            ):
-                boundary_button = QPushButton(text)
-                boundary_button.setToolTip("С — начало, К — конец; изменение не запускает повторный анализ.")
-                boundary_button.clicked.connect(
-                    lambda _checked=False, cid=candidate_id, name=boundary, value=delta: self.viewmodel.adjust_candidate_boundary(cid, name, value)
-                )
-                row.addWidget(boundary_button)
+            status.setWordWrap(True)
+            actions.addWidget(status)
             source_preview = QPushButton("Просмотреть")
             source_preview.clicked.connect(lambda _checked=False, value=dict(item): self._preview_candidate(value))
-            row.addWidget(source_preview)
+            actions.addWidget(source_preview)
             preview = previews.get(candidate_id, {}).get("preview", {}) if isinstance(previews.get(candidate_id), dict) else {}
             preview_file = Path(str(preview.get("output_file") or "")) if isinstance(preview, dict) else None
             if preview_file and preview_file.is_file():
                 button = QPushButton("Смотреть черновик")
                 button.clicked.connect(lambda _checked=False, path=preview_file: self.preview.set_file(str(path)))
-                row.addWidget(button)
+                actions.addWidget(button)
+            row.addLayout(actions)
             layout.addWidget(frame)
-        self.draft_button.setText("Собрать черновики" if draftable_exists else "Подтвердить выбор")
+        selected_count = len(project.review_selected_candidate_ids)
+        self.draft_button.setText(
+            f"Собрать {selected_count} черновик(а)" if draftable_exists else f"Подтвердить {selected_count} черновик(а)"
+        )
         self.draft_button.setDisabled(not bool(project.review_selected_candidate_ids))
         selected_drafts_exist = all(
             Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in project.selected_candidate_ids
         )
+        self.production_button.setText(f"Создать {len(project.selected_candidate_ids)} выбранных ролика(ов)")
         self.production_button.setDisabled(not bool(project.selected_candidate_ids) or not selected_drafts_exist)
         layout.addWidget(self.draft_button); layout.addWidget(self.production_button)
 
@@ -379,8 +443,8 @@ class ProjectScreen(QWidget):
     def _draft_action(self) -> None:
         if not self.project:
             return
-        candidate_ids = self._checked_candidate_ids()
-        self.viewmodel.set_review_selection(candidate_ids)
+        self._persist_review_selection()
+        candidate_ids = list(self.project.review_selected_candidate_ids)
         if not candidate_ids:
             return
         needs_draft = [
@@ -394,7 +458,19 @@ class ProjectScreen(QWidget):
 
     def _persist_review_selection(self) -> None:
         if self.project:
-            self.viewmodel.set_review_selection(self._checked_candidate_ids())
+            # Filters may hide already selected cards.  Update only the
+            # visible subset so a click never silently discards a selection
+            # made in another filter view.
+            selected = set(self.project.review_selected_candidate_ids)
+            for candidate_id, checkbox in self._candidate_checks.items():
+                if checkbox.isChecked():
+                    selected.add(candidate_id)
+                else:
+                    selected.discard(candidate_id)
+            self.viewmodel.set_review_selection([
+                candidate_id for candidate_id in self.project.review_selected_candidate_ids
+                if candidate_id in selected
+            ] + [candidate_id for candidate_id in self._candidate_checks if candidate_id in selected and candidate_id not in self.project.review_selected_candidate_ids])
 
     def _select_recommended(self) -> None:
         if not self.project:
@@ -403,7 +479,7 @@ class ProjectScreen(QWidget):
         analysis = read_json(path, {}) if path and path.is_file() else {}
         candidate_ids = [
             str(item.get("candidate_id")) for item in analysis.get("candidates", [])
-            if isinstance(item, dict) and item.get("selected_by_recommendation") and item.get("candidate_id")
+            if isinstance(item, dict) and item.get("recommended", item.get("selected_by_recommendation")) and item.get("candidate_id")
         ] if isinstance(analysis, dict) else []
         self.viewmodel.set_review_selection(candidate_ids)
 
@@ -423,7 +499,7 @@ class ProjectScreen(QWidget):
     def _filtered_candidates(self, candidates: list[object], project: DesktopProject) -> list[dict]:
         values = [dict(item) for item in candidates if isinstance(item, dict) and item.get("candidate_id")]
         if self._candidate_filter == "recommended":
-            values = [item for item in values if item.get("selected_by_recommendation")]
+            values = [item for item in values if item.get("recommended", item.get("selected_by_recommendation"))]
         elif self._candidate_filter in {"high", "medium"}:
             values = [item for item in values if item.get("potential") == self._candidate_filter]
         elif self._candidate_filter == "unselected":
@@ -438,7 +514,7 @@ class ProjectScreen(QWidget):
             ), reverse=True)
         else:
             values.sort(key=lambda item: (
-                bool(item.get("selected_by_recommendation")),
+                bool(item.get("recommended", item.get("selected_by_recommendation"))),
                 potential_rank.get(str(item.get("potential")), 0),
                 float(item.get("score") or 0),
             ), reverse=True)
@@ -448,11 +524,23 @@ class ProjectScreen(QWidget):
         if not self.project:
             return
         try:
-            start = float(candidate.get("start_seconds", candidate.get("start", 0)))
-            end = float(candidate.get("end_seconds", candidate.get("end", start)))
+            start, end = self._candidate_range(candidate)
         except (TypeError, ValueError):
             return
         self.preview.set_range(self.project.source, start, end)
+        self._active_candidate_id = str(candidate.get("candidate_id") or "") or None
+        self._show_candidate_detail(candidate, start, end)
+
+    def _candidate_range(self, candidate: dict) -> tuple[float, float]:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        override = self.project.candidate_boundary_overrides.get(candidate_id, {}) if self.project else {}
+        start = float(override.get("start", candidate.get("start_seconds", candidate.get("start", 0))))
+        end = float(override.get("end", candidate.get("end_seconds", candidate.get("end", start))))
+        return start, max(start, end)
+
+    def _show_candidate_detail(self, candidate: dict, start: float, end: float) -> None:
+        if not self.project:
+            return
         potential = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}.get(str(candidate.get("potential")), "Предварительный")
         reasons = [str(item) for item in candidate.get("reasons", []) if str(item)]
         risks = [str(item) for item in candidate.get("risks", []) if str(item)]
@@ -463,7 +551,15 @@ class ProjectScreen(QWidget):
             f"Идея: {candidate.get('core_idea') or candidate.get('summary') or '—'}",
             f"Начало: {candidate.get('hook_summary') or '—'}",
             f"Финал: {candidate.get('payoff_summary') or '—'}",
+            "Оценки: " + " · ".join((
+                f"удержание {self._score_text(candidate.get('retention_score'))}",
+                f"публикация {self._score_text(candidate.get('publishability_score'))}",
+                f"потенциал {self._score_text(candidate.get('viral_score'))}",
+            )),
         ]
+        excerpt = str(candidate.get("transcript_excerpt") or candidate.get("text") or "").strip()
+        if excerpt:
+            lines.append("Текст: " + excerpt)
         if reasons:
             lines.append("Почему рекомендуем: " + " ".join(reasons[:2]))
         if risks:
@@ -472,6 +568,69 @@ class ProjectScreen(QWidget):
         if candidate_id and self.project.candidate_errors.get(candidate_id):
             lines.append("Причина ошибки: " + self.project.candidate_errors[candidate_id])
         self._replace_card_text(self.candidate_detail, lines)
+        controls = QWidget()
+        grid = QGridLayout(controls)
+        grid.setContentsMargins(0, 4, 0, 0)
+        for index, (text, boundary, delta) in enumerate((
+            ("Начало −1 с", "start", -1.0), ("Начало −0.5 с", "start", -0.5),
+            ("Начало +0.5 с", "start", 0.5), ("Начало +1 с", "start", 1.0),
+            ("Конец −1 с", "end", -1.0), ("Конец −0.5 с", "end", -0.5),
+            ("Конец +0.5 с", "end", 0.5), ("Конец +1 с", "end", 1.0),
+        )):
+            button = QPushButton(text)
+            button.setToolTip("Проверит только сохранённые границы речи и сцены; повторный анализ не нужен.")
+            button.clicked.connect(
+                lambda _checked=False, cid=candidate_id, name=boundary, value=delta: self._adjust_candidate_boundary(cid, name, value)
+            )
+            grid.addWidget(button, index // 4, index % 4)
+        self.candidate_detail.layout().addWidget(controls)
+
+    @staticmethod
+    def _score_text(value: object) -> str:
+        try:
+            return f"{float(value):.0f}/100"
+        except (TypeError, ValueError):
+            return "—"
+
+    def _adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
+        if candidate_id:
+            self.viewmodel.adjust_candidate_boundary(candidate_id, boundary, delta_seconds)
+
+    def _refresh_active_candidate_detail(self, project: DesktopProject) -> None:
+        if not self._active_candidate_id or not project.analysis_artifact_path:
+            return
+        analysis = read_json(Path(project.analysis_artifact_path), {})
+        candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
+        candidate = next(
+            (item for item in candidates if isinstance(item, dict) and item.get("candidate_id") == self._active_candidate_id),
+            None,
+        )
+        if isinstance(candidate, dict):
+            try:
+                start, end = self._candidate_range(candidate)
+            except (TypeError, ValueError):
+                return
+            self._show_candidate_detail(candidate, start, end)
+
+    def _thumbnail_ready(self, candidate_id: str, path: str) -> None:
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            return
+        for label in self._candidate_thumbnail_labels.get(candidate_id, []):
+            try:
+                label.setText("")
+                label.setPixmap(pixmap.scaled(
+                    label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+                ))
+            except RuntimeError:
+                continue
+
+    def _thumbnail_unavailable(self, candidate_id: str) -> None:
+        for label in self._candidate_thumbnail_labels.get(candidate_id, []):
+            try:
+                label.setText("Кадр\nнедоступен")
+            except RuntimeError:
+                continue
 
     def _confirm_production_render(self) -> None:
         if not self.project or not self.project.selected_candidate_ids:
