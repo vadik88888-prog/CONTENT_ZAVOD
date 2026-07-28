@@ -44,6 +44,8 @@ def test_presets_resolve_to_distinct_real_pipeline_values() -> None:
     assert config.transformation.ai_strategy == "staged"
     assert config.production_render.crop_strategy == "center_crop"
     assert config.product_flow.processing_mode == "maximum"
+    assert config.virality.enabled is True
+    assert config.virality.semantic_ai_mode == "auto"
 
 
 def test_deep_analysis_auto_is_conservative_and_manual_choice_wins() -> None:

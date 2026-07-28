@@ -346,6 +346,10 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     config.production.audio_mode = resolved.audio_mode
     config.production_render.cache_enabled = resolved.cache_policy.startswith("reuse")
     config.optional_visual_features = resolved.deep_analysis.resolved
+    # Goal 5B is active for the product flow while AppConfig remains backward
+    # compatible for external programmatic callers that did not opt in.
+    config.virality.enabled = True
+    config.virality.semantic_ai_mode = "off" if resolved.processing_mode == "fast" or resolved.deep_analysis.requested == "off" else "auto"
     flow = config.product_flow
     flow.processing_mode = resolved.processing_mode
     flow.deep_analysis_requested = resolved.deep_analysis.requested

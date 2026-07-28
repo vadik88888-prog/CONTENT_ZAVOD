@@ -254,15 +254,67 @@ class ProjectScreen(QWidget):
                 if isinstance(selected_chapters, list) and len(selected_chapters) > 1
                 else "Подборка покрывает найденные самостоятельные фрагменты."
             )
-            self._replace_card_text(self.content_summary, [
+            lines = [
                 f"Тип: {profile.get('detected_content_type', 'не определён')}",
                 f"Смысловых частей: {len(content_map.get('chapters', []))}",
                 f"Самостоятельных историй: {recommendation.get('estimated_story_count', understanding.get('story_unit_count', 0))}",
                 f"Рекомендуем создать: {lower}–{upper} ролика(ов)",
                 coverage_status,
-            ])
+            ]
+            lines.extend(self._virality_summary_lines(report))
+            self._replace_card_text(self.content_summary, lines)
             return
         self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
+
+    @staticmethod
+    def _virality_summary_lines(report: dict) -> list[str]:
+        """Keep Goal 5B reasons short and human-readable; never expose its formula."""
+
+        virality = report.get("virality", {}) if isinstance(report, dict) else {}
+        intelligence = report.get("clip_intelligence", {}) if isinstance(report, dict) else {}
+        candidates = intelligence.get("candidates", []) if isinstance(intelligence, dict) else []
+        if not isinstance(virality, dict) or not virality.get("enabled") or not isinstance(candidates, list):
+            return []
+        chosen = next(
+            (item for item in candidates if isinstance(item, dict) and item.get("selected") and isinstance(item.get("virality"), dict)),
+            next((item for item in candidates if isinstance(item, dict) and isinstance(item.get("virality"), dict)), None),
+        )
+        if not isinstance(chosen, dict):
+            return []
+        details = chosen.get("virality", {})
+        potential = details.get("viral_potential", {}) if isinstance(details, dict) else {}
+        publishability = details.get("publishability", {}) if isinstance(details, dict) else {}
+        retention = details.get("retention_profile", {}) if isinstance(details, dict) else {}
+        if not all(isinstance(item, dict) for item in (potential, publishability, retention)):
+            return []
+        level = {
+            "weak": "Низкий", "moderate": "Средний", "strong": "Высокий", "excellent": "Очень высокий",
+        }.get(str(potential.get("level")), "Предварительный")
+        lines = [f"Потенциал: {level}"]
+        factors = potential.get("strongest_factors", [])
+        if isinstance(factors, list):
+            labels = {
+                "hook": "Сильное начало", "curiosity": "Интрига раскрывается", "emotion": "Эмоциональная развязка",
+                "payoff": "Самостоятельный вывод", "retention": "Хороший шанс удержания",
+                "publishability": "Готов к публикации", "quotability": "Запоминающаяся фраза",
+                "usefulness": "Практическая ценность", "momentum": "Мысль развивается",
+            }
+            for factor in factors:
+                label = labels.get(str(factor))
+                if label and label not in lines:
+                    lines.append(label)
+                if len(lines) >= 4:
+                    break
+        eligibility = details.get("eligibility", {}) if isinstance(details, dict) else {}
+        status = eligibility.get("status") if isinstance(eligibility, dict) else ""
+        if status == "publishable_now" and "Готов к публикации" not in lines:
+            lines.append("Готов к публикации")
+        elif status in {"needs_reconstruction", "publishable_with_minor_adjustment"}:
+            lines.append("Лучше доработать перед публикацией")
+        confidence = potential.get("confidence", {}) if isinstance(potential, dict) else {}
+        if isinstance(confidence, dict) and confidence.get("warnings"):
+            lines.append("Предварительная оценка: недостаточно визуальных данных")
+        return lines[:5]
 
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}

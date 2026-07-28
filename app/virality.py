@@ -17,7 +17,7 @@ from app.content_understanding import StoryUnit
 from app.models import Candidate
 
 
-VIRALITY_SCHEMA_VERSION = "5B.1"
+VIRALITY_SCHEMA_VERSION = "5B.2"
 FEATURE_NAMES = (
     "hook_strength", "curiosity_gap", "emotional_intensity", "emotional_progression",
     "conflict_tension", "surprise_novelty", "specificity", "clarity", "relatability",
@@ -92,6 +92,10 @@ _ANSWER_MARKERS = (
 _PAYOFF_MARKERS = (
     "вывод", "итог", "поэтому", "значит", "вот почему", "разница", "победа", "решение", "ответ",
     "therefore", "the point", "that is why", "solution", "answer", "conclusion",
+)
+_SOFT_PAYOFF_MARKERS = (
+    "это и есть", "всегда", "никогда", "побед", "умр", "решит", "нужн", "долж", "вырв", "сраж", "борь",
+    "this is", "always", "never", "win", "lose", "must", "choose", "act", "therefore",
 )
 _CONFLICT_MARKERS = (
     "но", "против", "или", "риск", "ошибк", "поражен", "страх", "потер", "бор", "ад", "цен",
@@ -1198,10 +1202,17 @@ def _score_payoff(candidate: Candidate, story: StoryUnit | None, segments: list[
     story_payoff = bool(story and story.payoff.strip())
     question = bool(hook and hook.curiosity_opened)
     resolved = bool(hook and hook.curiosity_resolved)
-    present = marker or story_payoff or resolved
-    payoff_type = "answer" if resolved else "conclusion" if marker else "insight" if story_payoff else "none"
     ending_natural = bool(candidate.boundary_diagnostics.get("eligible", False)) if candidate.boundary_diagnostics else bool(candidate.text.rstrip().endswith((".", "!", "?", "…")))
-    strength = _bounded((0.46 if present else 0.0) + (0.20 if marker else 0) + (0.17 if resolved else 0) + (0.10 if ending_natural else 0))
+    soft_story_payoff = bool(
+        story and story.publishability_precheck and story.completeness_score >= 0.70
+        and ending_natural and _contains_any(ending, _SOFT_PAYOFF_MARKERS)
+    )
+    present = marker or story_payoff or resolved or soft_story_payoff
+    payoff_type = "answer" if resolved else "conclusion" if marker else "insight" if story_payoff or soft_story_payoff else "none"
+    strength = _bounded(
+        (0.46 if present else 0.0) + (0.20 if marker else 0) + (0.17 if resolved else 0)
+        + (0.08 if soft_story_payoff else 0) + (0.10 if ending_natural else 0)
+    )
     alignment = _bounded(0.82 if question and resolved else 0.62 if present else 0.0)
     confidence = _transcript_confidence(segments)
     payoff_segment: dict[str, Any] | None = None
@@ -1880,7 +1891,9 @@ def aggregate_viral_potential(
         for name, signal in raw_penalties.items()
     }
     positive = _bounded(sum(item.contribution for item in components.values()))
-    penalty = _bounded(sum(item.contribution for item in penalties.values()))
+    # Components already express missing payoff, unclear context and flatness.
+    # Penalties are a bounded corrective signal rather than a second full score.
+    penalty = _bounded(sum(item.contribution for item in penalties.values()) * 0.25)
     viral_score = _bounded(positive - penalty)
     confidence = _confidence_model(candidate, feature_profile, retention_profile, publishability, content_profile)
     strongest = [item.name for item in sorted(components.values(), key=lambda item: (-item.contribution, item.name))[:3] if item.contribution > 0]

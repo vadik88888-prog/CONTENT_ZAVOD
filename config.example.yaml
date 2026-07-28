@@ -86,14 +86,14 @@ content_understanding:
 virality:
   # Goal 5B: comparative content-strength signals, not a prediction of views.
   enabled: true
-  schema_version: 5B.1
-  scoring_config_version: 5B.1
-  strategy_version: 5B.1
+  schema_version: 5B.2
+  scoring_config_version: 5B.2
+  strategy_version: 5B.2
   # "auto" uses bounded grounded semantic assistance when available and falls
   # back to the deterministic local profile if it is not.
   semantic_ai_mode: auto
   max_ai_batch_candidates: 20
-  minimum_quality_score: 0.52
+  minimum_quality_score: 0.45
   minimum_publishability_score: 0.55
   strong_story_unit_threshold: 0.55
   uncertainty_tiebreak_weight: 0.08

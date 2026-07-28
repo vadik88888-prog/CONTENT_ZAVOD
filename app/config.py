@@ -235,12 +235,12 @@ class ViralityScoringConfig:
     """Goal 5B policy. Scores are comparative content signals, never view predictions."""
 
     enabled: bool = False
-    schema_version: str = "5B.1"
-    scoring_config_version: str = "5B.1"
-    strategy_version: str = "5B.1"
+    schema_version: str = "5B.2"
+    scoring_config_version: str = "5B.2"
+    strategy_version: str = "5B.2"
     semantic_ai_mode: str = "auto"
     max_ai_batch_candidates: int = 20
-    minimum_quality_score: float = 0.52
+    minimum_quality_score: float = 0.45
     minimum_publishability_score: float = 0.55
     strong_story_unit_threshold: float = 0.55
     uncertainty_tiebreak_weight: float = 0.08

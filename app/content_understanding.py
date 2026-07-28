@@ -1356,6 +1356,11 @@ def select_with_coverage(
             and story.publishability_precheck
             and story.standalone_score >= settings.strong_story_unit_threshold
         )
+        virality_ready = bool(
+            getattr(getattr(config, "virality", None), "enabled", False)
+            and item.virality.get("selection_eligible", False)
+            and item.score >= float(getattr(config.virality, "minimum_quality_score", 0.52)) * 100
+        )
         if not item.selected:
             rejected[item.candidate.id] = item.rejection_reason or "Не прошёл базовый quality ranking."
         elif item.candidate.duration < float(config.min_clip_duration):
@@ -1363,7 +1368,7 @@ def select_with_coverage(
                 f"Длительность {item.candidate.duration:.2f} с меньше минимальных "
                 f"{float(config.min_clip_duration):.2f} с."
             )
-        elif item.score < config.score_threshold and (
+        elif item.score < config.score_threshold and not virality_ready and (
             not strong_story or item.score < settings.coverage_min_quality_score
         ):
             rejected[item.candidate.id] = "Оценка ниже порога."

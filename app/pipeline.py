@@ -100,11 +100,13 @@ class StageTracker:
             and (cache_key is None or stage.get("cache_key") == cache_key)
         )
 
-    def start(self, name: str, cache_key: str | None = None) -> None:
+    def start(self, name: str, cache_key: str | None = None, cache_hit: bool | None = None) -> None:
         self.data["stages"][name] = {
             "status": "running", "started_at": utc_now(), "_started": time.perf_counter(),
             "cache_key": cache_key,
         }
+        if cache_hit is not None:
+            self.data["stages"][name]["cache_hit"] = cache_hit
         self._save()
 
     def finish(self, name: str, status: str = "completed", error: str | None = None) -> None:
@@ -412,6 +414,9 @@ class Pipeline:
                         "schema_version": self.config.virality.schema_version,
                         "strategy_version": self.config.virality.strategy_version,
                         "semantic_ai_mode": self.config.virality.semantic_ai_mode,
+                        "provider": self.config.ai.provider,
+                        "model": self.config.ai.model,
+                        "prompt_version": "5B.deterministic.1",
                         "dead_zone_minimum_seconds": self.config.virality.dead_zone_minimum_seconds,
                     },
                 },
@@ -454,7 +459,7 @@ class Pipeline:
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {
-                "policy_version": "coverage-aware-virality-v1" if self.config.virality.enabled else "coverage-aware-v1",
+                "policy_version": "coverage-aware-virality-v2" if self.config.virality.enabled else "coverage-aware-v1",
                 "scored": _hash(ranked_data), "content_map": _hash(content_map),
                 "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold,
                 "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count,
@@ -565,6 +570,25 @@ class Pipeline:
         report_path = output_directory / "report.json"
         tracker.start("report", _hash({"final": final_data, "coverage": coverage_map, "recommendation": clip_count_recommendation, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
         tracker.finish("report")
+        virality_report = (
+            {
+                "enabled": True,
+                "schema_version": self.config.virality.schema_version,
+                "scoring_config_version": self.config.virality.scoring_config_version,
+                "strategy_version": self.config.virality.strategy_version,
+                "strategy_id": virality_ranking.get("strategy_id", virality_profiles.get("strategy_id", "generic_fallback")),
+                "profiles_ref": str(work_directory / "virality_profiles.json"),
+                "ranking_ref": str(work_directory / "virality_ranking.json"),
+                "cost": dict(virality_profiles.get("cost", {})),
+                "semantic_ai": dict(virality_profiles.get("semantic_ai", {})),
+                "cache": {
+                    "profiles_hit": bool(tracker.data.get("stages", {}).get("virality_profiles", {}).get("cache_hit", False)),
+                    "ranking_hit": bool(tracker.data.get("stages", {}).get("virality_ranking", {}).get("cache_hit", False)),
+                },
+                "candidate_count": len(virality_ranking.get("candidates", [])),
+            }
+            if self.config.virality.enabled else {"enabled": False, "status": "disabled"}
+        )
         report = make_report(
             report_path, source_data, metadata, self.config, tracker.data, len(selected), len(candidates),
             [str(item) for item in outputs], self.warnings, self.errors, ai_usage,
@@ -600,6 +624,7 @@ class Pipeline:
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "fallback_used": bool(content_profile.get("fallback_used", True)),
             },
+            virality=virality_report,
             primary_results=[item.to_dict() for item in registry],
             run={
                 "run_id": self.run_id,
@@ -623,6 +648,10 @@ class Pipeline:
                 "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "analysis_fingerprint": _hash({"profile": content_profile, "map": content_map, "coverage": coverage_map}),
+            },
+            virality={
+                **virality_report,
+                "analysis_fingerprint": _hash({"profiles": virality_profiles, "ranking": virality_ranking}) if self.config.virality.enabled else None,
             },
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
@@ -679,10 +708,10 @@ class Pipeline:
             # cache supplied the artifact.  The cache index and the run state
             # are different files and both writes are process-locked by
             # write_json, so runs never replace one another's state.json.
-            tracker.start(stage, cache_key)
+            tracker.start(stage, cache_key, cache_hit=True)
             tracker.finish(stage)
             return read_json(artifact, {})
-        tracker.start(stage, cache_key)
+        tracker.start(stage, cache_key, cache_hit=False)
         if cache is not tracker:
             cache.start(stage, cache_key)
         try:

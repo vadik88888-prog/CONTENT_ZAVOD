@@ -157,3 +157,22 @@ def test_coverage_selection_uses_strong_story_above_coverage_floor() -> None:
 
     assert len(selected) == 3
     assert any(item.score == 57 for item in selected)
+
+
+def test_coverage_selection_uses_enabled_virality_floor_without_dropping_boundary_checks() -> None:
+    content_map = _content_map([
+        "Discipline creates progress when motivation disappears at the end of a hard day.",
+        "Courage starts after a person makes the first difficult decision.",
+        "Responsibility gives people control over the choices they make tomorrow.",
+    ])
+    config = AppConfig(score_threshold=60)
+    config.ai_reranking.final_clip_count = 3
+    config.virality.enabled = True
+    config.virality.minimum_quality_score = 0.45
+    scored = _scored(content_map, [50, 49, 48])
+    for item in scored:
+        item.virality = {"selection_eligible": True}
+
+    selected, _coverage = select_with_coverage(scored, config, content_map)
+
+    assert len(selected) == 3

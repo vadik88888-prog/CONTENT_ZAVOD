@@ -122,6 +122,12 @@ def test_virality_cache_ignores_render_revisions_but_respects_scoring_weights(tm
     result = Pipeline(tmp_path, first, mock_ai=True).run(input_path=str(source))
     assert (result.work_directory / "virality_profiles.json").is_file()
     assert (result.work_directory / "virality_ranking.json").is_file()
+    report = read_json(result.report_path, {})
+    assert report["virality"]["enabled"] is True
+    assert Path(report["virality"]["profiles_ref"]).is_file()
+    assert report["virality"]["cost"]["actual_ai_cost"] == 0
+    manifest = read_json(result.output_directory / "manifest.json", {})
+    assert manifest["virality"]["analysis_fingerprint"]
     assert calls["virality_profiles"] == 1 and calls["virality_ranking"] == 1
 
     render_only = AppConfig(score_threshold=0); render_only.virality.enabled = True
