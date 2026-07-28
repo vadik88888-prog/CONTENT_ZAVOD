@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
+from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact
+from app.candidate_review import validate_boundary_override
+from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
+from app.draft_preview import DraftPreviewService
 from app.audio_modes import tts_eligibility
 from app.clip_results import ClipResult, primary_clip_results, result_paths
 from app.diversity import interval_metrics, transcript_similarity
@@ -95,6 +99,10 @@ class PipelineResult:
     warnings: list[str]
     terminal_status: str = "completed"
     error_code: str | None = None
+    analysis_path: Path | None = None
+    analysis_id: str | None = None
+    draft_path: Path | None = None
+    draft_id: str | None = None
 
 
 class StageTracker:
@@ -181,6 +189,14 @@ class Pipeline:
         audio_only: bool = False, recompute_audio: bool = False,
         production_render_only: bool = False, recompute_production_render: bool = False,
         disable_production_render: bool = False,
+        analysis_only: bool = False,
+        analysis_artifact_path: Path | None = None,
+        selected_candidate_ids: list[str] | None = None,
+        expected_analysis_id: str | None = None,
+        expected_analysis_fingerprint: str | None = None,
+        draft_only: bool = False,
+        draft_artifact_path: Path | None = None,
+        candidate_boundary_overrides: dict[str, dict[str, Any]] | None = None,
         run_id: str | None = None,
         upstream_run_directory: Path | None = None,
         project_id: str | None = None,
@@ -203,6 +219,14 @@ class Pipeline:
         self.production_render_only = production_render_only
         self.recompute_production_render = recompute_production_render
         self.disable_production_render = disable_production_render
+        self.analysis_only = analysis_only
+        self.analysis_artifact_path = analysis_artifact_path.resolve() if analysis_artifact_path else None
+        self.selected_candidate_ids = list(selected_candidate_ids or [])
+        self.expected_analysis_id = expected_analysis_id
+        self.expected_analysis_fingerprint = expected_analysis_fingerprint
+        self.draft_only = draft_only
+        self.draft_artifact_path = draft_artifact_path.resolve() if draft_artifact_path else None
+        self.candidate_boundary_overrides = dict(candidate_boundary_overrides or {})
         self.run_id = safe_name(run_id or f"run-{uuid.uuid4().hex}", "run")
         self.upstream_run_directory = upstream_run_directory
         self.project_id = project_id
@@ -222,6 +246,24 @@ class Pipeline:
         # index.  This keeps a new render from inheriting an old final-output
         # state while retaining the expensive media/transcript cache.
         source_cache = StageTracker(work_directory / "cache-state.json")
+        if self.analysis_artifact_path is not None:
+            if not self.draft_only:
+                raise ClipEngineError(
+                    "Direct production render from analysis is disabled. Build and review a draft preview first."
+                )
+            return self._run_draft_preview(
+                tracker=tracker,
+                source=source,
+                work_directory=work_directory,
+                output_directory=output_directory,
+            )
+        if self.draft_artifact_path is not None:
+            return self._run_production_from_draft(
+                tracker=tracker,
+                source=source,
+                work_directory=work_directory,
+                output_directory=output_directory,
+            )
         if self.recompute_tts:
             tts_names = tuple(
                 name for name in tracker.data.get("stages", {})
@@ -525,6 +567,34 @@ class Pipeline:
             },
         )
         selected = [item for item in final_scored if item.candidate.id in selected_ids]
+        if self.analysis_only:
+            return self._finish_analysis_only(
+                tracker=tracker,
+                source=source,
+                source_data=source_data,
+                metadata=metadata,
+                transcript=transcript,
+                transcript_features=transcript_features,
+                audio_features=audio_features,
+                scenes=scenes,
+                visual_analysis=visual_analysis,
+                content_profile=content_profile,
+                content_map=content_map,
+                story_units=story_units,
+                raw_candidates=raw_candidates,
+                candidates=candidates,
+                short_candidates=short_candidates,
+                ai_data=ai_data,
+                virality_profiles=virality_profiles,
+                virality_ranking=virality_ranking,
+                final_data=final_data,
+                coverage_map=coverage_map,
+                clip_count_recommendation=clip_count_recommendation,
+                final_scored=final_scored,
+                selected_ids=selected_ids,
+                work_directory=work_directory,
+                output_directory=output_directory,
+            )
         transformation = self._transform_selected(
             tracker, source_data, metadata, selected, transcript, transcript_features,
             audio_features, scenes, work_directory, output_directory,
@@ -695,6 +765,646 @@ class Pipeline:
         return PipelineResult(
             work_directory, output_directory, report_path, len(outputs), outputs, self.warnings,
             terminal_status=terminal["status"], error_code=terminal.get("error_code"),
+        )
+
+    def _finish_analysis_only(
+        self,
+        *,
+        tracker: StageTracker,
+        source: Source,
+        source_data: dict[str, Any],
+        metadata: dict[str, Any],
+        transcript: dict[str, Any],
+        transcript_features: dict[str, Any],
+        audio_features: dict[str, Any],
+        scenes: dict[str, Any],
+        visual_analysis: dict[str, Any],
+        content_profile: dict[str, Any],
+        content_map: dict[str, Any],
+        story_units: dict[str, Any],
+        raw_candidates: dict[str, Any],
+        candidates: list[Candidate],
+        short_candidates: list[Candidate],
+        ai_data: dict[str, Any],
+        virality_profiles: dict[str, Any],
+        virality_ranking: dict[str, Any],
+        final_data: dict[str, Any],
+        coverage_map: dict[str, Any],
+        clip_count_recommendation: dict[str, Any],
+        final_scored: list[Any],
+        selected_ids: set[str],
+        work_directory: Path,
+        output_directory: Path,
+    ) -> PipelineResult:
+        """Persist a reusable intelligence result without starting delivery work."""
+
+        scored_records = [item.to_dict() for item in final_scored]
+        candidate_data_path = work_directory / "candidates.scored.json"
+        # The source cache remains the authoritative large-data store.  This
+        # output-side artifact is the immutable hand-off for review and render.
+        references = {
+            "source": str(work_directory / "source.json"),
+            "metadata": str(work_directory / "metadata.json"),
+            "transcript": str(work_directory / "transcript.json"),
+            "transcript_features": str(work_directory / "transcript_features.json"),
+            "audio_features": str(work_directory / "audio_features.json"),
+            "scene_boundaries": str(work_directory / "scene_boundaries.json"),
+            "visual_analysis": str(work_directory / "visual_analysis.json"),
+            "content_profile": str(work_directory / "video_content_profile.json"),
+            "content_map": str(work_directory / "global_content_map.json"),
+            "story_units": str(work_directory / "story_units.json"),
+            "semantic_boundaries": str(work_directory / "semantic_boundaries.json"),
+            "coverage_map": str(work_directory / "coverage_map.json"),
+            "clip_count_recommendation": str(work_directory / "clip_count_recommendation.json"),
+            "candidate_data": str(candidate_data_path),
+        }
+        if self.config.virality.enabled:
+            references["virality_profiles"] = str(work_directory / "virality_profiles.json")
+            references["virality_ranking"] = str(work_directory / "virality_ranking.json")
+        analysis_fingerprint = _hash({
+            "engine": INTELLIGENCE_ENGINE_VERSION,
+            "source": source.id,
+            "profile": content_profile,
+            "content_map": content_map,
+            "ranking": final_data,
+            "coverage": coverage_map,
+            "recommendation": clip_count_recommendation,
+        })
+        analysis_id = f"analysis-{analysis_fingerprint[:16]}"
+        artifact_path = output_directory / "analysis.json"
+        artifact = new_analysis_artifact(
+            analysis_id=analysis_id,
+            project_id=self.project_id,
+            source=dict(source_data),
+            source_fingerprint=source.id,
+            analysis_fingerprint=analysis_fingerprint,
+            work_directory=str(work_directory),
+            candidate_data_ref=str(candidate_data_path),
+            references=references,
+            candidates=[candidate_review_payload(record, selected_ids) for record in scored_records],
+            recommendation={
+                "selected_candidate_ids": [item.candidate.id for item in final_scored if item.candidate.id in selected_ids],
+                "clip_count": clip_count_recommendation,
+                "coverage": coverage_map,
+            },
+            summary={
+                "candidate_count": len(final_scored),
+                "recommended_count": len(selected_ids),
+                "source_duration_seconds": metadata.get("duration"),
+                "content_type": content_profile.get("detected_content_type"),
+            },
+            warnings=list(self.warnings),
+        )
+        tracker.start("analysis_artifact", analysis_fingerprint)
+        artifact.write(artifact_path)
+        tracker.finish("analysis_artifact")
+        for stage in (
+            *TRANSFORMATION_STAGES, *PRODUCTION_PLAN_STAGES, *TTS_STAGES,
+            *AUDIO_COMPOSITION_STAGES, *PRODUCTION_RENDER_STAGES, "render",
+        ):
+            tracker.skip(stage, "Analysis-only run: delivery stage was not started.")
+        terminal = {
+            "status": "analysis_ready",
+            "error_code": None,
+            "message": "Analysis completed. Select candidates before rendering.",
+            "analysis_id": analysis_id,
+        }
+        tracker.start("terminal")
+        tracker.finish("terminal", "analysis_ready")
+        summary = intelligence_summary(
+            transcript_features, audio_features, scenes, candidates, short_candidates,
+            bool(ai_data.get("ai_reranking_used")), bool(ai_data.get("ai_fallback_used")),
+            str(ai_data.get("selection_mode", "local")), int(raw_candidates.get("candidates_generated", len(candidates))),
+        )
+        ai_usage = ai_data.get("ai", {})
+        virality_report = {
+            "enabled": self.config.virality.enabled,
+            "profiles_ref": str(work_directory / "virality_profiles.json") if self.config.virality.enabled else None,
+            "ranking_ref": str(work_directory / "virality_ranking.json") if self.config.virality.enabled else None,
+            "candidate_count": len(virality_ranking.get("candidates", [])),
+        }
+        report_path = output_directory / "report.json"
+        tracker.start("report", _hash({"analysis": analysis_fingerprint, "terminal": terminal}))
+        tracker.finish("report")
+        make_report(
+            report_path, source_data, metadata, self.config, tracker.data, len(selected_ids), len(candidates),
+            [], self.warnings, self.errors, ai_usage,
+            gpu_used=transcript.get("runtime", {}).get("device") == "cuda",
+            nvenc_used=False,
+            clip_intelligence={
+                **summary,
+                "candidates": scored_records,
+                "analysis_artifact_ref": str(artifact_path),
+                "analysis_id": analysis_id,
+            },
+            content_understanding={
+                "enabled": True,
+                "profile": content_profile,
+                "content_map": content_map,
+                "story_units_ref": str(work_directory / "story_units.json"),
+                "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
+                "coverage_map_ref": str(work_directory / "coverage_map.json"),
+                "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
+                "story_unit_count": len(story_units.get("story_units", [])),
+                "coverage_map": coverage_map,
+                "clip_count_recommendation": clip_count_recommendation,
+                "strategy_version": self.config.content_understanding.strategy_version,
+            },
+            virality=virality_report,
+            terminal=terminal,
+            run={
+                "run_id": self.run_id,
+                "project_id": self.project_id,
+                "source_id": source.id,
+                "run_directory": str(output_directory),
+                "started_at": self.started_at,
+                "analysis_id": analysis_id,
+                "analysis_artifact_path": str(artifact_path),
+                "analysis_fingerprint": analysis_fingerprint,
+                "terminal_status": "analysis_ready",
+            },
+        )
+        return PipelineResult(
+            work_directory=work_directory,
+            output_directory=output_directory,
+            report_path=report_path,
+            selected_clips=len(selected_ids),
+            output_files=[],
+            warnings=self.warnings,
+            terminal_status="analysis_ready",
+            analysis_path=artifact_path,
+            analysis_id=analysis_id,
+        )
+
+    def _run_draft_preview(
+        self,
+        *,
+        tracker: StageTracker,
+        source: Source,
+        work_directory: Path,
+        output_directory: Path,
+    ) -> PipelineResult:
+        """Deliver exactly the review selection without re-running intelligence."""
+
+        assert self.analysis_artifact_path is not None
+        try:
+            analysis = AnalysisArtifact.read(self.analysis_artifact_path)
+        except AnalysisArtifactError as error:
+            raise ClipEngineError(f"Analysis artifact cannot be used: {error}") from error
+        if analysis.project_id and self.project_id and analysis.project_id != self.project_id:
+            raise ClipEngineError("Analysis artifact belongs to a different project.")
+        if self.expected_analysis_id and analysis.analysis_id != self.expected_analysis_id:
+            raise ClipEngineError("Analysis ID does not match the supplied artifact.")
+        if self.expected_analysis_fingerprint and analysis.analysis_fingerprint != self.expected_analysis_fingerprint:
+            raise ClipEngineError("Analysis fingerprint does not match the supplied artifact.")
+        if analysis.source_fingerprint != source.id:
+            raise ClipEngineError("The selected analysis belongs to a different source file.")
+        if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
+            raise ClipEngineError("Selected candidate IDs must not contain duplicates.")
+        if not self.selected_candidate_ids:
+            raise ClipEngineError("Render requires at least one explicit selected candidate ID.")
+
+        analysis_work_directory = Path(analysis.work_directory).resolve()
+        root_work_directory = (self.root / "work").resolve()
+        if not analysis_work_directory.is_relative_to(root_work_directory):
+            raise ClipEngineError("Analysis artifact work reference is outside this engine workspace.")
+
+        def load_reference(name: str) -> dict[str, Any]:
+            raw_path = analysis.references.get(name)
+            if not raw_path:
+                raise ClipEngineError(f"Analysis artifact is missing its {name} reference.")
+            path = Path(raw_path).resolve()
+            if not path.is_relative_to(analysis_work_directory) or not path.is_file():
+                raise ClipEngineError(f"Analysis reference is unavailable or unsafe: {name}.")
+            value = read_json(path, None)
+            if not isinstance(value, dict):
+                raise ClipEngineError(f"Analysis reference is corrupted: {name}.")
+            return value
+
+        candidate_path = Path(analysis.candidate_data_ref).resolve()
+        if not candidate_path.is_relative_to(analysis_work_directory) or not candidate_path.is_file():
+            raise ClipEngineError("Analysis candidate data is unavailable or unsafe.")
+        candidate_data = read_json(candidate_path, None)
+        if not isinstance(candidate_data, dict):
+            raise ClipEngineError("Analysis candidate data is corrupted.")
+        final_scored = [
+            scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
+        ]
+        candidates_by_id = {item.candidate.id: item for item in final_scored}
+        unknown = [candidate_id for candidate_id in self.selected_candidate_ids if candidate_id not in candidates_by_id]
+        if unknown:
+            raise ClipEngineError(f"Selected candidates are not present in this analysis: {', '.join(unknown)}.")
+        selected = [candidates_by_id[candidate_id] for candidate_id in self.selected_candidate_ids]
+        source_data = load_reference("source")
+        metadata = load_reference("metadata")
+        transcript = load_reference("transcript")
+        transcript_features = load_reference("transcript_features")
+        audio_features = load_reference("audio_features")
+        scenes = load_reference("scene_boundaries")
+        visual_analysis = load_reference("visual_analysis")
+        content_profile = load_reference("content_profile")
+        content_map = load_reference("content_map")
+        coverage_map = load_reference("coverage_map")
+        clip_count_recommendation = load_reference("clip_count_recommendation")
+        story_units = load_reference("story_units")
+        selected = self._apply_boundary_overrides(selected, metadata, transcript_features, scenes)
+
+        tracker.start("analysis_handoff", analysis.analysis_fingerprint, cache_hit=True)
+        tracker.finish("analysis_handoff")
+        transformation = self._transform_selected(
+            tracker, source_data, metadata, selected, transcript, transcript_features,
+            audio_features, scenes, work_directory, output_directory,
+        )
+        self.warnings.extend(transformation.get("warnings", []))
+        production = self._build_production_plans(tracker, transformation, work_directory, output_directory)
+        return self._finish_draft_preview(
+            tracker=tracker,
+            analysis=analysis,
+            source=source,
+            source_data=source_data,
+            metadata=metadata,
+            transcript=transcript,
+            content_profile=content_profile,
+            content_map=content_map,
+            story_units=story_units,
+            coverage_map=coverage_map,
+            clip_count_recommendation=clip_count_recommendation,
+            final_scored=final_scored,
+            transformation=transformation,
+            production=production,
+            work_directory=work_directory,
+            output_directory=output_directory,
+        )
+    def _apply_boundary_overrides(
+        self, selected: list[Any], metadata: dict[str, Any], transcript_features: dict[str, Any], scenes: dict[str, Any],
+    ) -> list[Any]:
+        """Apply persisted review edits using cached boundary evidence only."""
+
+        if not self.candidate_boundary_overrides:
+            return selected
+        adjusted: list[Any] = []
+        for scored in selected:
+            candidate_id = scored.candidate.id
+            override = self.candidate_boundary_overrides.get(candidate_id)
+            if not override:
+                adjusted.append(scored)
+                continue
+            try:
+                start, end = float(override["start"]), float(override["end"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ClipEngineError(f"Boundary override is invalid for {candidate_id}.") from error
+            validation = validate_boundary_override(
+                start, end,
+                source_duration=float(metadata["duration"]) if metadata.get("duration") is not None else None,
+                minimum_duration=self.config.candidate_generation.min_duration_seconds,
+                maximum_duration=self.config.candidate_generation.max_duration_seconds,
+                transcript_features=transcript_features,
+                scenes=scenes,
+            )
+            if not validation["valid"]:
+                raise ClipEngineError(
+                    f"Boundary override for {candidate_id} needs correction: {' '.join(validation['errors'])}"
+                )
+            copy = scored_from_dict(scored.to_dict())
+            copy.candidate.start = start
+            copy.candidate.end = end
+            copy.candidate.boundary_diagnostics = {
+                **copy.candidate.boundary_diagnostics,
+                "review_override": validation,
+            }
+            self.warnings.extend(
+                f"Boundary override {candidate_id}: {warning}" for warning in validation["warnings"]
+            )
+            adjusted.append(copy)
+        return adjusted
+
+    def _finish_draft_preview(
+        self,
+        *,
+        tracker: StageTracker,
+        analysis: AnalysisArtifact,
+        source: Source,
+        source_data: dict[str, Any],
+        metadata: dict[str, Any],
+        transcript: dict[str, Any],
+        content_profile: dict[str, Any],
+        content_map: dict[str, Any],
+        story_units: dict[str, Any],
+        coverage_map: dict[str, Any],
+        clip_count_recommendation: dict[str, Any],
+        final_scored: list[Any],
+        transformation: dict[str, Any],
+        production: dict[str, Any],
+        work_directory: Path,
+        output_directory: Path,
+    ) -> PipelineResult:
+        """Create only fast review previews from Draft FinalScript/ProductionPlan."""
+
+        transformations = {
+            str(item.get("candidate_id") or ""): item
+            for item in transformation.get("items", []) if isinstance(item, dict)
+        }
+        plans = {
+            str(item.get("candidate_id") or ""): item
+            for item in production.get("items", []) if isinstance(item, dict)
+        }
+        reviewed: list[dict[str, Any]] = []
+        preview_outputs: list[Path] = []
+        for index, candidate_id in enumerate(self.selected_candidate_ids, start=1):
+            suffix = safe_name(candidate_id, f"candidate-{index:02d}")
+            transformation_item = transformations.get(candidate_id, {})
+            plan_item = plans.get(candidate_id, {})
+            final_script_path = output_directory / f"transformed-script-{suffix}.json"
+            production_plan_path = output_directory / f"production-plan-{suffix}.json"
+            base = {
+                "candidate_id": candidate_id,
+                "state": "draft_planning",
+                "requested_index": index,
+                "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
+                "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
+            }
+            if transformation_item.get("status") not in {"completed", "fallback"}:
+                reviewed.append({
+                    **base, "state": "draft_failed",
+                    "error": str(transformation_item.get("error") or "Draft FinalScript was not created."),
+                })
+                continue
+            if plan_item.get("status") != "completed":
+                reviewed.append({
+                    **base, "state": "draft_failed",
+                    "error": str(plan_item.get("error") or plan_item.get("reason") or "Draft ProductionPlan was not created."),
+                })
+                continue
+            try:
+                plan = ProductionPlan.model_validate(plan_item.get("plan"))
+                tracker.start(f"draft_preview:{candidate_id}", _hash({
+                    "analysis": analysis.analysis_fingerprint, "plan": plan.plan_id,
+                    "preview": {"width": 540, "height": 960, "fps": 24, "version": "1.0"},
+                }))
+                preview = DraftPreviewService().render(plan, source, output_directory / "drafts" / f"{index:02d}-{suffix}")
+                tracker.finish(f"draft_preview:{candidate_id}")
+            except Exception as error:
+                safe = sanitize_api_error(error)
+                tracker.finish(f"draft_preview:{candidate_id}", "failed", safe)
+                reviewed.append({**base, "state": "draft_failed", "error": safe})
+                self.warnings.append(f"Draft preview {candidate_id} failed: {safe}")
+                continue
+            preview_outputs.append(preview.output_file)
+            reviewed.append({
+                **base,
+                "state": "draft_ready",
+                "draft_final_script": transformation_item.get("final_script", {}),
+                "draft_production_plan": plan.model_dump(mode="json"),
+                "preview": preview.to_dict(),
+                "hook": str(transformation_item.get("final_script", {}).get("hook") or ""),
+                "development": str(transformation_item.get("final_script", {}).get("body") or ""),
+                "payoff": str(transformation_item.get("final_script", {}).get("ending") or ""),
+            })
+        ready_count = sum(item.get("state") == "draft_ready" for item in reviewed)
+        artifact_status = "draft_ready" if ready_count == len(reviewed) and ready_count else "draft_partial"
+        draft_fingerprint = _hash({
+            "analysis": analysis.analysis_fingerprint,
+            "candidate_ids": self.selected_candidate_ids,
+            "plans": [item.get("draft_production_plan", {}).get("plan_id") for item in reviewed],
+            "preview_version": "1.0",
+        })
+        draft_id = f"draft-{draft_fingerprint[:16]}"
+        draft_path = output_directory / "draft.json"
+        draft = new_draft_artifact(
+            draft_id=draft_id,
+            analysis_id=analysis.analysis_id,
+            analysis_fingerprint=analysis.analysis_fingerprint,
+            analysis_artifact_path=str(self.analysis_artifact_path),
+            project_id=self.project_id or analysis.project_id,
+            source_fingerprint=source.id,
+            candidates=reviewed,
+            status=artifact_status,
+            warnings=list(self.warnings),
+        )
+        tracker.start("draft_artifact", draft_fingerprint)
+        draft.write(draft_path)
+        tracker.finish("draft_artifact")
+        for stage in (*TTS_STAGES, *AUDIO_COMPOSITION_STAGES, *PRODUCTION_RENDER_STAGES, "render"):
+            tracker.skip(stage, "Draft preview is ready for review; production delivery was not started.")
+        terminal = {
+            "status": "draft_ready" if ready_count else "failed",
+            "error_code": None if ready_count else "NO_DRAFT_PREVIEWS",
+            "message": "Draft previews are ready for user review." if ready_count else "No candidate draft could be assembled.",
+            "draft_id": draft_id,
+        }
+        tracker.start("terminal")
+        tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)
+        report_path = output_directory / "report.json"
+        tracker.start("report", _hash({"draft": draft_fingerprint, "terminal": terminal}))
+        tracker.finish("report")
+        make_report(
+            report_path, source_data, metadata, self.config, tracker.data, ready_count, len(final_scored),
+            [str(path) for path in preview_outputs], self.warnings, self.errors, {},
+            gpu_used=False, nvenc_used=False,
+            clip_intelligence={
+                "candidates": [item.to_dict() for item in final_scored],
+                "analysis_artifact_ref": str(self.analysis_artifact_path),
+                "analysis_id": analysis.analysis_id,
+            },
+            content_transformation=transformation,
+            production_plan=production,
+            production_render={"enabled": False, "status": "skipped", "reason": "awaiting_user_review"},
+            candidate_flow={"draft_candidates": reviewed, "production_allowed": False},
+            terminal=terminal,
+            content_understanding={
+                "enabled": True, "profile": content_profile, "content_map": content_map,
+                "story_units_ref": analysis.references["story_units"],
+                "coverage_map_ref": analysis.references["coverage_map"],
+                "clip_count_recommendation_ref": analysis.references["clip_count_recommendation"],
+                "story_unit_count": len(story_units.get("story_units", [])),
+                "coverage_map": coverage_map,
+                "clip_count_recommendation": clip_count_recommendation,
+            },
+            run={
+                "run_id": self.run_id, "project_id": self.project_id, "source_id": source.id,
+                "run_directory": str(output_directory), "started_at": self.started_at,
+                "analysis_id": analysis.analysis_id, "draft_id": draft_id,
+                "draft_artifact_path": str(draft_path), "terminal_status": terminal["status"],
+            },
+        )
+        return PipelineResult(
+            work_directory=work_directory, output_directory=output_directory, report_path=report_path,
+            selected_clips=ready_count, output_files=preview_outputs, warnings=self.warnings,
+            terminal_status=terminal["status"], error_code=terminal.get("error_code"),
+            analysis_path=self.analysis_artifact_path, analysis_id=analysis.analysis_id,
+            draft_path=draft_path, draft_id=draft_id,
+        )
+
+    def _run_production_from_draft(
+        self,
+        *,
+        tracker: StageTracker,
+        source: Source,
+        work_directory: Path,
+        output_directory: Path,
+    ) -> PipelineResult:
+        """Run expensive delivery only for explicitly approved, draft-ready candidates."""
+
+        assert self.draft_artifact_path is not None
+        try:
+            draft = DraftArtifact.read(self.draft_artifact_path)
+            analysis = AnalysisArtifact.read(Path(draft.analysis_artifact_path))
+        except (DraftArtifactError, AnalysisArtifactError) as error:
+            raise ClipEngineError(f"Draft hand-off cannot be used: {error}") from error
+        if draft.project_id and self.project_id and draft.project_id != self.project_id:
+            raise ClipEngineError("Draft artifact belongs to a different project.")
+        if draft.source_fingerprint != source.id or analysis.source_fingerprint != source.id:
+            raise ClipEngineError("The selected draft belongs to a different source file.")
+        if not self.selected_candidate_ids:
+            raise ClipEngineError("Production render requires explicit approved candidate IDs.")
+        if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
+            raise ClipEngineError("Approved candidate IDs must not contain duplicates.")
+        by_id = {str(item.get("candidate_id") or ""): item for item in draft.candidates}
+        missing = [candidate_id for candidate_id in self.selected_candidate_ids if candidate_id not in by_id]
+        if missing:
+            raise ClipEngineError(f"Candidates are not present in the selected draft: {', '.join(missing)}.")
+        not_ready = [
+            candidate_id for candidate_id in self.selected_candidate_ids
+            if by_id[candidate_id].get("state") not in {"draft_ready", "selected"}
+        ]
+        if not_ready:
+            raise ClipEngineError(f"Production render requires draft_ready candidates: {', '.join(not_ready)}.")
+        plans: list[dict[str, Any]] = []
+        for index, candidate_id in enumerate(self.selected_candidate_ids, start=1):
+            record = by_id[candidate_id]
+            plan = record.get("draft_production_plan")
+            if not isinstance(plan, dict):
+                raise ClipEngineError(f"Draft ProductionPlan is missing for {candidate_id}.")
+            try:
+                parsed = ProductionPlan.model_validate(plan)
+            except Exception as error:
+                raise ClipEngineError(f"Draft ProductionPlan is invalid for {candidate_id}: {sanitize_api_error(error)}") from error
+            source_range = _plan_source_range(parsed)
+            plans.append({
+                "candidate_id": candidate_id,
+                "status": "completed",
+                "plan": parsed.model_dump(mode="json"),
+                "requested_index": index,
+                "production_plan_id": parsed.plan_id,
+                "source_start_seconds": source_range[0] if source_range else None,
+                "source_end_seconds": source_range[1] if source_range else None,
+            })
+        first_plan = plans[0]["plan"]
+        timeline = first_plan["timeline"]
+        production = {
+            "enabled": True,
+            "status": "completed",
+            "items": plans,
+            "production_plan": first_plan,
+            "segments": first_plan["segments"],
+            "estimated_duration": timeline["estimated_duration_seconds"],
+            "dialogue_count": timeline["dialogue_count"],
+            "narration_count": timeline["narration_count"],
+            "pause_count": timeline["pause_count"],
+            "timeline_version": timeline["timeline_version"],
+            "production_note": "Approved Draft ProductionPlan reused without analysis or draft reassembly.",
+        }
+        analysis_work = Path(analysis.work_directory).resolve()
+        root_work = (self.root / "work").resolve()
+        if not analysis_work.is_relative_to(root_work):
+            raise ClipEngineError("Analysis work reference is outside this engine workspace.")
+
+        def load_reference(name: str) -> dict[str, Any]:
+            raw = analysis.references.get(name)
+            path = Path(str(raw or "")).resolve()
+            if not raw or not path.is_relative_to(analysis_work) or not path.is_file():
+                raise ClipEngineError(f"Approved draft is missing a safe {name} analysis reference.")
+            value = read_json(path, None)
+            if not isinstance(value, dict):
+                raise ClipEngineError(f"Approved draft has corrupted {name} analysis data.")
+            return value
+
+        source_data = load_reference("source")
+        metadata = load_reference("metadata")
+        transcript = load_reference("transcript")
+        visual_analysis = load_reference("visual_analysis")
+        content_profile = load_reference("content_profile")
+        content_map = load_reference("content_map")
+        story_units = load_reference("story_units")
+        coverage_map = load_reference("coverage_map")
+        recommendation = load_reference("clip_count_recommendation")
+        candidate_data_path = Path(analysis.candidate_data_ref).resolve()
+        candidate_data = read_json(candidate_data_path, {}) if candidate_data_path.is_file() else {}
+        final_scored = [
+            scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
+        ] if isinstance(candidate_data, dict) else []
+        selected_ids = set(self.selected_candidate_ids)
+        tracker.start("approved_draft_handoff", _hash({"draft": draft.draft_id, "selected": self.selected_candidate_ids}), cache_hit=True)
+        tracker.finish("approved_draft_handoff")
+        tts = self._run_tts(tracker, production, work_directory, output_directory)
+        audio = self._run_audio(
+            tracker, production, tts, source, transcript, work_directory, output_directory,
+            Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
+        )
+        production_render = self._run_production_render(
+            tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
+        )
+        self.warnings.extend(production_render.get("warnings", []))
+        registry = primary_clip_results(production_render)
+        self._assert_current_run_results(registry, output_directory)
+        outputs = result_paths(registry, output_directory)
+        candidate_flow = build_candidate_flow(final_scored, selected_ids, {"items": []}, production, production_render)
+        terminal = build_terminal_state(len(plans), outputs, candidate_flow, delivery_required=True)
+        tracker.start("terminal")
+        tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)
+        if terminal["status"] == "failed":
+            self.errors.append(f"{terminal['error_code']}: {terminal['message']}")
+        elif terminal["status"] == "completed_with_warnings":
+            self.warnings.append("Some approved drafts did not reach a final production render.")
+        report_path = output_directory / "report.json"
+        tracker.start("report", _hash({"draft": draft.draft_id, "selected": self.selected_candidate_ids, "terminal": terminal}))
+        tracker.finish("report")
+        report = make_report(
+            report_path, source_data, metadata, self.config, tracker.data, len(plans), len(final_scored),
+            [str(path) for path in outputs], self.warnings, self.errors,
+            candidate_data.get("ai", {}) if isinstance(candidate_data, dict) else {},
+            gpu_used=transcript.get("runtime", {}).get("device") == "cuda", nvenc_used=False,
+            clip_intelligence={
+                "candidates": [item.to_dict() for item in final_scored],
+                "analysis_artifact_ref": str(draft.analysis_artifact_path),
+                "analysis_id": analysis.analysis_id,
+            },
+            production_plan=production, tts=tts, audio=audio, production_render=production_render,
+            candidate_flow=candidate_flow, terminal=terminal,
+            content_understanding={
+                "enabled": True, "profile": content_profile, "content_map": content_map,
+                "story_units_ref": analysis.references["story_units"],
+                "coverage_map_ref": analysis.references["coverage_map"],
+                "clip_count_recommendation_ref": analysis.references["clip_count_recommendation"],
+                "story_unit_count": len(story_units.get("story_units", [])), "coverage_map": coverage_map,
+                "clip_count_recommendation": recommendation,
+            },
+            run={
+                "run_id": self.run_id, "project_id": self.project_id, "source_id": source.id,
+                "run_directory": str(output_directory), "started_at": self.started_at,
+                "analysis_id": analysis.analysis_id, "draft_id": draft.draft_id,
+                "selected_candidate_ids": list(self.selected_candidate_ids),
+                "terminal_status": terminal["status"], "error_code": terminal.get("error_code"),
+            },
+            primary_results=[item.to_dict() for item in registry],
+        )
+        manifest = write_run_manifest(
+            output_directory / "manifest.json", run_id=self.run_id, source=source_data,
+            started_at=self.started_at, requested_clip_count=len(plans), production_render=production_render,
+            results=registry, run_directory=output_directory, project_id=self.project_id,
+            content_understanding={
+                "analysis_id": analysis.analysis_id, "draft_id": draft.draft_id,
+                "draft_artifact_ref": str(self.draft_artifact_path), "selected_candidate_ids": list(self.selected_candidate_ids),
+            }, terminal=terminal,
+        )
+        report["run"]["manifest_path"] = str(output_directory / "manifest.json")
+        report["run"]["finished_at"] = manifest["finished_at"]
+        write_json(report_path, report)
+        return PipelineResult(
+            work_directory=work_directory, output_directory=output_directory, report_path=report_path,
+            selected_clips=len(plans), output_files=outputs, warnings=self.warnings,
+            terminal_status=terminal["status"], error_code=terminal.get("error_code"),
+            analysis_id=analysis.analysis_id, draft_path=self.draft_artifact_path, draft_id=draft.draft_id,
         )
 
     def _source_stage(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+from app.candidate_review import validate_boundary_override
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
 from app.gui.services.error_mapping import redact_secrets
@@ -19,7 +20,7 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.source_download import validate_public_video_url
-from app.utils import utc_now
+from app.utils import read_json, utc_now
 
 
 @dataclass(slots=True)
@@ -177,6 +178,149 @@ class DesktopServices:
         self.projects.save(project)
         return run, prepared
 
+    def prepare_analysis(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
+            raise RuntimeError("Этот проект уже обрабатывается.")
+        source = project.source
+        if not source.is_file():
+            raise InputValidationError("Исходный видеофайл больше недоступен.")
+        intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        run = self.runs.create(
+            project,
+            settings_snapshot={
+                "project_options": asdict(project.settings),
+                "product_flow": {"user_intent": intent.to_dict(), "resolved_config": resolved.to_dict(), "estimate": estimate.to_dict()},
+                "local_test_mode": self.settings.local_test_mode,
+            },
+            source_snapshot={"kind": project.source_spec.kind, "path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
+            pipeline_version="0.1.0", run_kind=RunKind.ANALYSIS,
+        )
+        run.cost_estimate = estimate.estimated_ai_cost_max
+        self.runs.save(run)
+        try:
+            prepared = self.pipeline.prepare_analysis(project, run, self.settings)
+        except Exception:
+            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить анализ."
+            self.runs.save(run)
+            raise
+        self.record_launch_context(run, prepared)
+        project.status = ProjectStatus.ANALYZING; project.latest_run_id = run.run_id
+        self.projects.save(project)
+        return run, prepared
+
+    def prepare_draft(self, project: DesktopProject, candidate_ids: list[str]) -> tuple[ProjectRun, PreparedPipelineRun]:
+        if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
+            raise RuntimeError("Этот проект уже обрабатывается.")
+        if not project.analysis_artifact_path:
+            raise InputValidationError("Сначала выполните анализ видео.")
+        source = project.source
+        if not source.is_file():
+            raise InputValidationError("Исходный видеофайл больше недоступен.")
+        run = self.runs.create(
+            project, {"analysis_id": project.analysis_id, "candidate_ids": list(candidate_ids), "local_test_mode": self.settings.local_test_mode},
+            {"kind": project.source_spec.kind, "path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
+            "0.1.0", run_kind=RunKind.DRAFT,
+        )
+        try:
+            prepared = self.pipeline.prepare_draft(project, run, self.settings, candidate_ids)
+        except Exception:
+            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить черновик."
+            self.runs.save(run)
+            raise
+        for candidate_id in candidate_ids:
+            project.candidate_states[candidate_id] = "draft_planning"
+        self.record_launch_context(run, prepared)
+        project.status = ProjectStatus.PROCESSING; project.latest_run_id = run.run_id
+        self.projects.save(project)
+        return run, prepared
+
+    def select_draft_candidates(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
+        if not project.draft_artifact_path:
+            raise InputValidationError("Сначала соберите Draft Preview.")
+        if not candidate_ids:
+            raise InputValidationError("Выберите хотя бы один готовый черновик.")
+        unavailable = [item for item in candidate_ids if project.candidate_states.get(item) not in {"draft_ready", "selected"}]
+        if unavailable:
+            raise InputValidationError("В production можно отправлять только готовые черновики.")
+        for candidate_id, state in list(project.candidate_states.items()):
+            if state == "selected" and candidate_id not in candidate_ids:
+                project.candidate_states[candidate_id] = "draft_ready"
+        for candidate_id in candidate_ids:
+            project.candidate_states[candidate_id] = "selected"
+        project.selected_candidate_ids = list(candidate_ids)
+        project.status = ProjectStatus.REVIEWING_CANDIDATES
+        self.projects.save(project)
+        return project
+
+    def adjust_candidate_boundary(
+        self, project: DesktopProject, candidate_id: str, boundary: str, delta_seconds: float,
+    ) -> tuple[DesktopProject, dict]:
+        """Persist one review edit after cached-only boundary revalidation."""
+
+        if boundary not in {"start", "end"} or delta_seconds not in {-1.0, -0.5, 0.5, 1.0}:
+            raise InputValidationError("Доступны только шаги границы ±0.5 или ±1.0 секунды.")
+        artifact_path = Path(str(project.analysis_artifact_path or ""))
+        artifact = read_json(artifact_path, {}) if artifact_path.is_file() else {}
+        candidates = artifact.get("candidates", []) if isinstance(artifact, dict) else []
+        candidate = next((item for item in candidates if isinstance(item, dict) and str(item.get("candidate_id")) == candidate_id), None)
+        if not candidate:
+            raise InputValidationError("Кандидат не найден в сохранённом анализе.")
+        current = dict(project.candidate_boundary_overrides.get(candidate_id) or {})
+        start = float(current.get("start", candidate.get("start", 0)))
+        end = float(current.get("end", candidate.get("end", 0)))
+        if boundary == "start":
+            start += delta_seconds
+        else:
+            end += delta_seconds
+        references = artifact.get("references", {}) if isinstance(artifact, dict) else {}
+        transcript_features = read_json(Path(str(references.get("transcript_features") or "")), {}) if references.get("transcript_features") else {}
+        scenes = read_json(Path(str(references.get("scene_boundaries") or "")), {}) if references.get("scene_boundaries") else {}
+        validation = validate_boundary_override(
+            start, end,
+            source_duration=float(project.source_metadata.get("duration")) if project.source_metadata.get("duration") is not None else None,
+            minimum_duration=15.0, maximum_duration=60.0,
+            transcript_features=transcript_features if isinstance(transcript_features, dict) else {},
+            scenes=scenes if isinstance(scenes, dict) else {},
+        )
+        if not validation["valid"]:
+            raise InputValidationError(" ".join(validation["errors"]))
+        project.candidate_boundary_overrides[candidate_id] = {
+            "start": validation["start"], "end": validation["end"],
+            "warnings": validation["warnings"], "revalidation": validation["revalidation"],
+        }
+        if project.candidate_states.get(candidate_id) in {"draft_ready", "selected", "draft_failed"}:
+            project.candidate_states[candidate_id] = "analyzed"
+        project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
+        self.projects.save(project)
+        return project, validation
+
+    def prepare_selected_render(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
+            raise RuntimeError("Этот проект уже обрабатывается.")
+        candidate_ids = list(project.selected_candidate_ids)
+        if not candidate_ids:
+            raise InputValidationError("Сначала подтвердите черновики для production render.")
+        source = project.source
+        if not source.is_file():
+            raise InputValidationError("Исходный видеофайл больше недоступен.")
+        run = self.runs.create(
+            project, {"draft_id": project.draft_id, "candidate_ids": candidate_ids, "local_test_mode": self.settings.local_test_mode},
+            {"kind": project.source_spec.kind, "path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
+            "0.1.0", run_kind=RunKind.SELECTED_RENDER,
+        )
+        try:
+            prepared = self.pipeline.prepare_selected_render(project, run, self.settings, candidate_ids)
+        except Exception:
+            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить production render."
+            self.runs.save(run)
+            raise
+        for candidate_id in candidate_ids:
+            project.candidate_states[candidate_id] = "production_rendering"
+        self.record_launch_context(run, prepared)
+        project.status = ProjectStatus.RENDERING_SELECTED; project.latest_run_id = run.run_id
+        self.projects.save(project)
+        return run, prepared
+
     def prepare_render_revision(self, project: DesktopProject, parent_run: ProjectRun) -> tuple[ProjectRun, PreparedPipelineRun]:
         """Create an immutable export revision from existing production/audio artifacts."""
 
@@ -298,6 +442,7 @@ class DesktopServices:
         warnings = list(completion.warnings)
         if state_persistence_degraded and STATE_PERSISTENCE_WARNING not in warnings:
             warnings.append(STATE_PERSISTENCE_WARNING)
+        report = read_json(completion.report_path, {})
         run.status = RunStatus.COMPLETED_WITH_WARNINGS if warnings else RunStatus.COMPLETED
         run.finished_at = utc_now()
         run.warnings = warnings
@@ -305,7 +450,43 @@ class DesktopServices:
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
         self.runs.snapshot_report_and_outputs(run, completion.report_path, completion.output_files)
         self.runs.save(run)
-        project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
+        run_info = report.get("run", {}) if isinstance(report, dict) else {}
+        if run.run_kind == RunKind.ANALYSIS:
+            run.status = RunStatus.ANALYSIS_READY
+            project.analysis_artifact_path = str(run_info.get("analysis_artifact_path") or "") or None
+            project.analysis_id = str(run_info.get("analysis_id") or "") or None
+            project.analysis_fingerprint = str(run_info.get("analysis_fingerprint") or "") or None
+            candidates = report.get("clip_intelligence", {}).get("candidates", []) if isinstance(report.get("clip_intelligence"), dict) else []
+            project.candidate_states = {
+                str(item.get("id")): "analyzed" for item in candidates
+                if isinstance(item, dict) and item.get("id")
+            }
+            project.selected_candidate_ids = []
+            project.status = ProjectStatus.ANALYSIS_READY
+        elif run.run_kind == RunKind.DRAFT:
+            run.status = RunStatus.DRAFT_READY
+            project.draft_artifact_path = str(run_info.get("draft_artifact_path") or "") or None
+            project.draft_id = str(run_info.get("draft_id") or "") or None
+            draft_candidates = report.get("candidate_flow", {}).get("draft_candidates", []) if isinstance(report.get("candidate_flow"), dict) else []
+            for item in draft_candidates:
+                if isinstance(item, dict) and item.get("candidate_id") and item.get("state"):
+                    project.candidate_states[str(item["candidate_id"])] = str(item["state"])
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+        elif run.run_kind == RunKind.SELECTED_RENDER:
+            completed_ids = {
+                str(item.get("candidate_id")) for item in report.get("production_render", {}).get("items", [])
+                if isinstance(item, dict) and item.get("status") in {"completed", "warning"}
+            } if isinstance(report.get("production_render"), dict) else set()
+            for candidate_id in project.selected_candidate_ids:
+                project.candidate_states[candidate_id] = "rendered" if candidate_id in completed_ids else "draft_ready"
+            run.status = RunStatus.PARTIALLY_RENDERED if warnings or len(completed_ids) < len(project.selected_candidate_ids) else RunStatus.COMPLETED
+            project.status = ProjectStatus.PARTIALLY_RENDERED if run.status == RunStatus.PARTIALLY_RENDERED else ProjectStatus.COMPLETED
+            if run.status == RunStatus.PARTIALLY_RENDERED:
+                project.selected_candidate_ids = [
+                    candidate_id for candidate_id in project.selected_candidate_ids if candidate_id not in completed_ids
+                ]
+        else:
+            project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
         project.latest_run_id = run.run_id
         self.projects.save(project)
         return run
@@ -328,7 +509,20 @@ class DesktopServices:
         run.finished_at = utc_now()
         run.error_summary = "Создание ролика отменено пользователем."
         self.runs.save(run)
-        project.status = ProjectStatus.CANCELLED
+        if run.run_kind == RunKind.SELECTED_RENDER:
+            for candidate_id in project.selected_candidate_ids:
+                if project.candidate_states.get(candidate_id) == "production_rendering":
+                    project.candidate_states[candidate_id] = "selected"
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+        elif run.run_kind == RunKind.DRAFT:
+            for candidate_id, state in list(project.candidate_states.items()):
+                if state == "draft_planning":
+                    project.candidate_states[candidate_id] = "analyzed"
+            project.status = ProjectStatus.ANALYSIS_READY if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
+        elif run.run_kind == RunKind.ANALYSIS:
+            project.status = ProjectStatus.SOURCE_READY
+        else:
+            project.status = ProjectStatus.CANCELLED
         self.projects.save(project)
         return run
 

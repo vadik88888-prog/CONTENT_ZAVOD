@@ -152,6 +152,110 @@ class PipelineFacade:
             },
         )
 
+    def prepare_analysis(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
+        """Prepare the isolated analysis contract; it cannot start delivery."""
+
+        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        arguments = [
+            "-u", "-m", "app", "analyze", "--input", str(source_path), "--config", str(config_path),
+            "--run-id", run.run_id, "--project-id", project.project_id,
+        ]
+        if settings.local_test_mode:
+            arguments.extend(["--mock-ai", "--no-ai-rerank"])
+        if project.settings.recompute_all or not project.settings.use_cache:
+            arguments.append("--recompute-intelligence")
+        return self._prepared_mode(
+            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            {"mode": "analysis", "device": str(config.device), "cache": str(project.settings.use_cache).lower(),
+             "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
+        )
+
+    def prepare_draft(
+        self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, candidate_ids: list[str],
+    ) -> PreparedPipelineRun:
+        """Prepare draft plan + fast preview from one immutable analysis artifact."""
+
+        analysis_path = Path(str(project.analysis_artifact_path or ""))
+        if not analysis_path.is_file() or not project.analysis_id:
+            raise InputValidationError("Сначала завершите анализ и сохраните analysis.json.")
+        if not candidate_ids:
+            raise InputValidationError("Выберите хотя бы один кандидат для чернового просмотра.")
+        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        arguments = [
+            "-u", "-m", "app", "draft", "--input", str(source_path), "--config", str(config_path),
+            "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),
+            "--analysis-id", project.analysis_id,
+        ]
+        if project.analysis_fingerprint:
+            arguments.extend(["--analysis-fingerprint", project.analysis_fingerprint])
+        for candidate_id in candidate_ids:
+            arguments.extend(["--candidate-id", candidate_id])
+            override = project.candidate_boundary_overrides.get(candidate_id)
+            if isinstance(override, dict) and "start" in override and "end" in override:
+                arguments.extend(["--candidate-boundary", f"{candidate_id}:{override['start']}:{override['end']}"])
+        if settings.local_test_mode:
+            arguments.extend(["--mock-ai", "--no-ai-transformation"])
+        return self._prepared_mode(
+            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            {"mode": "draft", "analysis_id": project.analysis_id, "candidate_count": str(len(candidate_ids)),
+             "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
+        )
+
+    def prepare_selected_render(
+        self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, candidate_ids: list[str],
+    ) -> PreparedPipelineRun:
+        """Prepare the expensive 1080x1920 job only from reviewed draft.json."""
+
+        draft_path = Path(str(project.draft_artifact_path or ""))
+        if not draft_path.is_file() or not project.draft_id:
+            raise InputValidationError("Сначала соберите и проверьте Draft Preview.")
+        if not candidate_ids:
+            raise InputValidationError("Выберите черновики для production render.")
+        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        arguments = [
+            "-u", "-m", "app", "render", "--input", str(source_path), "--config", str(config_path),
+            "--run-id", run.run_id, "--project-id", project.project_id, "--draft", str(draft_path),
+            "--confirm-production",
+        ]
+        for candidate_id in candidate_ids:
+            arguments.extend(["--candidate-id", candidate_id])
+        if project.settings.subtitles_enabled is False:
+            arguments.append("--disable-subtitles")
+        return self._prepared_mode(
+            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            {"mode": "selected_render", "draft_id": project.draft_id, "candidate_count": str(len(candidate_ids)),
+             "encoder": str(config.production_render.encoder), "processing_mode": resolved.processing_mode,
+             "platform": resolved.platform.platform},
+            manifest_path=output_directory / "manifest.json",
+        )
+
+    def _prepare_mode_paths(
+        self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings,
+    ) -> tuple[Path, Any, ResolvedProcessingConfig, Path, Path, Path]:
+        source_path = validate_video_path(project.source)
+        config = load_config(self._base_config(settings))
+        _intent, resolved, _estimate = self.plan_processing(project, settings)
+        self._apply_project_options(config, project, settings, resolved)
+        run_directory = Path(project.project_directory) / "runs" / run.run_id
+        config_path = run_directory / "runtime-config.yaml"
+        config_path.write_text(yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
+        source = local_source(str(source_path))
+        run_key = f"{source.display_name}-{source.id[:12]}"
+        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
+        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
+        return source_path, config, resolved, config_path, work_directory, output_directory
+
+    def _prepared_mode(
+        self, arguments: list[str], source_path: Path, config_path: Path, work_directory: Path,
+        output_directory: Path, run_id: str, runtime_flags: dict[str, str], *, manifest_path: Path | None = None,
+    ) -> PreparedPipelineRun:
+        return PreparedPipelineRun(
+            program=sys.executable, arguments=arguments, working_directory=self.engine_root,
+            state_path=work_directory / "state.json", report_path=output_directory / "report.json",
+            output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
+            run_id=run_id, manifest_path=manifest_path, runtime_flags=runtime_flags,
+        )
+
     def prepare_render_revision(
         self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, parent_run: ProjectRun,
     ) -> PreparedPipelineRun:
@@ -213,6 +317,20 @@ class PipelineFacade:
             code = str(terminal.get("error_code") or "PIPELINE_FAILED")
             message = str(terminal.get("message") or "Pipeline завершился без финального ролика.")
             return self._failed_completion(prepared, message, f"{code}: {message}")
+        if isinstance(terminal, dict) and terminal.get("status") in {"analysis_ready", "draft_ready"}:
+            outputs = [
+                Path(str(value)) for value in raw.get("output_files", [])
+                if isinstance(value, str) and Path(value).is_file()
+            ]
+            return PipelineCompletion(
+                report_path=prepared.report_path,
+                output_files=outputs,
+                warnings=[str(value) for value in raw.get("warnings", [])],
+                error_summary=None,
+                technical_details=None,
+                cost_estimate=None,
+                canonical_results=False,
+            )
         manifest: dict[str, Any] | None = None
         if prepared.run_id:
             manifest_path = prepared.manifest_path or prepared.output_directory / "manifest.json"
@@ -233,7 +351,7 @@ class PipelineFacade:
                 "report.production_render is missing or invalid; final MP4 contract is unavailable.",
             )
         status = str(production.get("status", ""))
-        if status not in {"completed", "warning"}:
+        if status not in {"completed", "warning", "partial"}:
             return self._failed_completion(
                 prepared, "Не удалось создать итоговый видеофайл.",
                 f"production_render.status={status or 'missing'}; expected completed or warning.",
@@ -243,6 +361,8 @@ class PipelineFacade:
         if validation_error and not isinstance(raw.get("primary_results"), list):
             return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", validation_error)
         warnings = [str(value) for value in raw.get("warnings", [])]
+        if status == "partial":
+            warnings.append("Часть выбранных черновиков не прошла production render; повторный запуск доступен только для них.")
         production_warnings = production.get("warnings", [])
         if not isinstance(production_warnings, list):
             production_warnings = [production_warnings]
@@ -319,7 +439,8 @@ class PipelineFacade:
         if not prepared.run_id and not self._report_is_current(prepared.report_path, started_at):
             return None
         completion = self.completion(prepared)
-        if completion.error_summary or not completion.canonical_results:
+        recoverable_mode = prepared.runtime_flags.get("mode") in {"analysis", "draft"}
+        if completion.error_summary or (not completion.canonical_results and not recoverable_mode):
             return None
         return completion
 
@@ -343,11 +464,12 @@ class PipelineFacade:
         runtime_config = execution.get("runtime_config_path", "")
         run_id = str(execution.get("run_id") or "").strip() or None
         manifest_value = str(execution.get("manifest_path") or "").strip()
-        if run_id and not manifest_value:
+        runtime_flags = execution.get("runtime_flags", {})
+        mode = str(runtime_flags.get("mode") or "") if isinstance(runtime_flags, dict) else ""
+        if run_id and not manifest_value and mode not in {"analysis", "draft"}:
             return None
         manifest_path = Path(manifest_value) if manifest_value else None
         source = execution.get("source_path")
-        runtime_flags = execution.get("runtime_flags", {})
         return PreparedPipelineRun(
             program="", arguments=[], working_directory=self.engine_root,
             state_path=state_path, report_path=report_path, output_directory=output_directory,

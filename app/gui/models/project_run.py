@@ -13,18 +13,24 @@ class RunStatus:
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+    ANALYSIS_READY = "analysis_ready"
+    DRAFT_READY = "draft_ready"
+    PARTIALLY_RENDERED = "partially_rendered"
 
     ACTIVE: ClassVar[frozenset[str]] = frozenset({PREPARING, RUNNING, CANCELLING})
     ALL: ClassVar[frozenset[str]] = frozenset({
         PREPARING, RUNNING, CANCELLING, COMPLETED, COMPLETED_WITH_WARNINGS,
-        FAILED, CANCELLED, INTERRUPTED,
+        FAILED, CANCELLED, INTERRUPTED, ANALYSIS_READY, DRAFT_READY, PARTIALLY_RENDERED,
     })
 
 
 class RunKind:
     FULL = "full"
+    ANALYSIS = "analysis"
+    DRAFT = "draft"
+    SELECTED_RENDER = "selected_render"
     RENDER_REVISION = "render_revision"
-    ALL: ClassVar[frozenset[str]] = frozenset({FULL, RENDER_REVISION})
+    ALL: ClassVar[frozenset[str]] = frozenset({FULL, ANALYSIS, DRAFT, SELECTED_RENDER, RENDER_REVISION})
 
 
 @dataclass(slots=True)

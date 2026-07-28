@@ -10,6 +10,15 @@ from app.utils import utc_now
 
 
 class ProjectStatus:
+    NEW = "new"
+    SOURCE_READY = "source_ready"
+    ANALYZING = "analyzing"
+    ANALYSIS_READY = "analysis_ready"
+    REVIEWING_CANDIDATES = "reviewing_candidates"
+    RENDERING_SELECTED = "rendering_selected"
+    PARTIALLY_RENDERED = "partially_rendered"
+    # Legacy product-flow states remain readable and migrate gradually through
+    # the desktop service instead of invalidating existing user projects.
     DRAFT = "draft"
     READY = "ready"
     QUEUED = "queued"
@@ -21,6 +30,8 @@ class ProjectStatus:
     INTERRUPTED = "interrupted"
 
     ALL: ClassVar[frozenset[str]] = frozenset({
+        NEW, SOURCE_READY, ANALYZING, ANALYSIS_READY, REVIEWING_CANDIDATES,
+        RENDERING_SELECTED, PARTIALLY_RENDERED,
         DRAFT, READY, QUEUED, PROCESSING, COMPLETED, COMPLETED_WITH_WARNINGS,
         FAILED, CANCELLED, INTERRUPTED,
     })
@@ -80,6 +91,14 @@ class DesktopProject:
     thumbnail_path: str | None = None
     source_metadata: dict[str, Any] = field(default_factory=dict)
     source_spec: SourceSpec = field(default_factory=SourceSpec)
+    analysis_artifact_path: str | None = None
+    analysis_id: str | None = None
+    analysis_fingerprint: str | None = None
+    draft_artifact_path: str | None = None
+    draft_id: str | None = None
+    candidate_states: dict[str, str] = field(default_factory=dict)
+    selected_candidate_ids: list[str] = field(default_factory=list)
+    candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     schema_version: int = 3
 
     def validate(self) -> None:
@@ -91,6 +110,23 @@ class DesktopProject:
             raise ValueError("Unsupported project schema version.")
         self.settings.validate()
         self.source_spec.validate()
+        supported_candidate_states = {
+            "analyzed", "draft_planning", "draft_ready", "draft_failed",
+            "selected", "production_rendering", "rendered",
+        }
+        if any(not key or value not in supported_candidate_states for key, value in self.candidate_states.items()):
+            raise ValueError("Unsupported candidate review state.")
+        if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
+            raise ValueError("Selected candidate ids must be unique.")
+        for candidate_id, override in self.candidate_boundary_overrides.items():
+            if not candidate_id or not isinstance(override, dict):
+                raise ValueError("Candidate boundary override is invalid.")
+            try:
+                start, end = float(override["start"]), float(override["end"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Candidate boundary override has no valid range.") from error
+            if end <= start:
+                raise ValueError("Candidate boundary override is reversed.")
 
     @property
     def source(self) -> Path:
@@ -133,6 +169,17 @@ class DesktopProject:
             source_spec=SourceSpec.from_dict(
                 value.get("source_spec"), fallback_path=str(value.get("source_path", "")), fallback_metadata=source_metadata,
             ),
+            analysis_artifact_path=str(value["analysis_artifact_path"]) if value.get("analysis_artifact_path") else None,
+            analysis_id=str(value["analysis_id"]) if value.get("analysis_id") else None,
+            analysis_fingerprint=str(value["analysis_fingerprint"]) if value.get("analysis_fingerprint") else None,
+            draft_artifact_path=str(value["draft_artifact_path"]) if value.get("draft_artifact_path") else None,
+            draft_id=str(value["draft_id"]) if value.get("draft_id") else None,
+            candidate_states={str(key): str(item) for key, item in dict(value.get("candidate_states") or {}).items()},
+            selected_candidate_ids=[str(item) for item in value.get("selected_candidate_ids", [])],
+            candidate_boundary_overrides={
+                str(key): dict(item) for key, item in dict(value.get("candidate_boundary_overrides") or {}).items()
+                if isinstance(item, dict)
+            },
             # Older projects had only ``source_path``.  They are migrated in memory
             # to an explicit local source and written as v3 on the next save.
             schema_version=3,

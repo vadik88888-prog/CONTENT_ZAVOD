@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.config import AppConfig
 from app.pipeline import Pipeline
@@ -84,6 +85,96 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
     Pipeline(tmp_path, changed_transcript, mock_ai=True).run(input_path=str(source))
     assert calls["profile"] == 2
     assert calls["map"] == 2
+
+
+def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+
+    def delivery_must_not_start(*_args, **_kwargs):
+        raise AssertionError("Analysis-only mode must not start delivery work.")
+
+    import app.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module.Pipeline, "_transform_selected", delivery_must_not_start)
+
+    result = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+
+    assert result.terminal_status == "analysis_ready"
+    assert result.output_files == []
+    assert result.analysis_path and result.analysis_path.is_file()
+    analysis = read_json(result.analysis_path, {})
+    assert analysis["schema_version"] == "1.0"
+    assert analysis["status"] == "analysis_ready"
+    assert analysis["analysis_id"] == result.analysis_id
+    assert analysis["source_fingerprint"]
+    assert analysis["candidate_data_ref"].endswith("candidates.scored.json")
+    assert Path(analysis["candidate_data_ref"]).is_file()
+    assert analysis["candidates"]
+    report = read_json(result.report_path, {})
+    assert report["terminal"]["status"] == "analysis_ready"
+    assert report["production_render"]["status"] == "skipped"
+
+
+def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_order(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+    artifact = read_json(analysis.analysis_path, {})
+    candidate_ids = [item["candidate_id"] for item in artifact["candidates"][:2]]
+    assert candidate_ids
+    requested_ids = list(reversed(candidate_ids))
+    before_render = dict(calls)
+
+    import app.pipeline as pipeline_module
+
+    def preview(_self, _plan, _source, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
+        return SimpleNamespace(
+            output_file=output,
+            to_dict=lambda: {
+                "status": "draft_ready", "output_file": str(output),
+                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
+            },
+        )
+
+    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    draft_config = AppConfig(score_threshold=0)
+    draft_config.transformation.enabled = True
+    draft_config.production.enabled = True
+    result = Pipeline(
+        tmp_path, draft_config, mock_ai=True,
+        analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=requested_ids,
+        draft_only=True,
+    ).run(input_path=str(source))
+
+    assert calls == before_render  # analysis functions were not even cache-read by the draft command
+    assert result.selected_clips == len(requested_ids)
+    assert len(result.output_files) == len(requested_ids)
+    assert result.draft_path and result.draft_path.is_file()
+    report = read_json(result.report_path, {})
+    assert report["terminal"]["status"] == "draft_ready"
+    assert [item["candidate_id"] for item in report["candidate_flow"]["draft_candidates"]] == requested_ids
+    assert report["run"]["analysis_id"] == analysis.analysis_id
+
+
+def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+
+    import pytest
+    from app.errors import ClipEngineError
+    with pytest.raises(ClipEngineError, match="draft preview first"):
+        Pipeline(
+            tmp_path, AppConfig(score_threshold=0), mock_ai=True,
+            analysis_artifact_path=analysis.analysis_path,
+            selected_candidate_ids=[read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]],
+        ).run(input_path=str(source))
 
 
 def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypatch) -> None:

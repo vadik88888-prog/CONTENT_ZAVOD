@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from app.gui.models import DesktopProject, ProcessingPhase, ProcessingSnapshot, ProjectRun, RunStatus
+from app.gui.models import DesktopProject, ProcessingPhase, ProcessingSnapshot, ProjectRun, RunKind, RunStatus
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.error_mapping import map_error
 from app.gui.services.pipeline_facade import PreparedPipelineRun
@@ -30,6 +30,7 @@ class ProjectViewModel(QObject):
         self.snapshot = ProcessingSnapshot()
         self._launching = False
         self._started_at: float | None = None
+        self._after_download = "process"
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
         self._elapsed_timer.timeout.connect(self._emit_elapsed)
@@ -90,6 +91,81 @@ class ProjectViewModel(QObject):
             self.error_occurred.emit(map_error(error))
             if self.project:
                 self.project_changed.emit(self.project)
+
+    def start_analysis(self) -> None:
+        """Start analysis only; delivery remains unavailable until draft review."""
+
+        if not self.project or self.active:
+            return
+        self._launching = True
+        self._after_download = "analysis"
+        if not self.project.source_spec.is_ready:
+            self._start_source_download()
+            return
+        try:
+            self.run, self.prepared = self.services.prepare_analysis(self.project)
+            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Анализируем видео")
+            self.project_changed.emit(self.project)
+            self.runs_changed.emit(self.services.runs_for(self.project))
+            self.processing_changed.emit(self.snapshot)
+            self.runner.start(self.prepared)
+        except Exception as error:
+            self._launching = False
+            self.error_occurred.emit(map_error(error))
+            if self.project:
+                self.project_changed.emit(self.project)
+
+    def build_drafts(self, candidate_ids: list[str]) -> None:
+        if not self.project or self.active:
+            return
+        self._launching = True
+        try:
+            self.run, self.prepared = self.services.prepare_draft(self.project, candidate_ids)
+            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Собираем быстрые черновики")
+            self.project_changed.emit(self.project)
+            self.runs_changed.emit(self.services.runs_for(self.project))
+            self.processing_changed.emit(self.snapshot)
+            self.runner.start(self.prepared)
+        except Exception as error:
+            self._launching = False
+            self.error_occurred.emit(map_error(error))
+            self.project_changed.emit(self.project)
+
+    def select_drafts(self, candidate_ids: list[str]) -> None:
+        if not self.project or self.active:
+            return
+        try:
+            self.project = self.services.select_draft_candidates(self.project, candidate_ids)
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+
+    def adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
+        if not self.project or self.active:
+            return
+        try:
+            self.project, _validation = self.services.adjust_candidate_boundary(
+                self.project, candidate_id, boundary, delta_seconds,
+            )
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+
+    def render_selected(self) -> None:
+        if not self.project or self.active:
+            return
+        self._launching = True
+        try:
+            self.run, self.prepared = self.services.prepare_selected_render(self.project)
+            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Создаём итоговые ролики")
+            self.project_changed.emit(self.project)
+            self.runs_changed.emit(self.services.runs_for(self.project))
+            self.processing_changed.emit(self.snapshot)
+            self.runner.start(self.prepared)
+        except Exception as error:
+            self._launching = False
+            self.error_occurred.emit(map_error(error))
+            self.project_changed.emit(self.project)
 
     def rerender(self, parent_run: ProjectRun) -> None:
         if not self.project or self.active:
@@ -166,7 +242,7 @@ class ProjectViewModel(QObject):
         self.snapshot = ProcessingSnapshot(message="Видео загружено")
         self.project_changed.emit(self.project)
         self.processing_changed.emit(self.snapshot)
-        self.start()
+        self.start_analysis() if self._after_download == "analysis" else self.start()
 
     def _download_failed(self, message: str) -> None:
         if not self.project:
@@ -239,7 +315,15 @@ class ProjectViewModel(QObject):
             self.error_occurred.emit(map_error(run.error_summary or "Не удалось создать итоговый видеофайл."))
             return
         phase = ProcessingPhase.COMPLETED_WITH_WARNINGS if run.warnings else ProcessingPhase.COMPLETED
-        self._finish(phase, "Ролик готов" if not run.warnings else "Ролик готов с предупреждениями", run)
+        messages = {
+            RunKind.ANALYSIS: "Анализ готов: выберите кандидаты для черновика",
+            RunKind.DRAFT: "Черновики готовы: проверьте будущую сборку",
+            RunKind.SELECTED_RENDER: "Итоговые ролики готовы",
+        }
+        message = messages.get(run.run_kind, "Ролик готов")
+        if run.warnings:
+            message += " с предупреждениями"
+        self._finish(phase, message, run)
 
     def _failed(self, message: str) -> None:
         if not self.project or not self.run:
