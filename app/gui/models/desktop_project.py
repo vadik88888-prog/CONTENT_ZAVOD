@@ -101,6 +101,11 @@ class DesktopProject:
     # drafts without re-running analysis or silently dropping earlier work.
     candidate_draft_artifacts: dict[str, str] = field(default_factory=dict)
     candidate_states: dict[str, str] = field(default_factory=dict)
+    candidate_errors: dict[str, str] = field(default_factory=dict)
+    # Explicit pre-production choice.  It survives restart and is distinct
+    # from selected_candidate_ids, which means a user has approved a ready
+    # draft for the expensive production render.
+    review_selected_candidate_ids: list[str] = field(default_factory=list)
     selected_candidate_ids: list[str] = field(default_factory=list)
     candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     schema_version: int = 3
@@ -122,9 +127,16 @@ class DesktopProject:
             raise ValueError("Unsupported candidate review state.")
         if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
             raise ValueError("Selected candidate ids must be unique.")
+        if len(self.review_selected_candidate_ids) != len(set(self.review_selected_candidate_ids)) or any(
+            not candidate_id for candidate_id in self.review_selected_candidate_ids
+        ):
+            raise ValueError("Review candidate ids must be unique and non-empty.")
         if any(not candidate_id or not isinstance(path, str) or not path.strip()
                for candidate_id, path in self.candidate_draft_artifacts.items()):
             raise ValueError("Candidate draft artifact reference is invalid.")
+        if any(not candidate_id or not isinstance(message, str) or not message.strip()
+               for candidate_id, message in self.candidate_errors.items()):
+            raise ValueError("Candidate error is invalid.")
         for candidate_id, override in self.candidate_boundary_overrides.items():
             if not candidate_id or not isinstance(override, dict):
                 raise ValueError("Candidate boundary override is invalid.")
@@ -174,6 +186,10 @@ class DesktopProject:
                 candidate_id: draft_artifact_path for candidate_id, state in candidate_states.items()
                 if state in {"draft_ready", "selected"}
             }
+        selected_candidate_ids = [str(item) for item in value.get("selected_candidate_ids", [])]
+        review_selected_candidate_ids = [str(item) for item in value.get("review_selected_candidate_ids", [])]
+        if not review_selected_candidate_ids:
+            review_selected_candidate_ids = list(selected_candidate_ids)
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
@@ -196,7 +212,9 @@ class DesktopProject:
             draft_id=str(value["draft_id"]) if value.get("draft_id") else None,
             candidate_draft_artifacts=candidate_draft_artifacts,
             candidate_states=candidate_states,
-            selected_candidate_ids=[str(item) for item in value.get("selected_candidate_ids", [])],
+            candidate_errors={str(key): str(item) for key, item in dict(value.get("candidate_errors") or {}).items()},
+            review_selected_candidate_ids=review_selected_candidate_ids,
+            selected_candidate_ids=selected_candidate_ids,
             candidate_boundary_overrides={
                 str(key): dict(item) for key, item in dict(value.get("candidate_boundary_overrides") or {}).items()
                 if isinstance(item, dict)

@@ -449,9 +449,15 @@ def _apply_production_render_arguments(config, arguments: argparse.Namespace) ->
 
 
 def _apply_render_command_arguments(config, arguments: argparse.Namespace) -> None:
-    """Apply the small, visual-only override surface of the selected renderer."""
+    """Enable the approved delivery chain without changing source-analysis options."""
 
     config.production.enabled = True
+    # A reviewed draft contains a ProductionPlan, not a finished audio mix.  The
+    # selected renderer must therefore execute the remaining delivery stages.
+    # TTS is a no-op for original-audio plans, while Audio Composition is needed
+    # for every plan before the production renderer can consume it.
+    config.tts.enabled = True
+    config.audio_composition.enabled = True
     config.production_render.enabled = True
     render = config.production_render
     if arguments.output_width is not None:

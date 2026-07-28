@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
-from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact
+from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
 from app.draft_preview import DraftPreviewService
@@ -832,6 +832,7 @@ class Pipeline:
         })
         analysis_id = f"analysis-{analysis_fingerprint[:16]}"
         artifact_path = output_directory / "analysis.json"
+        review_candidates = [candidate_review_payload(record, selected_ids) for record in scored_records]
         artifact = new_analysis_artifact(
             analysis_id=analysis_id,
             project_id=self.project_id,
@@ -841,7 +842,7 @@ class Pipeline:
             work_directory=str(work_directory),
             candidate_data_ref=str(candidate_data_path),
             references=references,
-            candidates=[candidate_review_payload(record, selected_ids) for record in scored_records],
+            candidates=review_candidates,
             recommendation={
                 "selected_candidate_ids": [item.candidate.id for item in final_scored if item.candidate.id in selected_ids],
                 "clip_count": clip_count_recommendation,
@@ -852,7 +853,14 @@ class Pipeline:
                 "recommended_count": len(selected_ids),
                 "source_duration_seconds": metadata.get("duration"),
                 "content_type": content_profile.get("detected_content_type"),
+                "potential_counts": potential_counts(review_candidates),
             },
+            content_profile={
+                "detected_content_type": content_profile.get("detected_content_type"),
+                "confidence": content_profile.get("confidence"),
+                "strategy": content_profile.get("strategy"),
+            },
+            duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
             warnings=list(self.warnings),
         )
         tracker.start("analysis_artifact", analysis_fingerprint)

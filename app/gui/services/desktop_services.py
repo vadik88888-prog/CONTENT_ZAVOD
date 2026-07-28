@@ -107,6 +107,24 @@ class DesktopServices:
         project.settings.validate()
         self.projects.save(project)
 
+    def set_review_selection(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
+        """Persist the user's candidate choice before any draft or render starts."""
+
+        unique = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
+        unknown = [item for item in unique if item not in project.candidate_states]
+        if unknown:
+            raise InputValidationError("Один из выбранных моментов отсутствует в сохранённом анализе.")
+        project.review_selected_candidate_ids = unique
+        removed = set(project.selected_candidate_ids) - set(unique)
+        for candidate_id in removed:
+            if project.candidate_states.get(candidate_id) == "selected":
+                project.candidate_states[candidate_id] = "draft_ready"
+        project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item in unique]
+        if project.status not in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
+            project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else project.status
+        self.projects.save(project)
+        return project
+
     def delete_project(self, project_id: str) -> None:
         self.projects.delete(project_id)
 
@@ -213,6 +231,9 @@ class DesktopServices:
             raise RuntimeError("Этот проект уже обрабатывается.")
         if not project.analysis_artifact_path:
             raise InputValidationError("Сначала выполните анализ видео.")
+        outside_selection = [item for item in candidate_ids if item not in project.review_selected_candidate_ids]
+        if outside_selection:
+            raise InputValidationError("Сначала выберите моменты для подготовки черновика.")
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
@@ -229,6 +250,7 @@ class DesktopServices:
             raise
         for candidate_id in candidate_ids:
             project.candidate_states[candidate_id] = "draft_planning"
+            project.candidate_errors.pop(candidate_id, None)
         self.record_launch_context(run, prepared)
         project.status = ProjectStatus.PROCESSING; project.latest_run_id = run.run_id
         self.projects.save(project)
@@ -251,6 +273,7 @@ class DesktopServices:
         for candidate_id in candidate_ids:
             project.candidate_states[candidate_id] = "selected"
         project.selected_candidate_ids = list(candidate_ids)
+        project.review_selected_candidate_ids = list(candidate_ids)
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
         return project
@@ -294,6 +317,7 @@ class DesktopServices:
         if project.candidate_states.get(candidate_id) in {"draft_ready", "selected", "draft_failed"}:
             project.candidate_states[candidate_id] = "analyzed"
         project.candidate_draft_artifacts.pop(candidate_id, None)
+        project.candidate_errors.pop(candidate_id, None)
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
         self.projects.save(project)
         return project, validation
@@ -323,6 +347,7 @@ class DesktopServices:
             raise
         for candidate_id in candidate_ids:
             project.candidate_states[candidate_id] = "production_rendering"
+            project.candidate_errors.pop(candidate_id, None)
         self.record_launch_context(run, prepared)
         project.status = ProjectStatus.RENDERING_SELECTED; project.latest_run_id = run.run_id
         self.projects.save(project)
@@ -469,7 +494,9 @@ class DesktopServices:
                 if isinstance(item, dict) and item.get("id")
             }
             project.selected_candidate_ids = []
+            project.review_selected_candidate_ids = []
             project.candidate_draft_artifacts = {}
+            project.candidate_errors = {}
             project.draft_artifact_path = None
             project.draft_id = None
             project.status = ProjectStatus.ANALYSIS_READY
@@ -485,16 +512,31 @@ class DesktopServices:
                     project.candidate_states[candidate_id] = state
                     if state == "draft_ready" and project.draft_artifact_path:
                         project.candidate_draft_artifacts[candidate_id] = project.draft_artifact_path
+                        project.candidate_errors.pop(candidate_id, None)
                     elif state == "draft_failed":
                         project.candidate_draft_artifacts.pop(candidate_id, None)
+                        message = str(item.get("error") or "Не удалось подготовить черновик.").strip()
+                        if message:
+                            project.candidate_errors[candidate_id] = message
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.SELECTED_RENDER:
             completed_ids = {
                 str(item.get("candidate_id")) for item in report.get("production_render", {}).get("items", [])
                 if isinstance(item, dict) and item.get("status") in {"completed", "warning"}
             } if isinstance(report.get("production_render"), dict) else set()
+            flow_items = report.get("candidate_flow", {}).get("items", []) if isinstance(report.get("candidate_flow"), dict) else []
+            failures = {
+                str(item.get("candidate_id")): str(item.get("message") or item.get("reason") or "Не удалось создать ролик.")
+                for item in flow_items if isinstance(item, dict) and item.get("outcome") == "failed" and item.get("candidate_id")
+            }
             for candidate_id in project.selected_candidate_ids:
-                project.candidate_states[candidate_id] = "rendered" if candidate_id in completed_ids else "draft_ready"
+                if candidate_id in completed_ids:
+                    project.candidate_states[candidate_id] = "rendered"
+                    project.candidate_errors.pop(candidate_id, None)
+                else:
+                    project.candidate_states[candidate_id] = "draft_ready"
+                    if candidate_id in failures:
+                        project.candidate_errors[candidate_id] = failures[candidate_id]
             run.status = RunStatus.PARTIALLY_RENDERED if warnings or len(completed_ids) < len(project.selected_candidate_ids) else RunStatus.COMPLETED
             project.status = ProjectStatus.PARTIALLY_RENDERED if run.status == RunStatus.PARTIALLY_RENDERED else ProjectStatus.COMPLETED
             if run.status == RunStatus.PARTIALLY_RENDERED:
@@ -520,11 +562,13 @@ class DesktopServices:
             for candidate_id in project.selected_candidate_ids:
                 if project.candidate_states.get(candidate_id) == "production_rendering":
                     project.candidate_states[candidate_id] = "selected"
+                    project.candidate_errors[candidate_id] = run.error_summary
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.DRAFT:
             for candidate_id, state in list(project.candidate_states.items()):
                 if state == "draft_planning":
                     project.candidate_states[candidate_id] = "analyzed"
+                    project.candidate_errors[candidate_id] = run.error_summary
             project.status = ProjectStatus.ANALYSIS_READY if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
         elif run.run_kind == RunKind.ANALYSIS:
             project.status = ProjectStatus.SOURCE_READY

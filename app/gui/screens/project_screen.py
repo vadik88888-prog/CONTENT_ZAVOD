@@ -65,9 +65,14 @@ class ProjectScreen(QWidget):
         self.content_summary = self._card("Что найдено в видео")
         self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
         left.addWidget(self.content_summary)
+        self.candidate_detail = self._card("Просмотр момента")
+        self._replace_card_text(self.candidate_detail, ["Выберите момент в списке, чтобы просмотреть исходный фрагмент."])
+        left.addWidget(self.candidate_detail)
         self.candidate_review = self._card("Кандидаты и черновики")
         self.candidate_review_layout = self.candidate_review.layout()
         self._candidate_checks: dict[str, QCheckBox] = {}
+        self._candidate_filter = "all"
+        self._candidate_sort = "recommendation"
         self._replace_card_text(self.candidate_review, ["После анализа здесь появятся моменты для будущих роликов."])
         self.draft_button = QPushButton("Собрать черновик")
         self.draft_button.clicked.connect(self._draft_action)
@@ -176,7 +181,7 @@ class ProjectScreen(QWidget):
         settings.addStretch()
         self.run_button = QPushButton("Анализировать видео")
         self.run_button.setObjectName("primary")
-        self.run_button.clicked.connect(self.viewmodel.start_analysis)
+        self.run_button.clicked.connect(self._primary_action)
         settings.addWidget(self.run_button)
         body.addWidget(panel)
         root.addLayout(body, 1)
@@ -192,6 +197,10 @@ class ProjectScreen(QWidget):
         self.project = project
         self.title.setText(project.name)
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
+        review_ready = bool(project.analysis_artifact_path) and project.status in {
+            "analysis_ready", "reviewing_candidates", "partially_rendered", "completed",
+        }
+        self.run_button.setText("Посмотреть найденные моменты" if review_ready else "Анализировать видео")
         if project.source_spec.is_ready:
             self.preview.set_file(str(project.source))
         source = project.source_metadata
@@ -216,6 +225,16 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
         self._update_candidate_review(project)
+
+    def _primary_action(self) -> None:
+        if not self.project:
+            return
+        if self.project.analysis_artifact_path and self.project.status in {
+            "analysis_ready", "reviewing_candidates", "partially_rendered", "completed",
+        }:
+            self.candidate_review.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self.viewmodel.start_analysis()
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
@@ -245,9 +264,53 @@ class ProjectScreen(QWidget):
             layout.addWidget(self.draft_button); layout.addWidget(self.production_button)
             self.draft_button.setDisabled(True); self.production_button.setDisabled(True)
             return
-        ready_exists = any(state in {"draft_ready", "selected"} for state in project.candidate_states.values())
-        draftable_exists = any(state in {"analyzed", "draft_failed"} for state in project.candidate_states.values())
+        draftable_exists = any(
+            project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}
+            for candidate_id in project.review_selected_candidate_ids
+        )
+        potential_counts = {"high": 0, "medium": 0, "low": 0}
         for item in candidates:
+            if isinstance(item, dict):
+                level = str(item.get("potential") or "low")
+                potential_counts[level if level in potential_counts else "low"] += 1
+        selection_toolbar = QFrame()
+        toolbar_layout = QHBoxLayout(selection_toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.addWidget(QLabel(
+            f"Найдено: {len(candidates)} · Высокий: {potential_counts['high']} · "
+            f"Средний: {potential_counts['medium']} · Выбрано: {len(project.review_selected_candidate_ids)}"
+        ), 1)
+        recommended_button = QPushButton("Выбрать рекомендованные")
+        recommended_button.clicked.connect(self._select_recommended)
+        clear_button = QPushButton("Снять выбор")
+        clear_button.clicked.connect(self._clear_review_selection)
+        toolbar_layout.addWidget(recommended_button)
+        toolbar_layout.addWidget(clear_button)
+        layout.addWidget(selection_toolbar)
+        filter_toolbar = QFrame()
+        filter_layout = QHBoxLayout(filter_toolbar)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.addWidget(QLabel("Показать"))
+        filter_box = QComboBox()
+        for label, value in (
+            ("Все", "all"), ("Рекомендуемые", "recommended"), ("Высокий потенциал", "high"),
+            ("Средний потенциал", "medium"), ("Не выбраны", "unselected"),
+        ):
+            filter_box.addItem(label, value)
+        filter_box.setCurrentIndex(max(0, filter_box.findData(self._candidate_filter)))
+        filter_box.currentIndexChanged.connect(lambda _index, box=filter_box: self._change_candidate_filter(str(box.currentData())))
+        filter_layout.addWidget(filter_box)
+        filter_layout.addWidget(QLabel("Сортировка"))
+        sort_box = QComboBox()
+        for label, value in (("По рекомендации", "recommendation"), ("По времени", "time"), ("По потенциалу", "potential")):
+            sort_box.addItem(label, value)
+        sort_box.setCurrentIndex(max(0, sort_box.findData(self._candidate_sort)))
+        sort_box.currentIndexChanged.connect(lambda _index, box=sort_box: self._change_candidate_sort(str(box.currentData())))
+        filter_layout.addWidget(sort_box)
+        filter_layout.addStretch()
+        layout.addWidget(filter_toolbar)
+        visible_candidates = self._filtered_candidates(candidates, project)
+        for item in visible_candidates:
             if not isinstance(item, dict) or not item.get("candidate_id"):
                 continue
             candidate_id = str(item["candidate_id"])
@@ -256,14 +319,31 @@ class ProjectScreen(QWidget):
             start_value = override.get("start", item.get("start")) if isinstance(override, dict) else item.get("start")
             end_value = override.get("end", item.get("end")) if isinstance(override, dict) else item.get("end")
             start, end = format_seconds(start_value), format_seconds(end_value)
-            score = item.get("score", "—")
+            potential = {"high": "Высокий потенциал", "medium": "Средний потенциал", "low": "Низкий потенциал"}.get(
+                str(item.get("potential") or "low"), "Предварительная оценка",
+            )
+            confidence = float(item.get("confidence") or 0)
+            status_label = {
+                "analyzed": "готов к просмотру", "draft_planning": "собираем черновик",
+                "draft_ready": "черновик готов", "draft_failed": "черновик не готов",
+                "selected": "подтверждён", "production_rendering": "создаём ролик", "rendered": "готово",
+            }.get(state, "готов к просмотру")
             frame = QFrame(); frame.setObjectName("card")
             row = QHBoxLayout(frame); row.setContentsMargins(8, 6, 8, 6)
-            check = QCheckBox(f"{start}–{end} · {state} · {score}")
-            check.setToolTip(str(item.get("text") or item.get("reason") or ""))
-            check.setChecked(candidate_id in project.selected_candidate_ids or (not ready_exists and bool(item.get("selected_by_recommendation"))))
+            recommended = " · рекомендуем" if item.get("selected_by_recommendation") else ""
+            check = QCheckBox(f"{start}–{end} · {potential} · уверенность {confidence * 100:.0f}%{recommended}")
+            check.setToolTip(f"{status_label}. {item.get('title') or item.get('text') or item.get('reason') or ''}")
+            check.setChecked(candidate_id in project.review_selected_candidate_ids)
+            check.toggled.connect(lambda _checked=False: self._persist_review_selection())
             self._candidate_checks[candidate_id] = check
             row.addWidget(check, 1)
+            status = QLabel(status_label)
+            status.setObjectName("muted")
+            candidate_error = project.candidate_errors.get(candidate_id)
+            if candidate_error:
+                status.setText("есть ошибка")
+                status.setToolTip(candidate_error)
+            row.addWidget(status)
             for text, boundary, delta in (
                 ("С−1", "start", -1.0), ("С−.5", "start", -0.5), ("С+.5", "start", 0.5), ("С+1", "start", 1.0),
                 ("К−1", "end", -1.0), ("К−.5", "end", -0.5), ("К+.5", "end", 0.5), ("К+1", "end", 1.0),
@@ -274,6 +354,9 @@ class ProjectScreen(QWidget):
                     lambda _checked=False, cid=candidate_id, name=boundary, value=delta: self.viewmodel.adjust_candidate_boundary(cid, name, value)
                 )
                 row.addWidget(boundary_button)
+            source_preview = QPushButton("Просмотреть")
+            source_preview.clicked.connect(lambda _checked=False, value=dict(item): self._preview_candidate(value))
+            row.addWidget(source_preview)
             preview = previews.get(candidate_id, {}).get("preview", {}) if isinstance(previews.get(candidate_id), dict) else {}
             preview_file = Path(str(preview.get("output_file") or "")) if isinstance(preview, dict) else None
             if preview_file and preview_file.is_file():
@@ -282,7 +365,7 @@ class ProjectScreen(QWidget):
                 row.addWidget(button)
             layout.addWidget(frame)
         self.draft_button.setText("Собрать черновики" if draftable_exists else "Подтвердить выбор")
-        self.draft_button.setDisabled(False)
+        self.draft_button.setDisabled(not bool(project.review_selected_candidate_ids))
         selected_drafts_exist = all(
             Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in project.selected_candidate_ids
@@ -297,6 +380,9 @@ class ProjectScreen(QWidget):
         if not self.project:
             return
         candidate_ids = self._checked_candidate_ids()
+        self.viewmodel.set_review_selection(candidate_ids)
+        if not candidate_ids:
+            return
         needs_draft = [
             candidate_id for candidate_id in candidate_ids
             if self.project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}
@@ -305,6 +391,87 @@ class ProjectScreen(QWidget):
             self.viewmodel.build_drafts(needs_draft)
         else:
             self.viewmodel.select_drafts(candidate_ids)
+
+    def _persist_review_selection(self) -> None:
+        if self.project:
+            self.viewmodel.set_review_selection(self._checked_candidate_ids())
+
+    def _select_recommended(self) -> None:
+        if not self.project:
+            return
+        path = Path(self.project.analysis_artifact_path) if self.project.analysis_artifact_path else None
+        analysis = read_json(path, {}) if path and path.is_file() else {}
+        candidate_ids = [
+            str(item.get("candidate_id")) for item in analysis.get("candidates", [])
+            if isinstance(item, dict) and item.get("selected_by_recommendation") and item.get("candidate_id")
+        ] if isinstance(analysis, dict) else []
+        self.viewmodel.set_review_selection(candidate_ids)
+
+    def _clear_review_selection(self) -> None:
+        self.viewmodel.set_review_selection([])
+
+    def _change_candidate_filter(self, value: str) -> None:
+        self._candidate_filter = value
+        if self.project:
+            self._update_candidate_review(self.project)
+
+    def _change_candidate_sort(self, value: str) -> None:
+        self._candidate_sort = value
+        if self.project:
+            self._update_candidate_review(self.project)
+
+    def _filtered_candidates(self, candidates: list[object], project: DesktopProject) -> list[dict]:
+        values = [dict(item) for item in candidates if isinstance(item, dict) and item.get("candidate_id")]
+        if self._candidate_filter == "recommended":
+            values = [item for item in values if item.get("selected_by_recommendation")]
+        elif self._candidate_filter in {"high", "medium"}:
+            values = [item for item in values if item.get("potential") == self._candidate_filter]
+        elif self._candidate_filter == "unselected":
+            values = [item for item in values if item.get("candidate_id") not in project.review_selected_candidate_ids]
+        potential_rank = {"high": 2, "medium": 1, "low": 0}
+        if self._candidate_sort == "time":
+            values.sort(key=lambda item: float(item.get("start_seconds", item.get("start", 0)) or 0))
+        elif self._candidate_sort == "potential":
+            values.sort(key=lambda item: (
+                potential_rank.get(str(item.get("potential")), 0),
+                float(item.get("confidence") or 0), float(item.get("score") or 0),
+            ), reverse=True)
+        else:
+            values.sort(key=lambda item: (
+                bool(item.get("selected_by_recommendation")),
+                potential_rank.get(str(item.get("potential")), 0),
+                float(item.get("score") or 0),
+            ), reverse=True)
+        return values
+
+    def _preview_candidate(self, candidate: dict) -> None:
+        if not self.project:
+            return
+        try:
+            start = float(candidate.get("start_seconds", candidate.get("start", 0)))
+            end = float(candidate.get("end_seconds", candidate.get("end", start)))
+        except (TypeError, ValueError):
+            return
+        self.preview.set_range(self.project.source, start, end)
+        potential = {"high": "Высокий", "medium": "Средний", "low": "Низкий"}.get(str(candidate.get("potential")), "Предварительный")
+        reasons = [str(item) for item in candidate.get("reasons", []) if str(item)]
+        risks = [str(item) for item in candidate.get("risks", []) if str(item)]
+        lines = [
+            str(candidate.get("title") or "Момент"),
+            f"{format_seconds(start)}–{format_seconds(end)} · {format_seconds(end - start)}",
+            f"Потенциал: {potential} · Уверенность: {float(candidate.get('confidence') or 0) * 100:.0f}%",
+            f"Идея: {candidate.get('core_idea') or candidate.get('summary') or '—'}",
+            f"Начало: {candidate.get('hook_summary') or '—'}",
+            f"Финал: {candidate.get('payoff_summary') or '—'}",
+        ]
+        if reasons:
+            lines.append("Почему рекомендуем: " + " ".join(reasons[:2]))
+        if risks:
+            lines.append("Риск: " + " ".join(risks[:2]))
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if candidate_id and self.project.candidate_errors.get(candidate_id):
+            lines.append("Причина ошибки: " + self.project.candidate_errors[candidate_id])
+        self._replace_card_text(self.candidate_detail, lines)
 
     def _confirm_production_render(self) -> None:
         if not self.project or not self.project.selected_candidate_ids:
@@ -327,7 +494,12 @@ class ProjectScreen(QWidget):
         for run in runs:
             frame = QFrame(); frame.setObjectName("card")
             layout = QHBoxLayout(frame); layout.setContentsMargins(12, 10, 12, 10)
-            text = QLabel(f"{run.started_at[:16].replace('T', ' ')} · {run.status.replace('_', ' ')}")
+            kind = {
+                "analysis": "Анализ видео", "draft": "Подготовка черновика",
+                "selected_render": "Создание роликов", "render_revision": "Создать заново",
+                "full": "Полный запуск",
+            }.get(run.run_kind, "Запуск")
+            text = QLabel(f"{run.started_at[:16].replace('T', ' ')} · {kind} · {run.status.replace('_', ' ')}")
             text.setWordWrap(True)
             layout.addWidget(text, 1)
             results = [Path(item) for item in run.artifact_paths if Path(item).suffix.lower() == ".mp4" and Path(item).is_file()]
@@ -450,7 +622,7 @@ class ProjectScreen(QWidget):
         else:
             self.progress.set_finished(snapshot.message)
         self.run_button.setDisabled(active)
-        self.draft_button.setDisabled(active or not self._candidate_checks)
+        self.draft_button.setDisabled(active or not (self.project and self.project.review_selected_candidate_ids))
         selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
             Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in self.project.selected_candidate_ids

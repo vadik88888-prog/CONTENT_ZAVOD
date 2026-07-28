@@ -111,6 +111,13 @@ def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_pat
     assert analysis["candidate_data_ref"].endswith("candidates.scored.json")
     assert Path(analysis["candidate_data_ref"]).is_file()
     assert analysis["candidates"]
+    first = analysis["candidates"][0]
+    assert {"story_unit_id", "chapter_id", "start_seconds", "end_seconds", "duration_seconds"} <= set(first)
+    assert {"title", "core_idea", "hook_summary", "payoff_summary", "confidence", "potential"} <= set(first)
+    assert {"reasons", "risks", "feature_profile", "boundary_evidence", "preview"} <= set(first)
+    assert analysis["summary"]["potential_counts"]
+    assert analysis["content_profile"]
+    assert analysis["duration_seconds"] == 25.0
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "analysis_ready"
     assert report["production_render"]["status"] == "skipped"

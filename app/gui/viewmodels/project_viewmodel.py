@@ -140,6 +140,15 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def set_review_selection(self, candidate_ids: list[str]) -> None:
+        if not self.project or self.active:
+            return
+        try:
+            self.project = self.services.set_review_selection(self.project, candidate_ids)
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+
     def adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
         if not self.project or self.active:
             return

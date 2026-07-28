@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+from app.cli import _apply_render_command_arguments
+from app.config import AppConfig
 from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -47,6 +50,8 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert finished_analysis.status == RunStatus.ANALYSIS_READY
     assert project.status == ProjectStatus.ANALYSIS_READY
     assert project.candidate_states == {"candidate-a": "analyzed", "candidate-b": "analyzed"}
+    services.set_review_selection(project, ["candidate-a"])
+    assert services.projects.load(project.project_id).review_selected_candidate_ids == ["candidate-a"]
 
     draft_run, draft_prepared = services.prepare_draft(project, ["candidate-a"])
     assert draft_run.run_kind == RunKind.DRAFT
@@ -92,6 +97,7 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     project.candidate_draft_artifacts["candidate-b"] = str(draft_b_path)
     services.projects.save(project)
     services.select_draft_candidates(project, ["candidate-b", "candidate-a"])
+    assert project.review_selected_candidate_ids == ["candidate-b", "candidate-a"]
     production_run, production_prepared = services.prepare_selected_render(project)
     assert production_run.run_kind == RunKind.SELECTED_RENDER
     assert "render" in production_prepared.arguments
@@ -100,3 +106,22 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert project.status == ProjectStatus.RENDERING_SELECTED
     approved_path = Path(production_prepared.arguments[production_prepared.arguments.index("--draft") + 1])
     assert [item["candidate_id"] for item in read_json(approved_path, {})["candidates"]] == ["candidate-b", "candidate-a"]
+
+
+def test_approved_render_enables_the_required_delivery_stages() -> None:
+    config = AppConfig()
+
+    _apply_render_command_arguments(config, SimpleNamespace(
+        output_width=None,
+        output_height=None,
+        output_fps=None,
+        crop_strategy=None,
+        subtitle_style=None,
+        disable_subtitles=False,
+        video_encoder=None,
+    ))
+
+    assert config.production.enabled is True
+    assert config.tts.enabled is True
+    assert config.audio_composition.enabled is True
+    assert config.production_render.enabled is True
