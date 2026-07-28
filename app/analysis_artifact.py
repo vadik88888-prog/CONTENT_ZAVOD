@@ -37,6 +37,8 @@ class AnalysisArtifact:
     summary: dict[str, Any]
     content_profile: dict[str, Any]
     duration_seconds: float | None
+    candidate_count: int = 0
+    recommended_count: dict[str, int] = field(default_factory=dict)
     status: str = "analysis_ready"
     schema_version: str = ANALYSIS_ARTIFACT_SCHEMA_VERSION
     warnings: list[str] = field(default_factory=list)
@@ -53,6 +55,13 @@ class AnalysisArtifact:
             raise AnalysisArtifactError("Analysis artifact does not identify its source.")
         if not isinstance(self.candidates, list):
             raise AnalysisArtifactError("Analysis artifact candidates are invalid.")
+        if self.candidate_count < 0 or self.candidate_count != len(self.candidates):
+            raise AnalysisArtifactError("Analysis artifact candidate count is invalid.")
+        if any(
+            key not in {"min", "max", "default"} or isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for key, value in self.recommended_count.items()
+        ):
+            raise AnalysisArtifactError("Analysis artifact recommendation range is invalid.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -81,6 +90,8 @@ class AnalysisArtifact:
             summary=dict(raw.get("summary") or {}),
             content_profile=dict(raw.get("content_profile") or {}),
             duration_seconds=_optional_float(raw.get("duration_seconds")),
+            candidate_count=_candidate_count(raw),
+            recommended_count=_recommended_count(raw),
             status=str(raw.get("status") or ""),
             schema_version=str(raw.get("schema_version") or ""),
             warnings=[str(item) for item in raw.get("warnings", [])],
@@ -173,8 +184,14 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
             "start_seconds": start,
             "end_seconds": end,
             "requires_production_render": False,
+            "thumbnail": {
+                "kind": "lazy_source_frame",
+                "timestamp_seconds": round(start + min(1.0, max(0.0, (end - start) / 2)) if start is not None and end is not None else 0.0, 3),
+                "requires_production_render": False,
+            },
         },
         "state": "analyzed",
+        "recommended": selected,
         "selected_by_recommendation": selected,
         "recommendation_status": "recommended" if selected else "not_recommended",
         "virality_level": potential.get("level") or potential_level,
@@ -280,6 +297,40 @@ def _unique(values: list[str]) -> list[str]:
         if clean and clean not in result:
             result.append(clean)
     return result
+
+
+def _candidate_count(raw: dict[str, Any]) -> int:
+    value = raw.get("candidate_count")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    candidates = raw.get("candidates")
+    return len(candidates) if isinstance(candidates, list) else 0
+
+
+def _recommended_count(raw: dict[str, Any]) -> dict[str, int]:
+    value = raw.get("recommended_count")
+    if isinstance(value, dict):
+        result = {
+            str(key): int(item)
+            for key, item in value.items()
+            if str(key) in {"min", "max", "default"} and isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        }
+        if result:
+            return result
+    recommendation = raw.get("recommendation")
+    clip_count = recommendation.get("clip_count") if isinstance(recommendation, dict) else None
+    interval = clip_count.get("estimated_publishable_clip_range") if isinstance(clip_count, dict) else None
+    selected = recommendation.get("selected_candidate_ids") if isinstance(recommendation, dict) else []
+    default = len(selected) if isinstance(selected, list) else 0
+    if isinstance(interval, dict):
+        lower = interval.get("min")
+        upper = interval.get("max")
+        return {
+            "min": int(lower) if isinstance(lower, int) and lower >= 0 else default,
+            "max": int(upper) if isinstance(upper, int) and upper >= 0 else default,
+            "default": default,
+        }
+    return {"min": default, "max": default, "default": default}
 
 
 def new_analysis_artifact(**kwargs: Any) -> AnalysisArtifact:

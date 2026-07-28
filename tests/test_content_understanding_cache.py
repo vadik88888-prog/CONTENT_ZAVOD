@@ -114,13 +114,31 @@ def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_pat
     first = analysis["candidates"][0]
     assert {"story_unit_id", "chapter_id", "start_seconds", "end_seconds", "duration_seconds"} <= set(first)
     assert {"title", "core_idea", "hook_summary", "payoff_summary", "confidence", "potential"} <= set(first)
-    assert {"reasons", "risks", "feature_profile", "boundary_evidence", "preview"} <= set(first)
+    assert {"reasons", "risks", "feature_profile", "boundary_evidence", "preview", "recommended"} <= set(first)
+    assert first["preview"]["thumbnail"]["kind"] == "lazy_source_frame"
     assert analysis["summary"]["potential_counts"]
     assert analysis["content_profile"]
     assert analysis["duration_seconds"] == 25.0
+    assert analysis["candidate_count"] == len(analysis["candidates"])
+    assert {"min", "max", "default"} <= set(analysis["recommended_count"])
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "analysis_ready"
     assert report["production_render"]["status"] == "skipped"
+
+
+def test_repeated_analysis_reuses_source_intelligence_cache(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+
+    first = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+    second = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+
+    assert calls == {"profile": 1, "map": 1, "boundaries": 1}
+    assert first.analysis_id == second.analysis_id
+    report = read_json(second.report_path, {})
+    assert report["stages"]["transcription"]["cache_hit"] is True
+    assert report["terminal"]["status"] == "analysis_ready"
 
 
 def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_order(tmp_path: Path, monkeypatch) -> None:
@@ -162,6 +180,11 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert result.selected_clips == len(requested_ids)
     assert len(result.output_files) == len(requested_ids)
     assert result.draft_path and result.draft_path.is_file()
+    draft_artifact = read_json(result.draft_path, {})
+    first_draft = draft_artifact["candidates"][0]
+    assert first_draft["candidate_boundary_fingerprint"]
+    assert first_draft["transformation_fingerprint"]
+    assert first_draft["production_plan_fingerprint"]
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "draft_ready"
     assert [item["candidate_id"] for item in report["candidate_flow"]["draft_candidates"]] == requested_ids
@@ -181,6 +204,25 @@ def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypa
             tmp_path, AppConfig(score_threshold=0), mock_ai=True,
             analysis_artifact_path=analysis.analysis_path,
             selected_candidate_ids=[read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]],
+        ).run(input_path=str(source))
+
+
+def test_changed_source_fingerprint_requires_fresh_analysis_before_draft(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+    candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
+    source.write_bytes(b"changed source fingerprint")
+
+    import pytest
+    from app.errors import ClipEngineError
+
+    with pytest.raises(ClipEngineError, match="different source file"):
+        Pipeline(
+            tmp_path, AppConfig(score_threshold=0), mock_ai=True,
+            analysis_artifact_path=analysis.analysis_path,
+            selected_candidate_ids=[candidate_id], draft_only=True,
         ).run(input_path=str(source))
 
 
@@ -253,6 +295,8 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
         "production_plan_id": report["production_plan"]["items"][0]["production_plan_id"],
         "clip_result_id": "approved-result",
     }]
+    assert report["run"]["render_settings_fingerprint"]
+    assert report["production_render"]["render_settings_fingerprint"] == report["run"]["render_settings_fingerprint"]
 
 
 def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypatch) -> None:

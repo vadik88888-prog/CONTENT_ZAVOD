@@ -861,6 +861,12 @@ class Pipeline:
                 "strategy": content_profile.get("strategy"),
             },
             duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
+            candidate_count=len(review_candidates),
+            recommended_count={
+                "min": int(clip_count_recommendation.get("estimated_publishable_clip_range", {}).get("min", len(selected_ids)) or 0),
+                "max": int(clip_count_recommendation.get("estimated_publishable_clip_range", {}).get("max", len(selected_ids)) or 0),
+                "default": len(selected_ids),
+            },
             warnings=list(self.warnings),
         )
         tracker.start("analysis_artifact", analysis_fingerprint)
@@ -1079,6 +1085,12 @@ class Pipeline:
             copy.candidate.boundary_diagnostics = {
                 **copy.candidate.boundary_diagnostics,
                 "review_override": validation,
+                "candidate_boundary_fingerprint": _hash({
+                    "candidate_id": candidate_id,
+                    "start": validation["start"],
+                    "end": validation["end"],
+                    "analysis": self.expected_analysis_fingerprint,
+                }),
             }
             self.warnings.extend(
                 f"Boundary override {candidate_id}: {warning}" for warning in validation["warnings"]
@@ -1161,6 +1173,13 @@ class Pipeline:
             reviewed.append({
                 **base,
                 "state": "draft_ready",
+                "candidate_boundary_fingerprint": _hash({
+                    "candidate_id": candidate_id,
+                    "source_range": _plan_source_range(plan),
+                    "boundary": transformation_item.get("source_context", {}).get("candidate", {}),
+                }),
+                "transformation_fingerprint": str(transformation_item.get("transformation_fingerprint") or ""),
+                "production_plan_fingerprint": str(plan_item.get("production_plan_fingerprint") or ""),
                 "draft_final_script": transformation_item.get("final_script", {}),
                 "draft_production_plan": plan.model_dump(mode="json"),
                 "preview": preview.to_dict(),
@@ -1353,6 +1372,13 @@ class Pipeline:
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
         self.warnings.extend(production_render.get("warnings", []))
+        render_settings_fingerprint = _hash({
+            "production_render": self.config.production_render,
+            "audio_composition": self.config.audio_composition,
+            "tts": self.config.tts,
+            "production": self.config.production,
+        })
+        production_render["render_settings_fingerprint"] = render_settings_fingerprint
         registry = primary_clip_results(production_render)
         self._assert_current_run_results(registry, output_directory)
         outputs = result_paths(registry, output_directory)
@@ -1404,6 +1430,7 @@ class Pipeline:
                 "run_directory": str(output_directory), "started_at": self.started_at,
                 "analysis_id": analysis.analysis_id, "draft_id": draft.draft_id,
                 "selected_candidate_ids": list(self.selected_candidate_ids),
+                "render_settings_fingerprint": render_settings_fingerprint,
                 "terminal_status": terminal["status"], "error_code": terminal.get("error_code"),
             },
             primary_results=[item.to_dict() for item in registry],
@@ -1656,6 +1683,7 @@ class Pipeline:
                 outcomes.append({"status": "completed", "candidate_id": candidate_id, "plan": plan_data, "cache_hit": False})
             outcome = outcomes[-1]
             if outcome.get("status") == "completed":
+                outcome["production_plan_fingerprint"] = cache_key
                 plan = ProductionPlan.model_validate(outcome["plan"])
                 source_range = _plan_source_range(plan)
                 duplicate_reason = _production_plan_duplicate_reason(
@@ -2267,6 +2295,7 @@ class Pipeline:
                     _outcome_detail(outcome) if outcome_status == "failed" else None,
                 )
                 self._record_transformation_substages(tracker, candidate.id, cache_key, outcome)
+            outcome["transformation_fingerprint"] = cache_key
             outcomes.append(outcome)
             outcome_artifacts = self._write_transformation_artifacts(output_directory, suffix, index, outcome)
             artifacts.extend(outcome_artifacts)

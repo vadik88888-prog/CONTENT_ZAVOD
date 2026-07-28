@@ -20,7 +20,7 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.source_download import validate_public_video_url
-from app.utils import read_json, utc_now
+from app.utils import read_json, stable_text_hash, utc_now
 
 
 @dataclass(slots=True)
@@ -313,6 +313,9 @@ class DesktopServices:
         project.candidate_boundary_overrides[candidate_id] = {
             "start": validation["start"], "end": validation["end"],
             "warnings": validation["warnings"], "revalidation": validation["revalidation"],
+            "candidate_boundary_fingerprint": stable_text_hash(
+                f"{project.analysis_fingerprint or ''}:{candidate_id}:{validation['start']:.3f}:{validation['end']:.3f}"
+            ),
         }
         if project.candidate_states.get(candidate_id) in {"draft_ready", "selected", "draft_failed"}:
             project.candidate_states[candidate_id] = "analyzed"
