@@ -96,6 +96,10 @@ class DesktopProject:
     analysis_fingerprint: str | None = None
     draft_artifact_path: str | None = None
     draft_id: str | None = None
+    # A draft run may prepare only a subset of moments.  Keep the immutable
+    # artifact that owns each ready candidate so later selections can combine
+    # drafts without re-running analysis or silently dropping earlier work.
+    candidate_draft_artifacts: dict[str, str] = field(default_factory=dict)
     candidate_states: dict[str, str] = field(default_factory=dict)
     selected_candidate_ids: list[str] = field(default_factory=list)
     candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -118,6 +122,9 @@ class DesktopProject:
             raise ValueError("Unsupported candidate review state.")
         if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
             raise ValueError("Selected candidate ids must be unique.")
+        if any(not candidate_id or not isinstance(path, str) or not path.strip()
+               for candidate_id, path in self.candidate_draft_artifacts.items()):
+            raise ValueError("Candidate draft artifact reference is invalid.")
         for candidate_id, override in self.candidate_boundary_overrides.items():
             if not candidate_id or not isinstance(override, dict):
                 raise ValueError("Candidate boundary override is invalid.")
@@ -154,6 +161,19 @@ class DesktopProject:
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
         source_metadata = dict(value.get("source_metadata") or {})
+        draft_artifact_path = str(value["draft_artifact_path"]) if value.get("draft_artifact_path") else None
+        candidate_states = {str(key): str(item) for key, item in dict(value.get("candidate_states") or {}).items()}
+        candidate_draft_artifacts = {
+            str(key): str(item) for key, item in dict(value.get("candidate_draft_artifacts") or {}).items()
+        }
+        # Schema v3 originally retained only the latest draft path.  Existing
+        # ready candidates all belonged to that artifact, so reconstruct the
+        # per-candidate references during a non-destructive read migration.
+        if not candidate_draft_artifacts and draft_artifact_path:
+            candidate_draft_artifacts = {
+                candidate_id: draft_artifact_path for candidate_id, state in candidate_states.items()
+                if state in {"draft_ready", "selected"}
+            }
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
@@ -172,9 +192,10 @@ class DesktopProject:
             analysis_artifact_path=str(value["analysis_artifact_path"]) if value.get("analysis_artifact_path") else None,
             analysis_id=str(value["analysis_id"]) if value.get("analysis_id") else None,
             analysis_fingerprint=str(value["analysis_fingerprint"]) if value.get("analysis_fingerprint") else None,
-            draft_artifact_path=str(value["draft_artifact_path"]) if value.get("draft_artifact_path") else None,
+            draft_artifact_path=draft_artifact_path,
             draft_id=str(value["draft_id"]) if value.get("draft_id") else None,
-            candidate_states={str(key): str(item) for key, item in dict(value.get("candidate_states") or {}).items()},
+            candidate_draft_artifacts=candidate_draft_artifacts,
+            candidate_states=candidate_states,
             selected_candidate_ids=[str(item) for item in value.get("selected_candidate_ids", [])],
             candidate_boundary_overrides={
                 str(key): dict(item) for key, item in dict(value.get("candidate_boundary_overrides") or {}).items()

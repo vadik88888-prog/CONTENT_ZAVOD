@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -9,7 +10,7 @@ from app.gui.services.pipeline_facade import PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
-from app.utils import write_json
+from app.utils import read_json, write_json
 
 
 def _services(tmp_path: Path):
@@ -53,14 +54,49 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert "render" not in draft_prepared.arguments
     assert project.candidate_states["candidate-a"] == "draft_planning"
 
-    draft_path = tmp_path / "draft.json"; write_json(draft_path, {"placeholder": True})
-    project.draft_artifact_path = str(draft_path); project.draft_id = "draft-001"
-    project.candidate_states["candidate-a"] = "draft_ready"
+    preview = tmp_path / "draft-preview.mp4"; preview.write_bytes(b"preview")
+    draft_path = tmp_path / "draft-a.json"
+    new_draft_artifact(
+        draft_id="draft-001", analysis_id="analysis-001", analysis_fingerprint="fingerprint-001",
+        analysis_artifact_path=str(analysis_path), project_id=project.project_id,
+        source_fingerprint="source-fingerprint", candidates=[{
+            "candidate_id": "candidate-a", "state": "draft_ready",
+            "draft_production_plan": {"plan_id": "plan-a"},
+            "preview": {"output_file": str(preview)},
+        }],
+    ).write(draft_path)
+    write_json(draft_prepared.report_path, {
+        "terminal": {"status": "draft_ready"}, "output_files": [str(preview)], "warnings": [],
+        "run": {"draft_id": "draft-001", "draft_artifact_path": str(draft_path)},
+        "candidate_flow": {"draft_candidates": [{"candidate_id": "candidate-a", "state": "draft_ready"}]},
+    })
+    finished_draft = services.finish_success(project, draft_run, draft_prepared)
+    assert finished_draft.status == RunStatus.DRAFT_READY
+    assert project.candidate_draft_artifacts == {"candidate-a": str(draft_path)}
+    recovered = services.projects.load(project.project_id)
+    assert recovered.candidate_states["candidate-a"] == "draft_ready"
+    assert recovered.candidate_draft_artifacts == {"candidate-a": str(draft_path)}
+
+    # A later draft can be prepared independently.  The final hand-off joins
+    # both immutable draft plans in the user's selected order.
+    draft_b_path = tmp_path / "draft-b.json"
+    new_draft_artifact(
+        draft_id="draft-002", analysis_id="analysis-001", analysis_fingerprint="fingerprint-001",
+        analysis_artifact_path=str(analysis_path), project_id=project.project_id,
+        source_fingerprint="source-fingerprint", candidates=[{
+            "candidate_id": "candidate-b", "state": "draft_ready",
+            "draft_production_plan": {"plan_id": "plan-b"},
+        }],
+    ).write(draft_b_path)
+    project.candidate_states["candidate-b"] = "draft_ready"
+    project.candidate_draft_artifacts["candidate-b"] = str(draft_b_path)
     services.projects.save(project)
-    services.select_draft_candidates(project, ["candidate-a"])
+    services.select_draft_candidates(project, ["candidate-b", "candidate-a"])
     production_run, production_prepared = services.prepare_selected_render(project)
     assert production_run.run_kind == RunKind.SELECTED_RENDER
     assert "render" in production_prepared.arguments
     assert "--draft" in production_prepared.arguments
     assert "--confirm-production" in production_prepared.arguments
     assert project.status == ProjectStatus.RENDERING_SELECTED
+    approved_path = Path(production_prepared.arguments[production_prepared.arguments.index("--draft") + 1])
+    assert [item["candidate_id"] for item in read_json(approved_path, {})["candidates"]] == ["candidate-b", "candidate-a"]

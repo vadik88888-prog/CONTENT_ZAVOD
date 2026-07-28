@@ -235,13 +235,16 @@ class DesktopServices:
         return run, prepared
 
     def select_draft_candidates(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
-        if not project.draft_artifact_path:
+        if not project.candidate_draft_artifacts:
             raise InputValidationError("Сначала соберите Draft Preview.")
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один готовый черновик.")
         unavailable = [item for item in candidate_ids if project.candidate_states.get(item) not in {"draft_ready", "selected"}]
         if unavailable:
             raise InputValidationError("В production можно отправлять только готовые черновики.")
+        missing_artifacts = [item for item in candidate_ids if not Path(project.candidate_draft_artifacts.get(item, "")).is_file()]
+        if missing_artifacts:
+            raise InputValidationError("Черновик для выбранного момента больше не доступен.")
         for candidate_id, state in list(project.candidate_states.items()):
             if state == "selected" and candidate_id not in candidate_ids:
                 project.candidate_states[candidate_id] = "draft_ready"
@@ -290,6 +293,7 @@ class DesktopServices:
         }
         if project.candidate_states.get(candidate_id) in {"draft_ready", "selected", "draft_failed"}:
             project.candidate_states[candidate_id] = "analyzed"
+        project.candidate_draft_artifacts.pop(candidate_id, None)
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
         self.projects.save(project)
         return project, validation
@@ -300,6 +304,9 @@ class DesktopServices:
         candidate_ids = list(project.selected_candidate_ids)
         if not candidate_ids:
             raise InputValidationError("Сначала подтвердите черновики для production render.")
+        missing_artifacts = [item for item in candidate_ids if not Path(project.candidate_draft_artifacts.get(item, "")).is_file()]
+        if missing_artifacts:
+            raise InputValidationError("Не удалось найти сохранённый черновик для выбранного момента.")
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
@@ -462,6 +469,9 @@ class DesktopServices:
                 if isinstance(item, dict) and item.get("id")
             }
             project.selected_candidate_ids = []
+            project.candidate_draft_artifacts = {}
+            project.draft_artifact_path = None
+            project.draft_id = None
             project.status = ProjectStatus.ANALYSIS_READY
         elif run.run_kind == RunKind.DRAFT:
             run.status = RunStatus.DRAFT_READY
@@ -470,7 +480,13 @@ class DesktopServices:
             draft_candidates = report.get("candidate_flow", {}).get("draft_candidates", []) if isinstance(report.get("candidate_flow"), dict) else []
             for item in draft_candidates:
                 if isinstance(item, dict) and item.get("candidate_id") and item.get("state"):
-                    project.candidate_states[str(item["candidate_id"])] = str(item["state"])
+                    candidate_id = str(item["candidate_id"])
+                    state = str(item["state"])
+                    project.candidate_states[candidate_id] = state
+                    if state == "draft_ready" and project.draft_artifact_path:
+                        project.candidate_draft_artifacts[candidate_id] = project.draft_artifact_path
+                    elif state == "draft_failed":
+                        project.candidate_draft_artifacts.pop(candidate_id, None)
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.SELECTED_RENDER:
             completed_ids = {
@@ -500,7 +516,20 @@ class DesktopServices:
         run.technical_details = redact_secrets(technical_details or message)
         self.append_log(run, run.technical_details)
         self.runs.save(run)
-        project.status = ProjectStatus.FAILED
+        if run.run_kind == RunKind.SELECTED_RENDER:
+            for candidate_id in project.selected_candidate_ids:
+                if project.candidate_states.get(candidate_id) == "production_rendering":
+                    project.candidate_states[candidate_id] = "selected"
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+        elif run.run_kind == RunKind.DRAFT:
+            for candidate_id, state in list(project.candidate_states.items()):
+                if state == "draft_planning":
+                    project.candidate_states[candidate_id] = "analyzed"
+            project.status = ProjectStatus.ANALYSIS_READY if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
+        elif run.run_kind == RunKind.ANALYSIS:
+            project.status = ProjectStatus.SOURCE_READY
+        else:
+            project.status = ProjectStatus.FAILED
         self.projects.save(project)
         return run
 

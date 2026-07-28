@@ -61,12 +61,18 @@ class DraftPreviewService:
         if completed.returncode != 0 or not output_file.is_file() or output_file.stat().st_size == 0:
             detail = (completed.stderr or completed.stdout or "unknown ffmpeg error").strip()[-1000:]
             raise ProductionRenderError(f"Draft preview render failed: {detail}")
+        assembled_duration = round(sum(float(item["duration_seconds"]) for item in segments), 3)
+        planned_duration = float(plan.timeline.estimated_duration_seconds or 0)
+        # A locally-generated plan can legitimately omit its timeline estimate.
+        # The assembled source sequence is still an honest and useful duration
+        # estimate for the review screen, so never surface a misleading 0.0 s.
+        estimated_duration = round(planned_duration, 3) if planned_duration > 0 else assembled_duration
         result = DraftPreviewResult(
             output_file=output_file,
             subtitle_file=subtitle_file,
             segments=segments,
-            estimated_duration_seconds=float(plan.timeline.estimated_duration_seconds),
-            actual_duration_seconds=round(sum(float(item["duration_seconds"]) for item in segments), 3),
+            estimated_duration_seconds=estimated_duration,
+            actual_duration_seconds=assembled_duration,
             composition={
                 "width": self.width,
                 "height": self.height,

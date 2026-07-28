@@ -46,3 +46,5 @@ def test_fast_draft_preview_assembles_source_segments_with_subtitles(tmp_path: P
     assert result.subtitle_file.is_file()
     assert result.segments and all("source_start_seconds" in item for item in result.segments)
     assert result.composition["width"] == 540 and result.composition["height"] == 960
+    assert result.estimated_duration_seconds > 0
+    assert result.actual_duration_seconds and result.actual_duration_seconds > 0

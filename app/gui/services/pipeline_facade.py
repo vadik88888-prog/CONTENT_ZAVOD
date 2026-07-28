@@ -12,6 +12,7 @@ import yaml
 from app.clip_results import ClipResult, result_paths, unique_primary_results
 from app.run_manifest import is_run_scoped_path
 from app.config import load_config
+from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
 from app.gui.services.desktop_project_store import InputValidationError, validate_video_path
 from app.media import probe_video
@@ -206,12 +207,12 @@ class PipelineFacade:
     ) -> PreparedPipelineRun:
         """Prepare the expensive 1080x1920 job only from reviewed draft.json."""
 
-        draft_path = Path(str(project.draft_artifact_path or ""))
-        if not draft_path.is_file() or not project.draft_id:
+        if not project.candidate_draft_artifacts:
             raise InputValidationError("Сначала соберите и проверьте Draft Preview.")
         if not candidate_ids:
             raise InputValidationError("Выберите черновики для production render.")
         source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
             "-u", "-m", "app", "render", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--draft", str(draft_path),
@@ -228,6 +229,60 @@ class PipelineFacade:
              "platform": resolved.platform.platform},
             manifest_path=output_directory / "manifest.json",
         )
+
+    @staticmethod
+    def _compose_approved_draft(project: DesktopProject, candidate_ids: list[str], run_directory: Path) -> Path:
+        """Combine ready candidate drafts in the user's explicit output order.
+
+        Each fast-preview run is immutable and may cover only a subset of
+        candidates.  The production command still receives one trusted draft
+        contract, assembled here without touching analysis or re-planning.
+        """
+
+        artifacts: dict[Path, DraftArtifact] = {}
+        records: list[dict[str, Any]] = []
+        baseline: DraftArtifact | None = None
+        for candidate_id in candidate_ids:
+            raw_path = project.candidate_draft_artifacts.get(candidate_id)
+            path = Path(str(raw_path or "")).resolve()
+            if not raw_path or not path.is_file():
+                raise InputValidationError("Черновик для выбранного момента больше не доступен.")
+            try:
+                artifact = artifacts.setdefault(path, DraftArtifact.read(path))
+            except DraftArtifactError as error:
+                raise InputValidationError("Сохранённый Draft Preview повреждён.") from error
+            if baseline is None:
+                baseline = artifact
+            elif (
+                artifact.analysis_id != baseline.analysis_id
+                or artifact.analysis_fingerprint != baseline.analysis_fingerprint
+                or artifact.analysis_artifact_path != baseline.analysis_artifact_path
+                or artifact.source_fingerprint != baseline.source_fingerprint
+                or artifact.project_id != baseline.project_id
+            ):
+                raise InputValidationError("Выбранные черновики относятся к разным анализам и не могут быть объединены.")
+            record = next(
+                (item for item in artifact.candidates if str(item.get("candidate_id") or "") == candidate_id),
+                None,
+            )
+            if not isinstance(record, dict) or record.get("state") not in {"draft_ready", "selected"}:
+                raise InputValidationError("Выбранный черновик ещё не готов к production render.")
+            records.append(dict(record))
+        if baseline is None:  # Defensive: caller already rejected an empty selection.
+            raise InputValidationError("Выберите хотя бы один готовый черновик.")
+        approved = new_draft_artifact(
+            draft_id=f"approved-{run_directory.name}",
+            analysis_id=baseline.analysis_id,
+            analysis_fingerprint=baseline.analysis_fingerprint,
+            analysis_artifact_path=baseline.analysis_artifact_path,
+            project_id=baseline.project_id or project.project_id,
+            source_fingerprint=baseline.source_fingerprint,
+            candidates=records,
+            warnings=[warning for artifact in artifacts.values() for warning in artifact.warnings],
+        )
+        path = run_directory / "approved-draft.json"
+        approved.write(path)
+        return path
 
     def _prepare_mode_paths(
         self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings,

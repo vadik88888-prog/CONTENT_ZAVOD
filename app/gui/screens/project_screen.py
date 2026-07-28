@@ -227,18 +227,26 @@ class ProjectScreen(QWidget):
         analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
         analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
         candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
-        draft_path = Path(project.draft_artifact_path) if project.draft_artifact_path else None
-        draft = read_json(draft_path, {}) if draft_path and draft_path.is_file() else {}
-        previews = {
-            str(item.get("candidate_id")): item for item in draft.get("candidates", [])
-            if isinstance(item, dict) and item.get("candidate_id")
-        } if isinstance(draft, dict) else {}
+        previews: dict[str, dict] = {}
+        for candidate_id, artifact_path in project.candidate_draft_artifacts.items():
+            path = Path(artifact_path)
+            draft = read_json(path, {}) if path.is_file() else {}
+            if not isinstance(draft, dict):
+                continue
+            candidate = next(
+                (item for item in draft.get("candidates", [])
+                 if isinstance(item, dict) and str(item.get("candidate_id") or "") == candidate_id),
+                None,
+            )
+            if isinstance(candidate, dict):
+                previews[candidate_id] = candidate
         if not candidates:
             self._replace_card_text(self.candidate_review, ["После анализа здесь появятся моменты для будущих роликов."])
             layout.addWidget(self.draft_button); layout.addWidget(self.production_button)
             self.draft_button.setDisabled(True); self.production_button.setDisabled(True)
             return
         ready_exists = any(state in {"draft_ready", "selected"} for state in project.candidate_states.values())
+        draftable_exists = any(state in {"analyzed", "draft_failed"} for state in project.candidate_states.values())
         for item in candidates:
             if not isinstance(item, dict) or not item.get("candidate_id"):
                 continue
@@ -273,9 +281,13 @@ class ProjectScreen(QWidget):
                 button.clicked.connect(lambda _checked=False, path=preview_file: self.preview.set_file(str(path)))
                 row.addWidget(button)
             layout.addWidget(frame)
-        self.draft_button.setText("Подтвердить выбор" if ready_exists else "Собрать черновик")
+        self.draft_button.setText("Собрать черновики" if draftable_exists else "Подтвердить выбор")
         self.draft_button.setDisabled(False)
-        self.production_button.setDisabled(not bool(project.selected_candidate_ids) or not bool(project.draft_artifact_path))
+        selected_drafts_exist = all(
+            Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
+            for candidate_id in project.selected_candidate_ids
+        )
+        self.production_button.setDisabled(not bool(project.selected_candidate_ids) or not selected_drafts_exist)
         layout.addWidget(self.draft_button); layout.addWidget(self.production_button)
 
     def _checked_candidate_ids(self) -> list[str]:
@@ -285,11 +297,14 @@ class ProjectScreen(QWidget):
         if not self.project:
             return
         candidate_ids = self._checked_candidate_ids()
-        ready_exists = any(state in {"draft_ready", "selected"} for state in self.project.candidate_states.values())
-        if ready_exists:
-            self.viewmodel.select_drafts(candidate_ids)
+        needs_draft = [
+            candidate_id for candidate_id in candidate_ids
+            if self.project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}
+        ]
+        if needs_draft:
+            self.viewmodel.build_drafts(needs_draft)
         else:
-            self.viewmodel.build_drafts(candidate_ids)
+            self.viewmodel.select_drafts(candidate_ids)
 
     def _confirm_production_render(self) -> None:
         if not self.project or not self.project.selected_candidate_ids:
@@ -436,7 +451,11 @@ class ProjectScreen(QWidget):
             self.progress.set_finished(snapshot.message)
         self.run_button.setDisabled(active)
         self.draft_button.setDisabled(active or not self._candidate_checks)
-        self.production_button.setDisabled(active or not (self.project and self.project.selected_candidate_ids and self.project.draft_artifact_path))
+        selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
+            Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
+            for candidate_id in self.project.selected_candidate_ids
+        ) if self.project else False
+        self.production_button.setDisabled(active or not selected_drafts_exist)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.composition_strategy, self.subtitles, self.subtitle_style, self.cache,
