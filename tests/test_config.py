@@ -1,6 +1,6 @@
 import pytest
 
-from app.config import AppConfig
+from app.config import AppConfig, ViralityScoringConfig
 from app.errors import ClipEngineError
 
 
@@ -34,3 +34,14 @@ def test_content_understanding_versions_are_validated() -> None:
     config.content_understanding.strategy_version = ""
     with pytest.raises(ClipEngineError, match="strategy_version"):
         config.validate()
+
+
+def test_virality_policy_validates_complete_normalized_weights() -> None:
+    config = AppConfig()
+    config.virality.weights["hook"] = 0.2
+    with pytest.raises(ClipEngineError, match="Сумма virality.weights"):
+        config.validate()
+
+    policy = ViralityScoringConfig(semantic_ai_mode="invalid")
+    with pytest.raises(ClipEngineError, match="semantic_ai_mode"):
+        policy.validate()

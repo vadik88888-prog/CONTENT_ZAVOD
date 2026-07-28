@@ -83,6 +83,35 @@ content_understanding:
     semantic_duplicate_penalty: 0.25
     context_dependency_penalty: 0.10
     repetition_penalty: 0.08
+virality:
+  # Goal 5B: comparative content-strength signals, not a prediction of views.
+  enabled: true
+  schema_version: 5B.1
+  scoring_config_version: 5B.1
+  strategy_version: 5B.1
+  # "auto" uses bounded grounded semantic assistance when available and falls
+  # back to the deterministic local profile if it is not.
+  semantic_ai_mode: auto
+  max_ai_batch_candidates: 20
+  minimum_quality_score: 0.52
+  minimum_publishability_score: 0.55
+  strong_story_unit_threshold: 0.55
+  uncertainty_tiebreak_weight: 0.08
+  dead_zone_minimum_seconds: 1.4
+  dead_zone_penalty_weight: 0.10
+  weights:
+    hook: 0.13
+    curiosity: 0.07
+    emotion: 0.09
+    conflict: 0.07
+    specificity: 0.08
+    novelty: 0.06
+    usefulness: 0.08
+    quotability: 0.08
+    momentum: 0.09
+    payoff: 0.12
+    retention: 0.08
+    publishability: 0.05
 scoring:
   weights:
     hook: 0.18

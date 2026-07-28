@@ -186,6 +186,73 @@ class ContentUnderstandingConfig:
             raise ClipEngineError("content_understanding.coverage_min_quality_score должен быть от 0 до 100.")
 
 
+DEFAULT_VIRALITY_WEIGHTS = {
+    "hook": 0.13,
+    "curiosity": 0.07,
+    "emotion": 0.09,
+    "conflict": 0.07,
+    "specificity": 0.08,
+    "novelty": 0.06,
+    "usefulness": 0.08,
+    "quotability": 0.08,
+    "momentum": 0.09,
+    "payoff": 0.12,
+    "retention": 0.08,
+    "publishability": 0.05,
+}
+
+
+@dataclass(slots=True)
+class ViralityScoringConfig:
+    """Goal 5B policy. Scores are comparative content signals, never view predictions."""
+
+    enabled: bool = True
+    schema_version: str = "5B.1"
+    scoring_config_version: str = "5B.1"
+    strategy_version: str = "5B.1"
+    semantic_ai_mode: str = "auto"
+    max_ai_batch_candidates: int = 20
+    minimum_quality_score: float = 0.52
+    minimum_publishability_score: float = 0.55
+    strong_story_unit_threshold: float = 0.55
+    uncertainty_tiebreak_weight: float = 0.08
+    dead_zone_minimum_seconds: float = 1.4
+    dead_zone_penalty_weight: float = 0.10
+    weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_VIRALITY_WEIGHTS))
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ClipEngineError("virality.enabled должен быть true или false.")
+        for name, value in (
+            ("virality.schema_version", self.schema_version),
+            ("virality.scoring_config_version", self.scoring_config_version),
+            ("virality.strategy_version", self.strategy_version),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ClipEngineError(f"{name} не должен быть пустым.")
+        if self.semantic_ai_mode not in {"off", "auto", "on"}:
+            raise ClipEngineError("virality.semantic_ai_mode: off, auto или on.")
+        if not 1 <= self.max_ai_batch_candidates <= 100:
+            raise ClipEngineError("virality.max_ai_batch_candidates должен быть от 1 до 100.")
+        for name, value in (
+            ("minimum_quality_score", self.minimum_quality_score),
+            ("minimum_publishability_score", self.minimum_publishability_score),
+            ("strong_story_unit_threshold", self.strong_story_unit_threshold),
+            ("uncertainty_tiebreak_weight", self.uncertainty_tiebreak_weight),
+            ("dead_zone_penalty_weight", self.dead_zone_penalty_weight),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                raise ClipEngineError(f"virality.{name} должен быть от 0 до 1.")
+        if not 0.2 <= self.dead_zone_minimum_seconds <= 20:
+            raise ClipEngineError("virality.dead_zone_minimum_seconds должен быть от 0.2 до 20.")
+        if set(self.weights) != set(DEFAULT_VIRALITY_WEIGHTS):
+            raise ClipEngineError("virality.weights должен содержать все компоненты ViralPotentialScore.")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in self.weights.values()):
+            raise ClipEngineError("virality.weights должен содержать неотрицательные числа.")
+        if abs(sum(self.weights.values()) - 1.0) > 0.001:
+            raise ClipEngineError("Сумма virality.weights должна быть равна 1.0.")
+
+
 DEFAULT_SCORING_WEIGHTS = {
     "hook": 0.18,
     "completeness": 0.18,
@@ -613,6 +680,7 @@ class AppConfig:
     scene_detection: SceneDetectionConfig = field(default_factory=SceneDetectionConfig)
     candidate_generation: CandidateGenerationConfig = field(default_factory=CandidateGenerationConfig)
     content_understanding: ContentUnderstandingConfig = field(default_factory=ContentUnderstandingConfig)
+    virality: ViralityScoringConfig = field(default_factory=ViralityScoringConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     ai_reranking: AIRerankingConfig = field(default_factory=AIRerankingConfig)
     transformation: TransformationConfig = field(default_factory=TransformationConfig)
@@ -651,6 +719,7 @@ class AppConfig:
         self.scene_detection.validate()
         self.candidate_generation.validate()
         self.content_understanding.validate()
+        self.virality.validate()
         self.scoring.validate()
         self.ai_reranking.validate()
         self.transformation.validate()
@@ -695,6 +764,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             "scene_detection": SceneDetectionConfig,
             "candidate_generation": CandidateGenerationConfig,
             "content_understanding": ContentUnderstandingConfig,
+            "virality": ViralityScoringConfig,
             "scoring": ScoringConfig,
             "ai_reranking": AIRerankingConfig,
             "transformation": TransformationConfig,
