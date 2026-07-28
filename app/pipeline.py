@@ -1348,7 +1348,19 @@ class Pipeline:
         registry = primary_clip_results(production_render)
         self._assert_current_run_results(registry, output_directory)
         outputs = result_paths(registry, output_directory)
-        candidate_flow = build_candidate_flow(final_scored, selected_ids, {"items": []}, production, production_render)
+        # Draft FinalScripts were already validated before the user approved
+        # this render.  Preserve that completed stage in the candidate flow
+        # instead of treating it as missing merely because we intentionally do
+        # not re-run transformation here.
+        approved_transformation = {
+            "items": [
+                {"candidate_id": candidate_id, "status": "completed", "source": "approved_draft"}
+                for candidate_id in self.selected_candidate_ids
+            ],
+        }
+        candidate_flow = build_candidate_flow(
+            final_scored, selected_ids, approved_transformation, production, production_render,
+        )
         terminal = build_terminal_state(len(plans), outputs, candidate_flow, delivery_required=True)
         tracker.start("terminal")
         tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)

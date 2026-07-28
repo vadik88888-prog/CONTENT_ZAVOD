@@ -177,6 +177,77 @@ def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypa
         ).run(input_path=str(source))
 
 
+def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(tmp_path: Path, monkeypatch) -> None:
+    """The post-review render must not lose already-completed draft stages."""
+
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
+    candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
+
+    import app.pipeline as pipeline_module
+
+    def preview(_self, _plan, _source, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
+        return SimpleNamespace(
+            output_file=output,
+            to_dict=lambda: {
+                "status": "draft_ready", "output_file": str(output),
+                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
+            },
+        )
+
+    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    draft_config = AppConfig(score_threshold=0)
+    draft_config.transformation.enabled = True
+    draft_config.production.enabled = True
+    draft = Pipeline(
+        tmp_path, draft_config, mock_ai=True,
+        analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+    ).run(input_path=str(source))
+
+    def tts(_self, _tracker, _production, _work, _output):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def render(_self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None):
+        item = production["items"][0]
+        result = output / "results" / "final-short-01.mp4"
+        result.parent.mkdir(parents=True, exist_ok=True); result.write_bytes(b"mp4")
+        return {
+            "enabled": True, "status": "completed", "items": [{
+                "candidate_id": item["candidate_id"], "status": "completed", "output_file": str(result),
+                "production_plan_id": item["production_plan_id"], "clip_result_id": "approved-result",
+                "run_id": _self.run_id, "revision_id": f"{_self.run_id}:render-01", "primary": True,
+            }],
+        }
+
+    monkeypatch.setattr(Pipeline, "_run_tts", tts)
+    monkeypatch.setattr(Pipeline, "_run_audio", audio)
+    monkeypatch.setattr(Pipeline, "_run_production_render", render)
+    before_production = dict(calls)
+    result = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True,
+        draft_artifact_path=draft.draft_path, selected_candidate_ids=[candidate_id],
+    ).run(input_path=str(source))
+
+    assert calls == before_production
+    report = read_json(result.report_path, {})
+    flow = report["candidate_flow"]
+    assert report["terminal"]["status"] == "completed"
+    assert flow["transformed"] == flow["production_plans"] == flow["rendered"] == 1
+    assert flow["items"] == [{
+        "candidate_id": candidate_id, "outcome": "selected", "reason": "rendered",
+        "production_plan_id": report["production_plan"]["items"][0]["production_plan_id"],
+        "clip_result_id": "approved-result",
+    }]
+
+
 def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypatch) -> None:
     first_source = tmp_path / "first.mp4"; first_source.write_bytes(b"first")
     second_source = tmp_path / "second.mp4"; second_source.write_bytes(b"second")
