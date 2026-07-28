@@ -422,6 +422,7 @@ class ProjectScreen(QWidget):
             status.setWordWrap(True)
             actions.addWidget(status)
             source_preview = QPushButton("Просмотреть")
+            source_preview.setObjectName(f"preview-candidate-{candidate_id}")
             source_preview.clicked.connect(lambda _checked=False, value=dict(item): self._preview_candidate(value))
             actions.addWidget(source_preview)
             preview = previews.get(candidate_id, {}).get("preview", {}) if isinstance(previews.get(candidate_id), dict) else {}
@@ -535,7 +536,10 @@ class ProjectScreen(QWidget):
             start, end = self._candidate_range(candidate)
         except (TypeError, ValueError):
             return
-        self.preview.set_range(self.project.source, start, end)
+        self.preview.set_range(
+            self.project.source, start, end,
+            cache_directory=self.project.directory / "preview-proxies",
+        )
         self._active_candidate_id = str(candidate.get("candidate_id") or "") or None
         self._show_candidate_detail(candidate, start, end)
 
@@ -618,6 +622,10 @@ class ProjectScreen(QWidget):
                 start, end = self._candidate_range(candidate)
             except (TypeError, ValueError):
                 return
+            self.preview.set_range(
+                project.source, start, end,
+                cache_directory=project.directory / "preview-proxies",
+            )
             self._show_candidate_detail(candidate, start, end)
 
     def _thumbnail_ready(self, candidate_id: str, path: str) -> None:

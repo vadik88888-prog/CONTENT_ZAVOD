@@ -9,8 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
+from app.gui.components import VideoPreview
 from app.gui.models import DesktopSettings, ProjectStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -67,6 +68,14 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
     app = QApplication.instance() or QApplication([])
     services, project = _workspace(tmp_path)
     viewmodel = ProjectViewModel(services)
+    preview_ranges: list[tuple[Path, float, float, Path | None]] = []
+
+    def capture_preview_range(
+        _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None,
+    ) -> None:
+        preview_ranges.append((Path(path), float(start_seconds), float(end_seconds), cache_directory))
+
+    monkeypatch.setattr(VideoPreview, "set_range", capture_preview_range)
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
 
@@ -85,6 +94,22 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         app.processEvents()
         assert screen.candidate_review.hasFocus()
         assert screen.candidate_review.focusPolicy() == Qt.FocusPolicy.StrongFocus
+
+        # Candidate selection is bound to the source player, including the
+        # exact range and the project-local proxy cache destination.
+        candidate_previews = [
+            button for button in screen.findChildren(QPushButton)
+            if button.objectName().startswith("preview-candidate-")
+        ]
+        assert len(candidate_previews) == 2
+        first_preview, second_preview = candidate_previews
+        QTest.mouseClick(first_preview, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(second_preview, Qt.MouseButton.LeftButton)
+        assert preview_ranges == [
+            (project.source, 1.0, 18.0, project.directory / "preview-proxies"),
+            (project.source, 19.0, 29.0, project.directory / "preview-proxies"),
+        ]
+        assert screen._active_candidate_id and screen._active_candidate_id.endswith("other")
 
         screen._select_recommended()
 
