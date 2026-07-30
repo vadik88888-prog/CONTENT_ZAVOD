@@ -14,6 +14,8 @@ from app.gui.services.pipeline_facade import PreparedPipelineRun
 from app.gui.services.pipeline_runner import QtPipelineRunner
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
+from app.gui.services.desktop_services import DesktopServices
+from app.gui.services.system_service import SystemService
 
 
 def _video(tmp_path: Path, name: str = "тестовое видео.mp4") -> Path:
@@ -76,6 +78,32 @@ def test_active_run_is_recovered_as_interrupted(tmp_path: Path) -> None:
     assert history.mark_interrupted(project)
     assert history.load(project.project_id, run.run_id).status == RunStatus.INTERRUPTED
     assert store.load(project.project_id).status == ProjectStatus.INTERRUPTED
+
+
+def test_interrupted_url_download_becomes_repeatable_after_restart(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    store = DesktopProjectStore(data)
+    project = store.create_url("https://example.test/video", {"title": "Видео"})
+    partial = project.directory / "sources" / "video.mp4.part"
+    partial.parent.mkdir()
+    partial.write_bytes(b"partial")
+    project.source_spec.download_state = "downloading"
+    store.save(project)
+    services = DesktopServices(
+        engine_root=Path(__file__).resolve().parents[1],
+        settings_store=SettingsStore(data),
+        settings=DesktopSettings.defaults(data),
+        projects=store,
+        runs=RunHistoryStore(store),
+        pipeline=PipelineFacade(Path(__file__).resolve().parents[1]),
+        system=SystemService(Path(__file__).resolve().parents[1]),
+    )
+
+    assert services.recover_interrupted_downloads() == 1
+    restored = store.load(project.project_id)
+    assert restored.source_spec.download_state == "cancelled"
+    assert "начать снова" in (restored.source_spec.error_message or "")
+    assert not partial.exists()
 
 
 def test_settings_atomic_save_load_and_corrupt_fallback(tmp_path: Path) -> None:

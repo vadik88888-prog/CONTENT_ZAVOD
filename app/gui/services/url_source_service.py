@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, Signal
+from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 from app.source_download import (
     cleanup_partial_downloads,
@@ -13,6 +15,7 @@ from app.source_download import (
     parse_download_progress,
     parse_url_metadata,
     validate_public_video_url,
+    YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
 )
 
 
@@ -31,14 +34,20 @@ class URLSourceService(QObject):
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._read_output)
+        self.process.readyReadStandardError.connect(self._read_output)
         self.process.finished.connect(self._finished)
         self.process.errorOccurred.connect(self._process_error)
+        self.process.stateChanged.connect(self._state_changed)
         self._mode: str | None = None
         self._url: str | None = None
         self._target_directory: Path | None = None
         self._output: list[str] = []
         self._cancel_requested = False
         self._reported_process_error = False
+        self._process_id = 0
+        self._cancel_kill_timer = QTimer(self)
+        self._cancel_kill_timer.setSingleShot(True)
+        self._cancel_kill_timer.timeout.connect(self._kill_if_cancelling)
 
     @property
     def busy(self) -> bool:
@@ -61,8 +70,9 @@ class URLSourceService(QObject):
         self._target_directory = directory
         output_template = str(directory / "%(title).120B-%(id)s.%(ext)s")
         self._start([
-            "--no-playlist", "--newline", "--no-warnings", "--no-overwrites",
-            "--progress-template", "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+            "--no-playlist", "--newline", "--no-colors", "--no-warnings", "--no-overwrites", "--progress",
+            "--progress-template",
+            YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
             "--print", "after_move:filepath", "-o", output_template, safe_url,
         ])
 
@@ -72,6 +82,7 @@ class URLSourceService(QObject):
         self._cancel_requested = True
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.terminate()
+            self._cancel_kill_timer.start(5_000)
 
     def _begin(self, url: str, mode: str) -> str | None:
         if self.busy:
@@ -92,6 +103,7 @@ class URLSourceService(QObject):
         self._output = []
         self._cancel_requested = False
         self._reported_process_error = False
+        self._process_id = 0
         self.process.setProgram(executable)
         self.busy_changed.emit(True)
         return safe_url
@@ -120,12 +132,19 @@ class URLSourceService(QObject):
             self.busy_changed.emit(False)
             self.failed.emit("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.")
 
+    def _state_changed(self, state: QProcess.ProcessState) -> None:
+        if state == QProcess.ProcessState.Running:
+            self._process_id = int(self.process.processId())
+        elif state == QProcess.ProcessState.NotRunning:
+            self._process_id = 0
+
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._read_output()
         mode, url, directory = self._mode, self._url, self._target_directory
         if mode is None:
             return
         self._mode = self._url = None
+        self._cancel_kill_timer.stop()
         self.busy_changed.emit(False)
         if self._cancel_requested:
             if directory:
@@ -144,12 +163,41 @@ class URLSourceService(QObject):
             if mode == "download" and directory:
                 path = next((Path(line).resolve() for line in reversed(self._output) if _project_child(Path(line), directory) and Path(line).is_file()), None)
                 if path is None:
+                    # Direct-media extractors can complete a file without
+                    # emitting the requested after_move line. The command has
+                    # already exited successfully, so recover only the newest
+                    # complete file inside this project's source folder.
+                    completed = [
+                        item.resolve() for item in directory.iterdir()
+                        if item.is_file()
+                        and not item.name.endswith((".part", ".ytdl"))
+                        and _project_child(item, directory)
+                    ]
+                    path = max(completed, key=lambda item: item.stat().st_mtime_ns, default=None)
+                if path is None:
                     raise ValueError("Загрузка завершилась, но итоговый видеофайл не найден.")
                 self.download_completed.emit(str(path))
                 return
             raise ValueError("Неподдерживаемое состояние загрузки.")
         except Exception as error:
             self.failed.emit(str(error))
+
+    def _kill_if_cancelling(self) -> None:
+        if not self._cancel_requested or self.process.state() == QProcess.ProcessState.NotRunning:
+            return
+        # yt-dlp can launch a media helper. On Windows stop its exact process
+        # tree so cancellation never leaves a background download writing into
+        # this project while the UI claims it has stopped.
+        if sys.platform == "win32" and self._process_id:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(self._process_id), "/T", "/F"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            self.process.kill()
 
 
 def _project_child(path: Path, directory: Path) -> bool:

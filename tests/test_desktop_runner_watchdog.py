@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,6 +95,39 @@ def test_viewmodel_rejects_duplicate_launch_before_qprocess_becomes_active(monke
 
     assert calls == [True]
     assert viewmodel.active
+
+
+def test_link_download_is_explicit_shows_transfer_details_and_can_restart(monkeypatch, tmp_path: Path) -> None:
+    _application()
+    services, _project = _services(tmp_path)
+    project = services.projects.create_url("https://example.test/video", {"title": "Видео по ссылке"})
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+    launches: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        viewmodel.source_downloader,
+        "download",
+        lambda url, directory: launches.append((url, Path(directory))),
+    )
+
+    viewmodel.start_download()
+
+    assert project.source_spec.download_state == "downloading"
+    assert launches == [("https://example.test/video", project.directory / "sources")]
+    viewmodel._download_progress(SimpleNamespace(
+        fraction=0.25, speed="2MiB/s", downloaded="50MiB", total="200MiB", eta_seconds=75,
+    ))
+    assert viewmodel.snapshot.progress_fraction == 0.25
+    assert viewmodel.snapshot.transfer_downloaded == "50MiB"
+    assert viewmodel.snapshot.transfer_total == "200MiB"
+    assert viewmodel.snapshot.eta_seconds == 75
+
+    viewmodel._download_cancelled()
+    assert project.source_spec.download_state == "cancelled"
+
+    viewmodel.start_download()
+    assert len(launches) == 2
+    assert project.source_spec.download_state == "downloading"
 
 
 def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None:

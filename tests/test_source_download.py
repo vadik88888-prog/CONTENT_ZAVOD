@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QProcess
 
 import app.source_download as download_module
 from app.errors import SourceError
@@ -19,6 +20,7 @@ from app.source_download import (
     validate_public_video_url,
 )
 from app.source_models import SourceSpec
+from app.gui.services.url_source_service import URLSourceService
 
 
 @pytest.mark.parametrize("url", ["file:///C:/video.mp4", "ftp://example.test/video", "http://localhost/video", "http://127.0.0.1/video"])
@@ -52,6 +54,17 @@ def test_metadata_and_progress_are_parsed_without_exposing_internal_ytdlp_output
     assert metadata.format == "MP4"
     assert progress is not None
     assert progress.fraction == 0.425
+    assert progress.speed == "1.5MiB/s"
+    assert progress.eta_seconds == 17
+
+
+def test_progress_parses_real_transferred_and_expected_volume() -> None:
+    progress = parse_download_progress("download: 42.5%|128.0MiB|301.4MiB|NA|1.5MiB/s|00:17")
+
+    assert progress is not None
+    assert progress.fraction == 0.425
+    assert progress.downloaded == "128.0MiB"
+    assert progress.total == "301.4MiB"
     assert progress.speed == "1.5MiB/s"
     assert progress.eta_seconds == 17
 
@@ -105,6 +118,9 @@ def test_ytdlp_download_uses_argument_list_and_reports_progress(tmp_path: Path, 
     assert received["arguments"][-1] == "https://example.test/a video?x=1;not-a-command"
     assert "shell" not in received["kwargs"]
     assert updates[0].fraction == 0.5
+    assert "--progress" in received["arguments"]
+    assert any("_downloaded_bytes_str" in str(item) for item in received["arguments"])
+    assert any(str(item).startswith("download:download:") for item in received["arguments"])
 
 
 def test_ytdlp_download_recovers_a_completed_direct_file_without_after_move_output(
@@ -185,3 +201,19 @@ def test_cleanup_partial_downloads_leaves_completed_and_unrelated_files(tmp_path
     assert not (tmp_path / "clip.mp4.part").exists()
     assert not (tmp_path / "clip.ytdl").exists()
     assert completed.exists() and other.exists()
+
+
+def test_qt_url_download_recovers_direct_media_without_after_move_output(tmp_path: Path) -> None:
+    application = QCoreApplication.instance() or QCoreApplication([])
+    completed = tmp_path / "direct-video.mp4"
+    completed.write_bytes(b"video")
+    service = URLSourceService()
+    received: list[str] = []
+    service.download_completed.connect(received.append)
+    service._mode = "download"
+    service._url = "https://example.test/video.mp4"
+    service._target_directory = tmp_path
+
+    service._finished(0, QProcess.ExitStatus.NormalExit)
+
+    assert received == [str(completed.resolve())]

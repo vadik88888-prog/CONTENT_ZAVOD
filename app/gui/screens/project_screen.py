@@ -20,13 +20,25 @@ from app.utils import format_seconds, read_json
 
 
 _STATUS = {
-    "new": "Новый проект", "source_ready": "Источник готов", "analyzing": "Анализируем",
-    "analysis_ready": "Анализ готов", "reviewing_candidates": "Проверка кандидатов",
-    "rendering_selected": "Создаём выбранные ролики", "partially_rendered": "Готово частично",
+    "new": "Источник выбран", "source_ready": "Готов к настройке", "analyzing": "Ищем моменты",
+    "analysis_ready": "Моменты готовы", "reviewing_candidates": "Выбор моментов",
+    "rendering_selected": "Создаём готовые ролики", "partially_rendered": "Готово частично",
     "draft": "Черновик", "ready": "Готов", "queued": "Ожидает", "processing": "Создаём ролик",
     "completed": "Готово", "completed_with_warnings": "Готово с предупреждениями",
     "failed": "Ошибка", "cancelled": "Отменено", "interrupted": "Прервано",
 }
+
+_FLOW_STEPS = (
+    ("source", "Источник"),
+    ("download", "Загрузка"),
+    ("settings", "Настройка"),
+    ("processing", "Обработка"),
+    ("candidates", "Моменты"),
+    ("drafts", "Черновики"),
+    ("finished", "Готовые ролики"),
+)
+_FLOW_STEP_INDEX = {name: index for index, (name, _label) in enumerate(_FLOW_STEPS, start=1)}
+_FLOW_STEP_LABELS = dict(_FLOW_STEPS)
 
 
 class ProjectScreen(QWidget):
@@ -41,6 +53,7 @@ class ProjectScreen(QWidget):
         self._active_candidate_id: str | None = None
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
         self._candidate_cards: dict[str, QFrame] = {}
+        self._flow_step = "settings"
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.thumbnail_unavailable.connect(self._thumbnail_unavailable)
@@ -67,6 +80,25 @@ class ProjectScreen(QWidget):
         self.autosave = QLabel("Изменения сохраняются автоматически")
         self.autosave.setObjectName("muted")
         root.addWidget(self.autosave)
+        self.flow_card = QFrame()
+        self.flow_card.setObjectName("card")
+        flow_layout = QVBoxLayout(self.flow_card)
+        flow_layout.setContentsMargins(14, 10, 14, 10)
+        self.flow_position = QLabel("Шаг 3 из 7")
+        self.flow_position.setObjectName("muted")
+        self.flow_title = QLabel("Настройка")
+        self.flow_title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        self.flow_hint = QLabel()
+        self.flow_hint.setObjectName("muted")
+        self.flow_hint.setWordWrap(True)
+        self.flow_route = QLabel("Источник  →  Загрузка  →  Настройка  →  Обработка  →  Моменты  →  Черновики  →  Готовые ролики")
+        self.flow_route.setObjectName("muted")
+        self.flow_route.setWordWrap(True)
+        flow_layout.addWidget(self.flow_position)
+        flow_layout.addWidget(self.flow_title)
+        flow_layout.addWidget(self.flow_hint)
+        flow_layout.addWidget(self.flow_route)
+        root.addWidget(self.flow_card)
         body = QHBoxLayout()
         self.content_scroll = QScrollArea()
         self.content_scroll.setWidgetResizable(True)
@@ -76,18 +108,28 @@ class ProjectScreen(QWidget):
         self.preview = VideoPreview()
         self.preview.preview_ready.connect(self._focus_preview_player)
         left.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.setup_card = self._card("Шаг 1. Настройте обработку")
+        self.download_card = self._card("Загрузка")
+        self.download_source = QLabel()
+        self.download_source.setObjectName("muted")
+        self.download_source.setWordWrap(True)
+        self.download_button = QPushButton("Скачать видео")
+        self.download_button.setObjectName("primary")
+        self.download_button.clicked.connect(self.viewmodel.start_download)
+        self.download_card.layout().addWidget(self.download_source)
+        self.download_card.layout().addWidget(self.download_button)
+        left.addWidget(self.download_card)
+        self.setup_card = self._card("Настройка")
         self.setup_card.setObjectName("setup-card")
         setup_layout = self.setup_card.layout()
         self.setup_source = QLabel()
         self.setup_source.setObjectName("muted")
         self.setup_source.setWordWrap(True)
         setup_layout.addWidget(self.setup_source)
-        setup_layout.addWidget(QLabel("Режим обработки"))
+        setup_layout.addWidget(QLabel("Как искать моменты"))
         self.setup_processing_mode = QComboBox()
-        self.setup_processing_mode.addItem("Быстро — для разговорных видео", "fast")
-        self.setup_processing_mode.addItem("Стандарт — баланс скорости и качества", "standard")
-        self.setup_processing_mode.addItem("Максимум — для динамичных видео", "maximum")
+        self.setup_processing_mode.addItem("Быстрее — для разговорных видео", "fast")
+        self.setup_processing_mode.addItem("Сбалансировано", "standard")
+        self.setup_processing_mode.addItem("Тщательнее — для динамичных видео", "maximum")
         self.setup_processing_mode.currentIndexChanged.connect(
             lambda _index: self._save_setup_option("processing_mode", str(self.setup_processing_mode.currentData()))
         )
@@ -96,7 +138,7 @@ class ProjectScreen(QWidget):
         self.setup_mode_help.setObjectName("muted")
         self.setup_mode_help.setWordWrap(True)
         setup_layout.addWidget(self.setup_mode_help)
-        setup_layout.addWidget(QLabel("Дополнительный разбор видео"))
+        setup_layout.addWidget(QLabel("Учитывать события в кадре"))
         self.setup_deep_analysis = QComboBox()
         self.setup_deep_analysis.addItem("Авто — выбрать по содержанию", "auto")
         self.setup_deep_analysis.addItem("Включить", "on")
@@ -109,17 +151,17 @@ class ProjectScreen(QWidget):
         self.setup_deep_help.setObjectName("muted")
         self.setup_deep_help.setWordWrap(True)
         setup_layout.addWidget(self.setup_deep_help)
-        setup_layout.addWidget(QLabel("Площадка"))
+        setup_layout.addWidget(QLabel("Где будет показываться ролик"))
         self.setup_platform = QComboBox()
         self.setup_platform.addItem("TikTok", "tiktok")
         self.setup_platform.addItem("Instagram Reels", "reels")
         self.setup_platform.addItem("YouTube Shorts", "shorts")
-        self.setup_platform.addItem("Универсальный вертикальный", "universal")
+        self.setup_platform.addItem("Любая вертикальная лента", "universal")
         self.setup_platform.currentIndexChanged.connect(
             lambda _index: self._save_setup_option("platform", str(self.setup_platform.currentData()))
         )
         setup_layout.addWidget(self.setup_platform)
-        self.setup_platform_help = QLabel("Вертикальный ролик 9:16 с безопасными полями для интерфейса площадки.")
+        self.setup_platform_help = QLabel("Размер и поля ролика будут подготовлены для выбранного места.")
         self.setup_platform_help.setObjectName("muted")
         self.setup_platform_help.setWordWrap(True)
         setup_layout.addWidget(self.setup_platform_help)
@@ -134,7 +176,7 @@ class ProjectScreen(QWidget):
         self.setup_advanced_toggle = QPushButton("Дополнительные настройки")
         self.setup_advanced_toggle.setCheckable(True)
         setup_layout.addWidget(self.setup_advanced_toggle)
-        self.setup_start_button = QPushButton("Начать обработку")
+        self.setup_start_button = QPushButton("Начать поиск моментов")
         self.setup_start_button.setObjectName("primary")
         self.setup_start_button.clicked.connect(self._primary_action)
         setup_layout.addWidget(self.setup_start_button)
@@ -155,7 +197,7 @@ class ProjectScreen(QWidget):
         self.candidate_detail = self._card("Просмотр момента")
         self._replace_card_text(self.candidate_detail, ["Выберите момент в списке, чтобы просмотреть исходный фрагмент."])
         left.addWidget(self.candidate_detail)
-        self.candidate_review = self._card("Кандидаты и черновики")
+        self.candidate_review = self._card("Моменты")
         # The primary action scrolls directly to this workspace.  Make the
         # destination focusable as well, so keyboard focus follows the review
         # action instead of remaining on the header button.
@@ -170,16 +212,16 @@ class ProjectScreen(QWidget):
         self.draft_button = QPushButton("Создать черновики")
         self.draft_button.setObjectName("primary")
         self.draft_button.clicked.connect(self._draft_action)
-        self.production_button = QPushButton("Запустить production render")
+        self.production_button = QPushButton("Создать готовые ролики")
         self.production_button.setObjectName("primary")
         self.production_button.clicked.connect(self._confirm_production_render)
         left.addWidget(self.candidate_review)
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
         left.addWidget(self.progress)
-        history_title = QLabel("История запусков")
-        history_title.setStyleSheet("font-size: 17px; font-weight: 600;")
-        left.addWidget(history_title)
+        self.history_title = QLabel("История запусков")
+        self.history_title.setStyleSheet("font-size: 17px; font-weight: 600;")
+        left.addWidget(self.history_title)
         self.history = QScrollArea()
         self.history.setWidgetResizable(True)
         self.history_host = QWidget()
@@ -274,10 +316,11 @@ class ProjectScreen(QWidget):
         self.cache.toggled.connect(lambda value: self.viewmodel.save_options(use_cache=value))
         settings.addWidget(self.cache)
         settings.addStretch()
-        self.run_button = QPushButton("Анализировать видео")
+        self.run_button = QPushButton("Начать поиск моментов")
         self.run_button.setObjectName("primary")
         self.run_button.clicked.connect(self._primary_action)
         settings.addWidget(self.run_button)
+        self.run_button.hide()
         panel.hide()
         self.settings_toggle.toggled.connect(self._set_advanced_visible)
         self.setup_advanced_toggle.toggled.connect(self._set_advanced_visible)
@@ -296,10 +339,7 @@ class ProjectScreen(QWidget):
         self.project = project
         self.title.setText(project.name)
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
-        review_ready = bool(project.analysis_artifact_path) and project.status in {
-            "analysis_ready", "reviewing_candidates", "partially_rendered", "completed", "completed_with_warnings",
-        }
-        self.run_button.setText("Посмотреть найденные моменты" if review_ready else "Анализировать видео")
+        self.run_button.setText("Начать поиск моментов")
         if project.source_spec.is_ready and (is_new_project or self.preview.active_media_path is None):
             self.preview.show_source(str(project.source))
         source = project.source_metadata
@@ -326,12 +366,16 @@ class ProjectScreen(QWidget):
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
+        self._update_download_card(project)
         self._update_setup_card(project)
         self._update_candidate_review(project)
         self._update_next_step(project)
         self._refresh_active_candidate_detail(project)
+        self._apply_flow_visibility(project)
 
     def _set_advanced_visible(self, visible: bool) -> None:
+        if self._flow_step != "settings":
+            visible = False
         self.settings_panel.setVisible(visible)
         for toggle in (self.settings_toggle, self.setup_advanced_toggle):
             toggle.blockSignals(True)
@@ -341,29 +385,103 @@ class ProjectScreen(QWidget):
     def _save_setup_option(self, name: str, value: str) -> None:
         self.viewmodel.save_options(**{name: value})
 
+    def _update_download_card(self, project: DesktopProject) -> None:
+        source = project.source_metadata
+        name = str(source.get("title") or "Видео по ссылке")
+        size = self._format_file_size(source.get("estimated_size_bytes") or source.get("size_bytes"))
+        state = project.source_spec.download_state
+        if state == "cancelled":
+            message = "Загрузка была остановлена. Можно начать её снова — исходный файл не будет затронут."
+            button = "Скачать видео ещё раз"
+        elif state == "failed":
+            message = project.source_spec.error_message or "Видео не удалось скачать. Проверьте ссылку и попробуйте ещё раз."
+            button = "Попробовать скачать снова"
+        elif state == "downloading":
+            message = "Видео скачивается на этот компьютер. Статус, скорость и оставшееся время показаны ниже."
+            button = "Скачивание идёт"
+        else:
+            message = "Видео проверено. Сначала скачайте его на этот компьютер, затем выберите настройки обработки."
+            button = "Скачать видео"
+        details = f"{name}"
+        if size != "н/д":
+            details += f" · ожидаемый объём: {size}"
+        self.download_source.setText(f"{details}\n{message}")
+        self.download_button.setText(button)
+        self.download_button.setDisabled(state == "downloading" or self.viewmodel.active)
+
+    def _derive_flow_step(self, project: DesktopProject) -> str:
+        snapshot = self.viewmodel.snapshot
+        if snapshot.phase in {"preparing", "running", "cancelling"}:
+            return "download" if snapshot.stage == "download" else "processing"
+        if not project.source_spec.is_ready:
+            return "download"
+        states = project.candidate_states.values()
+        if project.selected_candidate_ids or any(state in {"draft_ready", "selected"} for state in states):
+            return "drafts"
+        if any(state == "rendered" for state in states):
+            return "finished"
+        if project.analysis_artifact_path:
+            return "candidates"
+        return "settings"
+
+    def _flow_hint_for(self, step: str, project: DesktopProject) -> str:
+        hints = {
+            "download": "Скачайте видео отдельно. Когда файл будет готов, откроется настройка.",
+            "settings": "Выберите основные параметры. Затем начнётся поиск подходящих моментов.",
+            "processing": "Мы подготовим видео и перейдём к следующему готовому результату автоматически.",
+            "candidates": "Посмотрите найденные моменты и выберите до трёх для черновиков.",
+            "drafts": "Посмотрите черновики и подтвердите только те, из которых нужно сделать готовые ролики.",
+            "finished": "Готовые ролики можно посмотреть здесь или открыть в папке проекта.",
+        }
+        return hints.get(step, "Выберите источник видео.")
+
+    def _apply_flow_visibility(self, project: DesktopProject) -> None:
+        step = self._derive_flow_step(project)
+        self._flow_step = step
+        active = self.viewmodel.snapshot.phase in {"preparing", "running", "cancelling"}
+        self.flow_position.setText(f"Шаг {_FLOW_STEP_INDEX[step]} из {len(_FLOW_STEPS)}")
+        self.flow_title.setText(_FLOW_STEP_LABELS[step])
+        self.flow_hint.setText(self._flow_hint_for(step, project))
+        self.download_card.setVisible(step == "download" and not active)
+        self.setup_card.setVisible(step == "settings" and not active)
+        review_visible = step in {"candidates", "drafts", "finished"} and not active
+        self.candidate_review.setVisible(review_visible)
+        self.preview.setVisible(review_visible and project.source_spec.is_ready)
+        self.candidate_detail.setVisible(review_visible and self._active_candidate_id is not None)
+        self.progress.setVisible(active)
+        self.next_step.hide()
+        self.metadata.hide()
+        self.estimate.hide()
+        self.content_summary.hide()
+        self.history.hide()
+        self.history_title.hide()
+        self.settings_toggle.setVisible(step == "settings" and not active)
+        self.autosave.setVisible(step == "settings" and not active)
+        if step != "settings" or active:
+            self._set_advanced_visible(False)
+
     def _update_setup_card(self, project: DesktopProject) -> None:
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source.get("duration") is not None else "пока неизвестна"
         size = self._format_file_size(source.get("size_bytes") or source.get("estimated_size_bytes"))
         source_name = project.source.name if project.source_spec.is_ready else str(source.get("title") or "Видео по ссылке")
-        source_kind = "Файл" if project.source_spec.kind == "local_file" else "Публичная ссылка"
-        source_state = "готов" if project.source_spec.is_ready else "будет загружен после запуска"
-        suffix = project.source.suffix.upper().lstrip(".") if project.source_spec.is_ready else str(source.get("format") or "формат определится после загрузки")
+        source_kind = "Файл" if project.source_spec.kind == "local_file" else "Видео по ссылке"
+        source_state = "готов" if project.source_spec.is_ready else "ещё не загружен"
         self.setup_source.setText(
-            f"{source_kind}: {source_name}\nДлительность: {duration} · Формат: {suffix or 'н/д'} · Размер: {size}\nИсточник {source_state}."
+            f"{source_kind}: {source_name}\nДлительность: {duration} · Размер: {size}\nИсточник {source_state}."
         )
         self.setup_mode_help.setText({
-            "fast": "Быстро ищет подходящие моменты в подкастах, интервью, лекциях и другом разговорном материале.",
-            "standard": "Подходящий вариант по умолчанию: баланс времени, качества и стоимости.",
-            "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени и может стоить дороже.",
+            "fast": "Быстрый вариант для интервью, лекций и других разговорных видео.",
+            "standard": "Подходящий вариант по умолчанию: хороший баланс времени и качества.",
+            "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени.",
         }[project.settings.processing_mode])
         try:
             resolved, estimate = self.viewmodel.setup_preflight()
             deep_state = "будет использован" if resolved.deep_analysis.resolved else "не потребуется"
-            self.setup_deep_help.setText(f"Авто-рекомендация: {resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.")
+            self.setup_deep_help.setText(f"{resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.")
             self.setup_platform_help.setText(
-                f"{resolved.platform.label}: вертикальный 9:16, до {int(resolved.platform.maximum_duration_seconds)} с, "
-                "субтитры и безопасные поля включены. Публикация в аккаунты не выполняется."
+                f"{resolved.platform.label}: ролик будет вертикальным, до {int(resolved.platform.maximum_duration_seconds)} секунд, "
+                "с субтитрами и полями для интерфейса."
             )
             self.setup_estimate.setText(self._setup_estimate_text(estimate))
         except Exception:
@@ -376,9 +494,9 @@ class ProjectScreen(QWidget):
         preparing = not bool(project.analysis_artifact_path)
         heading = self.setup_card.layout().itemAt(0).widget()
         if isinstance(heading, QLabel):
-            heading.setText("Шаг 1. Настройте обработку" if preparing else "Настройки следующего запуска")
+            heading.setText("Настройка" if preparing else "Настройки следующего поиска")
         self.setup_start_button.setVisible(preparing)
-        self.run_button.setVisible(not preparing)
+        self.run_button.hide()
 
     @staticmethod
     def _format_cost_range(minimum: object, maximum: object) -> str:
@@ -397,13 +515,8 @@ class ProjectScreen(QWidget):
             f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
             f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
         )
-        cost = self._format_cost_range(estimate.estimated_ai_cost_min, estimate.estimated_ai_cost_max)
-        drivers = ", ".join(estimate.cost_drivers[:4]) or "длительность и выбранные настройки"
-        reuse = " Повторный экспорт готового ролика не повторяет дорогой анализ." if estimate.cached_stages else ""
-        return (
-            f"Оценка до запуска: {minutes}; ориентир по стоимости: {cost}.\n"
-            f"На неё влияют: {drivers}. {estimate.cost_note}{reuse}"
-        )
+        drivers = ", ".join(estimate.cost_drivers[:3]) or "длительность и выбранные настройки"
+        return f"Ориентировочное время: {minutes}. Оно зависит от: {drivers}."
 
     def _saved_estimate_text(self, saved: dict) -> str:
         if not isinstance(saved, dict):
@@ -415,23 +528,23 @@ class ProjectScreen(QWidget):
             )
         except (KeyError, TypeError, ValueError):
             return "Оценка появится после проверки настроек."
-        cost = self._format_cost_range(saved.get("estimated_ai_cost_min"), saved.get("estimated_ai_cost_max"))
-        note = str(saved.get("cost_note") or "")
-        return f"Последняя сохранённая оценка: {minutes}; ориентир по стоимости: {cost}. {note}"
+        return f"Последняя сохранённая оценка: {minutes}."
 
     def _primary_action(self) -> None:
         if not self.project:
-            return
-        if self.project.analysis_artifact_path and self.project.status in {
-            "analysis_ready", "reviewing_candidates", "partially_rendered", "completed", "completed_with_warnings",
-        }:
-            self.content_scroll.ensureWidgetVisible(self.candidate_review, 0, 16)
-            self.candidate_review.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         self.viewmodel.start_analysis()
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
+        heading = layout.itemAt(0).widget()
+        if isinstance(heading, QLabel):
+            step = self._derive_flow_step(project)
+            heading.setText({
+                "candidates": "Выберите моменты",
+                "drafts": "Проверьте черновики",
+                "finished": "Готовые ролики",
+            }.get(step, "Моменты"))
         persistent = {self.workflow_hint, self.draft_button, self.production_button}
         while layout.count() > 1:
             item = layout.takeAt(1)
@@ -459,7 +572,7 @@ class ProjectScreen(QWidget):
             if isinstance(candidate, dict):
                 previews[candidate_id] = candidate
         if not candidates:
-            self.workflow_hint.setText("После анализа здесь появятся моменты, из которых можно выбрать до трёх черновиков.")
+            self.workflow_hint.setText("После поиска здесь появятся моменты, из которых можно выбрать до трёх черновиков.")
             self.workflow_hint.show()
             self.draft_button.hide()
             self.production_button.hide()
@@ -480,10 +593,8 @@ class ProjectScreen(QWidget):
         toolbar_layout = QHBoxLayout(selection_toolbar)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         summary = QLabel(
-            f"Найдено: {len(candidates)} · Рекомендуется: {recommended_count} · "
-            f"Выбрано для черновиков: {len(project.review_selected_candidate_ids)}/3 · "
-            f"Черновики: {ready_count} · Подтверждено: {len(project.selected_candidate_ids)} · "
-            f"Готовые ролики: {rendered_count}"
+            f"Найдено моментов: {len(candidates)} · рекомендуем: {recommended_count} · "
+            f"выбрано: {len(project.review_selected_candidate_ids)}/3"
         )
         summary.setWordWrap(True)
         toolbar_layout.addWidget(summary, 1)
@@ -494,28 +605,6 @@ class ProjectScreen(QWidget):
         toolbar_layout.addWidget(recommended_button)
         toolbar_layout.addWidget(clear_button)
         layout.addWidget(selection_toolbar)
-        filter_toolbar = QFrame()
-        filter_layout = QHBoxLayout(filter_toolbar)
-        filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_layout.addWidget(QLabel("Показать"))
-        filter_box = QComboBox()
-        for label, value in (
-            ("Все", "all"), ("Рекомендуемые", "recommended"), ("Высокий потенциал", "high"),
-            ("Средний потенциал", "medium"), ("Не выбраны", "unselected"),
-        ):
-            filter_box.addItem(label, value)
-        filter_box.setCurrentIndex(max(0, filter_box.findData(self._candidate_filter)))
-        filter_box.currentIndexChanged.connect(lambda _index, box=filter_box: self._change_candidate_filter(str(box.currentData())))
-        filter_layout.addWidget(filter_box)
-        filter_layout.addWidget(QLabel("Сортировка"))
-        sort_box = QComboBox()
-        for label, value in (("По рекомендации", "recommendation"), ("По времени", "time"), ("По потенциалу", "potential")):
-            sort_box.addItem(label, value)
-        sort_box.setCurrentIndex(max(0, sort_box.findData(self._candidate_sort)))
-        sort_box.currentIndexChanged.connect(lambda _index, box=sort_box: self._change_candidate_sort(str(box.currentData())))
-        filter_layout.addWidget(sort_box)
-        filter_layout.addStretch()
-        layout.addWidget(filter_toolbar)
         self._configure_workflow_action(project, draftable_ids, ready_count, rendered_count, processing_count)
         layout.addWidget(self.workflow_hint)
         if self.draft_button.isVisible():
@@ -540,12 +629,12 @@ class ProjectScreen(QWidget):
             )
             confidence = float(item.get("confidence") or 0)
             status_label = {
-                "analyzed": "можно посмотреть и добавить к черновикам", "draft_planning": "создаём черновик",
+                "analyzed": "можно посмотреть и добавить к черновикам", "draft_planning": "готовим черновик",
                 "draft_ready": "черновик готов к проверке", "draft_failed": "черновик не готов",
-                "selected": "подтверждён", "production_rendering": "создаём ролик", "rendered": "готово",
+                "selected": "подтверждён", "production_rendering": "создаём готовый ролик", "rendered": "готово",
             }.get(state, "можно посмотреть")
             if state == "draft_ready" and candidate_id not in project.review_selected_candidate_ids:
-                status_label = "черновик отклонён: в production не попадёт"
+                status_label = "черновик не выбран для готового ролика"
             frame = QFrame(); frame.setObjectName("card")
             self._candidate_cards[candidate_id] = frame
             row = QHBoxLayout(frame); row.setContentsMargins(10, 8, 10, 8)
@@ -599,7 +688,7 @@ class ProjectScreen(QWidget):
             status.setMaximumWidth(258)
             candidate_error = project.candidate_errors.get(candidate_id)
             if candidate_error:
-                status.setText("Черновик не создан. Создайте черновики снова или выберите другой момент.")
+                status.setText("Черновик не создан. Попробуйте ещё раз или выберите другой момент.")
                 status.setToolTip(candidate_error)
             status.setWordWrap(True)
             actions.addWidget(status)
@@ -643,7 +732,7 @@ class ProjectScreen(QWidget):
                         self._show_final_preview(path, title)
                     )
                     actions.addWidget(watch_final)
-                    open_final = QPushButton("Открыть MP4")
+                    open_final = QPushButton("Открыть готовый ролик")
                     open_final.clicked.connect(lambda _checked=False, path=final_file: self._open_file(path))
                     actions.addWidget(open_final)
             elif state not in {"draft_planning", "production_rendering"}:
@@ -672,7 +761,7 @@ class ProjectScreen(QWidget):
         self.draft_button.setDisabled(True)
         self.production_button.setDisabled(True)
         if project.status in {"analyzing", "processing", "rendering_selected"} or processing_count:
-            self.workflow_hint.setText("Операция выполняется. Её текущий этап и время показаны ниже; новые действия временно недоступны.")
+            self.workflow_hint.setText("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
             return
         if draftable_ids:
             count = len(draftable_ids)
@@ -683,8 +772,7 @@ class ProjectScreen(QWidget):
                 else f"Выбрано {selected_count} из 3. Для {count} из них ещё нужен черновик."
             )
             self.workflow_hint.setText(
-                f"{selection_summary} Следующий шаг — создать для них быстрые вертикальные черновики. "
-                "Production render пока не будет запущен."
+                f"{selection_summary} Следующий шаг — создать черновики, чтобы посмотреть ролики перед финальной сборкой."
             )
             self.draft_button.setText(f"Создать черновики ({count})")
             self.draft_button.setEnabled(True)
@@ -693,9 +781,9 @@ class ProjectScreen(QWidget):
         if project.selected_candidate_ids:
             count = len(project.selected_candidate_ids)
             self.workflow_hint.setText(
-                f"Подтверждено для production: {count}. Черновики уже проверены — теперь можно отдельно запустить финальный render."
+                f"Подтверждено: {count}. Черновики проверены — теперь можно создать готовые ролики."
             )
-            self.production_button.setText(f"Запустить production render ({count})")
+            self.production_button.setText(f"Создать готовые ролики ({count})")
             self.production_button.setEnabled(True)
             self.production_button.show()
             return
@@ -705,7 +793,7 @@ class ProjectScreen(QWidget):
             )
             return
         if rendered_count:
-            self.workflow_hint.setText("Готовые MP4 можно посмотреть в карточках или открыть из истории запусков.")
+            self.workflow_hint.setText("Готовые ролики можно посмотреть в карточках или открыть в папке проекта.")
             return
         self.workflow_hint.setText("Посмотрите моменты и добавьте к черновикам от одного до трёх лучших.")
 
@@ -984,7 +1072,7 @@ class ProjectScreen(QWidget):
             return
         answer = QMessageBox.question(
             self, "Создать итоговые ролики",
-            "Запустить тяжёлый production render 1080×1920 только для подтверждённых черновиков?",
+            "Создать готовые вертикальные ролики только для подтверждённых черновиков?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1075,19 +1163,19 @@ class ProjectScreen(QWidget):
 
         states = project.candidate_states
         if project.status in {"analyzing", "processing", "rendering_selected"}:
-            self.next_step_text.setText("Сейчас выполняется операция. Её статус показан в блоке ниже; дождитесь завершения или отмените запуск.")
+            self.next_step_text.setText("Сейчас идёт работа. Дождитесь завершения или остановите её.")
         elif any(state == "rendered" for state in states.values()):
-            self.next_step_text.setText("Ролики готовы. Откройте нужный MP4 в карточке или в истории запусков и проверьте его перед публикацией.")
+            self.next_step_text.setText("Ролики готовы. Откройте нужный ролик в карточке и проверьте его.")
         elif project.selected_candidate_ids:
-            self.next_step_text.setText("Черновики подтверждены. Production render не запускается сам: нажмите отдельную кнопку, когда будете готовы.")
+            self.next_step_text.setText("Черновики подтверждены. Когда будете готовы, создайте готовые ролики.")
         elif any(state in {"draft_ready", "selected"} for state in states.values()):
             self.next_step_text.setText("Есть готовые вертикальные черновики. Посмотрите их, затем подтвердите нужные или отклоните остальные.")
         elif project.review_selected_candidate_ids:
             self.next_step_text.setText("Моменты выбраны. Следующая безопасная операция — создать черновики; финальный render пока не начнётся.")
         elif project.analysis_artifact_path:
-            self.next_step_text.setText("Анализ готов. Посмотрите найденные моменты и добавьте к черновикам от одного до трёх лучших.")
+            self.next_step_text.setText("Моменты готовы. Посмотрите их и добавьте к черновикам от одного до трёх лучших.")
         else:
-            self.next_step_text.setText("Сначала посмотрите исходное видео. Затем запустите анализ, чтобы увидеть подходящие моменты.")
+            self.next_step_text.setText("Выберите настройки и начните поиск подходящих моментов.")
 
     @staticmethod
     def _virality_summary_lines(report: dict) -> list[str]:
@@ -1142,16 +1230,13 @@ class ProjectScreen(QWidget):
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         if active:
-            activity = snapshot.last_activity_at or "ожидаем запуск"
-            transfer = ""
-            if snapshot.transfer_speed:
-                transfer = f" · Скорость: {snapshot.transfer_speed}"
-            if snapshot.eta_seconds is not None:
-                transfer += f" · Осталось: {format_seconds(snapshot.eta_seconds)}"
+            detail = self._processing_detail(snapshot)
             self.progress.set_running(
                 snapshot.stage_label,
-                f"Прошло {format_seconds(snapshot.elapsed_seconds)} · Активность: {activity}{transfer}",
+                f"Прошло {format_seconds(snapshot.elapsed_seconds)}",
                 snapshot.progress_fraction,
+                detail,
+                cancelling=snapshot.phase == "cancelling",
             )
         else:
             self.progress.set_finished(snapshot.message)
@@ -1169,6 +1254,38 @@ class ProjectScreen(QWidget):
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform,
         ):
             widget.setDisabled(active)
+        if self.project:
+            self._update_download_card(self.project)
+            self._apply_flow_visibility(self.project)
+
+    def _processing_detail(self, snapshot: ProcessingSnapshot) -> str:
+        if snapshot.stage == "download":
+            details: list[str] = []
+            if snapshot.transfer_downloaded and snapshot.transfer_total:
+                details.append(f"Загружено: {snapshot.transfer_downloaded} из {snapshot.transfer_total}")
+            elif snapshot.transfer_downloaded:
+                details.append(f"Загружено: {snapshot.transfer_downloaded}")
+            elif self.project:
+                expected = self._format_file_size(self.project.source_metadata.get("estimated_size_bytes"))
+                if expected != "н/д":
+                    details.append(f"Ожидаемый объём: {expected}")
+            if snapshot.transfer_speed:
+                details.append(f"Скорость: {snapshot.transfer_speed}")
+            if snapshot.eta_seconds is not None:
+                details.append(f"Осталось: {format_seconds(snapshot.eta_seconds)}")
+            if snapshot.phase == "cancelling":
+                details.append("Останавливаем загрузку и удаляем неполный файл")
+            elif not details:
+                details.append("Подключаемся к видео и ждём первые данные")
+            return " · ".join(details)
+        next_result = {
+            "analysis": "Дальше покажем найденные моменты.",
+            "draft": "Дальше покажем готовые черновики.",
+            "selected_render": "Дальше покажем готовые ролики.",
+        }.get(self.viewmodel.run.run_kind if self.viewmodel.run else "", "Следующий результат откроется автоматически.")
+        if snapshot.phase == "cancelling":
+            return "Останавливаем работу. Уже готовые результаты останутся в проекте."
+        return f"Сейчас: {snapshot.stage_label}. {next_result} Это может занять несколько минут."
 
     def _open_project_folder(self) -> None:
         if self.project: self._open_folder(Path(self.project.project_directory))

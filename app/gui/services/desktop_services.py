@@ -19,7 +19,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
-from app.source_download import validate_public_video_url
+from app.source_download import cleanup_partial_downloads, validate_public_video_url
 from app.utils import read_json, stable_text_hash, utc_now
 
 
@@ -51,6 +51,7 @@ class DesktopServices:
             system=SystemService(engine_root),
         )
         services.recover_interrupted_runs()
+        services.recover_interrupted_downloads()
         return services
 
     def save_settings(self) -> None:
@@ -99,6 +100,7 @@ class DesktopServices:
         project.source_spec.metadata = metadata
         project.source_spec.download_state = "downloaded"
         project.source_spec.error_message = None
+        project.status = ProjectStatus.SOURCE_READY
         self._refresh_setup_state(project, "Видео загружено. Настройки и оценка обновлены по фактическому файлу.")
         self.projects.save(project)
         return project
@@ -109,6 +111,26 @@ class DesktopServices:
         project.source_spec.download_state = "cancelled" if cancelled else "failed"
         project.source_spec.error_message = redact_secrets(message)
         self.projects.save(project)
+
+    def recover_interrupted_downloads(self) -> int:
+        """Make an abandoned link download safely repeatable after restart.
+
+        A QProcess cannot survive the desktop client, so a persisted
+        ``downloading`` value must never be presented as a live transfer on
+        the next launch. Only project-local partial markers are removed.
+        """
+
+        recovered = 0
+        for project in self.projects.list():
+            source = project.source_spec
+            if source.kind != "url" or source.download_state != "downloading":
+                continue
+            cleanup_partial_downloads(project.directory / "sources")
+            source.download_state = "cancelled"
+            source.error_message = "Загрузка была прервана при закрытии приложения. Её можно начать снова."
+            self.projects.save(project)
+            recovered += 1
+        return recovered
 
     def save_project(self, project: DesktopProject) -> None:
         project.settings.validate()

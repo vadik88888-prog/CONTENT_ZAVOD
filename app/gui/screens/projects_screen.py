@@ -17,6 +17,9 @@ from app.gui.viewmodels import ProjectsViewModel
 
 
 _STATUS = {
+    "new": "Источник выбран", "source_ready": "Готов к настройке", "analyzing": "Ищем моменты",
+    "analysis_ready": "Моменты готовы", "reviewing_candidates": "Выбор моментов",
+    "rendering_selected": "Создаём готовые ролики", "partially_rendered": "Готово частично",
     "draft": "Черновик", "ready": "Готов", "processing": "Создаём ролик",
     "completed": "Готово", "completed_with_warnings": "Готово с предупреждениями",
     "failed": "Ошибка", "cancelled": "Отменено", "interrupted": "Прервано", "queued": "Ожидает",
@@ -35,27 +38,27 @@ class ProjectsScreen(QWidget):
         header = QHBoxLayout()
         title = QLabel("Проекты")
         title.setObjectName("title")
-        self.new_button = QPushButton("Загрузить файл")
+        self.new_button = QPushButton("Выбрать файл")
         self.new_button.setObjectName("primary")
         self.new_button.clicked.connect(self.choose_file)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.new_button)
         root.addLayout(header)
-        hint = QLabel("Добавьте исходное видео: загрузите файл с компьютера или вставьте публичную ссылку. Обработка не начнётся сама.")
+        hint = QLabel("Выберите видео с компьютера или вставьте открытую ссылку. Дальше вы отдельно скачаете видео и настроите обработку.")
         hint.setObjectName("subtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
         url_row = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Вставить ссылку на публичное видео")
+        self.url_input.setPlaceholderText("Вставить ссылку на открытое видео")
         self.url_input.returnPressed.connect(self._create_url)
-        self.url_button = QPushButton("Проверить ссылку")
+        self.url_button = QPushButton("Продолжить")
         self.url_button.clicked.connect(self._create_url)
         url_row.addWidget(self.url_input, 1)
         url_row.addWidget(self.url_button)
         root.addLayout(url_row)
-        public_note = QLabel("Подходят только открытые публичные видео. Ссылки с входом, платным доступом или защитой не поддерживаются.")
+        public_note = QLabel("Подойдут только видео, которые открываются без входа и оплаты.")
         public_note.setObjectName("muted")
         public_note.setWordWrap(True)
         root.addWidget(public_note)
@@ -95,7 +98,7 @@ class ProjectsScreen(QWidget):
     def _url_busy_changed(self, busy: bool) -> None:
         self.url_input.setDisabled(busy)
         self.url_button.setDisabled(busy)
-        self.url_button.setText("Проверяем ссылку…" if busy else "Проверить ссылку")
+        self.url_button.setText("Проверяем ссылку…" if busy else "Продолжить")
 
     def _render(self, projects: list[DesktopProject]) -> None:
         while self.list_layout.count() > 1:

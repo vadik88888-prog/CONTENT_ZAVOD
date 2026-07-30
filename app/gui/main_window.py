@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.project_viewmodel.runner.cancel()
+            self.project_viewmodel.cancel()
         self.services.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
         self.services.save_settings()
         event.accept()

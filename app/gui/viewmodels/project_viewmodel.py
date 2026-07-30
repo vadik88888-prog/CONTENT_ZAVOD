@@ -85,6 +85,7 @@ class ProjectViewModel(QObject):
         if not self.project or self.active:
             return
         self._launching = True
+        self._after_download = "process"
         if not self.project.source_spec.is_ready:
             self._start_source_download()
             return
@@ -123,6 +124,17 @@ class ProjectViewModel(QObject):
             self.error_occurred.emit(map_error(error))
             if self.project:
                 self.project_changed.emit(self.project)
+
+    def start_download(self) -> None:
+        """Download a public source as its own explicit user step."""
+
+        if not self.project or self.active:
+            return
+        if self.project.source_spec.kind != "url" or self.project.source_spec.is_ready:
+            return
+        self._launching = True
+        self._after_download = "none"
+        self._start_source_download()
 
     def build_drafts(self, candidate_ids: list[str]) -> None:
         if not self.project or self.active:
@@ -254,6 +266,8 @@ class ProjectViewModel(QObject):
         self.snapshot.message = "Загружаем видео"
         self.snapshot.progress_fraction = progress.fraction
         self.snapshot.transfer_speed = progress.speed
+        self.snapshot.transfer_downloaded = progress.downloaded
+        self.snapshot.transfer_total = progress.total
         self.snapshot.eta_seconds = progress.eta_seconds
         self.snapshot.last_activity_reason = "yt-dlp progress updated"
         self.processing_changed.emit(self.snapshot)
@@ -271,7 +285,12 @@ class ProjectViewModel(QObject):
         self.snapshot = ProcessingSnapshot(message="Видео загружено")
         self.project_changed.emit(self.project)
         self.processing_changed.emit(self.snapshot)
-        self.start_analysis() if self._after_download == "analysis" else self.start()
+        next_action = self._after_download
+        self._after_download = "none"
+        if next_action == "analysis":
+            self.start_analysis()
+        elif next_action == "process":
+            self.start()
 
     def _download_failed(self, message: str) -> None:
         if not self.project:

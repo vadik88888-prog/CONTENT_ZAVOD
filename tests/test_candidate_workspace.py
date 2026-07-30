@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from app.gui.components import VideoPreview
-from app.gui.models import DesktopSettings, ProjectStatus
+from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -88,13 +88,14 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.draft_button.isEnabled() is False
         assert screen.production_button.isEnabled() is False
 
-        # Regression: the primary "Проверка кандидатов" action must enter the
-        # review workspace without a NameError and move focus to it.
+        # The saved analysis opens directly at the single-purpose moments step;
+        # the setup CTA is deliberately not duplicated on this screen.
         screen.show()
         app.processEvents()
-        QTest.mouseClick(screen.run_button, Qt.MouseButton.LeftButton)
-        app.processEvents()
-        assert screen.candidate_review.hasFocus()
+        assert screen._flow_step == "candidates"
+        assert screen.candidate_review.isVisible()
+        assert screen.setup_card.isHidden()
+        assert screen.run_button.isHidden()
         assert screen.candidate_review.focusPolicy() == Qt.FocusPolicy.StrongFocus
 
         # Candidate selection is bound to the source player, including the
@@ -134,13 +135,14 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
 
         assert viewmodel.project.review_selected_candidate_ids == ["candidate-recommended", "candidate-other"]
 
-        # A completed render with non-blocking warnings must still take the
-        # user back to the review workspace, not offer a misleading new
-        # analysis as the next action.
+        # A completed render takes the reopened project straight to the
+        # finished videos step, without offering a misleading new analysis.
         project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
+        project.candidate_states["candidate-recommended"] = "rendered"
         services.projects.save(project)
         screen._project_changed(project)
-        assert screen.run_button.text() == "Посмотреть найденные моменты"
+        assert screen._flow_step == "finished"
+        assert screen.candidate_review.isVisible()
     finally:
         screen.close()
 
@@ -181,6 +183,66 @@ def test_source_setup_screen_persists_primary_choices_before_analysis(tmp_path: 
         reloaded = services.projects.load(project.project_id)
         assert reloaded.setup_state.last_estimate
         assert "первому анализу" in reloaded.setup_state.change_summary
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_link_project_reopens_at_download_then_moves_to_settings(tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, local_project = _workspace(tmp_path)
+    project = services.projects.create_url("https://example.test/video", {"title": "Длинное видео", "estimated_size_bytes": 1_000_000})
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+
+    try:
+        screen.open(project)
+        assert screen._flow_step == "download"
+        assert not screen.download_card.isHidden()
+        assert screen.setup_card.isHidden()
+        assert screen.download_button.text() == "Скачать видео"
+
+        project.source_spec.download_state = "cancelled"
+        project.source_spec.error_message = "Загрузка была прервана при закрытии приложения. Её можно начать снова."
+        services.projects.save(project)
+        screen._project_changed(project)
+        assert screen._flow_step == "download"
+        assert screen.download_button.text() == "Скачать видео ещё раз"
+
+        snapshot = ProcessingSnapshot(
+            phase=ProcessingPhase.RUNNING,
+            stage="download",
+            elapsed_seconds=12.0,
+            progress_fraction=0.42,
+            transfer_downloaded="128MiB",
+            transfer_total="301MiB",
+            transfer_speed="1.5MiB/s",
+            eta_seconds=17,
+        )
+        viewmodel.snapshot = snapshot
+        screen._processing_changed(snapshot)
+        assert screen._flow_step == "download"
+        assert screen.download_card.isHidden()
+        assert not screen.progress.isHidden()
+        assert screen.progress.progress.value() == 42
+        assert "128MiB из 301MiB" in screen.progress.detail.text()
+        assert "Скорость: 1.5MiB/s" in screen.progress.detail.text()
+        assert "Осталось:" in screen.progress.detail.text()
+
+        project.source_path = str(local_project.source)
+        project.source_spec.downloaded_path = str(local_project.source)
+        project.source_spec.download_state = "downloaded"
+        project.status = ProjectStatus.SOURCE_READY
+        services.projects.save(project)
+        viewmodel.snapshot = ProcessingSnapshot()
+        screen._project_changed(project)
+        assert screen._flow_step == "settings"
+        assert not screen.setup_card.isHidden()
+        assert screen.download_card.isHidden()
     finally:
         screen.close()
         screen.deleteLater()

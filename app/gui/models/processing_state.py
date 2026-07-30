@@ -46,6 +46,8 @@ class ProcessingSnapshot:
     last_activity_reason: str | None = None
     progress_fraction: float | None = None
     transfer_speed: str | None = None
+    transfer_downloaded: str | None = None
+    transfer_total: str | None = None
     eta_seconds: int | None = None
 
     @property

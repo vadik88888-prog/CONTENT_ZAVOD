@@ -38,6 +38,8 @@ class DownloadProgress:
     fraction: float | None
     speed: str | None
     eta_seconds: int | None
+    downloaded: str | None = None
+    total: str | None = None
 
 
 class DownloadCancelled(SourceError):
@@ -45,6 +47,15 @@ class DownloadCancelled(SourceError):
 
 
 ProgressCallback = Callable[[DownloadProgress], None]
+
+# The first ``download:`` selects yt-dlp's download-progress output type; the
+# second is our stable, parseable marker. Keeping the marker explicit avoids
+# confusing an output-type prefix with user-facing progress data.
+YTDLP_DOWNLOAD_PROGRESS_TEMPLATE = (
+    "download:download:%(progress._percent_str)s|%(progress._downloaded_bytes_str)s|"
+    "%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s|"
+    "%(progress._speed_str)s|%(progress._eta_str)s"
+)
 
 
 def find_ytdlp_executable() -> str | None:
@@ -139,8 +150,9 @@ class YtDlpSource:
         destination.mkdir(parents=True, exist_ok=True)
         output_template = str(destination / "%(title).120B-%(id)s.%(ext)s")
         command = [
-            executable, "--no-playlist", "--newline", "--no-warnings", "--no-overwrites",
-            "--progress-template", "download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+            executable, "--no-playlist", "--newline", "--no-colors", "--no-warnings", "--no-overwrites", "--progress",
+            "--progress-template",
+            YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
             "--print", "after_move:filepath", "-o", output_template, safe_url,
         ]
         try:
@@ -213,7 +225,7 @@ class YtDlpSource:
             process.kill()
             process.wait(timeout=10)
 
-_PROGRESS = re.compile(r"^download:\s*(?P<percent>[\d.]+)%\|(?P<speed>[^|]*)\|(?P<eta>[^|]*)$")
+_PROGRESS_PREFIX = re.compile(r"^download:\s*(?P<percent>[\d.]+)%\|(?P<values>.*)$")
 
 
 def parse_url_metadata(url: str, stdout: str) -> URLMetadata:
@@ -239,15 +251,29 @@ def parse_url_metadata(url: str, stdout: str) -> URLMetadata:
 
 
 def parse_download_progress(line: str) -> DownloadProgress | None:
-    matched = _PROGRESS.match(line)
+    matched = _PROGRESS_PREFIX.match(line)
     if not matched:
         return None
     try:
         fraction = max(0.0, min(1.0, float(matched.group("percent")) / 100.0))
     except ValueError:
         fraction = None
-    eta_text = matched.group("eta").strip()
-    return DownloadProgress(fraction, matched.group("speed").strip() or None, _eta_seconds(eta_text))
+    values = matched.group("values").split("|")
+    if len(values) == 2:
+        # Kept for yt-dlp output recorded by earlier app versions and for
+        # third-party wrappers that only emit speed and ETA.
+        speed, eta = values
+        return DownloadProgress(fraction, _progress_value(speed), _eta_seconds(eta.strip()))
+    if len(values) != 5:
+        return None
+    downloaded, total, estimated_total, speed, eta = values
+    return DownloadProgress(
+        fraction,
+        _progress_value(speed),
+        _eta_seconds(eta.strip()),
+        downloaded=_progress_value(downloaded),
+        total=_progress_value(total) or _progress_value(estimated_total),
+    )
 
 
 def cleanup_partial_downloads(directory: Path) -> None:
@@ -291,6 +317,11 @@ def _eta_seconds(value: str) -> int | None:
     if len(numbers) == 3:
         return numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
     return None
+
+
+def _progress_value(value: str) -> str | None:
+    cleaned = value.strip()
+    return cleaned if cleaned and cleaned.upper() not in {"NA", "N/A", "UNKNOWN"} else None
 
 
 def _is_child(path: Path, directory: Path) -> bool:
