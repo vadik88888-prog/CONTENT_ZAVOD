@@ -607,9 +607,14 @@ class ProjectScreen(QWidget):
         layout.addWidget(selection_toolbar)
         self._configure_workflow_action(project, draftable_ids, ready_count, rendered_count, processing_count)
         layout.addWidget(self.workflow_hint)
-        if self.draft_button.isVisible():
+        # The action buttons are intentionally retained while the dynamic
+        # candidate cards are rebuilt. A retained widget can temporarily be
+        # detached from the layout, in which case ``isVisible()`` is false
+        # even after ``show()``. ``isHidden()`` preserves the intended action
+        # state and ensures a clickable button is put back into the layout.
+        if not self.draft_button.isHidden():
             layout.addWidget(self.draft_button)
-        if self.production_button.isVisible():
+        if not self.production_button.isHidden():
             layout.addWidget(self.production_button)
         final_outputs = self._final_outputs_by_candidate()
         visible_candidates = self._filtered_candidates(candidates, project)
@@ -823,7 +828,6 @@ class ProjectScreen(QWidget):
     def _draft_action(self) -> None:
         if not self.project:
             return
-        self._persist_review_selection()
         candidate_ids = list(self.project.review_selected_candidate_ids)
         if not candidate_ids:
             return

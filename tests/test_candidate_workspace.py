@@ -10,10 +10,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from app.gui.components import VideoPreview
-from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus
+from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind, RunStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -22,7 +22,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.viewmodels import ProjectViewModel
-from app.utils import write_json
+from app.utils import read_json, write_json
 
 
 def _workspace(tmp_path: Path):
@@ -145,6 +145,128 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.candidate_review.isVisible()
     finally:
         screen.close()
+
+
+def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_opens_drafts(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    third_candidate = {
+        "candidate_id": "candidate-third", "title": "Третий момент", "start_seconds": 5.0,
+        "end_seconds": 16.0, "potential": "medium", "confidence": 0.7, "recommended": True,
+        "reasons": ["Подходит для черновика."], "preview": {"thumbnail": {"timestamp_seconds": 6.0}},
+    }
+    analysis["candidates"].append(third_candidate)
+    write_json(analysis_path, analysis)
+    selected_ids = ["candidate-recommended", "candidate-other", "candidate-third"]
+    project.candidate_states = {candidate_id: "analyzed" for candidate_id in selected_ids}
+    project.review_selected_candidate_ids = list(selected_ids)
+    services.projects.save(project)
+    calls: list[list[str]] = []
+    started: list[object] = []
+    draft_artifact = tmp_path / "draft.json"
+    write_json(draft_artifact, {"candidates": [{"candidate_id": item} for item in selected_ids]})
+
+    def prepare_draft(_services, current, candidate_ids):
+        calls.append(list(candidate_ids))
+        run = services.runs.create(
+            current, {"candidate_ids": list(candidate_ids)}, {"path": str(current.source)}, "test",
+            run_kind=RunKind.DRAFT,
+        )
+        for candidate_id in candidate_ids:
+            current.candidate_states[candidate_id] = "draft_planning"
+        current.status = ProjectStatus.PROCESSING
+        return run, object()
+
+    def finish_success(_services, current, run, _prepared):
+        run.status = RunStatus.DRAFT_READY
+        current.status = ProjectStatus.REVIEWING_CANDIDATES
+        current.draft_artifact_path = str(draft_artifact)
+        current.draft_id = "draft-test"
+        for candidate_id in selected_ids:
+            current.candidate_states[candidate_id] = "draft_ready"
+            current.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+        services.runs.save(run)
+        services.projects.save(current)
+        return run
+
+    monkeypatch.setattr(DesktopServices, "prepare_draft", prepare_draft)
+    monkeypatch.setattr(DesktopServices, "finish_success", finish_success)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(viewmodel.runner, "start", lambda prepared: started.append(prepared))
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+        assert screen.draft_button.isVisible() and screen.draft_button.isEnabled()
+        assert screen.draft_button.text() == "Создать черновики (3)"
+        assert screen.draft_button.height() > 0
+
+        QTest.mouseClick(screen.draft_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+
+        assert calls == [selected_ids]
+        assert len(started) == 1
+        assert viewmodel.snapshot.phase == ProcessingPhase.PREPARING
+        assert screen.progress.isVisible()
+        assert screen.progress.cancel_button.isVisible()
+        assert screen._flow_step == "processing"
+        assert all(project.candidate_states[item] == "draft_planning" for item in selected_ids)
+
+        viewmodel._completed(0)
+        app.processEvents()
+
+        assert screen._flow_step == "drafts"
+        assert all(project.candidate_states[item] == "draft_ready" for item in selected_ids)
+        assert screen.candidate_review.isVisible()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_draft_button_mouse_click_surfaces_prepare_failure(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.review_selected_candidate_ids = ["candidate-recommended"]
+    services.projects.save(project)
+    monkeypatch.setattr(
+        DesktopServices,
+        "prepare_draft",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("draft preparation failed")),
+    )
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, message: errors.append((title, message)))
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+        QTest.mouseClick(screen.draft_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+
+        assert errors
+        assert errors[0][0] == "Не удалось создать ролик"
+        assert not viewmodel.active
+        assert screen._flow_step == "candidates"
+        assert screen.progress.isHidden()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
 
 
 def test_source_setup_screen_persists_primary_choices_before_analysis(tmp_path: Path) -> None:
