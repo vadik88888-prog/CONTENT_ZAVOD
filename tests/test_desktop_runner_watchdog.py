@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot
+from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
@@ -128,6 +128,38 @@ def test_link_download_is_explicit_shows_transfer_details_and_can_restart(monkey
     viewmodel.start_download()
     assert len(launches) == 2
     assert project.source_spec.download_state == "downloading"
+
+
+def test_completed_link_download_hands_off_without_redownloading(monkeypatch, tmp_path: Path) -> None:
+    _application()
+    services, _project = _services(tmp_path)
+    project = services.projects.create_url("https://example.test/video", {"title": "Видео по ссылке"})
+    downloaded = project.directory / "sources" / "downloaded.mp4"
+    downloaded.parent.mkdir(parents=True, exist_ok=True)
+    downloaded.write_bytes(b"completed download")
+    metadata = {"duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0, "size_bytes": downloaded.stat().st_size}
+    monkeypatch.setattr(services.pipeline, "inspect_source", lambda _path: metadata)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+    relaunches: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        viewmodel.source_downloader,
+        "download",
+        lambda url, directory: relaunches.append((url, Path(directory))),
+    )
+
+    viewmodel._launching = True
+    viewmodel._after_download = "none"
+    viewmodel._download_completed(str(downloaded))
+
+    assert viewmodel.project is not None
+    assert viewmodel.project.status == ProjectStatus.SOURCE_READY
+    assert viewmodel.project.source == downloaded.resolve()
+    assert viewmodel.project.source_spec.downloaded_path == str(downloaded.resolve())
+    assert viewmodel.project.source_spec.download_state == "downloaded"
+    assert viewmodel.snapshot.message == "Видео загружено"
+    assert not viewmodel.active
+    assert relaunches == []
 
 
 def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None:

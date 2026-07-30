@@ -189,12 +189,12 @@ def test_source_setup_screen_persists_primary_choices_before_analysis(tmp_path: 
         app.processEvents()
 
 
-def test_link_project_reopens_at_download_then_moves_to_settings(tmp_path: Path) -> None:
+def test_link_project_reopens_at_download_then_moves_to_settings(monkeypatch, tmp_path: Path) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
     app = QApplication.instance() or QApplication([])
-    services, local_project = _workspace(tmp_path)
+    services, _local_project = _workspace(tmp_path)
     project = services.projects.create_url("https://example.test/video", {"title": "Длинное видео", "estimated_size_bytes": 1_000_000})
     viewmodel = ProjectViewModel(services)
     screen = ProjectScreen(viewmodel)
@@ -233,13 +233,20 @@ def test_link_project_reopens_at_download_then_moves_to_settings(tmp_path: Path)
         assert "Скорость: 1.5MiB/s" in screen.progress.detail.text()
         assert "Осталось:" in screen.progress.detail.text()
 
-        project.source_path = str(local_project.source)
-        project.source_spec.downloaded_path = str(local_project.source)
-        project.source_spec.download_state = "downloaded"
-        project.status = ProjectStatus.SOURCE_READY
-        services.projects.save(project)
-        viewmodel.snapshot = ProcessingSnapshot()
-        screen._project_changed(project)
+        downloaded = project.directory / "sources" / "downloaded.mp4"
+        downloaded.parent.mkdir(parents=True, exist_ok=True)
+        downloaded.write_bytes(b"completed download")
+        monkeypatch.setattr(services.pipeline, "inspect_source", lambda _path: {
+            "duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0,
+        })
+        viewmodel._launching = True
+        viewmodel._after_download = "none"
+        viewmodel._download_completed(str(downloaded))
+        app.processEvents()
+
+        assert project.source == downloaded.resolve()
+        assert project.source_spec.download_state == "downloaded"
+        assert project.status == ProjectStatus.SOURCE_READY
         assert screen._flow_step == "settings"
         assert not screen.setup_card.isHidden()
         assert screen.download_card.isHidden()

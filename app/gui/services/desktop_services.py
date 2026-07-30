@@ -7,7 +7,7 @@ from typing import Iterable
 
 from app.candidate_review import validate_boundary_override
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunKind, RunStatus
-from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
+from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError, validate_video_path
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import (
     STATE_PERSISTENCE_WARNING,
