@@ -28,10 +28,15 @@ def test_project_persistence_run_append_and_cyrillic_path(tmp_path: Path) -> Non
     store = DesktopProjectStore(tmp_path / "данные")
     project = store.create(source)
     project.settings.subtitle_style = "clean"
+    project.setup_state.last_estimate = {"estimated_seconds_min": 60, "estimated_seconds_max": 120}
+    project.setup_state.change_summary = "Настройки сохранены."
+    project.setup_state.reused_stages = ["сохранённый анализ"]
     store.save(project)
     loaded = store.load(project.project_id)
     assert loaded.source == source.resolve()
     assert loaded.settings.subtitle_style == "clean"
+    assert loaded.setup_state.last_estimate["estimated_seconds_max"] == 120
+    assert loaded.setup_state.reused_stages == ["сохранённый анализ"]
 
     history = RunHistoryStore(store)
     first = history.create(loaded, {"local_test_mode": True}, {"path": str(source)}, "0.1.0")

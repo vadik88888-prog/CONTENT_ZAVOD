@@ -27,6 +27,7 @@ class URLMetadata:
     extractor: str | None
     width: int | None
     height: int | None
+    format: str | None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -79,6 +80,23 @@ def validate_public_video_url(value: str) -> str:
     return parsed.geturl()
 
 
+def describe_public_url_failure(output: str) -> str:
+    """Turn common yt-dlp failures into an honest, non-bypass instruction."""
+
+    message = output.lower()
+    if any(marker in message for marker in (
+        "private video", "private content", "login required", "sign in", "cookies", "authentication",
+    )):
+        return "Это видео требует входа или имеет ограниченный доступ. Выберите публичную ссылку без авторизации."
+    if any(marker in message for marker in ("drm", "copyright-protected", "protected content")):
+        return "Это видео защищено и не поддерживается. Выберите открытый публичный ролик без защиты."
+    if any(marker in message for marker in ("video unavailable", "not available", "removed", "does not exist")):
+        return "Видео по этой ссылке недоступно. Проверьте ссылку или выберите другой публичный ролик."
+    if any(marker in message for marker in ("unsupported url", "no suitable formats", "unsupported site")):
+        return "Эта ссылка пока не поддерживается. Попробуйте прямую публичную ссылку на страницу видео."
+    return "Не удалось получить видео по этой ссылке. Проверьте, что она публичная и открывается без входа."
+
+
 class YtDlpSource:
     """A process-only adapter. It never reads browser cookies or invokes a shell."""
 
@@ -101,8 +119,11 @@ class YtDlpSource:
             return parse_url_metadata(safe_url, result.stdout)
         except subprocess.TimeoutExpired as error:
             raise SourceError("Не удалось получить информацию о видео: запрос занял слишком много времени.") from error
-        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
-            raise SourceError("Не удалось получить видео по этой ссылке.") from error
+        except subprocess.CalledProcessError as error:
+            details = "\n".join(part for part in (error.stdout, error.stderr) if isinstance(part, str))
+            raise SourceError(describe_public_url_failure(details)) from error
+        except (OSError, json.JSONDecodeError) as error:
+            raise SourceError(describe_public_url_failure("")) from error
 
     def download(
         self,
@@ -161,7 +182,7 @@ class YtDlpSource:
             raise DownloadCancelled("Загрузка видео отменена.")
         if exit_code != 0:
             cleanup_partial_downloads(destination)
-            raise SourceError("Не удалось получить видео по этой ссылке.")
+            raise SourceError(describe_public_url_failure("\n".join(output)))
         downloaded = next(
             (path.resolve() for path in reversed(paths) if path.is_file() and _is_child(path, destination)),
             None,
@@ -213,6 +234,7 @@ def parse_url_metadata(url: str, stdout: str) -> URLMetadata:
         extractor=str(raw["extractor_key"] or raw["extractor"]) if raw.get("extractor_key") or raw.get("extractor") else None,
         width=_integer(raw.get("width")),
         height=_integer(raw.get("height")),
+        format=str(raw["ext"]).upper() if raw.get("ext") else None,
     )
 
 

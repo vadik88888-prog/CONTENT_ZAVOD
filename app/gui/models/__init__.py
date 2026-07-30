@@ -1,4 +1,4 @@
-from app.gui.models.desktop_project import DesktopProject, ProjectOptions, ProjectStatus
+from app.gui.models.desktop_project import DesktopProject, ProjectOptions, ProjectStatus, SetupState
 from app.gui.models.desktop_settings import DesktopSettings
 from app.gui.models.processing_state import ProcessingPhase, ProcessingSnapshot
 from app.gui.models.project_run import ProjectRun, RunKind, RunStatus
@@ -11,6 +11,7 @@ __all__ = [
     "ProjectOptions",
     "ProjectRun",
     "RunKind",
+    "SetupState",
     "ProjectStatus",
     "RunStatus",
 ]

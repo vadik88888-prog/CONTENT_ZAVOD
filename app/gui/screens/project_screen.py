@@ -53,7 +53,7 @@ class ProjectScreen(QWidget):
         self.title.setObjectName("title")
         self.status = QLabel("")
         self.status.setObjectName("status")
-        self.settings_toggle = QPushButton("Настройки роликов")
+        self.settings_toggle = QPushButton("Дополнительно")
         self.settings_toggle.setCheckable(True)
         self.folder = QPushButton("Открыть папку")
         self.folder.clicked.connect(self._open_project_folder)
@@ -76,6 +76,69 @@ class ProjectScreen(QWidget):
         self.preview = VideoPreview()
         self.preview.preview_ready.connect(self._focus_preview_player)
         left.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.setup_card = self._card("Шаг 1. Настройте обработку")
+        self.setup_card.setObjectName("setup-card")
+        setup_layout = self.setup_card.layout()
+        self.setup_source = QLabel()
+        self.setup_source.setObjectName("muted")
+        self.setup_source.setWordWrap(True)
+        setup_layout.addWidget(self.setup_source)
+        setup_layout.addWidget(QLabel("Режим обработки"))
+        self.setup_processing_mode = QComboBox()
+        self.setup_processing_mode.addItem("Быстро — для разговорных видео", "fast")
+        self.setup_processing_mode.addItem("Стандарт — баланс скорости и качества", "standard")
+        self.setup_processing_mode.addItem("Максимум — для динамичных видео", "maximum")
+        self.setup_processing_mode.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option("processing_mode", str(self.setup_processing_mode.currentData()))
+        )
+        setup_layout.addWidget(self.setup_processing_mode)
+        self.setup_mode_help = QLabel()
+        self.setup_mode_help.setObjectName("muted")
+        self.setup_mode_help.setWordWrap(True)
+        setup_layout.addWidget(self.setup_mode_help)
+        setup_layout.addWidget(QLabel("Дополнительный разбор видео"))
+        self.setup_deep_analysis = QComboBox()
+        self.setup_deep_analysis.addItem("Авто — выбрать по содержанию", "auto")
+        self.setup_deep_analysis.addItem("Включить", "on")
+        self.setup_deep_analysis.addItem("Выключить", "off")
+        self.setup_deep_analysis.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option("deep_analysis", str(self.setup_deep_analysis.currentData()))
+        )
+        setup_layout.addWidget(self.setup_deep_analysis)
+        self.setup_deep_help = QLabel()
+        self.setup_deep_help.setObjectName("muted")
+        self.setup_deep_help.setWordWrap(True)
+        setup_layout.addWidget(self.setup_deep_help)
+        setup_layout.addWidget(QLabel("Площадка"))
+        self.setup_platform = QComboBox()
+        self.setup_platform.addItem("TikTok", "tiktok")
+        self.setup_platform.addItem("Instagram Reels", "reels")
+        self.setup_platform.addItem("YouTube Shorts", "shorts")
+        self.setup_platform.addItem("Универсальный вертикальный", "universal")
+        self.setup_platform.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option("platform", str(self.setup_platform.currentData()))
+        )
+        setup_layout.addWidget(self.setup_platform)
+        self.setup_platform_help = QLabel("Вертикальный ролик 9:16 с безопасными полями для интерфейса площадки.")
+        self.setup_platform_help.setObjectName("muted")
+        self.setup_platform_help.setWordWrap(True)
+        setup_layout.addWidget(self.setup_platform_help)
+        self.setup_estimate = QLabel()
+        self.setup_estimate.setObjectName("muted")
+        self.setup_estimate.setWordWrap(True)
+        setup_layout.addWidget(self.setup_estimate)
+        self.setup_change = QLabel()
+        self.setup_change.setObjectName("muted")
+        self.setup_change.setWordWrap(True)
+        setup_layout.addWidget(self.setup_change)
+        self.setup_advanced_toggle = QPushButton("Дополнительные настройки")
+        self.setup_advanced_toggle.setCheckable(True)
+        setup_layout.addWidget(self.setup_advanced_toggle)
+        self.setup_start_button = QPushButton("Начать обработку")
+        self.setup_start_button.setObjectName("primary")
+        self.setup_start_button.clicked.connect(self._primary_action)
+        setup_layout.addWidget(self.setup_start_button)
+        left.addWidget(self.setup_card)
         self.next_step = self._card("Следующий шаг")
         self.next_step_text = QLabel()
         self.next_step_text.setObjectName("muted")
@@ -216,7 +279,8 @@ class ProjectScreen(QWidget):
         self.run_button.clicked.connect(self._primary_action)
         settings.addWidget(self.run_button)
         panel.hide()
-        self.settings_toggle.toggled.connect(panel.setVisible)
+        self.settings_toggle.toggled.connect(self._set_advanced_visible)
+        self.setup_advanced_toggle.toggled.connect(self._set_advanced_visible)
         body.addWidget(panel)
         root.addLayout(body, 1)
         self.viewmodel.project_changed.connect(self._project_changed)
@@ -251,17 +315,109 @@ class ProjectScreen(QWidget):
         ])
         self._update_estimate(project)
         self._set_combo_data(self.processing_mode, project.settings.processing_mode)
+        self._set_combo_data(self.setup_processing_mode, project.settings.processing_mode)
         self._set_combo_data(self.deep_analysis, project.settings.deep_analysis)
+        self._set_combo_data(self.setup_deep_analysis, project.settings.deep_analysis)
         self._set_combo_data(self.platform, project.settings.platform)
+        self._set_combo_data(self.setup_platform, project.settings.platform)
         self._set_combo_data(self.clip_count, str(project.settings.clip_count))
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
         self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
+        self._update_setup_card(project)
         self._update_candidate_review(project)
         self._update_next_step(project)
         self._refresh_active_candidate_detail(project)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        self.settings_panel.setVisible(visible)
+        for toggle in (self.settings_toggle, self.setup_advanced_toggle):
+            toggle.blockSignals(True)
+            toggle.setChecked(visible)
+            toggle.blockSignals(False)
+
+    def _save_setup_option(self, name: str, value: str) -> None:
+        self.viewmodel.save_options(**{name: value})
+
+    def _update_setup_card(self, project: DesktopProject) -> None:
+        source = project.source_metadata
+        duration = format_seconds(source.get("duration")) if source.get("duration") is not None else "пока неизвестна"
+        size = self._format_file_size(source.get("size_bytes") or source.get("estimated_size_bytes"))
+        source_name = project.source.name if project.source_spec.is_ready else str(source.get("title") or "Видео по ссылке")
+        source_kind = "Файл" if project.source_spec.kind == "local_file" else "Публичная ссылка"
+        source_state = "готов" if project.source_spec.is_ready else "будет загружен после запуска"
+        suffix = project.source.suffix.upper().lstrip(".") if project.source_spec.is_ready else str(source.get("format") or "формат определится после загрузки")
+        self.setup_source.setText(
+            f"{source_kind}: {source_name}\nДлительность: {duration} · Формат: {suffix or 'н/д'} · Размер: {size}\nИсточник {source_state}."
+        )
+        self.setup_mode_help.setText({
+            "fast": "Быстро ищет подходящие моменты в подкастах, интервью, лекциях и другом разговорном материале.",
+            "standard": "Подходящий вариант по умолчанию: баланс времени, качества и стоимости.",
+            "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени и может стоить дороже.",
+        }[project.settings.processing_mode])
+        try:
+            resolved, estimate = self.viewmodel.setup_preflight()
+            deep_state = "будет использован" if resolved.deep_analysis.resolved else "не потребуется"
+            self.setup_deep_help.setText(f"Авто-рекомендация: {resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.")
+            self.setup_platform_help.setText(
+                f"{resolved.platform.label}: вертикальный 9:16, до {int(resolved.platform.maximum_duration_seconds)} с, "
+                "субтитры и безопасные поля включены. Публикация в аккаунты не выполняется."
+            )
+            self.setup_estimate.setText(self._setup_estimate_text(estimate))
+        except Exception:
+            saved = project.setup_state.last_estimate
+            self.setup_deep_help.setText("Рекомендация появится после проверки настроек.")
+            self.setup_estimate.setText(self._saved_estimate_text(saved))
+        self.setup_change.setText(
+            project.setup_state.change_summary or "Настройки сохраняются в этом проекте."
+        )
+        preparing = not bool(project.analysis_artifact_path)
+        heading = self.setup_card.layout().itemAt(0).widget()
+        if isinstance(heading, QLabel):
+            heading.setText("Шаг 1. Настройте обработку" if preparing else "Настройки следующего запуска")
+        self.setup_start_button.setVisible(preparing)
+        self.run_button.setVisible(not preparing)
+
+    @staticmethod
+    def _format_cost_range(minimum: object, maximum: object) -> str:
+        try:
+            low, high = float(minimum), float(maximum)
+        except (TypeError, ValueError):
+            return "неизвестна до проверки тарифов"
+        if high < 0.01:
+            return "меньше $0.01"
+        if low < 0.01:
+            return f"до ${high:.2f}"
+        return f"примерно ${low:.2f}–${high:.2f}"
+
+    def _setup_estimate_text(self, estimate) -> str:
+        minutes = (
+            f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
+            f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
+        )
+        cost = self._format_cost_range(estimate.estimated_ai_cost_min, estimate.estimated_ai_cost_max)
+        drivers = ", ".join(estimate.cost_drivers[:4]) or "длительность и выбранные настройки"
+        reuse = " Повторный экспорт готового ролика не повторяет дорогой анализ." if estimate.cached_stages else ""
+        return (
+            f"Оценка до запуска: {minutes}; ориентир по стоимости: {cost}.\n"
+            f"На неё влияют: {drivers}. {estimate.cost_note}{reuse}"
+        )
+
+    def _saved_estimate_text(self, saved: dict) -> str:
+        if not isinstance(saved, dict):
+            return "Оценка появится после проверки настроек."
+        try:
+            minutes = (
+                f"около {max(1, round(float(saved['estimated_seconds_min']) / 60))}–"
+                f"{max(1, round(float(saved['estimated_seconds_max']) / 60))} мин"
+            )
+        except (KeyError, TypeError, ValueError):
+            return "Оценка появится после проверки настроек."
+        cost = self._format_cost_range(saved.get("estimated_ai_cost_min"), saved.get("estimated_ai_cost_max"))
+        note = str(saved.get("cost_note") or "")
+        return f"Последняя сохранённая оценка: {minutes}; ориентир по стоимости: {cost}. {note}"
 
     def _primary_action(self) -> None:
         if not self.project:
@@ -1000,6 +1156,7 @@ class ProjectScreen(QWidget):
         else:
             self.progress.set_finished(snapshot.message)
         self.run_button.setDisabled(active)
+        self.setup_start_button.setDisabled(active)
         self.draft_button.setDisabled(active or not (self.project and self.project.review_selected_candidate_ids))
         selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
             Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
@@ -1009,6 +1166,7 @@ class ProjectScreen(QWidget):
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.composition_strategy, self.subtitles, self.subtitle_style, self.cache,
+            self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform,
         ):
             widget.setDisabled(active)
 
@@ -1052,17 +1210,14 @@ class ProjectScreen(QWidget):
                 f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
                 f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
             )
-            cost = (
-                "без платного AI"
-                if estimate.estimated_ai_cost_min is None
-                else f"ориентировочно ${estimate.estimated_ai_cost_min:.2f}–${estimate.estimated_ai_cost_max:.2f}"
-            )
+            cost = self._format_cost_range(estimate.estimated_ai_cost_min, estimate.estimated_ai_cost_max)
             analysis = "будет использован" if estimate.deep_analysis_resolved else "не потребуется"
             self._replace_card_text(self.estimate, [
                 f"Время: {minutes}",
                 f"Результат: примерно {estimate.estimated_clips_min}–{estimate.estimated_clips_max} ролика(ов)",
                 f"Глубокий анализ: {analysis}",
-                f"Стоимость AI: {cost}",
+                f"Ориентир по стоимости: {cost}",
+                estimate.cost_note,
             ])
         except Exception:
             self._replace_card_text(self.estimate, ["Оценка появится после проверки настроек."])

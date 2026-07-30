@@ -12,6 +12,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import (
+    CostPricing,
     ProcessingIntent,
     apply_resolved_processing_config,
     calibrate_processing_estimate,
@@ -76,6 +77,38 @@ def test_estimate_is_a_range_and_does_not_invent_local_ai_cost() -> None:
     assert paid.estimated_seconds_min < paid.estimated_seconds_max
     assert paid.estimated_ai_cost_min is not None
     assert longer.estimated_seconds_min > paid.estimated_seconds_min
+
+
+def test_cost_preview_uses_active_tariffs_and_explains_its_drivers() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(processing_mode="maximum", deep_analysis="on", clip_count="5", audio_mode="voiceover"),
+        _metadata(),
+    )
+    low_tariff = CostPricing(0.0000001, 0.000001, 5.0, ai_available=True, tts_available=True)
+    high_tariff = CostPricing(0.0000005, 0.000005, 25.0, ai_available=True, tts_available=True)
+
+    low = estimate_processing(resolved, _metadata(), paid_ai_available=True, pricing=low_tariff)
+    high = estimate_processing(resolved, _metadata(), paid_ai_available=True, pricing=high_tariff)
+
+    assert low.estimated_ai_cost_min is not None
+    assert high.estimated_ai_cost_max is not None
+    assert high.estimated_ai_cost_max > low.estimated_ai_cost_max
+    assert any("кадр" in item for item in high.cost_drivers)
+    assert "тариф" in high.cost_note.lower()
+
+
+def test_auto_recommendation_uses_available_content_signals_and_stays_conservative_when_unknown() -> None:
+    gameplay = resolve_processing_intent(
+        ProcessingIntent(deep_analysis="auto"), _metadata(title="PUBG gameplay decisive match")
+    )
+    speech = resolve_processing_intent(
+        ProcessingIntent(deep_analysis="auto"), _metadata(speech_ratio=0.9, visual_activity_score=0.2)
+    )
+    unknown = resolve_processing_intent(ProcessingIntent(deep_analysis="auto"), {})
+
+    assert gameplay.deep_analysis.resolved is True
+    assert speech.deep_analysis.resolved is False
+    assert unknown.deep_analysis.estimated_benefit == "unknown"
 
 
 def test_estimate_calibrates_from_persisted_completed_run_history() -> None:
@@ -151,6 +184,30 @@ def test_desktop_run_persists_intent_resolved_config_and_estimate(tmp_path: Path
     assert "processing_mode: maximum" in runtime
     assert "platform: shorts" in runtime
     assert "final_clip_count: 5" in runtime
+
+
+def test_setup_changes_explain_when_analysis_is_reused_or_needed_again(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(source, source_metadata=_metadata())
+    project.analysis_artifact_path = str(tmp_path / "analysis.json")
+    settings = DesktopSettings.defaults(data)
+    settings.local_test_mode = True
+    root = Path(__file__).resolve().parents[1]
+    services = DesktopServices(
+        engine_root=root, settings_store=SettingsStore(data), settings=settings, projects=projects,
+        runs=RunHistoryStore(projects), pipeline=PipelineFacade(root), system=SystemService(root),
+    )
+
+    services.update_project_options(project, processing_mode="maximum")
+    assert project.setup_state.needs_new_analysis is True
+    assert "новый анализ" in project.setup_state.change_summary
+
+    services.update_project_options(project, platform="shorts")
+    assert project.setup_state.needs_new_analysis is False
+    assert project.setup_state.reused_stages == ["сохранённый анализ", "найденные моменты"]
 
 
 def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Path) -> None:

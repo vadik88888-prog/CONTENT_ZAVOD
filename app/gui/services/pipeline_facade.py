@@ -17,6 +17,7 @@ from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
 from app.gui.services.desktop_project_store import InputValidationError, validate_video_path
 from app.media import probe_video
 from app.product_flow import (
+    CostPricing,
     ProcessingEstimate,
     ProcessingIntent,
     ResolvedProcessingConfig,
@@ -95,13 +96,20 @@ class PipelineFacade:
         config = load_config(base_config if base_config.is_file() else None)
         intent = project.settings.processing_intent()
         resolved = resolve_processing_intent(intent, project.source_metadata)
-        paid_ai_available = not settings.local_test_mode and (
-            config.ai.provider != "mock" or config.tts.provider != "mock"
+        ai_available = not settings.local_test_mode and config.ai.provider != "mock"
+        tts_available = not settings.local_test_mode and config.tts.provider == "openai"
+        pricing = CostPricing(
+            input_token_price=config.ai.input_token_price,
+            output_token_price=config.ai.output_token_price,
+            tts_cost_per_1m_characters=config.tts.cost_per_1m_characters,
+            ai_available=ai_available,
+            tts_available=tts_available,
         )
         estimate = estimate_processing(
             resolved,
             project.source_metadata,
-            paid_ai_available=paid_ai_available,
+            paid_ai_available=ai_available,
+            pricing=pricing,
         )
         return intent, resolved, estimate
 

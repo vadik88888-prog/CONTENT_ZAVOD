@@ -53,24 +53,33 @@ class ProjectViewModel(QObject):
         return self._launching or self.runner.active or self.source_downloader.busy
 
     def open(self, project: DesktopProject) -> None:
-        self.project = project
+        try:
+            self.project = self.services.refresh_setup_estimate(project)
+        except Exception:
+            # An unavailable optional provider tariff must not prevent a person
+            # from opening their existing candidates and completed videos.
+            self.project = project
         self.snapshot = ProcessingSnapshot()
-        self.project_changed.emit(project)
-        self.runs_changed.emit(self.services.runs_for(project))
+        self.project_changed.emit(self.project)
+        self.runs_changed.emit(self.services.runs_for(self.project))
         self.processing_changed.emit(self.snapshot)
 
     def save_options(self, **values: object) -> None:
         if not self.project or self.active:
             return
-        for name, value in values.items():
-            if hasattr(self.project.settings, name):
-                setattr(self.project.settings, name, value)
         try:
-            self.services.save_project(self.project)
+            self.project = self.services.update_project_options(self.project, **values)
         except Exception as error:
             self.error_occurred.emit(map_error(error))
             return
         self.project_changed.emit(self.project)
+
+    def setup_preflight(self):
+        """Return the current setup recommendation without starting a run."""
+
+        if not self.project:
+            raise RuntimeError("Проект не открыт.")
+        return self.services.setup_preflight(self.project)
 
     def start(self) -> None:
         if not self.project or self.active:

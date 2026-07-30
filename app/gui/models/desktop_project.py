@@ -76,6 +76,49 @@ class ProjectOptions:
 
 
 @dataclass(slots=True)
+class SetupState:
+    """Persisted, user-facing setup context for a project.
+
+    It deliberately contains only an estimate and an explanation of the next
+    run.  Pipeline settings continue to live in :class:`ProjectOptions`; this
+    state lets a reopened project show the same clear preflight summary without
+    serialising runtime paths, secrets, or engine internals.
+    """
+
+    last_estimate: dict[str, Any] = field(default_factory=dict)
+    estimated_at: str | None = None
+    change_summary: str = ""
+    needs_new_analysis: bool = False
+    reused_stages: list[str] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if not isinstance(self.last_estimate, dict):
+            raise ValueError("Setup estimate must be an object.")
+        if self.estimated_at is not None and not isinstance(self.estimated_at, str):
+            raise ValueError("Setup estimate timestamp is invalid.")
+        if not isinstance(self.change_summary, str):
+            raise ValueError("Setup change summary is invalid.")
+        if not isinstance(self.needs_new_analysis, bool):
+            raise ValueError("Setup analysis requirement is invalid.")
+        if not isinstance(self.reused_stages, list) or not all(isinstance(item, str) and item for item in self.reused_stages):
+            raise ValueError("Setup reused stages are invalid.")
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> "SetupState":
+        raw = value if isinstance(value, dict) else {}
+        reused_raw = raw.get("reused_stages")
+        state = cls(
+            last_estimate=dict(raw.get("last_estimate") or {}),
+            estimated_at=str(raw["estimated_at"]) if raw.get("estimated_at") else None,
+            change_summary=str(raw.get("change_summary") or ""),
+            needs_new_analysis=bool(raw.get("needs_new_analysis", False)),
+            reused_stages=[str(item) for item in reused_raw if str(item)] if isinstance(reused_raw, list) else [],
+        )
+        state.validate()
+        return state
+
+
+@dataclass(slots=True)
 class DesktopProject:
     """Durable user project.  The source is referenced, never copied."""
 
@@ -91,6 +134,7 @@ class DesktopProject:
     thumbnail_path: str | None = None
     source_metadata: dict[str, Any] = field(default_factory=dict)
     source_spec: SourceSpec = field(default_factory=SourceSpec)
+    setup_state: SetupState = field(default_factory=SetupState)
     analysis_artifact_path: str | None = None
     analysis_id: str | None = None
     analysis_fingerprint: str | None = None
@@ -119,6 +163,7 @@ class DesktopProject:
             raise ValueError("Unsupported project schema version.")
         self.settings.validate()
         self.source_spec.validate()
+        self.setup_state.validate()
         supported_candidate_states = {
             "analyzed", "draft_planning", "draft_ready", "draft_failed",
             "selected", "production_rendering", "rendered",
@@ -205,6 +250,7 @@ class DesktopProject:
             source_spec=SourceSpec.from_dict(
                 value.get("source_spec"), fallback_path=str(value.get("source_path", "")), fallback_metadata=source_metadata,
             ),
+            setup_state=SetupState.from_dict(value.get("setup_state")),
             analysis_artifact_path=str(value["analysis_artifact_path"]) if value.get("analysis_artifact_path") else None,
             analysis_id=str(value["analysis_id"]) if value.get("analysis_id") else None,
             analysis_fingerprint=str(value["analysis_fingerprint"]) if value.get("analysis_fingerprint") else None,

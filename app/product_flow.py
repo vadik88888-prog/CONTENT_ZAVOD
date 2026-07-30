@@ -166,6 +166,8 @@ class ProcessingEstimate:
     cached_stages: tuple[str, ...]
     confidence: str
     assumptions: tuple[str, ...]
+    cost_drivers: tuple[str, ...] = ()
+    cost_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,7 +181,33 @@ class ProcessingEstimate:
             "cached_stages": list(self.cached_stages),
             "confidence": self.confidence,
             "assumptions": list(self.assumptions),
+            "cost_drivers": list(self.cost_drivers),
+            "cost_note": self.cost_note,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class CostPricing:
+    """Configured provider tariffs used by the preflight estimate.
+
+    This is deliberately a small value object instead of a UI constant.  The
+    desktop obtains it from the active engine configuration, so changing a
+    provider tariff changes the estimate before the next run.
+    """
+
+    input_token_price: float | None
+    output_token_price: float | None
+    tts_cost_per_1m_characters: float | None = None
+    ai_available: bool = True
+    tts_available: bool = False
+
+    @property
+    def can_estimate_ai(self) -> bool:
+        return self.ai_available and self.input_token_price is not None and self.output_token_price is not None
+
+    @property
+    def can_estimate_tts(self) -> bool:
+        return self.tts_available and self.tts_cost_per_1m_characters is not None
 
 
 def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None = None) -> DeepAnalysisDecision:
@@ -195,7 +223,10 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
         raise ValueError("Unsupported deep analysis mode.")
     metadata = source_metadata or {}
     evidence: dict[str, Any] = {}
-    for key in ("duration", "width", "height", "fps", "visual_activity_score", "content_kind"):
+    for key in (
+        "duration", "width", "height", "fps", "visual_activity_score", "scene_density",
+        "speech_ratio", "silence_ratio", "content_kind", "genre", "title", "filename",
+    ):
         if key in metadata:
             evidence[key] = metadata[key]
     if requested == "on":
@@ -203,15 +234,31 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     if requested == "off":
         return DeepAnalysisDecision(requested, False, "Выключено по вашему выбору.", evidence, "none")
 
-    kind = str(metadata.get("content_kind", "")).lower()
+    kind = " ".join(
+        str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename")
+    ).lower()
     activity = _number(metadata.get("visual_activity_score"))
-    if kind in {"podcast", "lecture", "talking_head", "screen_recording"}:
-        return DeepAnalysisDecision("auto", False, "Источник похож на разговорный или статичный формат.", evidence, "low")
+    scene_density = _number(metadata.get("scene_density"))
+    speech_ratio = _number(metadata.get("speech_ratio"))
+    static_markers = ("podcast", "lecture", "interview", "talking", "talking_head", "webinar", "screen_recording")
+    dynamic_markers = ("gameplay", "game", "pubg", "movie", "film", "series", "trailer", "review", "travel", "sport", "concert")
+    if any(marker in kind for marker in static_markers):
+        return DeepAnalysisDecision("auto", False, "Похоже на разговорный или статичный материал: сначала достаточно анализа речи.", evidence, "low")
+    if any(marker in kind for marker in dynamic_markers):
+        return DeepAnalysisDecision("auto", True, "Похоже на динамичное видео, где важны события в кадре.", evidence, "high")
     if activity is not None and activity >= 0.55:
         return DeepAnalysisDecision("auto", True, "В видео заметна высокая визуальная активность.", evidence, "high")
-    if activity is not None:
+    if scene_density is not None and scene_density >= 0.55:
+        return DeepAnalysisDecision("auto", True, "В видео часто меняются сцены; дополнительный разбор кадра может помочь.", evidence, "high")
+    if speech_ratio is not None and speech_ratio >= 0.65 and (activity is None or activity < 0.45):
+        return DeepAnalysisDecision("auto", False, "Преобладает речь, а заметных динамичных сцен пока нет.", evidence, "low")
+    if activity is not None or scene_density is not None:
         return DeepAnalysisDecision("auto", False, "Визуальная активность невысокая; достаточно анализа речи.", evidence, "low")
-    return DeepAnalysisDecision("auto", False, "Недостаточно локальных признаков: начнём с анализа речи.", evidence, "unknown")
+    return DeepAnalysisDecision(
+        "auto", False,
+        "Недостаточно признаков до первого анализа: выбран бережный вариант без дополнительного разбора кадра.",
+        evidence, "unknown",
+    )
 
 
 def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[str, Any] | None = None) -> ResolvedProcessingConfig:
@@ -248,6 +295,7 @@ def estimate_processing(
     *,
     paid_ai_available: bool,
     cached_stages: tuple[str, ...] = (),
+    pricing: CostPricing | None = None,
 ) -> ProcessingEstimate:
     """Return a bounded estimate, never a misleading single-point promise."""
 
@@ -262,14 +310,52 @@ def estimate_processing(
         base_seconds *= 0.62
     estimate_min = max(20, int(round(base_seconds * 0.75)))
     estimate_max = max(estimate_min + 15, int(round(base_seconds * 1.35)))
-    if paid_ai_available:
-        ai_factor = {"fast": 0.002, "standard": 0.007, "maximum": 0.015}[resolved.processing_mode]
+    # The UI receives configured provider tariffs through ``pricing``.  The
+    # fallback keeps the public pure function useful for existing callers while
+    # retaining the same defaults as AIConfig.  It is never used by the desktop
+    # preflight, which always passes the active configuration explicitly.
+    active_pricing = pricing or CostPricing(
+        input_token_price=0.00000025,
+        output_token_price=0.000002,
+        ai_available=paid_ai_available,
+    )
+    cost_drivers = [
+        "длительность исходного видео",
+        {"fast": "быстрый режим", "standard": "стандартный режим", "maximum": "максимальный режим"}[resolved.processing_mode],
+        f"подготовка до {resolved.clip_count} ролика(ов)",
+    ]
+    if resolved.deep_analysis.resolved:
+        cost_drivers.append("дополнительный разбор кадров")
+
+    cost_min = cost_max = None
+    if active_pricing.can_estimate_ai:
+        # These are bounded request-volume assumptions, not prices.  Tariffs
+        # themselves are always taken from AppConfig.  They track the existing
+        # candidate limits and shortlist sizes resolved above, so the estimate
+        # changes when a product mode actually changes pipeline work.
+        input_per_minute = {"fast": 220, "standard": 420, "maximum": 720}[resolved.processing_mode]
+        output_per_shortlist = {"fast": 42, "standard": 78, "maximum": 120}[resolved.processing_mode]
+        output_per_clip = {"fast": 120, "standard": 230, "maximum": 360}[resolved.processing_mode]
+        input_tokens = minutes * input_per_minute + resolved.shortlist_size * 55
+        output_tokens = resolved.shortlist_size * output_per_shortlist + resolved.clip_count * output_per_clip
         if resolved.deep_analysis.resolved:
-            ai_factor += 0.006
-        cost_min = round(minutes * ai_factor * 0.75, 2)
-        cost_max = round(max(cost_min + 0.01, minutes * ai_factor * 1.35), 2)
+            input_tokens += minutes * 260
+            output_tokens += resolved.clip_count * 75
+        base_cost = input_tokens * float(active_pricing.input_token_price) + output_tokens * float(active_pricing.output_token_price)
+        cost_min, cost_max = base_cost * 0.72, base_cost * 1.36
+        if resolved.audio_mode in {"voiceover", "replace_voice", "mixed"} and active_pricing.can_estimate_tts:
+            narration_chars_min = resolved.clip_count * resolved.platform.target_duration_seconds * 9
+            narration_chars_max = resolved.clip_count * resolved.platform.target_duration_seconds * 18
+            tts_rate = float(active_pricing.tts_cost_per_1m_characters)
+            cost_min += narration_chars_min * tts_rate / 1_000_000
+            cost_max += narration_chars_max * tts_rate / 1_000_000
+            cost_drivers.append("выбранный способ озвучки")
+        cost_min, cost_max = round(cost_min, 4), round(max(cost_min, cost_max), 4)
+        cost_note = "Диапазон рассчитан по тарифам, указанным в текущих настройках, и объёму работы до запуска."
+    elif paid_ai_available:
+        cost_note = "Тарифы для текущего сервиса не заданы, поэтому стоимость до запуска не показываем."
     else:
-        cost_min = cost_max = None
+        cost_note = "Платные обращения в этом запуске не используются."
     requested = resolved.clip_count
     return ProcessingEstimate(
         estimated_seconds_min=estimate_min,
@@ -285,6 +371,8 @@ def estimate_processing(
             "Оценка зависит от длительности, выбранного режима и мощности компьютера.",
             "Итоговое число роликов зависит от найденных подходящих фрагментов.",
         ),
+        cost_drivers=tuple(cost_drivers),
+        cost_note=cost_note,
     )
 
 
@@ -325,6 +413,8 @@ def calibrate_processing_estimate(estimate: ProcessingEstimate, runs: list[Any])
         deep_analysis_resolved=estimate.deep_analysis_resolved, cached_stages=estimate.cached_stages,
         confidence="calibrated",
         assumptions=(*estimate.assumptions, f"Оценка откалибрована по {len(ratios)} завершённым запускам этого приложения."),
+        cost_drivers=estimate.cost_drivers,
+        cost_note=estimate.cost_note,
     )
 
 

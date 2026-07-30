@@ -143,6 +143,46 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.run_button.text() == "Посмотреть найденные моменты"
     finally:
         screen.close()
+
+
+def test_source_setup_screen_persists_primary_choices_before_analysis(tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.analysis_artifact_path = None
+    project.analysis_id = None
+    project.candidate_states = {}
+    project.status = ProjectStatus.SOURCE_READY
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+
+    try:
+        screen.open(project)
+        assert not screen.setup_start_button.isHidden()
+        assert screen.run_button.isHidden()
+        screen.setup_processing_mode.setCurrentIndex(screen.setup_processing_mode.findData("maximum"))
+        for deep_mode in ("auto", "on", "off"):
+            screen.setup_deep_analysis.setCurrentIndex(screen.setup_deep_analysis.findData(deep_mode))
+            app.processEvents()
+            assert viewmodel.project is not None and viewmodel.project.settings.deep_analysis == deep_mode
+        for platform in ("tiktok", "reels", "shorts", "universal"):
+            screen.setup_platform.setCurrentIndex(screen.setup_platform.findData(platform))
+            app.processEvents()
+            assert viewmodel.project is not None and viewmodel.project.settings.platform == platform
+        app.processEvents()
+
+        assert viewmodel.project is not None
+        assert viewmodel.project.settings.processing_mode == "maximum"
+        assert viewmodel.project.settings.deep_analysis == "off"
+        assert viewmodel.project.settings.platform == "universal"
+        reloaded = services.projects.load(project.project_id)
+        assert reloaded.setup_state.last_estimate
+        assert "первому анализу" in reloaded.setup_state.change_summary
+    finally:
+        screen.close()
         screen.deleteLater()
         app.processEvents()
 

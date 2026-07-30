@@ -69,10 +69,16 @@ class DesktopServices:
 
     def create_project(self, source_path: str | Path) -> DesktopProject:
         metadata = self.pipeline.inspect_source(source_path)
-        return self.projects.create(source_path, source_metadata=metadata)
+        project = self.projects.create(source_path, source_metadata=metadata)
+        self._refresh_setup_state(project, "Источник готов. Настройте обработку и запустите анализ, когда будете готовы.")
+        self.projects.save(project)
+        return project
 
     def create_url_project(self, url: str, metadata: dict) -> DesktopProject:
-        return self.projects.create_url(validate_public_video_url(url), metadata)
+        project = self.projects.create_url(validate_public_video_url(url), metadata)
+        self._refresh_setup_state(project, "Ссылка проверена. Настройте обработку; загрузка начнётся только после вашего запуска.")
+        self.projects.save(project)
+        return project
 
     def mark_url_download_started(self, project: DesktopProject) -> None:
         if project.source_spec.kind != "url":
@@ -93,6 +99,7 @@ class DesktopServices:
         project.source_spec.metadata = metadata
         project.source_spec.download_state = "downloaded"
         project.source_spec.error_message = None
+        self._refresh_setup_state(project, "Видео загружено. Настройки и оценка обновлены по фактическому файлу.")
         self.projects.save(project)
         return project
 
@@ -106,6 +113,71 @@ class DesktopServices:
     def save_project(self, project: DesktopProject) -> None:
         project.settings.validate()
         self.projects.save(project)
+
+    def update_project_options(self, project: DesktopProject, **values: object) -> DesktopProject:
+        """Persist a setup change and tell the person what the next run will reuse.
+
+        The method never launches or invalidates pipeline artifacts.  Existing
+        candidates and drafts remain inspectable; only the setup explanation
+        describes whether a later analysis is needed for a changed option.
+        """
+
+        changed: list[str] = []
+        for name, value in values.items():
+            if not hasattr(project.settings, name):
+                continue
+            if getattr(project.settings, name) != value:
+                setattr(project.settings, name, value)
+                changed.append(name)
+        project.settings.validate()
+        if not changed:
+            return project
+        has_analysis = bool(project.analysis_artifact_path)
+        analysis_options = {"processing_mode", "deep_analysis", "clip_count"}
+        needs_analysis = has_analysis and bool(analysis_options.intersection(changed))
+        if needs_analysis:
+            summary = (
+                "Настройки сохранены для следующего анализа. Текущие найденные моменты и черновики не изменены; "
+                "чтобы применить этот режим, выполните новый анализ видео."
+            )
+            reused = ["текущие моменты и черновики остаются доступными для просмотра"]
+        elif has_analysis:
+            summary = (
+                "Настройки сохранены. Сохранённый анализ и найденные моменты можно использовать повторно; "
+                "новый анализ не нужен."
+            )
+            reused = ["сохранённый анализ", "найденные моменты"]
+        else:
+            summary = "Настройки сохранены и будут применены к первому анализу."
+            reused = []
+        self._refresh_setup_state(project, summary, needs_new_analysis=needs_analysis, reused_stages=reused)
+        self.projects.save(project)
+        return project
+
+    def _refresh_setup_state(
+        self,
+        project: DesktopProject,
+        summary: str | None = None,
+        *,
+        needs_new_analysis: bool | None = None,
+        reused_stages: list[str] | None = None,
+    ) -> None:
+        """Store a safe, serialisable estimate for the next time the project opens."""
+
+        try:
+            estimate = self.processing_estimate(project)
+        except Exception:
+            # A first-run configuration can be incomplete.  Keep the source and
+            # choices durable and let the screen show its honest fallback state.
+            return
+        project.setup_state.last_estimate = estimate.to_dict()
+        project.setup_state.estimated_at = utc_now()
+        if summary is not None:
+            project.setup_state.change_summary = summary
+        if needs_new_analysis is not None:
+            project.setup_state.needs_new_analysis = needs_new_analysis
+        if reused_stages is not None:
+            project.setup_state.reused_stages = list(reused_stages)
 
     def set_review_selection(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
         """Persist the user's candidate choice before any draft or render starts."""
@@ -136,8 +208,23 @@ class DesktopServices:
     def processing_estimate(self, project: DesktopProject):
         """A serialisable preflight estimate for the project screen."""
 
-        estimate = self.pipeline.plan_processing(project, self.settings)[2]
-        return calibrate_processing_estimate(estimate, self.runs_for(project))
+        return self.setup_preflight(project)[1]
+
+    def setup_preflight(self, project: DesktopProject):
+        """Resolve the existing pipeline's setup choices for a view-model."""
+
+        _intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        return resolved, calibrate_processing_estimate(estimate, self.runs_for(project))
+
+    def refresh_setup_estimate(self, project: DesktopProject) -> DesktopProject:
+        """Refresh the durable preflight when a project is opened again."""
+
+        previous = dict(project.setup_state.last_estimate)
+        previous_at = project.setup_state.estimated_at
+        self._refresh_setup_state(project)
+        if project.setup_state.last_estimate != previous or (project.setup_state.last_estimate and previous_at is None):
+            self.projects.save(project)
+        return project
 
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status == ProjectStatus.PROCESSING:

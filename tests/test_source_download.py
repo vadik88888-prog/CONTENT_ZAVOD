@@ -12,6 +12,7 @@ from app.source_download import (
     DownloadCancelled,
     YtDlpSource,
     cleanup_partial_downloads,
+    describe_public_url_failure,
     find_ytdlp_executable,
     parse_download_progress,
     parse_url_metadata,
@@ -26,14 +27,29 @@ def test_unsafe_url_schemes_and_local_hosts_are_rejected(url: str) -> None:
         validate_public_video_url(url)
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ERROR: Private video. Sign in required", "входа"),
+        ("ERROR: This video is DRM protected", "защищено"),
+        ("ERROR: Video unavailable", "недоступно"),
+    ],
+)
+def test_public_url_failure_is_explained_without_suggesting_a_bypass(raw: str, expected: str) -> None:
+    message = describe_public_url_failure(raw)
+    assert expected in message
+    assert "cookies" not in message.lower()
+
+
 def test_metadata_and_progress_are_parsed_without_exposing_internal_ytdlp_output() -> None:
-    metadata = parse_url_metadata("https://example.test/video", '{"title":"Видео — тест","duration":91.2,"filesize_approx":1234,"thumbnail":"https://image.test/a.jpg","width":1920,"height":1080}')
+    metadata = parse_url_metadata("https://example.test/video", '{"title":"Видео — тест","duration":91.2,"filesize_approx":1234,"thumbnail":"https://image.test/a.jpg","width":1920,"height":1080,"ext":"mp4"}')
     progress = parse_download_progress("download: 42.5%|1.5MiB/s|00:17")
 
     assert metadata.title == "Видео — тест"
     assert metadata.duration == 91.2
     assert metadata.estimated_size_bytes == 1234
     assert (metadata.width, metadata.height) == (1920, 1080)
+    assert metadata.format == "MP4"
     assert progress is not None
     assert progress.fraction == 0.425
     assert progress.speed == "1.5MiB/s"

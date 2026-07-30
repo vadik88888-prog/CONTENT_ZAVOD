@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, Signal
 
 from app.source_download import (
     cleanup_partial_downloads,
+    describe_public_url_failure,
+    find_ytdlp_executable,
     parse_download_progress,
     parse_url_metadata,
     validate_public_video_url,
@@ -81,7 +82,7 @@ class URLSourceService(QObject):
         except Exception as error:
             self.failed.emit(str(error))
             return None
-        executable = shutil.which("yt-dlp")
+        executable = find_ytdlp_executable()
         if not executable:
             self.failed.emit("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.")
             return None
@@ -134,7 +135,7 @@ class URLSourceService(QObject):
         if exit_code != 0 or self._reported_process_error:
             if directory:
                 cleanup_partial_downloads(directory)
-            self.failed.emit("Не удалось получить видео по этой ссылке.")
+            self.failed.emit(describe_public_url_failure("\n".join(self._output)))
             return
         try:
             if mode == "metadata" and url:
