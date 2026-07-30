@@ -51,6 +51,7 @@ class DesktopServices:
             system=SystemService(engine_root),
         )
         services.recover_interrupted_runs()
+        services.recover_ready_analysis_runs()
         services.recover_interrupted_downloads()
         return services
 
@@ -64,6 +65,7 @@ class DesktopServices:
         self.runs = RunHistoryStore(self.projects)
         self.save_settings()
         self.recover_interrupted_runs()
+        self.recover_ready_analysis_runs()
 
     def list_projects(self) -> list[DesktopProject]:
         return self.projects.list()
@@ -258,6 +260,12 @@ class DesktopServices:
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
+        if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
+            project.status = ProjectStatus.ANALYSIS_READY
+            self.projects.save(project)
+            raise InputValidationError(
+                "Готовый analysis.json уже найден. Откройте «Моменты»; повторный анализ не запускался."
+            )
         source = project.source
         if not source.is_file():
             if project.source_spec.kind == "url":
@@ -315,6 +323,12 @@ class DesktopServices:
         return run, prepared
 
     def prepare_analysis(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
+            project.status = ProjectStatus.ANALYSIS_READY
+            self.projects.save(project)
+            raise InputValidationError(
+                "Готовый analysis.json уже найден. Откройте «Моменты»; повторный анализ не запускался."
+            )
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
         source = project.source
@@ -566,7 +580,10 @@ class DesktopServices:
     def _with_observability_paths(prepared: PreparedPipelineRun, run: ProjectRun) -> PreparedPipelineRun:
         return replace(
             prepared,
-            heartbeat_path=prepared.state_path.with_name("heartbeat.json"),
+            # A pending run has only its engine metadata lookup path.  The
+            # runner switches to the real heartbeat path once the child engine
+            # publishes it; guessing it from a source slug is forbidden.
+            heartbeat_path=None if prepared.artifact_metadata_path else prepared.state_path.with_name("heartbeat.json"),
             log_path=Path(run.log_path),
         )
 
@@ -574,15 +591,23 @@ class DesktopServices:
         """Persist the desktop launch contract without leaking environment secrets."""
 
         run.settings_snapshot["execution"] = {
-            "state_path": str(prepared.state_path),
-            "report_path": str(prepared.report_path),
-            "output_directory": str(prepared.output_directory),
             "runtime_config_path": str(prepared.runtime_config_path),
             "run_id": prepared.run_id,
-            "manifest_path": str(prepared.manifest_path) if prepared.manifest_path else None,
+            "project_id": prepared.project_id or run.project_id,
+            "artifact_metadata_path": str(prepared.artifact_metadata_path) if prepared.artifact_metadata_path else None,
             "source_path": str(prepared.source_path) if prepared.source_path else None,
             "runtime_flags": dict(prepared.runtime_flags),
         }
+        # Hand-built PreparedPipelineRun values remain useful in tests and for
+        # older external callers.  Those values already are their engine
+        # contract, so preserve them as a backward-compatible fallback.
+        if prepared.artifact_metadata_path is None:
+            run.settings_snapshot["execution"].update({
+                "state_path": str(prepared.state_path),
+                "report_path": str(prepared.report_path),
+                "output_directory": str(prepared.output_directory),
+                "manifest_path": str(prepared.manifest_path) if prepared.manifest_path else None,
+            })
         self.runs.save(run)
         flags = [argument for argument in prepared.arguments if argument.startswith("--")]
         self.append_log(run, "Desktop pipeline launch prepared.")
@@ -590,7 +615,7 @@ class DesktopServices:
         self.append_log(run, f"cwd: {prepared.working_directory}")
         self.append_log(run, f"source: {prepared.source_path or '<unknown>'}")
         self.append_log(run, f"runtime config: {prepared.runtime_config_path}")
-        self.append_log(run, f"output directory: {prepared.output_directory}")
+        self.append_log(run, "output directory: awaiting engine artifact metadata")
         self.append_log(run, f"flags: {' '.join(flags) if flags else '<none>'}")
         runtime_flags = "; ".join(
             f"{key}={value}" for key, value in prepared.runtime_flags.items()
@@ -649,6 +674,7 @@ class DesktopServices:
         run.warnings = warnings
         run.cost_estimate = completion.cost_estimate
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
+        self._snapshot_engine_paths(run)
         self.runs.snapshot_report_and_outputs(run, completion.report_path, completion.output_files)
         self.runs.save(run)
         run_info = report.get("run", {}) if isinstance(report, dict) else {}
@@ -724,8 +750,32 @@ class DesktopServices:
         else:
             project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
         project.latest_run_id = run.run_id
+        # Run-kind-specific terminal states (analysis_ready/draft_ready) are
+        # assigned after snapshots are copied; persist the final value too.
+        self.runs.save(run)
         self.projects.save(project)
         return run
+
+    def _snapshot_engine_paths(self, run: ProjectRun) -> None:
+        """Persist only paths returned by engine metadata for restart recovery."""
+
+        prepared = self.pipeline.prepared_from_execution(run)
+        resolved = self.pipeline.resolve_engine_paths(prepared)
+        if resolved is None or resolved is prepared and prepared and prepared.artifact_metadata_path:
+            return
+        execution = run.settings_snapshot.setdefault("execution", {})
+        if not isinstance(execution, dict):
+            return
+        execution["engine_paths"] = {
+            "state_path": str(resolved.state_path.resolve()),
+            "report_path": str(resolved.report_path.resolve()),
+            "output_directory": str(resolved.output_directory.resolve()),
+            "manifest_path": str(resolved.manifest_path.resolve()) if resolved.manifest_path else None,
+            "heartbeat_path": str(resolved.heartbeat_path.resolve()) if resolved.heartbeat_path else None,
+        }
+        execution["artifact_metadata_path"] = (
+            str(resolved.artifact_metadata_path.resolve()) if resolved.artifact_metadata_path else execution.get("artifact_metadata_path")
+        )
 
     def finish_failure(
         self, project: DesktopProject, run: ProjectRun, message: str, technical_details: str | None = None,
@@ -805,3 +855,32 @@ class DesktopServices:
                     project.status = ProjectStatus.INTERRUPTED
                 self.projects.save(project)
         return recovered_or_interrupted
+
+    def recover_ready_analysis_runs(self) -> int:
+        """Repair legacy desktop history from a completed engine analysis.
+
+        The recovery only reads finished engine artifacts by run/project ID and
+        never starts another analysis process.
+        """
+
+        restored = 0
+        for project in self.projects.list():
+            if project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
+                continue
+            for run in self.runs.list(project.project_id):
+                if run.run_kind != RunKind.ANALYSIS:
+                    continue
+                prepared = self.pipeline.prepared_from_execution(run)
+                if prepared is None:
+                    continue
+                completion = self.pipeline.completion(prepared)
+                if completion.error_summary:
+                    continue
+                report = read_json(completion.report_path, {})
+                terminal = report.get("terminal", {}) if isinstance(report, dict) else {}
+                if not isinstance(terminal, dict) or terminal.get("status") != "analysis_ready":
+                    continue
+                self._finish_completion(project, run, completion)
+                restored += 1
+                break
+        return restored

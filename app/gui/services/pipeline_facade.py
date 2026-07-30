@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ import yaml
 
 from app.clip_results import ClipResult, result_paths, unique_primary_results
 from app.run_manifest import is_run_scoped_path
+from app.run_artifacts import find_run_artifact_metadata, run_metadata_path
 from app.config import load_config
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
 from app.gui.models import DesktopProject, DesktopSettings, ProjectRun
@@ -25,7 +26,6 @@ from app.product_flow import (
     estimate_processing,
     resolve_processing_intent,
 )
-from app.sources import local_source
 from app.utils import read_json
 
 
@@ -59,6 +59,11 @@ class PreparedPipelineRun:
     heartbeat_path: Path | None = None
     log_path: Path | None = None
     source_duration_seconds: float | None = None
+    # The only path desktop can know before the engine starts.  It is addressed
+    # by run_id, never by a source filename or its slug.  Once the engine writes
+    # it, state/report/output paths are replaced with the engine's real values.
+    artifact_metadata_path: Path | None = None
+    project_id: str | None = None
 
     def command_line(self) -> str:
         """Return the Windows-safe command line used by the desktop runner."""
@@ -139,10 +144,6 @@ class PipelineFacade:
             yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8"
         )
 
-        source = local_source(str(source_path))
-        run_key = f"{source.display_name}-{source.id[:12]}"
-        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
-        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         # The engine is executed as a child of QProcess, where Python's normal
         # stdout buffering hides useful diagnostics until the process exits.
         arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id, "--transform-script"]
@@ -153,19 +154,9 @@ class PipelineFacade:
                 "--recompute-intelligence", "--recompute-transformation", "--recompute-production-plan",
                 "--recompute-tts", "--recompute-audio", "--recompute-production-render",
             ])
-        return PreparedPipelineRun(
-            program=sys.executable,
-            arguments=arguments,
-            working_directory=self.engine_root,
-            state_path=work_directory / "state.json",
-            report_path=output_directory / "report.json",
-            output_directory=output_directory,
-            runtime_config_path=config_path,
-            source_path=source_path,
-            source_duration_seconds=_source_duration_seconds(project),
-            run_id=run.run_id,
-            manifest_path=output_directory / "manifest.json",
-            runtime_flags={
+        return self._pending_prepared(
+            arguments, source_path, config_path, run.run_id, project.project_id,
+            {
                 "device": str(config.device),
                 "encoder": str(config.production_render.encoder),
                 "cache": str(config.production_render.cache_enabled).lower(),
@@ -174,12 +165,13 @@ class PipelineFacade:
                 "processing_mode": resolved.processing_mode,
                 "platform": resolved.platform.platform,
             },
+            source_duration_seconds=_source_duration_seconds(project),
         )
 
     def prepare_analysis(self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings) -> PreparedPipelineRun:
         """Prepare the isolated analysis contract; it cannot start delivery."""
 
-        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         arguments = [
             "-u", "-m", "app", "analyze", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id,
@@ -189,7 +181,7 @@ class PipelineFacade:
         if project.settings.recompute_all or not project.settings.use_cache:
             arguments.append("--recompute-intelligence")
         return self._prepared_mode(
-            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            arguments, source_path, config_path, run.run_id, project.project_id,
             {"mode": "analysis", "device": str(config.device), "cache": str(project.settings.use_cache).lower(),
              "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
             source_duration_seconds=_source_duration_seconds(project),
@@ -205,7 +197,7 @@ class PipelineFacade:
             raise InputValidationError("Сначала завершите анализ и сохраните analysis.json.")
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один кандидат для чернового просмотра.")
-        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         arguments = [
             "-u", "-m", "app", "draft", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),
@@ -221,7 +213,7 @@ class PipelineFacade:
         if settings.local_test_mode:
             arguments.extend(["--mock-ai", "--no-ai-transformation"])
         return self._prepared_mode(
-            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            arguments, source_path, config_path, run.run_id, project.project_id,
             {"mode": "draft", "analysis_id": project.analysis_id, "candidate_count": str(len(candidate_ids)),
              "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
             source_duration_seconds=_source_duration_seconds(project),
@@ -236,7 +228,7 @@ class PipelineFacade:
             raise InputValidationError("Сначала соберите и проверьте Draft Preview.")
         if not candidate_ids:
             raise InputValidationError("Выберите черновики для production render.")
-        source_path, config, resolved, config_path, work_directory, output_directory = self._prepare_mode_paths(project, run, settings)
+        source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
             "-u", "-m", "app", "render", "--input", str(source_path), "--config", str(config_path),
@@ -248,11 +240,10 @@ class PipelineFacade:
         if project.settings.subtitles_enabled is False:
             arguments.append("--disable-subtitles")
         return self._prepared_mode(
-            arguments, source_path, config_path, work_directory, output_directory, run.run_id,
+            arguments, source_path, config_path, run.run_id, project.project_id,
             {"mode": "selected_render", "draft_id": project.draft_id, "candidate_count": str(len(candidate_ids)),
              "encoder": str(config.production_render.encoder), "processing_mode": resolved.processing_mode,
              "platform": resolved.platform.platform},
-            manifest_path=output_directory / "manifest.json",
             source_duration_seconds=_source_duration_seconds(project),
         )
 
@@ -312,7 +303,7 @@ class PipelineFacade:
 
     def _prepare_mode_paths(
         self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings,
-    ) -> tuple[Path, Any, ResolvedProcessingConfig, Path, Path, Path]:
+    ) -> tuple[Path, Any, ResolvedProcessingConfig, Path]:
         source_path = validate_video_path(project.source)
         config = load_config(self._base_config(settings))
         _intent, resolved, _estimate = self.plan_processing(project, settings)
@@ -320,23 +311,34 @@ class PipelineFacade:
         run_directory = Path(project.project_directory) / "runs" / run.run_id
         config_path = run_directory / "runtime-config.yaml"
         config_path.write_text(yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
-        source = local_source(str(source_path))
-        run_key = f"{source.display_name}-{source.id[:12]}"
-        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
-        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
-        return source_path, config, resolved, config_path, work_directory, output_directory
+        return source_path, config, resolved, config_path
 
     def _prepared_mode(
-        self, arguments: list[str], source_path: Path, config_path: Path, work_directory: Path,
-        output_directory: Path, run_id: str, runtime_flags: dict[str, str], *, manifest_path: Path | None = None,
+        self, arguments: list[str], source_path: Path, config_path: Path, run_id: str, project_id: str,
+        runtime_flags: dict[str, str], *,
         source_duration_seconds: float | None = None,
     ) -> PreparedPipelineRun:
+        return self._pending_prepared(
+            arguments, source_path, config_path, run_id, project_id, runtime_flags,
+            source_duration_seconds=source_duration_seconds,
+        )
+
+    def _pending_prepared(
+        self, arguments: list[str], source_path: Path, config_path: Path, run_id: str, project_id: str,
+        runtime_flags: dict[str, str], *, source_duration_seconds: float | None = None,
+    ) -> PreparedPipelineRun:
+        """Prepare a launch without deriving engine output locations in GUI code."""
+
+        metadata_path = run_metadata_path(self.engine_root, run_id)
         return PreparedPipelineRun(
             program=sys.executable, arguments=arguments, working_directory=self.engine_root,
-            state_path=work_directory / "state.json", report_path=output_directory / "report.json",
-            output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
-            run_id=run_id, manifest_path=manifest_path, runtime_flags=runtime_flags,
+            # These are a harmless pre-engine sentinel.  No completion logic
+            # reads them: it resolves the engine metadata first.
+            state_path=metadata_path, report_path=metadata_path,
+            output_directory=metadata_path.parent, runtime_config_path=config_path, source_path=source_path,
+            run_id=run_id, runtime_flags=runtime_flags,
             source_duration_seconds=source_duration_seconds,
+            artifact_metadata_path=metadata_path, project_id=project_id,
         )
 
     def prepare_render_revision(
@@ -351,34 +353,35 @@ class PipelineFacade:
         run_directory = Path(project.project_directory) / "runs" / run.run_id
         config_path = run_directory / "runtime-config.yaml"
         config_path.write_text(yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
-        source = local_source(str(source_path))
-        parent_execution = parent_run.settings_snapshot.get("execution", {})
-        parent_value = parent_execution.get("output_directory") if isinstance(parent_execution, dict) else None
-        parent_output = Path(str(parent_value)) if isinstance(parent_value, str) and parent_value.strip() else None
+        parent_prepared = self.prepared_from_execution(parent_run)
+        parent_resolved = self.resolve_engine_paths(parent_prepared) if parent_prepared else None
+        parent_output = parent_resolved.output_directory if parent_resolved else None
+        # Very old desktop records retained only this engine-returned output
+        # directory.  It is still an explicit artifact path, not a slug we
+        # reconstruct from the source title.
+        if parent_output is None:
+            parent_execution = parent_run.settings_snapshot.get("execution", {})
+            parent_value = parent_execution.get("output_directory") if isinstance(parent_execution, dict) else None
+            parent_output = Path(str(parent_value)) if isinstance(parent_value, str) and parent_value.strip() else None
         if parent_output is None or not parent_output.is_dir():
             raise InputValidationError("Не найдена run directory исходного успешного запуска для повторного экспорта.")
-        run_key = f"{source.display_name}-{source.id[:12]}"
-        work_directory = self.engine_root / "work" / run_key / "runs" / run.run_id
-        output_directory = self.engine_root / "output" / run_key / "runs" / run.run_id
         arguments = [
             "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id,
             "--upstream-run-directory", str(parent_output),
             "--production-render-only", "--recompute-production-render",
         ]
-        return PreparedPipelineRun(
-            program=sys.executable, arguments=arguments, working_directory=self.engine_root,
-            state_path=work_directory / "state.json", report_path=output_directory / "report.json",
-            output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
-            run_id=run.run_id, manifest_path=output_directory / "manifest.json",
-            source_duration_seconds=_source_duration_seconds(project),
-            runtime_flags={
+        return self._pending_prepared(
+            arguments, source_path, config_path, run.run_id, project.project_id,
+            {
                 "render_only": "true", "device": str(config.device), "encoder": str(config.production_render.encoder),
                 "cache": str(config.production_render.cache_enabled).lower(), "processing_mode": resolved.processing_mode,
                 "platform": resolved.platform.platform,
             },
+            source_duration_seconds=_source_duration_seconds(project),
         )
 
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
+        prepared = self.resolve_engine_paths(prepared)
         if not prepared.report_path.is_file():
             return self._failed_completion(
                 prepared, "Итоговый отчёт обработки не найден.",
@@ -520,6 +523,7 @@ class PipelineFacade:
         still validate every primary MP4.
         """
 
+        prepared = self.resolve_engine_paths(prepared)
         if not prepared.run_id and not self._report_is_current(prepared.report_path, started_at):
             return None
         completion = self.completion(prepared)
@@ -534,6 +538,44 @@ class PipelineFacade:
         execution = run.settings_snapshot.get("execution", {})
         if not isinstance(execution, dict):
             return None
+        runtime_config = execution.get("runtime_config_path", "")
+        # A deliberately absent run_id is a legacy non-canonical completion
+        # contract.  Do not promote it to the desktop history UUID: that would
+        # incorrectly require a manifest that the legacy engine never wrote.
+        stored_run_id = execution.get("run_id") if "run_id" in execution else run.run_id
+        run_id = str(stored_run_id).strip() if stored_run_id else None
+        project_id = str(execution.get("project_id") or run.project_id).strip() or None
+        runtime_flags = execution.get("runtime_flags", {})
+        source = execution.get("source_path")
+        metadata_value = str(execution.get("artifact_metadata_path") or "").strip()
+        if run_id and metadata_value:
+            metadata_path = Path(metadata_value)
+            return PreparedPipelineRun(
+                program="", arguments=[], working_directory=self.engine_root,
+                state_path=metadata_path, report_path=metadata_path, output_directory=metadata_path.parent,
+                runtime_config_path=Path(str(runtime_config or metadata_path.with_name("runtime-config.yaml"))),
+                source_path=Path(str(source)) if source else None,
+                runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
+                run_id=run_id, artifact_metadata_path=metadata_path, project_id=project_id,
+            )
+        engine_paths = execution.get("engine_paths")
+        if isinstance(engine_paths, dict) and all(
+            isinstance(engine_paths.get(name), str) and engine_paths[name].strip()
+            for name in ("state_path", "report_path", "output_directory")
+        ):
+            return PreparedPipelineRun(
+                program="", arguments=[], working_directory=self.engine_root,
+                state_path=Path(str(engine_paths["state_path"])),
+                report_path=Path(str(engine_paths["report_path"])),
+                output_directory=Path(str(engine_paths["output_directory"])),
+                runtime_config_path=Path(str(runtime_config or engine_paths["report_path"])).with_name("runtime-config.yaml"),
+                source_path=Path(str(source)) if source else None,
+                runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
+                run_id=run_id,
+                manifest_path=Path(str(engine_paths["manifest_path"])) if engine_paths.get("manifest_path") else None,
+                heartbeat_path=Path(str(engine_paths["heartbeat_path"])) if engine_paths.get("heartbeat_path") else None,
+                project_id=project_id,
+            )
         required_paths = ("state_path", "report_path", "output_directory")
         if not all(isinstance(execution.get(name), str) and execution[name].strip() for name in required_paths):
             return None
@@ -545,15 +587,8 @@ class PipelineFacade:
             return None
         if not all(str(path) for path in (report_path, output_directory, state_path)):
             return None
-        runtime_config = execution.get("runtime_config_path", "")
-        run_id = str(execution.get("run_id") or "").strip() or None
         manifest_value = str(execution.get("manifest_path") or "").strip()
-        runtime_flags = execution.get("runtime_flags", {})
-        mode = str(runtime_flags.get("mode") or "") if isinstance(runtime_flags, dict) else ""
-        if run_id and not manifest_value and mode not in {"analysis", "draft"}:
-            return None
         manifest_path = Path(manifest_value) if manifest_value else None
-        source = execution.get("source_path")
         return PreparedPipelineRun(
             program="", arguments=[], working_directory=self.engine_root,
             state_path=state_path, report_path=report_path, output_directory=output_directory,
@@ -562,6 +597,47 @@ class PipelineFacade:
             runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
             run_id=run_id,
             manifest_path=manifest_path,
+            project_id=project_id,
+        )
+
+    def resolve_engine_paths(self, prepared: PreparedPipelineRun | None) -> PreparedPipelineRun | None:
+        """Replace desktop placeholders with paths published by the engine.
+
+        A missing indexed record intentionally triggers an identity scan for
+        legacy reports/analysis artifacts.  It never reconstructs a source
+        slug, so differences in URL titles or Unicode normalization are benign.
+        """
+
+        if prepared is None or not prepared.run_id:
+            return prepared
+        metadata = find_run_artifact_metadata(
+            self.engine_root,
+            run_id=prepared.run_id,
+            project_id=prepared.project_id,
+            preferred_path=prepared.artifact_metadata_path,
+        )
+        if metadata is None:
+            return prepared
+        paths = metadata["paths"]
+        try:
+            state_path = Path(str(paths["state_path"]))
+            report_path = Path(str(paths["report_path"]))
+            output_directory = Path(str(paths["output_directory"]))
+        except (KeyError, TypeError, ValueError):
+            return prepared
+        heartbeat_value = paths.get("heartbeat_path")
+        manifest_value = paths.get("manifest_path")
+        return replace(
+            prepared,
+            state_path=state_path,
+            report_path=report_path,
+            output_directory=output_directory,
+            heartbeat_path=Path(str(heartbeat_value)) if heartbeat_value else None,
+            manifest_path=Path(str(manifest_value)) if manifest_value else None,
+            artifact_metadata_path=Path(str(metadata["metadata_path"])) if metadata.get("metadata_path") else prepared.artifact_metadata_path,
+            project_id=str(metadata.get("project_id") or prepared.project_id or "") or None,
+            # runtime config remains a desktop launch setting; work_directory is
+            # only used for observability, so keep the engine root as QProcess cwd.
         )
 
     @staticmethod

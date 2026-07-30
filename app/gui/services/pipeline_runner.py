@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
@@ -12,6 +13,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 from app.gui.models.processing_state import STAGE_LABELS
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import PreparedPipelineRun
+from app.run_artifacts import find_run_artifact_metadata
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import utc_now
 
@@ -210,6 +212,7 @@ class QtPipelineRunner(QObject):
                 self.warning_received.emit(safe)
 
     def _poll_stage(self) -> None:
+        self._resolve_engine_paths()
         self._poll_activity_sources()
         prepared = self._prepared
         if prepared is None or not prepared.state_path.is_file():
@@ -299,6 +302,7 @@ class QtPipelineRunner(QObject):
     def _poll_activity_sources(self) -> None:
         """Treat durable engine evidence as liveness, even without progress text."""
 
+        self._resolve_engine_paths()
         prepared = self._prepared
         if prepared is None:
             return
@@ -309,6 +313,42 @@ class QtPipelineRunner(QObject):
         self._observe_artifact_directory("work artifact", prepared.state_path.parent)
         self._observe_artifact_directory("output artifact", prepared.output_directory)
         self._observe_child_process_activity()
+
+    def _resolve_engine_paths(self) -> None:
+        """Adopt paths emitted by the child engine as soon as they are available."""
+
+        prepared = self._prepared
+        if prepared is None or not prepared.run_id:
+            return
+        metadata = find_run_artifact_metadata(
+            prepared.working_directory,
+            run_id=prepared.run_id,
+            project_id=prepared.project_id,
+            preferred_path=prepared.artifact_metadata_path,
+        )
+        if metadata is None:
+            return
+        paths = metadata.get("paths", {})
+        if not isinstance(paths, dict):
+            return
+        try:
+            state_path = Path(str(paths["state_path"]))
+            report_path = Path(str(paths["report_path"]))
+            output_directory = Path(str(paths["output_directory"]))
+        except (KeyError, TypeError, ValueError):
+            return
+        heartbeat = paths.get("heartbeat_path")
+        manifest = paths.get("manifest_path")
+        self._prepared = replace(
+            prepared,
+            state_path=state_path,
+            report_path=report_path,
+            output_directory=output_directory,
+            heartbeat_path=Path(str(heartbeat)) if heartbeat else None,
+            manifest_path=Path(str(manifest)) if manifest else None,
+            artifact_metadata_path=Path(str(metadata["metadata_path"])) if metadata.get("metadata_path") else prepared.artifact_metadata_path,
+            project_id=str(metadata.get("project_id") or prepared.project_id or "") or None,
+        )
 
     def _observe_file(self, name: str, path: Path) -> None:
         try:

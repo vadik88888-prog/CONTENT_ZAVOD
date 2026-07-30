@@ -53,6 +53,7 @@ from app.media import prepare_media
 from app.models import Candidate, candidate_from_dict, scored_from_dict
 from app.rendering import render_clip
 from app.reporting import make_report
+from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
 from app.production_plan import PRODUCTION_PLAN_VERSION, build_production_plan, production_summary
@@ -220,6 +221,12 @@ class StageTracker:
         self.data["config_signature"] = value
         self._save()
 
+    def set_run_metadata(self, value: dict[str, Any]) -> None:
+        """Persist engine-owned artifact locations alongside stage progress."""
+
+        self.data["run"] = value
+        self._save()
+
     def _save(self) -> None:
         # A later successful save supersedes an earlier transient failure.  Do
         # not persist a stale degraded marker into the canonical state file.
@@ -313,6 +320,7 @@ class Pipeline:
         self._heartbeat = RunHeartbeat(self.run_work_directory / "heartbeat.json")
         self._heartbeat.start()
         tracker = StageTracker(self.run_work_directory / "state.json", heartbeat=self._heartbeat)
+        self._publish_run_paths(tracker, work_directory, output_directory)
         # Result lifecycle state belongs to exactly one run.  Source analysis
         # artifacts remain reusable across runs, with a separately locked cache
         # index.  This keeps a new render from inheriting an old final-output
@@ -840,10 +848,59 @@ class Pipeline:
         ))
 
     def _complete_run(self, result: PipelineResult) -> PipelineResult:
+        self._publish_completed_run_paths(result)
         if self._heartbeat is not None:
             self._heartbeat.stop()
             self._heartbeat = None
         return result
+
+    def _publish_run_paths(self, tracker: StageTracker, work_directory: Path, output_directory: Path) -> None:
+        """Publish the real paths selected by the engine before any work starts.
+
+        GUI callers use this identity-keyed record instead of mirroring the
+        source-name slug algorithm.  Keeping it in ``state.json`` as well makes
+        a run recoverable when the separate lookup record was not retained.
+        """
+
+        metadata = make_run_artifact_metadata(
+            engine_root=self.root,
+            run_id=self.run_id,
+            project_id=self.project_id,
+            work_directory=work_directory,
+            output_directory=output_directory,
+        )
+        tracker.set_run_metadata(metadata)
+        write_run_artifact_metadata(self.root, metadata)
+
+    def _publish_completed_run_paths(self, result: PipelineResult) -> None:
+        """Update the engine metadata with terminal artifacts and report paths."""
+
+        metadata = make_run_artifact_metadata(
+            engine_root=self.root,
+            run_id=self.run_id,
+            project_id=self.project_id,
+            work_directory=result.work_directory,
+            output_directory=result.output_directory,
+            report_path=result.report_path,
+            analysis_artifact_path=result.analysis_path,
+            draft_artifact_path=result.draft_path,
+            manifest_path=(result.output_directory / "manifest.json") if (result.output_directory / "manifest.json").is_file() else None,
+            output_files=result.output_files,
+            terminal_status=result.terminal_status,
+        )
+        write_run_artifact_metadata(self.root, metadata)
+        state_path = result.work_directory / "state.json"
+        state = read_json(state_path, {})
+        if isinstance(state, dict):
+            state["run"] = metadata
+            write_json(state_path, state)
+        report = read_json(result.report_path, {})
+        if isinstance(report, dict):
+            run = report.setdefault("run", {})
+            if isinstance(run, dict):
+                run["artifact_metadata_path"] = metadata["metadata_path"]
+                run["artifact_paths"] = dict(metadata["paths"])
+                write_json(result.report_path, report)
 
     def _finish_analysis_only(
         self,
