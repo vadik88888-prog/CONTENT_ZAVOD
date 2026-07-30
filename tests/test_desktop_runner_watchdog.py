@@ -251,6 +251,33 @@ def test_stdout_and_stderr_update_activity_and_log_without_secrets(tmp_path: Pat
     assert fake_key not in pipeline_log
 
 
+def test_gui_runner_replaces_invalid_process_bytes_in_stdout_and_stderr(tmp_path: Path) -> None:
+    """Qt pipe output must still reach the UI when a tool emits arbitrary bytes."""
+
+    _application()
+    logs: list[str] = []
+    completed: list[int] = []
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=5_000)
+    runner.log_received.connect(logs.append)
+    runner.run_completed.connect(completed.append)
+    runner.start(_prepared(
+        tmp_path,
+        [
+            "-u", "-c",
+            "import sys; "
+            "sys.stdout.buffer.write(b'stdout: \\x98\\n'); sys.stdout.flush(); "
+            "sys.stderr.buffer.write(b'stderr: \\x98\\n'); sys.stderr.flush()",
+        ],
+    ))
+
+    _run_loop(500)
+
+    assert completed == [0]
+    combined = "\n".join(logs)
+    assert "stdout: �" in combined
+    assert "stderr: �" in combined
+
+
 def test_paths_with_cyrillic_apostrophe_and_double_spaces_are_passed_verbatim(tmp_path: Path) -> None:
     _application()
     source = tmp_path / "Клип  Тони Д'Амато.mp4"

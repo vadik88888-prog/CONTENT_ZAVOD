@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from app.gui.components import CandidateThumbnailLoader, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
+from app.gui.services.error_mapping import dialog_message
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
 
@@ -1364,4 +1365,4 @@ class ProjectScreen(QWidget):
         return "н/д"
 
     def _error(self, error) -> None:
-        QMessageBox.warning(self, error.title, error.user_message)
+        QMessageBox.warning(self, error.title, dialog_message(error))

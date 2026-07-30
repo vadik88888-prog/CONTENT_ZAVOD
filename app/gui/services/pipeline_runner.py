@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 from app.gui.models.processing_state import STAGE_LABELS
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import PreparedPipelineRun
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import utc_now
 
 
@@ -252,9 +253,9 @@ class QtPipelineRunner(QObject):
                 result = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
-                    text=True,
                     timeout=10,
                     check=False,
+                    **UTF8_REPLACE_TEXT,
                 )
                 self._record(f"taskkill /T completed with exit code {result.returncode} for PID {pid}.")
             except (OSError, subprocess.SubprocessError) as error:

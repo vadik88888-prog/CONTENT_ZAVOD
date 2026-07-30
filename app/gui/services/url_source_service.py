@@ -17,6 +17,7 @@ from app.source_download import (
     validate_public_video_url,
     YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
 )
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 
 
 class URLSourceService(QObject):
@@ -192,7 +193,7 @@ class URLSourceService(QObject):
             try:
                 subprocess.run(
                     ["taskkill", "/PID", str(self._process_id), "/T", "/F"],
-                    capture_output=True, text=True, timeout=10, check=False,
+                    capture_output=True, timeout=10, check=False, **UTF8_REPLACE_TEXT,
                 )
             except (OSError, subprocess.SubprocessError):
                 pass

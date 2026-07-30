@@ -7,6 +7,7 @@ from pathlib import Path
 from app.config import AppConfig
 from app.errors import DependencyError, StageError
 from app.models import ScoredCandidate
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 
 
 def _ffmpeg() -> str:
@@ -20,7 +21,7 @@ def nvenc_available() -> bool:
     try:
         result = subprocess.run(
             [_ffmpeg(), "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=30, check=True,
+            capture_output=True, timeout=30, check=True, **UTF8_REPLACE_TEXT,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -59,7 +60,7 @@ def _render_with_encoder(
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(destination),
     ]
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=7200)
+        subprocess.run(command, check=True, capture_output=True, timeout=7200, **UTF8_REPLACE_TEXT)
     except subprocess.CalledProcessError as error:
         details = (error.stderr or error.stdout or "").strip()
         raise StageError(f"Рендер {item.candidate.id} не выполнен: {details[-1200:]}") from error

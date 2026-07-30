@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.errors import DependencyError, SourceError
 from app.source_download import validate_public_video_url
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import safe_name, stable_file_hash, stable_text_hash
 
 
@@ -57,7 +58,7 @@ def url_source(url: str, target_directory: Path) -> Source:
         "--print", "after_move:filepath", "-o", template, safe_url,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=3600)
+        result = subprocess.run(command, capture_output=True, check=True, timeout=3600, **UTF8_REPLACE_TEXT)
     except subprocess.CalledProcessError as error:
         raise SourceError("Не удалось получить видео по этой ссылке.") from error
     except subprocess.TimeoutExpired as error:

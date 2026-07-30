@@ -10,6 +10,7 @@ from typing import Any
 
 from app.config import ProductionRenderConfig
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import stable_text_hash, write_bytes_atomic
 from app.video_models import SubtitleCue, SubtitleProject, SubtitleStyle, SubtitleWordTiming
 
@@ -105,7 +106,10 @@ def _resolve_font(requested: str) -> tuple[str, bool, str | None]:
     matcher = shutil.which("fc-match")
     if matcher:
         try:
-            match = subprocess.run([matcher, "-f", "%{family}", requested], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+            match = subprocess.run(
+                [matcher, "-f", "%{family}", requested], capture_output=True, timeout=10, check=True,
+                **UTF8_REPLACE_TEXT,
+            ).stdout.strip()
             if match and requested.casefold() in match.casefold():
                 return requested, False, None
             return "Arial", True, f"Subtitle font '{requested}' is unavailable; using Arial."

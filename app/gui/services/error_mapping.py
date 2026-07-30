@@ -16,6 +16,16 @@ class UserFacingError:
     error_code: str
 
 
+def dialog_message(error: UserFacingError) -> str:
+    """Keep the friendly explanation while exposing the redacted root cause."""
+
+    message = error.user_message.strip()
+    detail = redact_secrets(error.technical_details).strip()
+    if not detail or detail == message:
+        return message
+    return f"{message}\n\nПодробности: {detail[-1200:]}"
+
+
 def redact_secrets(value: object) -> str:
     return _SECRET.sub("[скрыто]", str(value))
 

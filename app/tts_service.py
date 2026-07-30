@@ -11,6 +11,7 @@ from app.ai import sanitize_api_error
 from app.audio_modes import tts_eligibility
 from app.config import AppConfig
 from app.production_models import NarrationSegment, ProductionPlan
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.tts_models import (
     TTS_SCHEMA_VERSION,
     TTSAudioArtifact,
@@ -407,7 +408,7 @@ def validate_audio(path: Path, estimated_duration: float, config: AppConfig) -> 
     try:
         probe = subprocess.run(
             [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
-            check=True, capture_output=True, text=True, timeout=30,
+            check=True, capture_output=True, timeout=30, **UTF8_REPLACE_TEXT,
         )
         raw = json.loads(probe.stdout)
         stream = next(item for item in raw.get("streams", []) if item.get("codec_type") == "audio")
@@ -446,7 +447,7 @@ def normalize_audio(source: Path, destination: Path, sample_rate: int) -> None:
     try:
         subprocess.run(
             [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(temporary_path)],
-            check=True, capture_output=True, text=True, timeout=120,
+            check=True, capture_output=True, timeout=120, **UTF8_REPLACE_TEXT,
         )
         if temporary_path.stat().st_size <= 44:
             raise RuntimeError("ffmpeg produced empty audio")

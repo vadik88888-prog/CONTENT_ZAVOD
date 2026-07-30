@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from app.gui.components import VideoDropZone
 from app.gui.models import DesktopProject
-from app.gui.services.error_mapping import map_error
+from app.gui.services.error_mapping import dialog_message, map_error
 from app.gui.viewmodels import ProjectsViewModel
 
 
@@ -164,4 +164,4 @@ class ProjectsScreen(QWidget):
             self.refresh()
 
     def _show_error(self, error) -> None:
-        QMessageBox.warning(self, error.title, error.user_message)
+        QMessageBox.warning(self, error.title, dialog_message(error))

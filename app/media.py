@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.errors import DependencyError, StageError
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import write_json
 
 
@@ -20,7 +21,7 @@ def _tool(name: str) -> str:
 def run_checked(arguments: list[str], timeout: int = 3600) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            arguments, check=True, capture_output=True, text=True, timeout=timeout
+            arguments, check=True, capture_output=True, timeout=timeout, **UTF8_REPLACE_TEXT
         )
     except subprocess.CalledProcessError as error:
         details = (error.stderr or error.stdout or "").strip()

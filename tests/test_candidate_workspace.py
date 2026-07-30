@@ -260,6 +260,7 @@ def test_draft_button_mouse_click_surfaces_prepare_failure(tmp_path: Path, monke
 
         assert errors
         assert errors[0][0] == "Не удалось создать ролик"
+        assert "draft preparation failed" in errors[0][1]
         assert not viewmodel.active
         assert screen._flow_step == "candidates"
         assert screen.progress.isHidden()

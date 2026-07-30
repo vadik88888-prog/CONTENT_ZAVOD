@@ -29,6 +29,7 @@ from app.config import AppConfig
 from app.errors import AudioCompositionError
 from app.production_models import DialogueSegment, NarrationSegment, PauseSegment, ProductionPlan
 from app.sources import Source
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.tts_models import TTSSegmentResult
 from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, write_bytes_atomic, write_json
 
@@ -490,7 +491,7 @@ def _ffmpeg_to_wav(arguments: list[str], destination: Path) -> None:
         temporary_path = Path(temporary.name)
     try:
         command = [executable, "-y", "-hide_banner", "-loglevel", "error", *arguments, "-c:a", "pcm_s16le", str(temporary_path)]
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(command, check=True, capture_output=True, timeout=600, **UTF8_REPLACE_TEXT)
         if result.returncode != 0 or temporary_path.stat().st_size <= 44:
             raise AudioCompositionError("FFmpeg produced an empty audio artifact.")
         temporary_path.replace(destination)
@@ -513,7 +514,7 @@ def _probe_wav(path: Path, sample_rate: int) -> dict[str, float]:
     try:
         result = subprocess.run(
             [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
-            check=True, capture_output=True, text=True, timeout=60,
+            check=True, capture_output=True, timeout=60, **UTF8_REPLACE_TEXT,
         )
         raw = json.loads(result.stdout)
         stream = next(item for item in raw.get("streams", []) if item.get("codec_type") == "audio")

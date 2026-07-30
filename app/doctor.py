@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.config import AppConfig
 from app.source_download import find_ytdlp_executable
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 
 
 @dataclass(slots=True)
@@ -22,7 +23,7 @@ class Check:
 def _run(arguments: list[str]) -> str | None:
     try:
         result = subprocess.run(
-            arguments, check=True, capture_output=True, text=True, timeout=10
+            arguments, check=True, capture_output=True, timeout=10, **UTF8_REPLACE_TEXT
         )
     except (OSError, subprocess.SubprocessError):
         return None

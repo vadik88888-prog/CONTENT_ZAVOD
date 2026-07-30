@@ -17,6 +17,7 @@ from app.production_models import DialogueSegment, NarrationSegment, ProductionP
 from app.production_subtitles import build_subtitle_project, write_production_ass
 from app.rendering import nvenc_available
 from app.sources import Source
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, write_bytes_atomic, write_json
 from app.video_models import (
     CanvasConfig,
@@ -1473,7 +1474,7 @@ def probe_media(path: Path, require_video: bool = False, require_audio: bool = F
     try:
         result = subprocess.run(
             [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=90, check=True,
+            capture_output=True, timeout=90, check=True, **UTF8_REPLACE_TEXT,
         )
         raw = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
@@ -1710,7 +1711,7 @@ def _mixed_timeline_filter(durations: list[float], transitions: list[VideoTransi
 
 def _run_ffmpeg(command: list[str], context: str) -> None:
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=7200)
+        subprocess.run(command, check=True, capture_output=True, timeout=7200, **UTF8_REPLACE_TEXT)
     except subprocess.TimeoutExpired as error:
         raise ProductionRenderError(f"FFmpeg timed out during {context}.") from error
     except (OSError, subprocess.CalledProcessError) as error:

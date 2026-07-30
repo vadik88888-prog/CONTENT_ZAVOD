@@ -15,6 +15,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from app.errors import DependencyError, SourceError
+from app.subprocess_utils import UTF8_REPLACE_TEXT
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +127,7 @@ class YtDlpSource:
             "--dump-single-json", safe_url,
         ]
         try:
-            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90, check=True)
+            result = subprocess.run(command, capture_output=True, timeout=90, check=True, **UTF8_REPLACE_TEXT)
             return parse_url_metadata(safe_url, result.stdout)
         except subprocess.TimeoutExpired as error:
             raise SourceError("Не удалось получить информацию о видео: запрос занял слишком много времени.") from error
@@ -157,8 +158,7 @@ class YtDlpSource:
         ]
         try:
             process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding="utf-8", errors="replace",
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **UTF8_REPLACE_TEXT,
             )
         except OSError as error:
             raise DependencyError("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.") from error
