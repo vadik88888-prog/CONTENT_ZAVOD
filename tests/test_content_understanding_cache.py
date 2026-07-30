@@ -182,6 +182,11 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert result.draft_path and result.draft_path.is_file()
     draft_artifact = read_json(result.draft_path, {})
     first_draft = draft_artifact["candidates"][0]
+    progress = read_json(result.output_directory / "draft-progress.json", {})
+    assert progress["run_id"] == result.output_directory.name
+    assert [item["candidate_id"] for item in progress["candidates"]] == requested_ids
+    assert all(item["source_end_seconds"] > item["source_start_seconds"] for item in progress["candidates"])
+    assert all(item["output_file"] for item in progress["candidates"])
     assert first_draft["candidate_boundary_fingerprint"]
     assert first_draft["transformation_fingerprint"]
     assert first_draft["production_plan_fingerprint"]

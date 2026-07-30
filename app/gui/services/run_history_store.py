@@ -108,10 +108,16 @@ class RunHistoryStore:
             shutil.copy2(report_path, report_copy)
             run.report_path = str(report_copy)
             stored.append(str(report_copy))
-        for source in output_files:
+        for index, source in enumerate(output_files, start=1):
             if not source.is_file():
                 continue
             target = artifacts / source.name
+            # Every fast draft preview is deliberately named
+            # ``draft-preview.mp4`` inside its candidate-owned directory.  A
+            # run-history snapshot must retain all of them rather than letting
+            # the last candidate overwrite the earlier previews.
+            if target.exists() and source != target:
+                target = artifacts / f"{index:02d}-{source.name}"
             if target.exists():
                 target.unlink()
             try:

@@ -33,6 +33,9 @@ class DraftArtifact:
     status: str = "draft_ready"
     schema_version: str = DRAFT_ARTIFACT_SCHEMA_VERSION
     warnings: list[str] = field(default_factory=list)
+    # An in-progress draft artifact is owned by one isolated engine run.  The
+    # field is optional to keep already completed v1.0 artifacts readable.
+    run_id: str = ""
 
     def validate(self) -> None:
         if self.schema_version != DRAFT_ARTIFACT_SCHEMA_VERSION:
@@ -44,6 +47,8 @@ class DraftArtifact:
             self.analysis_artifact_path, self.source_fingerprint,
         )):
             raise DraftArtifactError("Draft artifact is missing required identifiers.")
+        if not isinstance(self.run_id, str):
+            raise DraftArtifactError("Draft artifact run identifier is invalid.")
         for candidate in self.candidates:
             if not isinstance(candidate, dict) or not str(candidate.get("candidate_id") or "").strip():
                 raise DraftArtifactError("Draft candidate is malformed.")
@@ -74,6 +79,7 @@ class DraftArtifact:
             status=str(raw.get("status") or ""),
             schema_version=str(raw.get("schema_version") or ""),
             warnings=[str(item) for item in raw.get("warnings", [])],
+            run_id=str(raw.get("run_id") or ""),
         )
         artifact.validate()
         return artifact

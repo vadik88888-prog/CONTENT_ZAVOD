@@ -832,19 +832,32 @@ class DesktopServices:
         for project in self.projects.list():
             changed = False
             for run in self.runs.list(project.project_id):
-                if run.status not in RunStatus.ACTIVE:
+                is_active = run.status in RunStatus.ACTIVE
+                is_draft_reconciliation = (
+                    run.status == RunStatus.INTERRUPTED
+                    and run.run_kind == RunKind.DRAFT
+                    and project.latest_run_id == run.run_id
+                )
+                if not is_active and not is_draft_reconciliation:
                     continue
                 prepared = self.pipeline.prepared_from_execution(run)
-                if prepared and self.recover_failed_process(project, run, prepared):
+                if is_active and prepared and self.recover_failed_process(project, run, prepared):
                     recovered_or_interrupted += 1
                     changed = True
                     continue
-                run.status = RunStatus.INTERRUPTED
-                run.finished_at = utc_now()
-                run.error_summary = "Предыдущий запуск был прерван при закрытии приложения."
-                self.runs.save(run)
-                recovered_or_interrupted += 1
-                changed = True
+                if run.run_kind == RunKind.DRAFT:
+                    reconciled = self._recover_interrupted_draft(project, run, prepared)
+                    if reconciled or is_active:
+                        recovered_or_interrupted += int(is_active)
+                        changed = True
+                    continue
+                if is_active:
+                    run.status = RunStatus.INTERRUPTED
+                    run.finished_at = utc_now()
+                    run.error_summary = "Предыдущий запуск был прерван при закрытии приложения."
+                    self.runs.save(run)
+                    recovered_or_interrupted += 1
+                    changed = True
             if changed:
                 latest = next(iter(self.runs.list(project.project_id)), None)
                 if latest and latest.status == RunStatus.COMPLETED_WITH_WARNINGS:
@@ -855,6 +868,104 @@ class DesktopServices:
                     project.status = ProjectStatus.INTERRUPTED
                 self.projects.save(project)
         return recovered_or_interrupted
+
+    def _recover_interrupted_draft(
+        self,
+        project: DesktopProject,
+        run: ProjectRun,
+        prepared: PreparedPipelineRun | None,
+    ) -> bool:
+        """Reconcile an abandoned draft run without discovering arbitrary MP4s."""
+
+        expected = [
+            str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
+            if str(candidate_id)
+        ]
+        progress = self.pipeline.recover_draft_progress(prepared, expected) if prepared else None
+        ready_ids = set(progress.ready_candidate_ids) if progress else set()
+        invalid_ids = set(progress.invalid_candidate_ids) if progress else set()
+        changed = False
+
+        if progress:
+            artifact_path = str(progress.artifact_path.resolve())
+            if project.draft_artifact_path != artifact_path:
+                project.draft_artifact_path = artifact_path
+                changed = True
+            if project.draft_id != progress.artifact.draft_id:
+                project.draft_id = progress.artifact.draft_id
+                changed = True
+            records = {
+                str(item.get("candidate_id") or ""): item
+                for item in progress.artifact.candidates if isinstance(item, dict)
+            }
+            for candidate_id in ready_ids:
+                if project.candidate_states.get(candidate_id) != "draft_ready":
+                    project.candidate_states[candidate_id] = "draft_ready"
+                    changed = True
+                if project.candidate_draft_artifacts.get(candidate_id) != artifact_path:
+                    project.candidate_draft_artifacts[candidate_id] = artifact_path
+                    changed = True
+                if candidate_id in project.candidate_errors:
+                    project.candidate_errors.pop(candidate_id, None)
+                    changed = True
+            for candidate_id in invalid_ids:
+                if project.candidate_draft_artifacts.pop(candidate_id, None) is not None:
+                    changed = True
+                if project.candidate_states.get(candidate_id) != "analyzed":
+                    project.candidate_states[candidate_id] = "analyzed"
+                    changed = True
+                message = "Неполный файл черновика не был принят после перезапуска."
+                if project.candidate_errors.get(candidate_id) != message:
+                    project.candidate_errors[candidate_id] = message
+                    changed = True
+            # ``draft_failed`` never counts as ready after an abrupt close: a
+            # later click starts only these missing candidates in a new draft run.
+            for candidate_id in expected:
+                if candidate_id in ready_ids or candidate_id in invalid_ids:
+                    continue
+                record = records.get(candidate_id, {})
+                if record.get("state") == "draft_failed" and record.get("error"):
+                    message = str(record["error"])
+                    if project.candidate_errors.get(candidate_id) != message:
+                        project.candidate_errors[candidate_id] = message
+                        changed = True
+                if project.candidate_states.get(candidate_id) != "analyzed":
+                    project.candidate_states[candidate_id] = "analyzed"
+                    changed = True
+                if project.candidate_draft_artifacts.pop(candidate_id, None) is not None:
+                    changed = True
+        else:
+            # Legacy interrupted draft runs have no candidate-owned progress
+            # contract.  Their files are deliberately ignored rather than being
+            # guessed from a directory listing.
+            for candidate_id in expected:
+                if project.candidate_states.get(candidate_id) == "draft_planning":
+                    project.candidate_states[candidate_id] = "analyzed"
+                    changed = True
+
+        interruption_message = "Предыдущий запуск черновиков был прерван при закрытии приложения."
+        if ready_ids:
+            interruption_message = (
+                f"Предыдущий запуск черновиков был прерван; готово: {len(ready_ids)} из {len(expected)}. "
+                "Можно продолжить только недостающие черновики."
+            )
+        if run.status != RunStatus.INTERRUPTED:
+            run.status = RunStatus.INTERRUPTED
+            changed = True
+        if run.finished_at is None:
+            run.finished_at = utc_now()
+            changed = True
+        if run.error_summary != interruption_message:
+            run.error_summary = interruption_message
+            changed = True
+        if project.status != ProjectStatus.INTERRUPTED:
+            project.status = ProjectStatus.INTERRUPTED
+            changed = True
+        if changed:
+            self._snapshot_engine_paths(run)
+            self.runs.save(run)
+            self.projects.save(project)
+        return changed
 
     def recover_ready_analysis_runs(self) -> int:
         """Repair legacy desktop history from a completed engine analysis.

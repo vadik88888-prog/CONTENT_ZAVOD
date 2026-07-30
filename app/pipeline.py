@@ -1157,6 +1157,12 @@ class Pipeline:
         clip_count_recommendation = load_reference("clip_count_recommendation")
         story_units = load_reference("story_units")
         selected = self._apply_boundary_overrides(selected, metadata, transcript_features, scenes)
+        self._write_draft_progress(
+            output_directory=output_directory,
+            analysis=analysis,
+            source=source,
+            selected=selected,
+        )
 
         tracker.start("analysis_handoff", analysis.analysis_fingerprint, cache_hit=True)
         tracker.finish("analysis_handoff")
@@ -1179,6 +1185,7 @@ class Pipeline:
             coverage_map=coverage_map,
             clip_count_recommendation=clip_count_recommendation,
             final_scored=final_scored,
+            selected=selected,
             transformation=transformation,
             production=production,
             work_directory=work_directory,
@@ -1248,6 +1255,7 @@ class Pipeline:
         coverage_map: dict[str, Any],
         clip_count_recommendation: dict[str, Any],
         final_scored: list[Any],
+        selected: list[Any],
         transformation: dict[str, Any],
         production: dict[str, Any],
         work_directory: Path,
@@ -1263,6 +1271,11 @@ class Pipeline:
             str(item.get("candidate_id") or ""): item
             for item in production.get("items", []) if isinstance(item, dict)
         }
+        selected_ranges = {
+            item.candidate.id: (float(item.candidate.start), float(item.candidate.end))
+            for item in selected
+        }
+        progress_candidates = self._draft_progress_candidates(selected)
         reviewed: list[dict[str, Any]] = []
         preview_outputs: list[Path] = []
         for index, candidate_id in enumerate(self.selected_candidate_ids, start=1):
@@ -1275,6 +1288,9 @@ class Pipeline:
                 "candidate_id": candidate_id,
                 "state": "draft_planning",
                 "requested_index": index,
+                "source_start_seconds": selected_ranges[candidate_id][0],
+                "source_end_seconds": selected_ranges[candidate_id][1],
+                "output_file": None,
                 "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
             }
@@ -1283,12 +1299,20 @@ class Pipeline:
                     **base, "state": "draft_failed",
                     "error": str(transformation_item.get("error") or "Draft FinalScript was not created."),
                 })
+                self._write_draft_progress(
+                    output_directory=output_directory, analysis=analysis, source=source,
+                    selected=selected, completed=reviewed, base_candidates=progress_candidates,
+                )
                 continue
             if plan_item.get("status") != "completed":
                 reviewed.append({
                     **base, "state": "draft_failed",
                     "error": str(plan_item.get("error") or plan_item.get("reason") or "Draft ProductionPlan was not created."),
                 })
+                self._write_draft_progress(
+                    output_directory=output_directory, analysis=analysis, source=source,
+                    selected=selected, completed=reviewed, base_candidates=progress_candidates,
+                )
                 continue
             try:
                 plan = ProductionPlan.model_validate(plan_item.get("plan"))
@@ -1303,6 +1327,10 @@ class Pipeline:
                 tracker.finish(f"draft_preview:{candidate_id}", "failed", safe)
                 reviewed.append({**base, "state": "draft_failed", "error": safe})
                 self.warnings.append(f"Draft preview {candidate_id} failed: {safe}")
+                self._write_draft_progress(
+                    output_directory=output_directory, analysis=analysis, source=source,
+                    selected=selected, completed=reviewed, base_candidates=progress_candidates,
+                )
                 continue
             preview_outputs.append(preview.output_file)
             reviewed.append({
@@ -1318,10 +1346,15 @@ class Pipeline:
                 "draft_final_script": transformation_item.get("final_script", {}),
                 "draft_production_plan": plan.model_dump(mode="json"),
                 "preview": preview.to_dict(),
+                "output_file": str(preview.output_file),
                 "hook": str(transformation_item.get("final_script", {}).get("hook") or ""),
                 "development": str(transformation_item.get("final_script", {}).get("body") or ""),
                 "payoff": str(transformation_item.get("final_script", {}).get("ending") or ""),
             })
+            self._write_draft_progress(
+                output_directory=output_directory, analysis=analysis, source=source,
+                selected=selected, completed=reviewed, base_candidates=progress_candidates,
+            )
         ready_count = sum(item.get("state") == "draft_ready" for item in reviewed)
         artifact_status = "draft_ready" if ready_count == len(reviewed) and ready_count else "draft_partial"
         draft_fingerprint = _hash({
@@ -1342,6 +1375,7 @@ class Pipeline:
             candidates=reviewed,
             status=artifact_status,
             warnings=list(self.warnings),
+            run_id=self.run_id,
         )
         tracker.start("draft_artifact", draft_fingerprint)
         draft.write(draft_path)
@@ -1396,6 +1430,62 @@ class Pipeline:
             analysis_path=self.analysis_artifact_path, analysis_id=analysis.analysis_id,
             draft_path=draft_path, draft_id=draft_id,
         )
+
+    def _draft_progress_candidates(self, selected: list[Any]) -> list[dict[str, Any]]:
+        """Bind every requested draft to its reviewed source range before rendering.
+
+        This is deliberately separate from discovery of media files: recovery may
+        only accept a preview that is named by this binding.
+        """
+
+        return [
+            {
+                "candidate_id": item.candidate.id,
+                "state": "draft_planning",
+                "requested_index": index,
+                "source_start_seconds": float(item.candidate.start),
+                "source_end_seconds": float(item.candidate.end),
+                "output_file": None,
+            }
+            for index, item in enumerate(selected, start=1)
+        ]
+
+    def _write_draft_progress(
+        self,
+        *,
+        output_directory: Path,
+        analysis: AnalysisArtifact,
+        source: Source,
+        selected: list[Any],
+        completed: list[dict[str, Any]] | None = None,
+        base_candidates: list[dict[str, Any]] | None = None,
+    ) -> Path:
+        """Atomically persist candidate-owned draft progress for restart recovery."""
+
+        base = base_candidates or self._draft_progress_candidates(selected)
+        by_id = {
+            str(item.get("candidate_id") or ""): dict(item)
+            for item in completed or [] if isinstance(item, dict)
+        }
+        candidates = [
+            by_id.get(str(item["candidate_id"]), dict(item))
+            for item in base
+        ]
+        progress = new_draft_artifact(
+            draft_id=f"draft-progress-{self.run_id}",
+            analysis_id=analysis.analysis_id,
+            analysis_fingerprint=analysis.analysis_fingerprint,
+            analysis_artifact_path=str(self.analysis_artifact_path),
+            project_id=self.project_id or analysis.project_id,
+            source_fingerprint=source.id,
+            candidates=candidates,
+            status="draft_partial",
+            warnings=list(self.warnings),
+            run_id=self.run_id,
+        )
+        path = output_directory / "draft-progress.json"
+        progress.write(path)
+        return path
 
     def _run_production_from_draft(
         self,

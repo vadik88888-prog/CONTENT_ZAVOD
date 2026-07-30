@@ -151,6 +151,25 @@ def test_individual_draft_approval_is_persistent_and_does_not_change_review_sele
     assert project.candidate_states["candidate-a"] == "draft_ready"
 
 
+def test_run_history_keeps_each_candidate_preview_when_file_names_match(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    run = services.runs.create(project, {}, {}, "test", run_kind=RunKind.DRAFT)
+    previews = []
+    for index, payload in enumerate((b"candidate-a", b"candidate-b", b"candidate-c"), start=1):
+        preview = tmp_path / f"candidate-{index}" / "draft-preview.mp4"
+        preview.parent.mkdir(parents=True)
+        preview.write_bytes(payload)
+        previews.append(preview)
+
+    services.runs.snapshot_report_and_outputs(run, tmp_path / "missing-report.json", previews)
+
+    stored = [Path(path) for path in run.artifact_paths]
+    assert [path.name for path in stored] == [
+        "draft-preview.mp4", "02-draft-preview.mp4", "03-draft-preview.mp4",
+    ]
+    assert [path.read_bytes() for path in stored] == [b"candidate-a", b"candidate-b", b"candidate-c"]
+
+
 def test_completed_selected_render_with_warnings_is_not_marked_partial(tmp_path: Path) -> None:
     services, project, _source = _services(tmp_path)
     project.selected_candidate_ids = ["candidate-a"]

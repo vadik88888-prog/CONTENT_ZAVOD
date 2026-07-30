@@ -26,7 +26,7 @@ from app.product_flow import (
     estimate_processing,
     resolve_processing_intent,
 )
-from app.utils import read_json
+from app.utils import read_json, safe_name
 
 
 STATE_PERSISTENCE_WARNING = "Ролики созданы, но не удалось сохранить служебное состояние"
@@ -80,6 +80,16 @@ class PipelineCompletion:
     technical_details: str | None
     cost_estimate: float | None
     canonical_results: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveredDraftProgress:
+    """Verified candidate-owned previews retained by an interrupted draft run."""
+
+    artifact_path: Path
+    artifact: DraftArtifact
+    ready_candidate_ids: list[str]
+    invalid_candidate_ids: list[str]
 
 
 class PipelineFacade:
@@ -531,6 +541,130 @@ class PipelineFacade:
         if completion.error_summary or (not completion.canonical_results and not recoverable_mode):
             return None
         return completion
+
+    def recover_draft_progress(
+        self,
+        prepared: PreparedPipelineRun,
+        expected_candidate_ids: list[str],
+    ) -> RecoveredDraftProgress | None:
+        """Read only the explicit progress contract of this isolated draft run.
+
+        The method intentionally does not search for MP4 files.  A file is
+        eligible only when the atomic progress artifact binds its candidate ID,
+        reviewed source range, deterministic preview path, and completed state.
+        """
+
+        prepared = self.resolve_engine_paths(prepared)
+        if (
+            prepared is None
+            or not prepared.run_id
+            or prepared.runtime_flags.get("mode") != "draft"
+            or not expected_candidate_ids
+            or len(expected_candidate_ids) != len(set(expected_candidate_ids))
+        ):
+            return None
+        progress_path = prepared.output_directory / "draft-progress.json"
+        try:
+            artifact = DraftArtifact.read(progress_path)
+        except (DraftArtifactError, OSError, ValueError):
+            return None
+        if (
+            artifact.run_id != prepared.run_id
+            or artifact.status != "draft_partial"
+            or (prepared.project_id and artifact.project_id != prepared.project_id)
+            or artifact.analysis_id != prepared.runtime_flags.get("analysis_id")
+        ):
+            return None
+        records = artifact.candidates
+        record_ids = [str(record.get("candidate_id") or "") for record in records]
+        if record_ids != expected_candidate_ids:
+            return None
+
+        ready: list[str] = []
+        invalid: list[str] = []
+        for index, record in enumerate(records, start=1):
+            candidate_id = expected_candidate_ids[index - 1]
+            if not self._valid_draft_binding(record, candidate_id, index, prepared.output_directory):
+                return None
+            if record.get("state") != "draft_ready":
+                continue
+            if self._valid_draft_preview(record, candidate_id, index, prepared.output_directory):
+                ready.append(candidate_id)
+            else:
+                invalid.append(candidate_id)
+        return RecoveredDraftProgress(progress_path, artifact, ready, invalid)
+
+    @staticmethod
+    def _valid_draft_binding(
+        record: dict[str, Any], candidate_id: str, index: int, output_directory: Path,
+    ) -> bool:
+        if not isinstance(record, dict) or str(record.get("candidate_id") or "") != candidate_id:
+            return False
+        try:
+            start = float(record["source_start_seconds"])
+            end = float(record["source_end_seconds"])
+            requested_index = int(record["requested_index"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if end <= start or requested_index != index:
+            return False
+        # A non-ready record must not smuggle an output into recovery.
+        if record.get("state") != "draft_ready":
+            return not str(record.get("output_file") or "").strip()
+        return True
+
+    def _valid_draft_preview(
+        self,
+        record: dict[str, Any],
+        candidate_id: str,
+        index: int,
+        output_directory: Path,
+    ) -> bool:
+        preview = record.get("preview")
+        output_value = str(record.get("output_file") or "").strip()
+        final_script = record.get("draft_final_script")
+        plan = record.get("draft_production_plan")
+        plan_metadata = plan.get("metadata") if isinstance(plan, dict) else None
+        if (
+            not isinstance(preview, dict)
+            or not isinstance(final_script, dict)
+            or not isinstance(plan_metadata, dict)
+            or str(final_script.get("candidate_id") or "") != candidate_id
+            or str(plan_metadata.get("candidate_id") or "") != candidate_id
+            or preview.get("status") != "draft_ready"
+            or not output_value
+        ):
+            return False
+        preview_value = str(preview.get("output_file") or "").strip()
+        if not preview_value or Path(preview_value) != Path(output_value):
+            return False
+        path = Path(output_value)
+        if not path.is_absolute():
+            path = output_directory / path
+        expected = output_directory / "drafts" / f"{index:02d}-{safe_name(candidate_id, f'candidate-{index:02d}')}" / "draft-preview.mp4"
+        try:
+            same_path = path.resolve() == expected.resolve()
+        except OSError:
+            return False
+        if not same_path or not is_run_scoped_path(path, output_directory):
+            return False
+        try:
+            bound_start = float(record["source_start_seconds"])
+            bound_end = float(record["source_end_seconds"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        segments = preview.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return False
+        for segment in segments:
+            try:
+                start = float(segment["source_start_seconds"])
+                end = float(segment["source_end_seconds"])
+            except (KeyError, TypeError, ValueError):
+                return False
+            if end <= start or start < bound_start - 0.25 or end > bound_end + 0.25:
+                return False
+        return self._validate_final_mp4(path) is None
 
     def prepared_from_execution(self, run: ProjectRun) -> PreparedPipelineRun | None:
         """Reconstruct a read-only completion contract stored at launch time."""
