@@ -37,6 +37,7 @@ class ProjectViewModel(QObject):
         self.runner = QtPipelineRunner(self)
         self.runner.run_started.connect(self._run_started)
         self.runner.stage_changed.connect(self._stage_changed)
+        self.runner.stage_running_longer_than_usual.connect(self._stage_running_longer_than_usual)
         self.runner.activity_changed.connect(self._activity_changed)
         self.runner.log_received.connect(self._log_received)
         self.runner.run_completed.connect(self._completed)
@@ -238,6 +239,13 @@ class ProjectViewModel(QObject):
         self.processing_changed.emit(self.snapshot)
         self.runner.cancel()
 
+    def continue_waiting(self) -> None:
+        if not self.runner.active:
+            return
+        self.runner.continue_waiting()
+        self.snapshot.long_stage_warning = None
+        self.processing_changed.emit(self.snapshot)
+
     def _start_source_download(self) -> None:
         if not self.project or self.project.source_spec.kind != "url" or not self.project.source_spec.original_url:
             return
@@ -333,6 +341,15 @@ class ProjectViewModel(QObject):
         self.snapshot.phase = ProcessingPhase.RUNNING
         self.snapshot.stage = stage
         self.snapshot.message = label
+        self.snapshot.long_stage_warning = None
+        self.processing_changed.emit(self.snapshot)
+
+    def _stage_running_longer_than_usual(self, stage: str, _timeout_ms: int) -> None:
+        self.snapshot.phase = ProcessingPhase.RUNNING
+        if stage != "processing":
+            self.snapshot.stage = stage
+            self.snapshot.message = self.snapshot.stage_label
+        self.snapshot.long_stage_warning = "Этап выполняется дольше обычного"
         self.processing_changed.emit(self.snapshot)
 
     def _activity_changed(self, timestamp: str, reason: str) -> None:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
@@ -18,11 +20,16 @@ class QtPipelineRunner(QObject):
     """Run the existing CLI with observable, bounded QProcess lifecycle handling."""
 
     DEFAULT_STARTUP_TIMEOUT_MS = 15_000
-    # Some real stages (Whisper or a network request) legitimately run for minutes
-    # without producing stdout.  This is deliberately much longer than a normal
-    # stage transition, but it still makes an abandoned child process finite.
+    # This is a *warning* threshold, not a process-kill deadline. A real
+    # Whisper/ffmpeg/remote-provider stage can be silent for a long time.
     DEFAULT_STALL_TIMEOUT_MS = 15 * 60 * 1000
+    DEFAULT_LONG_STAGE_TIMEOUT_MS = 90 * 60 * 1000
     DEFAULT_KILL_TIMEOUT_MS = 5_000
+    LONG_SOURCE_DURATION_SECONDS = 90 * 60
+    LONG_RUNNING_STAGES = frozenset({
+        "transcription", "audio_features", "scene_detection", "visual_analysis",
+        "production_render", "render", "tts", "audio",
+    })
 
     run_started = Signal()
     stage_changed = Signal(str, str)
@@ -30,6 +37,7 @@ class QtPipelineRunner(QObject):
     activity_changed = Signal(str, str)
     log_received = Signal(str)
     warning_received = Signal(str)
+    stage_running_longer_than_usual = Signal(str, int)
     run_completed = Signal(int)
     run_failed = Signal(str)
     run_cancelled = Signal()
@@ -40,6 +48,7 @@ class QtPipelineRunner(QObject):
         *,
         startup_timeout_ms: int = DEFAULT_STARTUP_TIMEOUT_MS,
         stall_timeout_ms: int = DEFAULT_STALL_TIMEOUT_MS,
+        long_stage_timeout_ms: int = DEFAULT_LONG_STAGE_TIMEOUT_MS,
         kill_timeout_ms: int = DEFAULT_KILL_TIMEOUT_MS,
     ) -> None:
         super().__init__(parent)
@@ -70,15 +79,20 @@ class QtPipelineRunner(QObject):
 
         self._prepared: PreparedPipelineRun | None = None
         self._stall_timeout_ms = stall_timeout_ms
+        self._long_stage_timeout_ms = max(stall_timeout_ms, long_stage_timeout_ms)
         self._last_stage: str | None = None
         self._state_fingerprint: tuple[int, int] | None = None
+        self._activity_fingerprints: dict[str, object] = {}
         self._launch_wall_time = 0.0
+        self._stage_started_monotonic = 0.0
+        self._next_stage_warning_monotonic = 0.0
+        self._warned_stage: str | None = None
+        self._last_child_activity: tuple[int, int] | None = None
         self._last_activity_monotonic = 0.0
         self._last_activity_at: str | None = None
         self._last_activity_reason = ""
         self._failure_details = ""
         self._cancel_requested = False
-        self._watchdog_failed = False
         self._running_seen = False
         self._terminal_emitted = False
         self._process_id = 0
@@ -102,13 +116,17 @@ class QtPipelineRunner(QObject):
         self._prepared = prepared
         self._last_stage = None
         self._state_fingerprint = None
+        self._activity_fingerprints = {}
         self._launch_wall_time = time.time()
         self._last_activity_monotonic = time.monotonic()
+        self._stage_started_monotonic = self._last_activity_monotonic
+        self._next_stage_warning_monotonic = self._last_activity_monotonic + self._current_timeout_seconds()
+        self._warned_stage = None
+        self._last_child_activity = None
         self._last_activity_at = utc_now()
         self._last_activity_reason = "launch requested"
         self._failure_details = ""
         self._cancel_requested = False
-        self._watchdog_failed = False
         self._running_seen = False
         self._terminal_emitted = False
         self._process_id = 0
@@ -146,6 +164,15 @@ class QtPipelineRunner(QObject):
         self._process.terminate()
         self._kill_timer.start()
 
+    def continue_waiting(self) -> None:
+        """Acknowledge a slow-stage warning without disturbing the child process."""
+
+        if not self.active:
+            return
+        self._warned_stage = None
+        self._next_stage_warning_monotonic = time.monotonic() + self._current_timeout_seconds()
+        self._record("User chose to continue waiting for the current pipeline stage.")
+
     def _state_changed(self, state: QProcess.ProcessState) -> None:
         self._record(f"QProcess state: {state.name}")
         if state == QProcess.ProcessState.Running:
@@ -156,6 +183,10 @@ class QtPipelineRunner(QObject):
             self._record("QProcess stdin closed.")
             self._bind_process_tree()
             self._note_activity("QProcess entered Running")
+            self._stage_started_monotonic = time.monotonic()
+            self._next_stage_warning_monotonic = (
+                self._stage_started_monotonic + self._current_timeout_seconds()
+            )
             self._watchdog_timer.start()
             self.run_started.emit()
 
@@ -179,6 +210,7 @@ class QtPipelineRunner(QObject):
                 self.warning_received.emit(safe)
 
     def _poll_stage(self) -> None:
+        self._poll_activity_sources()
         prepared = self._prepared
         if prepared is None or not prepared.state_path.is_file():
             return
@@ -211,6 +243,11 @@ class QtPipelineRunner(QObject):
             return
         if stage and stage != self._last_stage:
             self._last_stage = stage
+            self._stage_started_monotonic = time.monotonic()
+            self._warned_stage = None
+            self._next_stage_warning_monotonic = (
+                self._stage_started_monotonic + self._current_timeout_seconds()
+            )
             label = STAGE_LABELS.get(stage.split(":", 1)[0], "Обрабатываем видео")
             self._note_activity(f"stage changed to {stage}")
             self._record(f"Pipeline stage: {stage} ({label})")
@@ -228,14 +265,107 @@ class QtPipelineRunner(QObject):
     def _check_stall(self) -> None:
         if self._terminal_emitted or not self._running_seen or not self.active:
             return
-        elapsed_ms = (time.monotonic() - self._last_activity_monotonic) * 1000
-        if elapsed_ms < self._stall_timeout_ms:
+        self._poll_activity_sources()
+        # Running is the authoritative liveness signal. Never turn a silent
+        # but still-live QProcess into a failed run or terminate it here.
+        if self._process.state() != QProcess.ProcessState.Running:
             return
-        details = self._diagnostic_details(f"stall watchdog timeout after {elapsed_ms / 1000:.1f}s")
-        self._watchdog_failed = True
-        self._record(f"Stall watchdog triggered after {elapsed_ms / 1000:.1f}s without activity.")
-        self._request_stop()
-        self._finish_failure("Обработка остановилась и не отвечает.", details)
+        now = time.monotonic()
+        if now < self._next_stage_warning_monotonic or self._warned_stage == self._current_stage():
+            return
+        stage = self._current_stage()
+        timeout_ms = int(self._current_timeout_seconds() * 1000)
+        self._warned_stage = stage
+        self._record(
+            f"Stage {stage} is running longer than usual after "
+            f"{now - self._stage_started_monotonic:.1f}s; QProcess is still Running."
+        )
+        self.stage_running_longer_than_usual.emit(stage, timeout_ms)
+
+    def _current_stage(self) -> str:
+        return self._last_stage or "processing"
+
+    def _current_timeout_seconds(self) -> float:
+        parent_stage = self._current_stage().split(":", 1)[0]
+        source_duration = self._prepared.source_duration_seconds if self._prepared else None
+        timeout_ms = (
+            self._long_stage_timeout_ms
+            if parent_stage in self.LONG_RUNNING_STAGES
+            or (source_duration is not None and source_duration > self.LONG_SOURCE_DURATION_SECONDS)
+            else self._stall_timeout_ms
+        )
+        return timeout_ms / 1000
+
+    def _poll_activity_sources(self) -> None:
+        """Treat durable engine evidence as liveness, even without progress text."""
+
+        prepared = self._prepared
+        if prepared is None:
+            return
+        heartbeat = prepared.heartbeat_path or prepared.state_path.with_name("heartbeat.json")
+        self._observe_file("heartbeat file", heartbeat)
+        if prepared.log_path is not None:
+            self._observe_file("pipeline log", prepared.log_path)
+        self._observe_artifact_directory("work artifact", prepared.state_path.parent)
+        self._observe_artifact_directory("output artifact", prepared.output_directory)
+        self._observe_child_process_activity()
+
+    def _observe_file(self, name: str, path: Path) -> None:
+        try:
+            stat = path.stat()
+            fingerprint: object = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            fingerprint = None
+        self._observe_fingerprint(name, fingerprint)
+
+    def _observe_artifact_directory(self, name: str, directory: Path) -> None:
+        self._observe_fingerprint(name, _artifact_fingerprint(directory))
+
+    def _observe_fingerprint(self, name: str, fingerprint: object) -> None:
+        unseen = object()
+        previous = self._activity_fingerprints.get(name, unseen)
+        self._activity_fingerprints[name] = fingerprint
+        if fingerprint is not None and previous != fingerprint:
+            self._note_activity(f"{name} updated")
+
+    def _observe_child_process_activity(self) -> None:
+        token = self._child_process_activity_token()
+        if token is None:
+            return
+        if self._last_child_activity is not None and token != self._last_child_activity:
+            self._note_activity("child process CPU activity")
+        self._last_child_activity = token
+
+    def _child_process_activity_token(self) -> tuple[int, int] | None:
+        """Return aggregate CPU work for the Windows job (CLI plus children)."""
+
+        if sys.platform != "win32" or self._job_handle is None:
+            return None
+        try:
+            import ctypes
+
+            class _JobAccounting(ctypes.Structure):
+                _fields_ = [
+                    ("TotalUserTime", ctypes.c_longlong),
+                    ("TotalKernelTime", ctypes.c_longlong),
+                    ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                    ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                    ("TotalPageFaultCount", ctypes.c_uint32),
+                    ("TotalProcesses", ctypes.c_uint32),
+                    ("ActiveProcesses", ctypes.c_uint32),
+                    ("TotalTerminatedProcesses", ctypes.c_uint32),
+                ]
+
+            accounting = _JobAccounting()
+            returned = ctypes.c_uint32()
+            queried = ctypes.WinDLL("kernel32", use_last_error=True).QueryInformationJobObject(
+                self._job_handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), ctypes.byref(returned),
+            )
+            if not queried:
+                return None
+            return accounting.TotalUserTime + accounting.TotalKernelTime, accounting.ActiveProcesses
+        except (AttributeError, OSError):
+            return None
 
     def _request_stop(self) -> None:
         if self.active:
@@ -280,10 +410,7 @@ class QtPipelineRunner(QObject):
         self._record(f"QProcess finished: exit_code={exit_code}; exit_status={exit_status.name}")
         self._note_activity("QProcess finished")
         if self._terminal_emitted:
-            if self._watchdog_failed:
-                self._kill_process_tree()
-            else:
-                self._release_process_job()
+            self._release_process_job()
             return
         if self._cancel_requested:
             self._kill_process_tree()
@@ -420,3 +547,29 @@ class QtPipelineRunner(QObject):
         self._stage_timer.stop()
         self._watchdog_timer.stop()
         self._startup_timer.stop()
+
+
+def _artifact_fingerprint(directory: Path) -> tuple[int, int, int] | None:
+    """A cheap, content-free signal that an engine artifact is being written."""
+
+    try:
+        if not directory.is_dir():
+            return None
+        latest_mtime = 0
+        total_size = 0
+        count = 0
+        for root, _directories, filenames in os.walk(directory):
+            for filename in filenames:
+                if filename in {"state.json", "heartbeat.json"} or filename.endswith(".write.lock"):
+                    continue
+                path = Path(root) / filename
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                latest_mtime = max(latest_mtime, stat.st_mtime_ns)
+                total_size += stat.st_size
+                count += 1
+        return latest_mtime, total_size, count
+    except OSError:
+        return None

@@ -1,5 +1,7 @@
+import json
+
 from app.config import AppConfig
-from app.pipeline import Pipeline, StageTracker
+from app.pipeline import Pipeline, RunHeartbeat, StageTracker
 
 
 def test_no_candidates_do_not_require_a_gemini_key(tmp_path) -> None:
@@ -32,3 +34,17 @@ def test_state_can_persist_configuration_signature(tmp_path) -> None:
 
     restored = StageTracker(tmp_path / "state.json")
     assert restored.data["config_signature"] == "abc123"
+
+
+def test_stage_tracker_updates_engine_heartbeat(tmp_path) -> None:
+    heartbeat = RunHeartbeat(tmp_path / "heartbeat.json")
+    heartbeat.start()
+    try:
+        state = StageTracker(tmp_path / "state.json", heartbeat=heartbeat)
+        state.start("transcription")
+
+        payload = json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+        assert payload["stage"] == "transcription"
+        assert payload["pid"] > 0
+    finally:
+        heartbeat.stop()

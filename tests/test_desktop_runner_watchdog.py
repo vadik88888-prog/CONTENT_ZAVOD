@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,7 +71,8 @@ def test_pipeline_log_is_created_before_qprocess_start(monkeypatch, tmp_path: Pa
     run, returned = services.prepare_run(project)
 
     log = Path(run.log_path)
-    assert returned == prepared
+    assert returned.heartbeat_path == prepared.state_path.with_name("heartbeat.json")
+    assert returned.log_path == log
     assert log.is_file()
     text = log.read_text(encoding="utf-8")
     assert "Desktop pipeline launch prepared." in text
@@ -194,19 +196,75 @@ def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None
     assert "process_state=NotRunning" in runner.failure_details
 
 
-def test_stall_watchdog_fails_started_silent_process(tmp_path: Path) -> None:
+def test_live_silent_process_warns_without_failure_or_auto_kill(tmp_path: Path) -> None:
     _application()
     failures: list[str] = []
-    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=80, kill_timeout_ms=50)
+    warnings: list[tuple[str, int]] = []
+    completed: list[int] = []
+    runner = QtPipelineRunner(
+        startup_timeout_ms=1_000, stall_timeout_ms=80, long_stage_timeout_ms=80, kill_timeout_ms=50,
+    )
     runner.run_failed.connect(failures.append)
-    runner.start(_prepared(tmp_path, ["-u", "-c", "import time; time.sleep(10)"]))
+    runner.stage_running_longer_than_usual.connect(lambda stage, timeout: warnings.append((stage, timeout)))
+    runner.run_completed.connect(completed.append)
+    runner.start(_prepared(tmp_path, ["-u", "-c", "import time; time.sleep(0.55)"]))
 
-    _run_loop(800)
+    _run_loop(280)
 
-    assert failures == ["Обработка остановилась и не отвечает."]
-    assert "stall watchdog timeout" in runner.failure_details
-    assert "last_activity_at=" in runner.failure_details
+    assert runner.active
+    assert failures == []
+    assert warnings == [("processing", 80)]
+    _run_loop(700)
+    assert completed == [0]
+    assert failures == []
     assert not runner.active
+
+
+def test_watchdog_observes_heartbeat_log_and_artifact_changes(tmp_path: Path) -> None:
+    _application()
+    activities: list[str] = []
+    completed: list[int] = []
+    heartbeat = tmp_path / "heartbeat.json"
+    log_path = tmp_path / "pipeline.log"
+    output_directory = tmp_path / "output"
+    script = (
+        "from pathlib import Path; import time; "
+        f"heartbeat=Path({str(heartbeat)!r}); log=Path({str(log_path)!r}); output=Path({str(output_directory)!r}); "
+        "output.mkdir(exist_ok=True); heartbeat.write_text('first'); log.write_text('first'); "
+        "(output / 'partial.bin').write_bytes(b'1'); time.sleep(0.08); "
+        "heartbeat.write_text('second'); log.write_text('second'); "
+        "(output / 'partial.bin').write_bytes(b'12'); time.sleep(0.08)"
+    )
+    runner = QtPipelineRunner(startup_timeout_ms=1_000, stall_timeout_ms=500, long_stage_timeout_ms=500)
+    runner.activity_changed.connect(lambda _at, reason: activities.append(reason))
+    runner.run_completed.connect(completed.append)
+    prepared = replace(
+        _prepared(tmp_path, ["-u", "-c", script]),
+        heartbeat_path=heartbeat,
+        log_path=log_path,
+        output_directory=output_directory,
+    )
+    runner.start(prepared)
+
+    _run_loop(600)
+
+    assert completed == [0]
+    assert any(reason == "heartbeat file updated" for reason in activities)
+    assert any(reason == "pipeline log updated" for reason in activities)
+    assert any(reason == "output artifact updated" for reason in activities)
+
+
+def test_long_media_stages_use_extended_warning_timeout(tmp_path: Path) -> None:
+    runner = QtPipelineRunner(stall_timeout_ms=80, long_stage_timeout_ms=500)
+
+    runner._last_stage = "transcription"
+    assert runner._current_timeout_seconds() == 0.5
+    runner._last_stage = "metadata"
+    assert runner._current_timeout_seconds() == 0.08
+    runner._prepared = replace(_prepared(tmp_path, ["-u", "-c", "pass"]), source_duration_seconds=90 * 60 + 1)
+    assert runner._current_timeout_seconds() == 0.5
+    runner._prepared = replace(runner._prepared, source_duration_seconds=30)
+    assert runner._current_timeout_seconds() == 0.08
 
 
 def test_stdout_and_stderr_update_activity_and_log_without_secrets(tmp_path: Path) -> None:

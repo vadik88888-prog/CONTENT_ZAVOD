@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QProgres
 
 class ProcessingProgress(QFrame):
     cancel_requested = Signal()
+    continue_waiting_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -29,6 +30,15 @@ class ProcessingProgress(QFrame):
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         layout.addWidget(self.detail)
+        self.warning = QLabel("")
+        self.warning.setObjectName("warning")
+        self.warning.setWordWrap(True)
+        self.warning.hide()
+        layout.addWidget(self.warning)
+        self.continue_waiting_button = QPushButton("Продолжить ждать")
+        self.continue_waiting_button.clicked.connect(self.continue_waiting_requested)
+        self.continue_waiting_button.hide()
+        layout.addWidget(self.continue_waiting_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.cancel_button = QPushButton("Отменить")
         self.cancel_button.setObjectName("danger")
         self.cancel_button.clicked.connect(self.cancel_requested)
@@ -43,10 +53,14 @@ class ProcessingProgress(QFrame):
         detail: str = "",
         *,
         cancelling: bool = False,
+        long_stage_warning: str | None = None,
     ) -> None:
         self.stage.setText(stage)
         self.elapsed.setText(elapsed)
         self.detail.setText(detail)
+        self.warning.setText(long_stage_warning or "")
+        self.warning.setVisible(bool(long_stage_warning))
+        self.continue_waiting_button.setVisible(bool(long_stage_warning) and not cancelling)
         self.progress.show()
         if progress_fraction is None:
             self.progress.setRange(0, 0)
@@ -61,6 +75,9 @@ class ProcessingProgress(QFrame):
         self.stage.setText(message)
         self.elapsed.clear()
         self.detail.clear()
+        self.warning.clear()
+        self.warning.hide()
+        self.continue_waiting_button.hide()
         self.progress.hide()
         self.cancel_button.hide()
         self.cancel_button.setDisabled(False)

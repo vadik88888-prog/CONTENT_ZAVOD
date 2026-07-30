@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -299,7 +299,7 @@ class DesktopServices:
         run.cost_estimate = estimate.estimated_ai_cost_max
         self.runs.save(run)
         try:
-            prepared = self.pipeline.prepare(project, run, self.settings)
+            prepared = self._with_observability_paths(self.pipeline.prepare(project, run, self.settings), run)
         except Exception:
             run.status = RunStatus.FAILED
             run.finished_at = utc_now()
@@ -334,7 +334,7 @@ class DesktopServices:
         run.cost_estimate = estimate.estimated_ai_cost_max
         self.runs.save(run)
         try:
-            prepared = self.pipeline.prepare_analysis(project, run, self.settings)
+            prepared = self._with_observability_paths(self.pipeline.prepare_analysis(project, run, self.settings), run)
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить анализ."
             self.runs.save(run)
@@ -361,7 +361,9 @@ class DesktopServices:
             "0.1.0", run_kind=RunKind.DRAFT,
         )
         try:
-            prepared = self.pipeline.prepare_draft(project, run, self.settings, candidate_ids)
+            prepared = self._with_observability_paths(
+                self.pipeline.prepare_draft(project, run, self.settings, candidate_ids), run,
+            )
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить черновик."
             self.runs.save(run)
@@ -495,7 +497,9 @@ class DesktopServices:
             "0.1.0", run_kind=RunKind.SELECTED_RENDER,
         )
         try:
-            prepared = self.pipeline.prepare_selected_render(project, run, self.settings, candidate_ids)
+            prepared = self._with_observability_paths(
+                self.pipeline.prepare_selected_render(project, run, self.settings, candidate_ids), run,
+            )
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить production render."
             self.runs.save(run)
@@ -546,7 +550,9 @@ class DesktopServices:
         run.cost_estimate = 0.0
         self.runs.save(run)
         try:
-            prepared = self.pipeline.prepare_render_revision(project, run, self.settings, parent_run)
+            prepared = self._with_observability_paths(
+                self.pipeline.prepare_render_revision(project, run, self.settings, parent_run), run,
+            )
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить повторный экспорт."
             self.runs.save(run)
@@ -555,6 +561,14 @@ class DesktopServices:
         project.status = ProjectStatus.PROCESSING; project.latest_run_id = run.run_id
         self.projects.save(project)
         return run, prepared
+
+    @staticmethod
+    def _with_observability_paths(prepared: PreparedPipelineRun, run: ProjectRun) -> PreparedPipelineRun:
+        return replace(
+            prepared,
+            heartbeat_path=prepared.state_path.with_name("heartbeat.json"),
+            log_path=Path(run.log_path),
+        )
 
     def record_launch_context(self, run: ProjectRun, prepared: PreparedPipelineRun) -> None:
         """Persist the desktop launch contract without leaking environment secrets."""

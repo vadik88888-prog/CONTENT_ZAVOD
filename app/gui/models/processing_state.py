@@ -44,6 +44,7 @@ class ProcessingSnapshot:
     elapsed_seconds: float = 0.0
     last_activity_at: str | None = None
     last_activity_reason: str | None = None
+    long_stage_warning: str | None = None
     progress_fraction: float | None = None
     transfer_speed: str | None = None
     transfer_downloaded: str | None = None

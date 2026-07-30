@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
@@ -105,9 +106,68 @@ class PipelineResult:
     draft_id: str | None = None
 
 
+class RunHeartbeat:
+    """Persist lightweight liveness while an expensive stage has no stdout."""
+
+    INTERVAL_SECONDS = 10.0
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._state = {"stage": "preparing"}
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.beat(str(self._state["stage"]))
+        self._thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(self.path, self._stop_event, self._state_lock, self._state),
+            name="pipeline-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def beat(self, stage: str) -> None:
+        with self._state_lock:
+            self._state["stage"] = stage
+        _write_heartbeat(self.path, self._state_lock, self._state)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def __del__(self) -> None:
+        self.stop()
+
+
+def _heartbeat_loop(
+    path: Path,
+    stop_event: threading.Event,
+    state_lock: threading.Lock,
+    state: dict[str, str],
+) -> None:
+    while not stop_event.wait(RunHeartbeat.INTERVAL_SECONDS):
+        _write_heartbeat(path, state_lock, state)
+
+
+def _write_heartbeat(path: Path, state_lock: threading.Lock, state: dict[str, str]) -> None:
+    try:
+        with state_lock:
+            stage = state["stage"]
+        write_json(path, {"updated_at": utc_now(), "stage": stage, "pid": os.getpid()})
+    except OSError:
+        # A heartbeat must never make a media job fail merely because a scanner
+        # or Explorer has a transient lock on the file.
+        pass
+
+
 class StageTracker:
-    def __init__(self, state_path: Path) -> None:
+    def __init__(self, state_path: Path, *, heartbeat: RunHeartbeat | None = None) -> None:
         self.path = state_path
+        self.heartbeat = heartbeat
         self.data = read_json(state_path, {"created_at": utc_now(), "stages": {}})
         self.data.setdefault("stages", {})
         self.persistence_error: AtomicWriteError | None = None
@@ -121,6 +181,8 @@ class StageTracker:
         )
 
     def start(self, name: str, cache_key: str | None = None, cache_hit: bool | None = None) -> None:
+        if self.heartbeat is not None:
+            self.heartbeat.beat(name)
         self.data["stages"][name] = {
             "status": "running", "started_at": utc_now(), "_started": time.perf_counter(),
             "cache_key": cache_key,
@@ -130,6 +192,8 @@ class StageTracker:
         self._save()
 
     def finish(self, name: str, status: str = "completed", error: str | None = None) -> None:
+        if self.heartbeat is not None:
+            self.heartbeat.beat(name)
         stage = self.data["stages"].setdefault(name, {})
         started = stage.pop("_started", None)
         stage["status"] = status
@@ -234,13 +298,21 @@ class Pipeline:
         self.run_work_directory: Path | None = None
         self.warnings: list[str] = []
         self.errors: list[str] = []
+        self._heartbeat: RunHeartbeat | None = None
+
+    def __del__(self) -> None:
+        heartbeat = getattr(self, "_heartbeat", None)
+        if heartbeat is not None:
+            heartbeat.stop()
 
     def run(self, input_path: str | None = None, url: str | None = None) -> PipelineResult:
         validate_source_arguments(input_path, url)
         self.started_at = utc_now()
         source, work_directory, output_directory = self._prepare_source(input_path, url)
         assert self.run_work_directory is not None
-        tracker = StageTracker(self.run_work_directory / "state.json")
+        self._heartbeat = RunHeartbeat(self.run_work_directory / "heartbeat.json")
+        self._heartbeat.start()
+        tracker = StageTracker(self.run_work_directory / "state.json", heartbeat=self._heartbeat)
         # Result lifecycle state belongs to exactly one run.  Source analysis
         # artifacts remain reusable across runs, with a separately locked cache
         # index.  This keeps a new render from inheriting an old final-output
@@ -251,19 +323,19 @@ class Pipeline:
                 raise ClipEngineError(
                     "Direct production render from analysis is disabled. Build and review a draft preview first."
                 )
-            return self._run_draft_preview(
+            return self._complete_run(self._run_draft_preview(
                 tracker=tracker,
                 source=source,
                 work_directory=work_directory,
                 output_directory=output_directory,
-            )
+            ))
         if self.draft_artifact_path is not None:
-            return self._run_production_from_draft(
+            return self._complete_run(self._run_production_from_draft(
                 tracker=tracker,
                 source=source,
                 work_directory=work_directory,
                 output_directory=output_directory,
-            )
+            ))
         if self.recompute_tts:
             tts_names = tuple(
                 name for name in tracker.data.get("stages", {})
@@ -283,11 +355,11 @@ class Pipeline:
             )
             tracker.invalidate("Запрошен --recompute-production-render.", production_render_names)
         if self.tts_only:
-            return self._run_tts_only(tracker, source, work_directory, output_directory)
+            return self._complete_run(self._run_tts_only(tracker, source, work_directory, output_directory))
         if self.audio_only:
-            return self._run_audio_only(tracker, source, work_directory, output_directory)
+            return self._complete_run(self._run_audio_only(tracker, source, work_directory, output_directory))
         if self.production_render_only:
-            return self._run_production_render_only(tracker, source, work_directory, output_directory)
+            return self._complete_run(self._run_production_render_only(tracker, source, work_directory, output_directory))
         if self.recompute_intelligence:
             tracker.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
             source_cache.invalidate("Запрошен --recompute-intelligence.", INTELLIGENCE_STAGES)
@@ -311,7 +383,7 @@ class Pipeline:
             lambda: prepare_media(source.path, work_directory), cache_tracker=source_cache,
         )
         if not metadata.get("audio_path"):
-            return self._finish_without_audio(tracker, source_data, metadata, work_directory, output_directory)
+            return self._complete_run(self._finish_without_audio(tracker, source_data, metadata, work_directory, output_directory))
         transcript = self._cached(
             tracker, "transcription", work_directory / "transcript.json",
             {"source": source.id, "whisper": self.config.whisper_model, "language": self.config.language, "device": self.config.device},
@@ -568,7 +640,7 @@ class Pipeline:
         )
         selected = [item for item in final_scored if item.candidate.id in selected_ids]
         if self.analysis_only:
-            return self._finish_analysis_only(
+            return self._complete_run(self._finish_analysis_only(
                 tracker=tracker,
                 source=source,
                 source_data=source_data,
@@ -594,7 +666,7 @@ class Pipeline:
                 selected_ids=selected_ids,
                 work_directory=work_directory,
                 output_directory=output_directory,
-            )
+            ))
         transformation = self._transform_selected(
             tracker, source_data, metadata, selected, transcript, transcript_features,
             audio_features, scenes, work_directory, output_directory,
@@ -762,10 +834,16 @@ class Pipeline:
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
         write_json(report_path, report)
-        return PipelineResult(
+        return self._complete_run(PipelineResult(
             work_directory, output_directory, report_path, len(outputs), outputs, self.warnings,
             terminal_status=terminal["status"], error_code=terminal.get("error_code"),
-        )
+        ))
+
+    def _complete_run(self, result: PipelineResult) -> PipelineResult:
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
+            self._heartbeat = None
+        return result
 
     def _finish_analysis_only(
         self,

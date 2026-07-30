@@ -32,6 +32,15 @@ from app.utils import read_json
 STATE_PERSISTENCE_WARNING = "Ролики созданы, но не удалось сохранить служебное состояние"
 
 
+def _source_duration_seconds(project: DesktopProject) -> float | None:
+    value = project.source_metadata.get("duration")
+    try:
+        duration = float(value)
+    except (TypeError, ValueError):
+        return None
+    return duration if duration > 0 else None
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedPipelineRun:
     program: str
@@ -45,6 +54,11 @@ class PreparedPipelineRun:
     runtime_flags: dict[str, str] = field(default_factory=dict)
     run_id: str | None = None
     manifest_path: Path | None = None
+    # Desktop-only observability paths.  The engine owns heartbeat.json next to
+    # state.json; the desktop runner owns the rotating pipeline log.
+    heartbeat_path: Path | None = None
+    log_path: Path | None = None
+    source_duration_seconds: float | None = None
 
     def command_line(self) -> str:
         """Return the Windows-safe command line used by the desktop runner."""
@@ -148,6 +162,7 @@ class PipelineFacade:
             output_directory=output_directory,
             runtime_config_path=config_path,
             source_path=source_path,
+            source_duration_seconds=_source_duration_seconds(project),
             run_id=run.run_id,
             manifest_path=output_directory / "manifest.json",
             runtime_flags={
@@ -177,6 +192,7 @@ class PipelineFacade:
             arguments, source_path, config_path, work_directory, output_directory, run.run_id,
             {"mode": "analysis", "device": str(config.device), "cache": str(project.settings.use_cache).lower(),
              "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
+            source_duration_seconds=_source_duration_seconds(project),
         )
 
     def prepare_draft(
@@ -208,6 +224,7 @@ class PipelineFacade:
             arguments, source_path, config_path, work_directory, output_directory, run.run_id,
             {"mode": "draft", "analysis_id": project.analysis_id, "candidate_count": str(len(candidate_ids)),
              "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
+            source_duration_seconds=_source_duration_seconds(project),
         )
 
     def prepare_selected_render(
@@ -236,6 +253,7 @@ class PipelineFacade:
              "encoder": str(config.production_render.encoder), "processing_mode": resolved.processing_mode,
              "platform": resolved.platform.platform},
             manifest_path=output_directory / "manifest.json",
+            source_duration_seconds=_source_duration_seconds(project),
         )
 
     @staticmethod
@@ -311,12 +329,14 @@ class PipelineFacade:
     def _prepared_mode(
         self, arguments: list[str], source_path: Path, config_path: Path, work_directory: Path,
         output_directory: Path, run_id: str, runtime_flags: dict[str, str], *, manifest_path: Path | None = None,
+        source_duration_seconds: float | None = None,
     ) -> PreparedPipelineRun:
         return PreparedPipelineRun(
             program=sys.executable, arguments=arguments, working_directory=self.engine_root,
             state_path=work_directory / "state.json", report_path=output_directory / "report.json",
             output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
             run_id=run_id, manifest_path=manifest_path, runtime_flags=runtime_flags,
+            source_duration_seconds=source_duration_seconds,
         )
 
     def prepare_render_revision(
@@ -350,6 +370,7 @@ class PipelineFacade:
             state_path=work_directory / "state.json", report_path=output_directory / "report.json",
             output_directory=output_directory, runtime_config_path=config_path, source_path=source_path,
             run_id=run.run_id, manifest_path=output_directory / "manifest.json",
+            source_duration_seconds=_source_duration_seconds(project),
             runtime_flags={
                 "render_only": "true", "device": str(config.device), "encoder": str(config.production_render.encoder),
                 "cache": str(config.production_render.cache_enabled).lower(), "processing_mode": resolved.processing_mode,

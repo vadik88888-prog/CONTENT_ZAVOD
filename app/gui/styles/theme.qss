@@ -12,6 +12,7 @@ QFrame#dropZone { border: 1px dashed #4A5361; min-height: 132px; }
 QLabel#title { font-size: 26px; font-weight: 700; }
 QLabel#subtitle { color: #A8B0BC; }
 QLabel#muted { color: #737D8C; }
+QLabel#warning { color: #F0B968; }
 QLabel#status { border-radius: 9px; padding: 3px 8px; background: #252C38; color: #D6DBE4; }
 QPushButton { background: #222832; border: 1px solid #303946; border-radius: 8px; padding: 8px 12px; min-height: 18px; }
 QPushButton:hover { background: #2A3240; }

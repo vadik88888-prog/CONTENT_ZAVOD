@@ -219,6 +219,7 @@ class ProjectScreen(QWidget):
         left.addWidget(self.candidate_review)
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
+        self.progress.continue_waiting_requested.connect(self.viewmodel.continue_waiting)
         left.addWidget(self.progress)
         self.history_title = QLabel("История запусков")
         self.history_title.setStyleSheet("font-size: 17px; font-weight: 600;")
@@ -1242,6 +1243,7 @@ class ProjectScreen(QWidget):
                 snapshot.progress_fraction,
                 detail,
                 cancelling=snapshot.phase == "cancelling",
+                long_stage_warning=snapshot.long_stage_warning,
             )
         else:
             self.progress.set_finished(snapshot.message)
