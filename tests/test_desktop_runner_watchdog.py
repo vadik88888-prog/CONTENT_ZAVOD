@@ -162,6 +162,24 @@ def test_completed_link_download_hands_off_without_redownloading(monkeypatch, tm
     assert relaunches == []
 
 
+def test_local_source_uses_shared_validation_handoff(monkeypatch, tmp_path: Path) -> None:
+    _application()
+    services, _project = _services(tmp_path)
+    local_video = tmp_path / "local-video.mp4"
+    local_video.write_bytes(b"local video")
+    metadata = {"duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0}
+    monkeypatch.setattr(services.pipeline, "inspect_source", lambda _path: metadata)
+
+    project = services.create_project(local_video)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+
+    assert project.status == ProjectStatus.SOURCE_READY
+    assert project.source == local_video.resolve()
+    assert project.source_metadata == metadata
+    assert not viewmodel.active
+
+
 def test_startup_watchdog_marks_unstarted_process_failed(tmp_path: Path) -> None:
     _application()
     failures: list[str] = []

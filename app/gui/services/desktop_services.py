@@ -69,8 +69,9 @@ class DesktopServices:
         return self.projects.list()
 
     def create_project(self, source_path: str | Path) -> DesktopProject:
-        metadata = self.pipeline.inspect_source(source_path)
-        project = self.projects.create(source_path, source_metadata=metadata)
+        source = self._resolve_valid_source(source_path)
+        metadata = self.pipeline.inspect_source(source)
+        project = self.projects.create(source, source_metadata=metadata)
         self._refresh_setup_state(project, "Источник готов. Настройте обработку и запустите анализ, когда будете готовы.")
         self.projects.save(project)
         return project
@@ -89,7 +90,7 @@ class DesktopServices:
         self.projects.save(project)
 
     def complete_url_download(self, project: DesktopProject, path: str | Path) -> DesktopProject:
-        source = validate_video_path(path)
+        source = self._resolve_valid_source(path)
         source_directory = (Path(project.project_directory) / "sources").resolve()
         if not source.is_relative_to(source_directory):
             raise InputValidationError("Загруженный файл должен находиться в папке проекта.")
@@ -104,6 +105,12 @@ class DesktopServices:
         self._refresh_setup_state(project, "Видео загружено. Настройки и оценка обновлены по фактическому файлу.")
         self.projects.save(project)
         return project
+
+    @staticmethod
+    def _resolve_valid_source(path: str | Path) -> Path:
+        """Use one validation contract before either source enters the project flow."""
+
+        return validate_video_path(path)
 
     def fail_url_download(self, project: DesktopProject, message: str, *, cancelled: bool = False) -> None:
         if project.source_spec.kind != "url":

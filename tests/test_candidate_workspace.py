@@ -189,6 +189,35 @@ def test_source_setup_screen_persists_primary_choices_before_analysis(tmp_path: 
         app.processEvents()
 
 
+def test_local_video_handoff_opens_settings(monkeypatch, tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, _project = _workspace(tmp_path)
+    local_video = tmp_path / "local-video.mp4"
+    local_video.write_bytes(b"local video")
+    monkeypatch.setattr(services.pipeline, "inspect_source", lambda _path: {
+        "duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0,
+    })
+    project = services.create_project(local_video)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+
+    try:
+        screen.open(project)
+
+        assert project.status == ProjectStatus.SOURCE_READY
+        assert project.source == local_video.resolve()
+        assert screen._flow_step == "settings"
+        assert not screen.setup_card.isHidden()
+        assert screen.download_card.isHidden()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
 def test_link_project_reopens_at_download_then_moves_to_settings(monkeypatch, tmp_path: Path) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
