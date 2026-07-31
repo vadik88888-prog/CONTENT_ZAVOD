@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.config import AppConfig
 from app.candidate_quality import CANDIDATE_QUALITY_SCHEMA_VERSION, EligibilityDecision, EligibilityState
 from app.content_understanding import (
@@ -10,7 +12,9 @@ from app.content_understanding import (
     select_with_coverage,
 )
 from app.models import Candidate, ScoredCandidate
+from app.pipeline import Pipeline
 from app.transcript_features import analyse_transcript
+from app.utils import read_json
 
 
 def _content_map(texts: list[str]) -> dict:
@@ -85,6 +89,76 @@ def test_semantic_duplicate_is_not_used_to_fill_requested_count() -> None:
     assert len(selected) == 2
     assert len(coverage["duplicate_content_clusters"]) == 1
     assert any("Семантически повторяет" in (item.selection_reason or "") for item in scored if item not in selected)
+    decision = coverage["diversity_decision"]
+    assert decision["schema_version"] == "5B.2"
+    assert decision["result_reason_code"] == "INSUFFICIENT_UNIQUE_CANDIDATES"
+    assert any(item["reason_code"] == "SEMANTIC_DUPLICATE" for item in decision["exclusions"])
+
+
+def test_mmr_selects_weaker_unique_candidate_instead_of_multiple_semantic_clones() -> None:
+    content_map = _content_map([
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Clear ownership makes decisions faster. Therefore, name the owner before the meeting ends.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 3
+    config.content_understanding.diversity_lambda = 0.72
+    scored = _scored(content_map, [99, 98, 97, 91])
+
+    selected, coverage = select_with_coverage(scored, config, content_map)
+
+    assert scored[3] in selected
+    assert len([item for item in selected if item in scored[:3]]) == 1
+    decision = coverage["diversity_decision"]
+    assert decision["lambda"] == 0.72
+    assert len(decision["selections"]) == len(selected)
+    assert all(item["reason_code"] == "SELECTED_MMR" for item in decision["selections"])
+    assert decision["result_reason_code"] == "INSUFFICIENT_UNIQUE_CANDIDATES"
+
+
+def test_similarity_matrix_excludes_ineligible_candidates() -> None:
+    content_map = _content_map([
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Clear ownership makes decisions faster. Therefore, name the owner before the meeting ends.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 2
+    scored = _scored(content_map, [99, 98, 95])
+    ineligible = scored[1]
+    assert ineligible.candidate.eligibility_decision is not None
+    ineligible.candidate.eligibility_decision.eligible = False
+
+    _selected, coverage = select_with_coverage(scored, config, content_map)
+
+    decision = coverage["diversity_decision"]
+    assert ineligible.candidate.id not in decision["eligible_candidate_ids"]
+    assert all(
+        ineligible.candidate.id not in {item["candidate_id"], item["other_candidate_id"]}
+        for item in decision["similarities"]
+    )
+    exclusion = next(item for item in decision["exclusions"] if item["candidate_id"] == ineligible.candidate.id)
+    assert exclusion["reason_code"] == "ELIGIBILITY_NOT_PASSED"
+
+
+def test_final_selection_artifact_persists_versioned_diversity_decision(tmp_path: Path) -> None:
+    content_map = _content_map([
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Teams make progress by acting before certainty arrives. Therefore, act before you feel ready.",
+        "Clear ownership makes decisions faster. Therefore, name the owner before the meeting ends.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 3
+    path = tmp_path / "final_selection.json"
+
+    data = Pipeline(tmp_path, config, mock_ai=True)._final_selection(_scored(content_map, [99, 98, 91]), path, content_map)
+
+    persisted = read_json(path, {})
+    assert data["diversity_decision"]["schema_version"] == "5B.2"
+    assert persisted["diversity_decision"] == data["diversity_decision"]
+    assert persisted["coverage"]["diversity_decision"] == data["diversity_decision"]
 
 
 def test_clip_count_recommendation_uses_distinct_story_units_not_duration() -> None:

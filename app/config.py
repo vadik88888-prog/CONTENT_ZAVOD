@@ -142,6 +142,9 @@ class ContentUnderstandingConfig:
     strong_story_unit_threshold: float = 0.55
     semantic_duplicate_threshold: float = 0.78
     coverage_min_quality_score: float = 55.0
+    diversity_schema_version: str = "5B.2"
+    diversity_config_version: str = "5B.2"
+    diversity_lambda: float = 0.76
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -154,6 +157,8 @@ class ContentUnderstandingConfig:
             ("content_understanding.boundary_schema_version", self.boundary_schema_version),
             ("content_understanding.coverage_schema_version", self.coverage_schema_version),
             ("content_understanding.coverage_selection_version", self.coverage_selection_version),
+            ("content_understanding.diversity_schema_version", self.diversity_schema_version),
+            ("content_understanding.diversity_config_version", self.diversity_config_version),
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
@@ -184,6 +189,8 @@ class ContentUnderstandingConfig:
             raise ClipEngineError("content_understanding coverage thresholds должны быть от 0 до 1.")
         if not 0 <= self.coverage_min_quality_score <= 100:
             raise ClipEngineError("content_understanding.coverage_min_quality_score должен быть от 0 до 100.")
+        if not 0 <= self.diversity_lambda <= 1:
+            raise ClipEngineError("content_understanding.diversity_lambda должен быть от 0 до 1.")
 
 
 DEFAULT_VIRALITY_WEIGHTS = {

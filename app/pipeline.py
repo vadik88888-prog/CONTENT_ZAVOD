@@ -29,6 +29,7 @@ from app.content_understanding import (
     build_video_content_profile,
     generate_semantic_candidates,
     recommend_clip_count,
+    select_with_coverage,
     story_units_artifact,
 )
 from app.content_transformation import (
@@ -605,7 +606,7 @@ class Pipeline:
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {
-                "policy_version": "coverage-aware-virality-v2" if self.config.virality.enabled else "coverage-aware-v1",
+                "policy_version": "coverage-diversity-mmr-5B.2",
                 "scored": _hash(ranked_data), "content_map": _hash(content_map),
                 "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold,
                 "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count,
@@ -615,6 +616,12 @@ class Pipeline:
                     "strong_story_unit_threshold": self.config.content_understanding.strong_story_unit_threshold,
                     "semantic_duplicate_threshold": self.config.content_understanding.semantic_duplicate_threshold,
                     "coverage_min_quality_score": self.config.content_understanding.coverage_min_quality_score,
+                },
+                "diversity": {
+                    "schema_version": self.config.content_understanding.diversity_schema_version,
+                    "config_version": self.config.content_understanding.diversity_config_version,
+                    "lambda": self.config.content_understanding.diversity_lambda,
+                    "semantic_duplicate_threshold": self.config.content_understanding.semantic_duplicate_threshold,
                 },
                 "virality": {
                     "enabled": self.config.virality.enabled,
@@ -1798,7 +1805,11 @@ class Pipeline:
         return data
 
     def _final_selection(self, scored: list, path: Path, content_map: dict[str, Any] | None = None) -> dict[str, Any]:
-        selected = select_clips(scored, self.config, content_map)
+        if content_map is not None:
+            selected, coverage = select_with_coverage(scored, self.config, content_map)
+        else:
+            selected = select_clips(scored, self.config)
+            coverage = {}
         requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
         warnings: list[str] = []
         if len(selected) < requested:
@@ -1806,12 +1817,13 @@ class Pipeline:
                 f"Найдено только {len(selected)} достаточно разных сильных фрагмента из запрошенных {requested}."
             )
         data = {
-            "policy_version": "coverage-aware-v1" if content_map is not None else "temporal-diversity-v2",
+            "policy_version": "coverage-diversity-mmr-5B.2" if content_map is not None else "temporal-diversity-v2",
             "candidates": [item.to_dict() for item in scored],
             "selected_ids": [item.candidate.id for item in selected],
             "requested_count": requested,
             "warnings": warnings,
-            "coverage": build_coverage_map(content_map, scored, selected, self.config) if content_map is not None else {},
+            "coverage": coverage,
+            "diversity_decision": coverage.get("diversity_decision") if content_map is not None else None,
         }
         write_json(path, data)
         return data

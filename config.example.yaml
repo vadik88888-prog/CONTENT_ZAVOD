@@ -67,6 +67,11 @@ content_understanding:
   continuation_risk_threshold: 0.65
   strong_story_unit_threshold: 0.55
   semantic_duplicate_threshold: 0.78
+  # Goal 5B-2: deterministic MMR policy uses only existing transcript/content-map
+  # evidence; it does not invoke an embedding service or an extra AI request.
+  diversity_schema_version: 5B.2
+  diversity_config_version: 5B.2
+  diversity_lambda: 0.76
   # Coverage может выбрать самостоятельную StoryUnit ниже legacy score_threshold,
   # но не ниже этого пола и только после semantic/boundary validation.
   coverage_min_quality_score: 55

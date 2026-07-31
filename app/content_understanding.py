@@ -13,7 +13,16 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from app.diversity import interval_metrics, is_temporal_duplicate, transcript_similarity
+from app.diversity import (
+    DIVERSITY_DECISION_SCHEMA_VERSION,
+    DiversityDecision,
+    DiversityExclusion,
+    DiversitySelection,
+    DiversitySimilarity,
+    interval_metrics,
+    is_temporal_duplicate,
+    transcript_similarity,
+)
 from app.models import Candidate, ScoredCandidate
 from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
@@ -1350,15 +1359,35 @@ def _boundary_failure_reason(
 def select_with_coverage(
     scored: list[ScoredCandidate], config: Any, content_map_data: dict[str, Any],
 ) -> tuple[list[ScoredCandidate], dict[str, Any]]:
-    """Deterministically select strong, non-clone StoryUnits across the source."""
+    """Select strong StoryUnits with existing coverage plus deterministic MMR diversity."""
 
     content_map = GlobalContentMap.from_dict(content_map_data)
     settings = config.content_understanding
     weights = settings.coverage_weights
     stories = {item.story_unit_id: item for item in content_map.story_units}
     selected: list[ScoredCandidate] = []
-    rejected: dict[str, str] = {}
+    rejected: dict[str, DiversityExclusion] = {}
+    selections: list[DiversitySelection] = []
     requested = min(config.max_clips, config.ai_reranking.final_clip_count)
+    diversity_lambda = float(settings.diversity_lambda)
+    eligible_for_similarity = [
+        item for item in scored
+        if item.candidate.eligibility_decision is not None
+        and item.candidate.eligibility_decision.explicitly_eligible
+    ]
+    similarities, similarity_index = _eligible_diversity_similarities(eligible_for_similarity, stories)
+
+    def reject(item: ScoredCandidate, reason_code: str, reason: str, *, against: ScoredCandidate | None = None,
+               similarity: DiversitySimilarity | None = None) -> None:
+        rejected[item.candidate.id] = DiversityExclusion(
+            candidate_id=item.candidate.id,
+            reason_code=reason_code,
+            reason=reason,
+            against_candidate_id=against.candidate.id if against is not None else None,
+            max_similarity=similarity.composite_similarity if similarity is not None else None,
+            similarity=similarity,
+        )
+
     for item in scored:
         boundary = item.candidate.boundary_diagnostics
         decision = item.candidate.eligibility_decision
@@ -1373,31 +1402,58 @@ def select_with_coverage(
             and item.virality.get("selection_eligible", False)
             and item.score >= float(getattr(config.virality, "minimum_quality_score", 0.52)) * 100
         )
-        if not item.selected:
-            rejected[item.candidate.id] = item.rejection_reason or "Не прошёл базовый quality ranking."
-        elif decision is None or not decision.explicitly_eligible:
+        if decision is None or not decision.explicitly_eligible:
             state = decision.state.value if decision is not None else "legacy_unassessed"
             codes = [code.value for code in decision.reason_codes] if decision is not None else ["LEGACY_UNASSESSED"]
-            rejected[item.candidate.id] = f"Eligibility gate rejected candidate: state={state}; codes={','.join(codes)}."
+            reject(
+                item,
+                "ELIGIBILITY_NOT_PASSED",
+                f"Eligibility gate rejected candidate: state={state}; codes={','.join(codes)}.",
+            )
+        elif not item.selected:
+            reject(item, "BASE_SELECTION_REJECTED", item.rejection_reason or "Не прошёл базовый quality ranking.")
         elif item.candidate.duration < float(config.min_clip_duration):
-            rejected[item.candidate.id] = (
-                f"Длительность {item.candidate.duration:.2f} с меньше минимальных "
-                f"{float(config.min_clip_duration):.2f} с."
+            reject(
+                item,
+                "DURATION_BELOW_MINIMUM",
+                (
+                    f"Длительность {item.candidate.duration:.2f} с меньше минимальных "
+                    f"{float(config.min_clip_duration):.2f} с."
+                ),
             )
         elif item.score < config.score_threshold and not virality_ready and (
             not strong_story or item.score < settings.coverage_min_quality_score
         ):
-            rejected[item.candidate.id] = "Оценка ниже порога."
+            reject(item, "QUALITY_BELOW_THRESHOLD", "Оценка ниже порога.")
         elif boundary and not bool(boundary.get("eligible", False)):
-            rejected[item.candidate.id] = str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation.")
+            reject(
+                item,
+                "BOUNDARY_REJECTED",
+                str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation."),
+            )
     while len(selected) < requested:
-        ranked: list[tuple[float, str, ScoredCandidate, dict[str, Any]]] = []
+        ranked: list[tuple[float, float, str, ScoredCandidate, dict[str, Any], ScoredCandidate | None, DiversitySimilarity | None]] = []
         for item in scored:
             if item.candidate.id in rejected or item in selected:
                 continue
-            duplicate = _coverage_duplicate(item, selected, config, settings.semantic_duplicate_threshold)
-            if duplicate:
-                rejected[item.candidate.id] = duplicate
+            temporal_duplicate = _coverage_temporal_duplicate(item, selected, config)
+            if temporal_duplicate is not None:
+                chosen, reason = temporal_duplicate
+                similarity = _diversity_similarity_for(item, chosen, similarity_index)
+                reject(item, "TEMPORAL_DUPLICATE", reason, against=chosen, similarity=similarity)
+                continue
+            max_similarity, similar_to, similarity = _max_selected_diversity_similarity(item, selected, similarity_index)
+            if similarity is not None and max_similarity >= float(settings.semantic_duplicate_threshold):
+                reject(
+                    item,
+                    "SEMANTIC_DUPLICATE",
+                    (
+                        f"Семантически повторяет кандидата {similar_to.candidate.id} "
+                        f"(similarity={max_similarity:.3f})."
+                    ),
+                    against=similar_to,
+                    similarity=similarity,
+                )
                 continue
             details = _coverage_increment(item, selected, stories, config)
             story = stories.get(str(item.candidate.story_unit_id or ""))
@@ -1421,25 +1477,250 @@ def select_with_coverage(
                 - repetition * weights["repetition_penalty"]
             )
             details["coverage_selection_score"] = round(score, 6)
-            ranked.append((score, item.candidate.id, item, details))
+            mmr_score = diversity_lambda * score - (1 - diversity_lambda) * max_similarity
+            details["diversity"] = {
+                "reason_code": "SELECTED_MMR",
+                "lambda": round(diversity_lambda, 6),
+                "max_similarity": round(max_similarity, 6),
+                "against_candidate_id": similar_to.candidate.id if similar_to is not None else None,
+                "mmr_score": round(mmr_score, 6),
+                "similarity": similarity.to_dict() if similarity is not None else None,
+            }
+            ranked.append((mmr_score, score, item.candidate.id, item, details, similar_to, similarity))
         if not ranked:
             break
-        _score, _candidate_id, best, details = max(ranked, key=lambda item: (item[0], item[1]))
+        mmr_score, coverage_score, _candidate_id, best, details, similar_to, similarity = max(
+            ranked, key=lambda item: (item[0], item[1], item[2]),
+        )
         best.candidate.incremental_coverage_score = float(details["incremental_coverage_score"])
-        best.selection_reason = "Выбран: качество, завершённость и новое semantic coverage подтверждены."
+        best.selection_reason = "Выбран: качество, coverage и semantic diversity подтверждены MMR-политикой."
         best.selection_diagnostics = {"decision": "accepted_coverage", **details}
         selected.append(best)
+        selections.append(DiversitySelection(
+            candidate_id=best.candidate.id,
+            coverage_quality_score=coverage_score,
+            max_similarity=float(details["diversity"]["max_similarity"]),
+            against_candidate_id=similar_to.candidate.id if similar_to is not None else None,
+            mmr_score=mmr_score,
+            similarity=similarity,
+        ))
     selected_ids = {item.candidate.id for item in selected}
     for item in scored:
         if item.candidate.id in selected_ids:
             item.selected = True
             continue
         item.selected = False
-        reason = rejected.get(item.candidate.id, "Не вошёл в лимит после coverage-aware selection.")
-        item.selection_reason = reason
-        item.selection_diagnostics = {"decision": "rejected_coverage", "reason": reason}
+        exclusion = rejected.get(item.candidate.id)
+        if exclusion is None:
+            exclusion = DiversityExclusion(
+                candidate_id=item.candidate.id,
+                reason_code="LIMIT_REACHED",
+                reason="Не вошёл в лимит после coverage-aware selection.",
+            )
+            rejected[item.candidate.id] = exclusion
+        item.selection_reason = exclusion.reason
+        item.selection_diagnostics = {
+            "decision": "rejected_coverage",
+            "reason": exclusion.reason,
+            "reason_code": exclusion.reason_code,
+            "diversity": exclusion.to_dict(),
+        }
     coverage = build_coverage_map(content_map_data, scored, selected, config)
+    result_reason_code = "REQUEST_SATISFIED"
+    if len(selected) < requested:
+        result_reason_code = (
+            "INSUFFICIENT_UNIQUE_CANDIDATES"
+            if any(item.reason_code in {"SEMANTIC_DUPLICATE", "TEMPORAL_DUPLICATE"} for item in rejected.values())
+            else "INSUFFICIENT_ELIGIBLE_CANDIDATES"
+        )
+    diversity_decision = DiversityDecision(
+        schema_version=str(getattr(settings, "diversity_schema_version", DIVERSITY_DECISION_SCHEMA_VERSION)),
+        config_version=str(getattr(settings, "diversity_config_version", "unknown")),
+        requested_count=requested,
+        lambda_value=diversity_lambda,
+        eligible_candidate_ids=sorted(item.candidate.id for item in eligible_for_similarity),
+        selected_candidate_ids=[item.candidate.id for item in selected],
+        selections=selections,
+        exclusions=[rejected[item.candidate.id] for item in scored if item.candidate.id in rejected],
+        similarities=similarities,
+        result_reason_code=result_reason_code,
+    )
+    coverage["diversity_decision"] = diversity_decision.to_dict()
     return selected, coverage
+
+
+def _eligible_diversity_similarities(
+    candidates: list[ScoredCandidate], stories: dict[str, StoryUnit],
+) -> tuple[list[DiversitySimilarity], dict[tuple[str, str], DiversitySimilarity]]:
+    """Calculate the complete pair matrix once, excluding ineligible candidates."""
+
+    records: list[DiversitySimilarity] = []
+    index: dict[tuple[str, str], DiversitySimilarity] = {}
+    ordered = sorted(candidates, key=lambda item: item.candidate.id)
+    for position, first in enumerate(ordered):
+        for second in ordered[position + 1:]:
+            record = _candidate_diversity_similarity(first, second, stories)
+            records.append(record)
+            index[_diversity_pair_key(first.candidate.id, second.candidate.id)] = record
+    return records, index
+
+
+def _candidate_diversity_similarity(
+    first: ScoredCandidate, second: ScoredCandidate, stories: dict[str, StoryUnit],
+) -> DiversitySimilarity:
+    """Combine only persisted source evidence; missing evidence never triggers inference."""
+
+    first_candidate, second_candidate = first.candidate, second.candidate
+    first_story = stories.get(str(first_candidate.story_unit_id or ""))
+    second_story = stories.get(str(second_candidate.story_unit_id or ""))
+    first_signature = first_candidate.content_signature
+    second_signature = second_candidate.content_signature
+    components: dict[str, float] = {}
+
+    semantic = _max_text_similarity(
+        [first_candidate.text, first_candidate.core_idea, str(first_signature.get("normalized_core_idea") or "")],
+        [second_candidate.text, second_candidate.core_idea, str(second_signature.get("normalized_core_idea") or "")],
+    )
+    if semantic is not None:
+        components["semantic"] = semantic
+
+    key_claim = _max_text_similarity(
+        _candidate_key_claims(first_candidate, first_story),
+        _candidate_key_claims(second_candidate, second_story),
+    )
+    if key_claim is not None:
+        components["key_claim"] = key_claim
+
+    payoff = _max_text_similarity(
+        _candidate_payoffs(first_candidate, first_story),
+        _candidate_payoffs(second_candidate, second_story),
+    )
+    if payoff is not None:
+        components["payoff"] = payoff
+
+    metrics = interval_metrics(
+        first_candidate.start, first_candidate.end, second_candidate.start, second_candidate.end,
+    )
+    components["source_time"] = max(metrics.iou, metrics.containment)
+
+    first_topics = {str(item) for item in first_signature.get("topic_ids", []) if str(item)}
+    second_topics = {str(item) for item in second_signature.get("topic_ids", []) if str(item)}
+    first_chapter = str(first_candidate.chapter_id or (first_story.chapter_id if first_story else ""))
+    second_chapter = str(second_candidate.chapter_id or (second_story.chapter_id if second_story else ""))
+    if first_topics or second_topics or (first_chapter and second_chapter):
+        topic_overlap = _set_similarity(first_topics, second_topics)
+        components["chapter_topic"] = max(topic_overlap, float(bool(first_chapter and first_chapter == second_chapter)))
+
+    first_pattern = _rhetorical_pattern(first_candidate, first_story)
+    second_pattern = _rhetorical_pattern(second_candidate, second_story)
+    if first_pattern and second_pattern:
+        components["rhetorical_pattern"] = float(first_pattern == second_pattern)
+
+    weights = {
+        "semantic": 0.45,
+        "key_claim": 0.20,
+        "payoff": 0.10,
+        "source_time": 0.10,
+        "chapter_topic": 0.08,
+        "rhetorical_pattern": 0.07,
+    }
+    denominator = sum(weights[name] for name in components)
+    composite = sum(weights[name] * value for name, value in components.items()) / denominator if denominator else 0.0
+    return DiversitySimilarity(
+        candidate_id=first_candidate.id,
+        other_candidate_id=second_candidate.id,
+        composite_similarity=round(composite, 6),
+        components={name: round(value, 6) for name, value in components.items()},
+        available_components=list(components),
+    )
+
+
+def _candidate_key_claims(candidate: Candidate, story: StoryUnit | None) -> list[str]:
+    signature = candidate.content_signature
+    values: list[Any] = [signature.get("key_claims"), candidate.core_idea]
+    if story is not None:
+        values.extend([story.core_idea, story.content_signature.get("key_claims")])
+    return _text_values(values)
+
+
+def _candidate_payoffs(candidate: Candidate, story: StoryUnit | None) -> list[str]:
+    values: list[Any] = [candidate.semantic_evidence.get("payoff")]
+    if story is not None:
+        values.append(story.payoff)
+    return _text_values(values)
+
+
+def _rhetorical_pattern(candidate: Candidate, story: StoryUnit | None) -> str:
+    signature = candidate.content_signature
+    values = (
+        candidate.semantic_evidence.get("rhetorical_pattern"),
+        signature.get("rhetorical_pattern"),
+        signature.get("narrative_function"),
+        story.emotional_arc if story is not None else None,
+    )
+    return next((str(value).strip() for value in values if str(value or "").strip()), "")
+
+
+def _text_values(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            result.append(value.strip())
+        elif isinstance(value, (list, tuple, set)):
+            result.extend(str(item).strip() for item in value if str(item).strip())
+    return list(dict.fromkeys(result))
+
+
+def _max_text_similarity(first: list[str], second: list[str]) -> float | None:
+    if not first or not second:
+        return None
+    return max(transcript_similarity(left, right) for left in first for right in second)
+
+
+def _set_similarity(first: set[str], second: set[str]) -> float:
+    if not first or not second:
+        return 0.0
+    return len(first & second) / len(first | second)
+
+
+def _diversity_pair_key(first_id: str, second_id: str) -> tuple[str, str]:
+    return tuple(sorted((first_id, second_id)))
+
+
+def _diversity_similarity_for(
+    first: ScoredCandidate, second: ScoredCandidate,
+    index: dict[tuple[str, str], DiversitySimilarity],
+) -> DiversitySimilarity | None:
+    return index.get(_diversity_pair_key(first.candidate.id, second.candidate.id))
+
+
+def _max_selected_diversity_similarity(
+    item: ScoredCandidate, selected: list[ScoredCandidate],
+    index: dict[tuple[str, str], DiversitySimilarity],
+) -> tuple[float, ScoredCandidate | None, DiversitySimilarity | None]:
+    comparisons = [
+        (similarity.composite_similarity, chosen.candidate.id, chosen, similarity)
+        for chosen in selected
+        if (similarity := _diversity_similarity_for(item, chosen, index)) is not None
+    ]
+    if not comparisons:
+        return 0.0, None, None
+    similarity, _candidate_id, chosen, record = max(comparisons, key=lambda value: (value[0], value[1]))
+    return similarity, chosen, record
+
+
+def _coverage_temporal_duplicate(
+    item: ScoredCandidate, selected: list[ScoredCandidate], config: Any,
+) -> tuple[ScoredCandidate, str] | None:
+    for chosen in selected:
+        metrics = interval_metrics(item.candidate.start, item.candidate.end, chosen.candidate.start, chosen.candidate.end)
+        if is_temporal_duplicate(
+            metrics,
+            overlap_threshold=config.overlap_threshold,
+            minimum_distance_seconds=config.min_selected_clip_distance_seconds,
+        ):
+            return chosen, f"Дублирует временной диапазон {chosen.candidate.id}."
+    return None
 
 
 def build_coverage_map(

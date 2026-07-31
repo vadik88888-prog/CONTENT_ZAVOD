@@ -36,6 +36,18 @@ def test_content_understanding_versions_are_validated() -> None:
         config.validate()
 
 
+def test_diversity_policy_requires_versions_and_normalized_lambda() -> None:
+    config = AppConfig()
+    config.content_understanding.diversity_config_version = ""
+    with pytest.raises(ClipEngineError, match="diversity_config_version"):
+        config.validate()
+
+    config = AppConfig()
+    config.content_understanding.diversity_lambda = 1.01
+    with pytest.raises(ClipEngineError, match="diversity_lambda"):
+        config.validate()
+
+
 def test_virality_policy_validates_complete_normalized_weights() -> None:
     config = AppConfig()
     config.virality.weights["hook"] = 0.2
