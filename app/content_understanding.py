@@ -8,6 +8,7 @@ proposals, but can always fall back to this local implementation.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -32,6 +33,7 @@ VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
 CONTENT_STRATEGY_VERSION = "5A.2"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
+BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -1020,9 +1022,21 @@ def _continuation_risk(segment: dict[str, Any], feature: dict[str, Any]) -> floa
     text = str(segment["text"]).strip().casefold()
     if not bool(feature.get("sentence_end", _sentence_end(text))):
         return 1.0
+    # A question must normally carry its answer/payoff forward.  The boundary
+    # resolver will seek the next complete segment instead of ending on it.
+    if text.endswith("?"):
+        return 0.75
     if text.endswith(("и", "а", "но", "or", "and", "but")) or any(text.endswith(marker) for marker in ("если", "когда", "because", "if")):
         return 0.85
     return 0.15 if not any(marker in text for marker in _SETUP_MARKERS) else 0.45
+
+
+def _speaker_changed(first: dict[str, Any] | None, second: dict[str, Any] | None) -> bool:
+    if first is None or second is None:
+        return False
+    first_speaker = str(first.get("speaker_id") or "").strip()
+    second_speaker = str(second.get("speaker_id") or "").strip()
+    return bool(first_speaker and second_speaker and first_speaker != second_speaker)
 
 
 def _visual_activity(start: float, end: float, scenes: dict[str, Any], visual_analysis: dict[str, Any]) -> float:
@@ -1101,6 +1115,8 @@ class SemanticBoundaryEngine:
         final_index, extension_reason = self._resolve_semantic_end(segments, end_index, features)
         final_segment = segments[final_index]
         start_segment = segments[start_index]
+        previous_segment = segments[start_index - 1] if start_index > 0 else None
+        next_segment = segments[final_index + 1] if final_index + 1 < len(segments) else None
         start_word_position = _first_word_position(words, float(start_segment["start"]), float(start_segment["end"]))
         end_word_position = _last_word_position(words, float(final_segment["start"]), float(final_segment["end"]))
         start_word = words[start_word_position] if start_word_position is not None else None
@@ -1109,8 +1125,12 @@ class SemanticBoundaryEngine:
         end_time, tail_padding, silence_after = self._resolve_tail(end_word, words, end_word_position, final_segment, source_duration)
         start_feature = features.get(int(start_segment["id"]), {})
         end_feature = features.get(int(final_segment["id"]), {})
-        start_point = self._start_point(start_segment, start_feature, start_word, start_word_position, silence_before, scenes)
-        end_point = self._end_point(final_segment, end_feature, end_word, end_word_position, silence_after, scenes, extension_reason)
+        start_point = self._start_point(
+            start_segment, start_feature, start_word, start_word_position, silence_before, scenes, previous_segment,
+        )
+        end_point = self._end_point(
+            final_segment, end_feature, end_word, end_word_position, silence_after, scenes, extension_reason, next_segment,
+        )
         word_integrity = (
             (start_word is None or start_time <= float(start_word["start"]) + 0.001)
             and (end_word is None or end_time >= float(end_word["end"]) - 0.001)
@@ -1133,6 +1153,25 @@ class SemanticBoundaryEngine:
             + 0.15 * (1 - continuation_risk) + 0.10 * float(payoff_preserved)
         )
         final_segments = segments[start_index:final_index + 1]
+        allowed_range = {"start_seconds": round(start_time, 3), "end_seconds": round(end_time, 3)}
+        hook_range = {
+            "start_seconds": round(float(start_word["start"] if start_word else start_segment["start"]), 3),
+            "end_seconds": round(min(float(start_segment["end"]), end_time), 3),
+        }
+        completion_range = {
+            "start_seconds": round(max(float(final_segment["start"]), start_time), 3),
+            "end_seconds": round(float(end_word["end"] if end_word else final_segment["end"]), 3),
+        }
+        safe_start_points = sorted({
+            round(point, 3)
+            for point in [start_time, *[float(item["start"]) for item in final_segments], *[float(item["start"]) for item in words]]
+            if start_time - 0.001 <= point <= end_time + 0.001
+        })
+        safe_end_points = sorted({
+            round(point, 3)
+            for point in [end_time, *[float(item["end"]) for item in final_segments], *[float(item["end"]) for item in words]]
+            if start_time - 0.001 <= point <= end_time + 0.001
+        })
         diagnostics = {
             "schema_version": str(getattr(self.settings, "boundary_schema_version", "5A.1")),
             "requested_range": {"start": round(story_unit.start, 3), "end": round(story_unit.end, 3)},
@@ -1147,10 +1186,52 @@ class SemanticBoundaryEngine:
             "tail_naturalness": round(_tail_naturalness(tail_padding, silence_after, self.settings), 3),
             "head_naturalness": round(_head_naturalness(head_padding, silence_before, self.settings), 3),
             "payoff_preserved": payoff_preserved, "continuation_risk": round(continuation_risk, 3),
+            "continuation_risk_threshold": round(float(self.settings.continuation_risk_threshold), 3),
             "overall_boundary_score": round(overall, 3), "eligible": valid,
             "fallback_reason": "" if valid else _boundary_failure_reason(start_point, end_point, word_integrity, sentence_integrity, payoff_preserved),
             "semantic_extension_reason": extension_reason,
+            "pause_evidence": {
+                "head_silence_seconds": round(silence_before, 3),
+                "tail_silence_seconds": round(silence_after, 3),
+                "pre_roll_seconds": round(head_padding, 3),
+                "post_roll_seconds": round(tail_padding, 3),
+                "intentional_pause_preserved": bool(head_padding > 0 or tail_padding > 0),
+            },
+            "question_context": {
+                "start_is_question": str(start_segment["text"]).strip().endswith("?"),
+                "end_is_question": str(final_segment["text"]).strip().endswith("?"),
+                "answer_or_completion_included": not str(final_segment["text"]).strip().endswith("?"),
+            },
+            "allowed_source_range": allowed_range,
+            "required_evidence": [
+                {
+                    "requirement_type": "hook", "required": bool(story_unit.hook_seed.strip()),
+                    "source_range": hook_range, "transcript_segment_id": int(start_segment["id"]),
+                    "reason": "Hook must remain in the final source dialogue.",
+                    "evidence": {"text": story_unit.hook_seed, "boundary_reason": start_point.reason},
+                },
+                {
+                    "requirement_type": "completion", "required": True,
+                    "source_range": completion_range, "transcript_segment_id": int(final_segment["id"]),
+                    "reason": "The final complete thought must remain in the final source dialogue.",
+                    "evidence": {"text": story_unit.ending, "boundary_reason": end_point.reason},
+                },
+                {
+                    "requirement_type": "payoff", "required": bool(story_unit.payoff.strip()),
+                    "source_range": completion_range, "transcript_segment_id": int(final_segment["id"]),
+                    "reason": "Detected payoff must remain in the final source dialogue.",
+                    "evidence": {"text": story_unit.payoff, "boundary_reason": end_point.reason},
+                },
+            ],
+            "safe_start_points": safe_start_points,
+            "safe_end_points": safe_end_points,
         }
+        # Candidate ids are deterministically derived from StoryUnit ids in the
+        # existing pipeline, so the engine can emit the durable decision at the
+        # same moment it resolves the source boundary.
+        diagnostics["boundary_decision"] = _boundary_decision_payload(
+            f"candidate-{story_unit.story_unit_id}", diagnostics,
+        )
         return SemanticBoundaryResolution(start_time, end_time, [int(item["id"]) for item in final_segments], _group_text(final_segments), diagnostics)
 
     def _resolve_semantic_end(
@@ -1168,7 +1249,7 @@ class SemanticBoundaryEngine:
             feature = features.get(int(candidate["id"]), {})
             if _sentence_complete(candidate, feature) and _continuation_risk(candidate, feature) <= float(self.settings.continuation_risk_threshold):
                 return index, "extended_to_sentence_completion"
-        if end_index == len(segments) - 1:
+        if end_index == len(segments) - 1 and not _sentence_complete(initial, feature):
             # Legacy/fallback transcripts can omit punctuation even though no
             # later speech evidence exists.  Preserve the whole final word and
             # report the lower-confidence terminal fallback instead of silently
@@ -1198,19 +1279,23 @@ class SemanticBoundaryEngine:
 
     def _start_point(
         self, segment: dict[str, Any], feature: dict[str, Any], word: dict[str, Any] | None,
-        word_index: int | None, silence_before: float, scenes: dict[str, Any],
+        word_index: int | None, silence_before: float, scenes: dict[str, Any], previous_segment: dict[str, Any] | None,
     ) -> BoundaryPoint:
         complete = bool(feature.get("sentence_start", _sentence_start(segment)))
         dependent = _starts_dependent(str(segment["text"]))
-        boundary_type = "strong_start" if complete and silence_before >= 0.1 else "acceptable_start" if complete else "forbidden_start" if dependent else "weak_start"
-        signals = (["sentence_start"] if complete else []) + (["pause_before"] if silence_before >= 0.1 else [])
+        speaker_change = _speaker_changed(previous_segment, segment)
+        scene_distance = _scene_distance(float(segment["start"]), scenes)
+        scene_aligned = scene_distance is not None and scene_distance <= 0.25
+        boundary_type = "strong_start" if complete and (silence_before >= 0.1 or speaker_change) else "acceptable_start" if complete else "forbidden_start" if dependent else "weak_start"
+        signals = (["sentence_start"] if complete else []) + (["pause_before"] if silence_before >= 0.1 else []) + (["speaker_change"] if speaker_change else []) + (["scene_boundary_nearby"] if scene_aligned else [])
         penalties = ["dependent_clause"] if dependent else ([] if complete else ["mid_sentence"])
+        base_confidence = 0.95 if boundary_type == "strong_start" else 0.75 if boundary_type == "acceptable_start" else 0.25
         return BoundaryPoint(
             timestamp=float(word["start"] if word else segment["start"]), boundary_type=boundary_type,
-            confidence=0.95 if boundary_type == "strong_start" else 0.75 if boundary_type == "acceptable_start" else 0.25,
+            confidence=_bounded(base_confidence + (0.025 if speaker_change else 0.0) + (0.025 if scene_aligned else 0.0)),
             supporting_signals=signals, penalties=penalties, transcript_segment_id=int(segment["id"]), word_index=word_index,
-            scene_boundary_distance=_scene_distance(float(segment["start"]), scenes), silence_before=round(silence_before, 3),
-            silence_after=0.0, speaker_change=False, sentence_completion=complete,
+            scene_boundary_distance=scene_distance, silence_before=round(silence_before, 3),
+            silence_after=0.0, speaker_change=speaker_change, sentence_completion=complete,
             semantic_completion_score=1.0 if complete else 0.25, continuation_probability=0.0 if complete else 0.7,
             reason="Начало полного первого слова на границе предложения." if complete else "Начало зависит от предыдущей фразы.",
         )
@@ -1218,19 +1303,24 @@ class SemanticBoundaryEngine:
     def _end_point(
         self, segment: dict[str, Any], feature: dict[str, Any], word: dict[str, Any] | None,
         word_index: int | None, silence_after: float, scenes: dict[str, Any], extension_reason: str,
+        next_segment: dict[str, Any] | None,
     ) -> BoundaryPoint:
         transcript_terminal_fallback = extension_reason == "transcript_terminal_fallback_without_punctuation"
         complete = _sentence_complete(segment, feature) or transcript_terminal_fallback
         continuation = 0.45 if transcript_terminal_fallback else _continuation_risk(segment, feature)
         boundary_type = "strong_end" if not transcript_terminal_fallback and complete and silence_after >= float(self.settings.min_tail_padding_seconds) else "acceptable_end" if complete else "forbidden_end"
-        signals = (["sentence_completion"] if _sentence_complete(segment, feature) else []) + (["transcript_terminal"] if transcript_terminal_fallback else []) + (["silence_after"] if silence_after >= float(self.settings.min_tail_padding_seconds) else [])
+        speaker_change = _speaker_changed(segment, next_segment)
+        scene_distance = _scene_distance(float(segment["end"]), scenes)
+        scene_aligned = scene_distance is not None and scene_distance <= 0.25
+        signals = (["sentence_completion"] if _sentence_complete(segment, feature) else []) + (["transcript_terminal"] if transcript_terminal_fallback else []) + (["silence_after"] if silence_after >= float(self.settings.min_tail_padding_seconds) else []) + (["speaker_change_after"] if speaker_change else []) + (["scene_boundary_nearby"] if scene_aligned else [])
         penalties = ["transcript_missing_terminal_punctuation"] if transcript_terminal_fallback else ([] if complete else ["unfinished_grammar_or_required_continuation"])
+        base_confidence = 0.96 if boundary_type == "strong_end" else 0.78 if boundary_type == "acceptable_end" else 0.15
         return BoundaryPoint(
             timestamp=float(word["end"] if word else segment["end"]), boundary_type=boundary_type,
-            confidence=0.96 if boundary_type == "strong_end" else 0.78 if boundary_type == "acceptable_end" else 0.15,
+            confidence=_bounded(base_confidence + (0.025 if speaker_change else 0.0) + (0.025 if scene_aligned else 0.0)),
             supporting_signals=signals, penalties=penalties, transcript_segment_id=int(segment["id"]), word_index=word_index,
-            scene_boundary_distance=_scene_distance(float(segment["end"]), scenes), silence_before=0.0,
-            silence_after=round(silence_after, 3), speaker_change=False, sentence_completion=complete,
+            scene_boundary_distance=scene_distance, silence_before=0.0,
+            silence_after=round(silence_after, 3), speaker_change=speaker_change, sentence_completion=complete,
             semantic_completion_score=0.62 if transcript_terminal_fallback else 0.95 if complete else 0.10, continuation_probability=round(continuation, 3),
             reason="Конец полного последнего слова и завершённого предложения." if not transcript_terminal_fallback and complete else "Транскрипт заканчивается после полного последнего слова; применён безопасный fallback." if transcript_terminal_fallback else extension_reason,
         )
@@ -1248,8 +1338,14 @@ def generate_semantic_candidates(
     for unit in content_map.story_units:
         resolution = engine.resolve(unit, transcript, transcript_features, scenes)
         diagnostics = resolution.diagnostics
+        candidate_id = f"candidate-{unit.story_unit_id}"
+        if _has_complete_boundary_evidence(diagnostics) and not isinstance(diagnostics.get("boundary_decision"), dict):
+            diagnostics = {
+                **diagnostics,
+                "boundary_decision": _boundary_decision_payload(candidate_id, diagnostics),
+            }
         candidate = Candidate(
-            id=f"candidate-{unit.story_unit_id}", start=resolution.start, end=resolution.end,
+            id=candidate_id, start=resolution.start, end=resolution.end,
             text=resolution.text, reason="SemanticBoundaryEngine: естественные границы StoryUnit.",
             transcript_segment_ids=resolution.transcript_segment_ids,
             start_boundary_reason=str(diagnostics.get("start_boundary", {}).get("reason", "")),
@@ -1272,6 +1368,62 @@ def generate_semantic_candidates(
         )
         candidates.append(candidate)
     return candidates, len(candidates)
+
+
+def _has_complete_boundary_evidence(diagnostics: dict[str, Any]) -> bool:
+    return all(
+        isinstance(diagnostics.get(name), dict)
+        for name in ("requested_range", "resolved_range", "allowed_source_range", "start_boundary", "end_boundary")
+    )
+
+
+def _boundary_decision_payload(candidate_id: str, diagnostics: dict[str, Any]) -> dict[str, Any]:
+    """Promote existing 5A diagnostics into the persisted 5C decision shape."""
+
+    requested = diagnostics["requested_range"]
+    resolved = diagnostics["resolved_range"]
+    allowed = diagnostics["allowed_source_range"]
+    fingerprint = stable_text_hash(json.dumps(
+        {"candidate_id": candidate_id, "decision_inputs": diagnostics},
+        ensure_ascii=False,
+        sort_keys=True,
+    ))[:12]
+    fallback_reason = str(diagnostics.get("fallback_reason") or "").strip() or None
+    extension_reason = str(diagnostics.get("semantic_extension_reason") or "")
+    return {
+        "schema_version": BOUNDARY_DECISION_SCHEMA_VERSION,
+        "decision_id": f"boundary-{candidate_id}-{fingerprint}",
+        "candidate_id": candidate_id,
+        "rough_range": {
+            "start_seconds": float(requested["start"]),
+            "end_seconds": float(requested["end"]),
+        },
+        "refined_range": {
+            "start_seconds": float(resolved["start"]),
+            "end_seconds": float(resolved["end"]),
+        },
+        "allowed_source_range": dict(allowed),
+        "start_reason": str(diagnostics["start_boundary"].get("reason") or "resolved_start_boundary"),
+        "end_reason": str(diagnostics["end_boundary"].get("reason") or "resolved_end_boundary"),
+        "word_integrity": bool(diagnostics.get("word_integrity", False)),
+        "sentence_integrity": bool(diagnostics.get("sentence_integrity", False)),
+        "semantic_completion": float(diagnostics.get("semantic_completion", 0)) >= 0.6,
+        "payoff_preserved": bool(diagnostics.get("payoff_preserved", False)),
+        "continuation_risk": float(diagnostics.get("continuation_risk", 1)),
+        "continuation_risk_threshold": float(diagnostics.get("continuation_risk_threshold", 0.65)),
+        "pre_roll_seconds": float(diagnostics.get("head_padding_seconds", 0)),
+        "post_roll_seconds": float(diagnostics.get("tail_padding_seconds", 0)),
+        "confidence": float(diagnostics.get("overall_boundary_score", 0)),
+        "start_evidence": dict(diagnostics["start_boundary"]),
+        "end_evidence": dict(diagnostics["end_boundary"]),
+        "pause_evidence": dict(diagnostics.get("pause_evidence", {})),
+        "question_context": dict(diagnostics.get("question_context", {})),
+        "required_evidence": [dict(item) for item in diagnostics.get("required_evidence", []) if isinstance(item, dict)],
+        "safe_start_points": [float(item) for item in diagnostics.get("safe_start_points", [])],
+        "safe_end_points": [float(item) for item in diagnostics.get("safe_end_points", [])],
+        "fallback_used": extension_reason not in {"", "story_unit_complete"},
+        "fallback_reason": fallback_reason,
+    }
 
 
 def _timestamped_words(transcript: dict[str, Any], segments: list[dict[str, Any]]) -> list[dict[str, Any]]:

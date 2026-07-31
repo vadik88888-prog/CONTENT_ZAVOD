@@ -24,11 +24,13 @@ from app.video_composition import (
     probe_media,
     production_render_report_section,
     _ffmpeg,
+    _source_range_for_audio,
     _timeline_filter,
     _split_timeline_at_scene_boundaries,
     _validate_tracking_decisions,
     _visual_filter,
 )
+from app.production_models import SourceSegmentRange
 from app.video_models import (
     CanvasConfig, CompositionSegment, CropPlan, ReframeKeyframe, RenderValidation,
     SourceVideoClip, SubjectBounds, VideoTimeline,
@@ -82,6 +84,15 @@ def test_video_models_validate_canvas_crop_and_timeline_ranges() -> None:
         CropPlan(strategy="center_crop", source_width=100, source_height=100, crop_width=80, crop_height=80, crop_x=30, crop_y=0)
     with pytest.raises(ValidationError):
         SourceVideoClip(**{**clip.model_dump(), "timeline_end_seconds": 0.5})
+
+
+def test_narration_visual_mapping_prefers_validated_plan_range_over_full_transcript_segment() -> None:
+    narration = next(segment for segment in _plan(narration=True, dialogue=False).segments if segment.segment_type == "narration")
+    narration.source_ranges = [SourceSegmentRange(
+        transcript_segment_id=0, source_start_seconds=0.5, source_end_seconds=1.5,
+    )]
+
+    assert _source_range_for_audio(None, narration, {0: (0.0, 3.0)})[:2] == (0.5, 1.5)
 
 
 def test_missing_ffmpeg_and_ffprobe_fail_with_clear_render_errors(monkeypatch: pytest.MonkeyPatch) -> None:

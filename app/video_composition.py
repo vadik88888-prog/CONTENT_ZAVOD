@@ -362,6 +362,15 @@ def _source_range_for_audio(
     if isinstance(segment, DialogueSegment):
         return segment.source_start_seconds, segment.source_end_seconds, segment.fact_id, segment.speaker, "dialogue"
     if isinstance(segment, NarrationSegment):
+        if segment.source_ranges:
+            source = segment.source_ranges[0]
+            return (
+                source.source_start_seconds,
+                source.source_end_seconds,
+                segment.fact_ids[0] if segment.fact_ids else None,
+                "narrator",
+                "narration",
+            )
         for identifier in segment.source_segment_ids:
             value = transcript_ranges.get(identifier)
             if value is not None:

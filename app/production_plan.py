@@ -7,6 +7,7 @@ from typing import Any
 from app.errors import ProductionPlanError
 from app.production_models import (
     AudioLayer,
+    BoundaryDecision,
     DialogueSegment,
     NarrationSegment,
     PauseSegment,
@@ -14,6 +15,7 @@ from app.production_models import (
     ProductionPlan,
     SubtitleCue,
     SubtitleTrack,
+    SourceSegmentRange,
     TimelineEntry,
     TimelineEstimate,
     VoiceProfile,
@@ -22,7 +24,7 @@ from app.transformation_models import validate_final_script
 from app.utils import stable_text_hash
 
 
-PRODUCTION_PLAN_VERSION = "3A.1"
+PRODUCTION_PLAN_VERSION = "3A.2"
 TIMELINE_VERSION = "3A.0"
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
 
@@ -44,6 +46,7 @@ def build_production_plan(
     sentences = [item for item in final.get("sentences", []) if isinstance(item, dict) and str(item.get("text", "")).strip()]
     if not candidate_id or not sentences:
         raise ProductionPlanError("ProductionPlan требует FinalScript с candidate_id и хотя бы одним предложением.")
+    boundary_decision = _boundary_decision_from_context(context, candidate_id)
     facts = {
         str(item.get("fact_id")): item
         for item in semantic.get("supporting_facts", [])
@@ -99,6 +102,7 @@ def build_production_plan(
                     source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                     speaker=str(production_config.original_dialogue_speaker),
                     confidence=float(fact.get("confidence", 0.0)),
+                    boundary_decision_id=boundary_decision.decision_id if boundary_decision else None,
                     linked_segment_ids=[],
                 )
                 segments.append(dialogue)
@@ -116,9 +120,11 @@ def build_production_plan(
             source_sentence_id=sentence_id,
             fact_ids=fact_ids,
             source_segment_ids=source_ids,
+            source_ranges=_source_ranges_for_facts(fact_ids, source_ids, facts, evidence),
             word_count=_word_count(text),
             words_per_second=float(production_config.narration_words_per_second),
             voice_profile_id=voice.profile_id,
+            boundary_decision_id=boundary_decision.decision_id if boundary_decision else None,
         )
         segments.append(narration)
         narration_to_dialogue[narration_id] = []
@@ -141,6 +147,7 @@ def build_production_plan(
                 source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                 speaker=str(production_config.original_dialogue_speaker),
                 confidence=float(fact.get("confidence", 0.0)),
+                boundary_decision_id=boundary_decision.decision_id if boundary_decision else None,
                 linked_segment_ids=[narration_id],
             )
             segments.append(dialogue)
@@ -164,30 +171,33 @@ def build_production_plan(
     subtitle_track = _build_subtitle_track(segments, timeline, language)
     source = _dict(context.get("source"), "SourceContext.source")
     final_script_hash = stable_text_hash(json.dumps(final, ensure_ascii=False, sort_keys=True))
-    plan = ProductionPlan(
-        plan_id=f"production-{candidate_id}-{final_script_hash[:12]}",
-        segments=segments,
-        dialogue_mappings=dialogue_mappings,
-        timeline=timeline,
-        voice_profile=voice,
-        audio_layers=[
-            AudioLayer(layer_id="layer-narration", layer_type="narration"),
-            AudioLayer(layer_id="layer-original-dialogue", layer_type="original_dialogue"),
-            AudioLayer(layer_id="layer-music", layer_type="music"),
-            AudioLayer(layer_id="layer-effects", layer_type="effects"),
-        ],
-        subtitle_track=subtitle_track,
-        metadata=ProductionMetadata(
-            plan_version=PRODUCTION_PLAN_VERSION,
-            candidate_id=candidate_id,
-            source_id=str(source.get("id", "")),
-            final_script_hash=final_script_hash,
-        ),
-        audio_mode=audio_mode,
-        tts_eligible=not dialogue_only and audio_mode in {"voiceover", "replace_voice", "mixed"},
-        audio_mode_reason="source_audio_mode" if source_audio_mode else "explicit_voiceover_intent",
-    )
-    return plan
+    try:
+        return ProductionPlan(
+            plan_id=f"production-{candidate_id}-{final_script_hash[:12]}",
+            segments=segments,
+            dialogue_mappings=dialogue_mappings,
+            timeline=timeline,
+            voice_profile=voice,
+            audio_layers=[
+                AudioLayer(layer_id="layer-narration", layer_type="narration"),
+                AudioLayer(layer_id="layer-original-dialogue", layer_type="original_dialogue"),
+                AudioLayer(layer_id="layer-music", layer_type="music"),
+                AudioLayer(layer_id="layer-effects", layer_type="effects"),
+            ],
+            subtitle_track=subtitle_track,
+            metadata=ProductionMetadata(
+                plan_version=PRODUCTION_PLAN_VERSION,
+                candidate_id=candidate_id,
+                source_id=str(source.get("id", "")),
+                final_script_hash=final_script_hash,
+            ),
+            audio_mode=audio_mode,
+            tts_eligible=not dialogue_only and audio_mode in {"voiceover", "replace_voice", "mixed"},
+            audio_mode_reason="source_audio_mode" if source_audio_mode else "explicit_voiceover_intent",
+            boundary_decision=boundary_decision,
+        )
+    except ValueError as error:
+        raise ProductionPlanError(str(error)) from error
 
 
 def production_summary(plan: ProductionPlan) -> str:
@@ -246,6 +256,47 @@ def _build_subtitle_track(segments: list[Any], timeline: TimelineEstimate, langu
         for index, segment in enumerate(segments) if isinstance(segment, NarrationSegment)
     ]
     return SubtitleTrack(track_id="subtitle-track-placeholder", language=language, cues=cues)
+
+
+def _boundary_decision_from_context(context: dict[str, Any], candidate_id: str) -> BoundaryDecision | None:
+    """Read a 5C decision without making legacy draft artifacts unusable."""
+
+    raw = context.get("boundary_decision")
+    if raw in (None, {}):
+        return None
+    if not isinstance(raw, dict):
+        raise ProductionPlanError("BOUNDARY_DECISION_INVALID: SourceContext boundary_decision must be an object.")
+    try:
+        decision = BoundaryDecision.model_validate(raw)
+    except Exception as error:
+        raise ProductionPlanError(f"BOUNDARY_DECISION_INVALID: {error}") from error
+    if decision.candidate_id != candidate_id:
+        raise ProductionPlanError(
+            "BOUNDARY_CANDIDATE_MISMATCH: SourceContext boundary decision belongs to another candidate."
+        )
+    return decision
+
+
+def _source_ranges_for_facts(
+    fact_ids: list[str], source_ids: list[int], facts: dict[str, dict[str, Any]], evidence: dict[int, dict[str, Any]],
+) -> list[SourceSegmentRange]:
+    ranges: list[SourceSegmentRange] = []
+    seen: set[tuple[int, float, float]] = set()
+    for fact_id in fact_ids:
+        fact = facts[fact_id]
+        source_id = _first_known_segment_id(fact, evidence, source_ids)
+        source = evidence[source_id]
+        start = float(fact.get("evidence_start", source.get("start", 0)))
+        end = float(fact.get("evidence_end", source.get("end", 0)))
+        key = (source_id, start, end)
+        if end > start and key not in seen:
+            ranges.append(SourceSegmentRange(
+                transcript_segment_id=source_id,
+                source_start_seconds=start,
+                source_end_seconds=end,
+            ))
+            seen.add(key)
+    return ranges
 
 
 def _first_known_segment_id(fact: dict[str, Any], evidence: dict[int, dict[str, Any]], source_ids: list[int]) -> int:

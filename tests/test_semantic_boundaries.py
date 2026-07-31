@@ -10,6 +10,7 @@ from app.content_understanding import (
     build_video_content_profile,
 )
 from app.models import Candidate, ScoredCandidate
+from app.production_models import BoundaryDecision
 from app.selection import select_clips
 from app.semantic_extraction import build_source_context
 from app.transcript_features import analyse_transcript
@@ -51,6 +52,15 @@ def test_boundary_engine_keeps_first_and_last_words_and_natural_tail() -> None:
     assert resolution.diagnostics["sentence_integrity"] is True
     assert resolution.diagnostics["tail_padding_seconds"] >= config.content_understanding.min_tail_padding_seconds
     assert resolution.diagnostics["eligible"] is True
+    decision = resolution.diagnostics["boundary_decision"]
+    assert BoundaryDecision.model_validate(decision).decision_id.startswith("boundary-candidate-")
+    assert decision["schema_version"] == "5C.1"
+    assert decision["word_integrity"] is True
+    assert decision["required_evidence"][0]["requirement_type"] == "hook"
+    assert decision["required_evidence"][1]["requirement_type"] == "completion"
+    assert decision["start_evidence"]["reason"]
+    assert decision["end_evidence"]["reason"]
+    assert decision["pause_evidence"]["post_roll_seconds"] >= 0
 
 
 def test_boundary_engine_extends_unfinished_setup_to_sentence_completion() -> None:
@@ -79,6 +89,49 @@ def test_boundary_engine_extends_unfinished_setup_to_sentence_completion() -> No
     forbidden = SemanticBoundaryEngine(config.content_understanding).resolve(unfinished, transcript, features, {"boundaries": []})
     assert forbidden.diagnostics["eligible"] is False
     assert forbidden.diagnostics["end_boundary"]["boundary_type"] == "forbidden_end"
+
+
+def test_boundary_engine_keeps_question_with_answer_and_records_speaker_scene_evidence() -> None:
+    config = AppConfig()
+    transcript = {
+        "source_id": "source-1", "language": "en", "duration": 8.0,
+        "segments": [
+            {"id": 0, "start": 0.5, "end": 2.0, "speaker_id": "host", "text": "What changes the result?"},
+            {"id": 1, "start": 2.2, "end": 5.5, "speaker_id": "guest", "text": "A complete answer changes the result.", "words": [
+                {"start": 2.2, "end": 2.4, "text": "A"},
+                {"start": 5.0, "end": 5.4, "text": "result"},
+            ]},
+        ],
+    }
+    features = analyse_transcript(transcript, config.transcript_features)
+    original = _unit(transcript, features, config)
+    question = replace(
+        original, start=0.5, end=2.0, duration=1.5, transcript_segment_ids=[0],
+        development="What changes the result?", ending="What changes the result?",
+    )
+
+    resolution = SemanticBoundaryEngine(config.content_understanding).resolve(
+        question, transcript, features, {"boundaries": [{"timestamp": 2.2}, {"timestamp": 5.5}]},
+    )
+
+    assert resolution.transcript_segment_ids == [0, 1]
+    assert resolution.diagnostics["semantic_extension_reason"] == "extended_to_sentence_completion"
+    decision = resolution.diagnostics["boundary_decision"]
+    assert decision["end_evidence"]["scene_boundary_distance"] is not None
+    assert "scene_boundary_nearby" in decision["end_evidence"]["supporting_signals"]
+    assert decision["end_evidence"]["speaker_change"] is False
+    assert decision["question_context"]["end_is_question"] is False
+
+    answer = replace(
+        original, start=2.2, end=5.5, duration=3.3, transcript_segment_ids=[1],
+        development="A complete answer changes the result.", ending="A complete answer changes the result.",
+    )
+    speaker_resolution = SemanticBoundaryEngine(config.content_understanding).resolve(
+        answer, transcript, features, {"boundaries": [{"timestamp": 2.2}, {"timestamp": 5.5}]},
+    )
+    speaker_start = speaker_resolution.diagnostics["boundary_decision"]["start_evidence"]
+    assert speaker_start["speaker_change"] is True
+    assert "speaker_change" in speaker_start["supporting_signals"]
 
 
 def test_selection_rejects_forbidden_semantic_boundary() -> None:

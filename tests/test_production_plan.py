@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,59 @@ def _voiceover_production():
     return production
 
 
+def _boundary_decision(*, semantic_completion: bool = True, payoff_preserved: bool = True) -> dict:
+    source_range = {"start_seconds": 4.0, "end_seconds": 20.0}
+    return {
+        "schema_version": "5C.1",
+        "decision_id": "boundary-candidate-production-001-safe",
+        "candidate_id": "candidate-production-001",
+        "rough_range": dict(source_range),
+        "refined_range": dict(source_range),
+        "allowed_source_range": dict(source_range),
+        "start_reason": "Complete opening word and sentence boundary.",
+        "end_reason": "Complete ending word and completed thought.",
+        "word_integrity": True,
+        "sentence_integrity": True,
+        "semantic_completion": semantic_completion,
+        "payoff_preserved": payoff_preserved,
+        "continuation_risk": 0.1,
+        "continuation_risk_threshold": 0.65,
+        "pre_roll_seconds": 0.1,
+        "post_roll_seconds": 0.2,
+        "confidence": 0.9,
+        "start_evidence": {"reason": "sentence_start", "speaker_change": False, "scene_boundary_distance": 0.2},
+        "end_evidence": {"reason": "sentence_completion", "speaker_change": False, "scene_boundary_distance": 0.3},
+        "pause_evidence": {"pre_roll_seconds": 0.1, "post_roll_seconds": 0.2},
+        "required_evidence": [
+            {
+                "requirement_type": "hook", "required": True,
+                "source_range": {"start_seconds": 4.0, "end_seconds": 12.0},
+                "transcript_segment_id": 0, "reason": "Hook survives.", "evidence": {"text": "First claim"},
+            },
+            {
+                "requirement_type": "completion", "required": True,
+                "source_range": {"start_seconds": 12.0, "end_seconds": 20.0},
+                "transcript_segment_id": 0, "reason": "Thought completes.", "evidence": {"text": "Complete ending"},
+            },
+            {
+                "requirement_type": "payoff", "required": True,
+                "source_range": {"start_seconds": 18.0, "end_seconds": 20.0},
+                "transcript_segment_id": 0, "reason": "Payoff survives.", "evidence": {"text": "Payoff"},
+            },
+        ],
+        "safe_start_points": [4.0, 12.0, 18.0],
+        "safe_end_points": [12.0, 18.0, 20.0],
+        "fallback_used": False,
+        "fallback_reason": None,
+    }
+
+
+def _outcome_with_boundary() -> dict:
+    outcome = _transformation_outcome()
+    outcome["source_context"]["boundary_decision"] = _boundary_decision()
+    return outcome
+
+
 def test_pydantic_production_models_reject_invalid_narration() -> None:
     with pytest.raises(ValidationError):
         NarrationSegment(
@@ -64,6 +118,96 @@ def test_builder_creates_narration_dialogue_pauses_and_placeholders() -> None:
     assert all(item.status == "placeholder" for item in plan.audio_layers)
     assert plan.metadata.tts_generated is False
     assert plan.metadata.render_generated is False
+
+
+def test_production_plan_persists_boundary_decision_and_links_every_dialogue_source_range() -> None:
+    plan = build_production_plan(_outcome_with_boundary(), AppConfig().production)
+
+    assert plan.boundary_decision is not None
+    assert plan.boundary_decision.schema_version == "5C.1"
+    assert all(
+        segment.boundary_decision_id == plan.boundary_decision.decision_id
+        for segment in plan.dialogue_mappings
+    )
+    assert all(
+        plan.boundary_decision.allowed_source_range.start_seconds <= segment.source_start_seconds
+        and segment.source_end_seconds <= plan.boundary_decision.allowed_source_range.end_seconds
+        for segment in plan.dialogue_mappings
+    )
+
+    voiceover_plan = build_production_plan(_outcome_with_boundary(), _voiceover_production())
+    narration = [segment for segment in voiceover_plan.segments if isinstance(segment, NarrationSegment)]
+    assert narration and all(segment.source_ranges for segment in narration)
+    assert all(
+        source.source_start_seconds >= voiceover_plan.boundary_decision.allowed_source_range.start_seconds
+        and source.source_end_seconds <= voiceover_plan.boundary_decision.allowed_source_range.end_seconds
+        and segment.boundary_decision_id == voiceover_plan.boundary_decision.decision_id
+        for segment in narration for source in segment.source_ranges
+    )
+
+
+def test_production_plan_blocks_dialogue_word_cut_after_boundary_handoff() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["semantic_representation"]["supporting_facts"][0]["evidence_start"] = 4.2
+
+    with pytest.raises(ProductionPlanError, match="BOUNDARY_WORD_CUT"):
+        build_production_plan(outcome, AppConfig().production)
+
+
+def test_production_plan_blocks_dialogue_range_outside_selected_boundary() -> None:
+    outcome = _outcome_with_boundary()
+    decision = outcome["source_context"]["boundary_decision"]
+    decision["refined_range"]["start_seconds"] = 5.0
+    decision["allowed_source_range"]["start_seconds"] = 5.0
+    decision["required_evidence"][0]["source_range"]["start_seconds"] = 5.0
+    decision["safe_start_points"].append(5.0)
+
+    with pytest.raises(ProductionPlanError, match="BOUNDARY_SOURCE_RANGE_OUTSIDE"):
+        build_production_plan(outcome, AppConfig().production)
+
+
+def test_production_plan_blocks_lost_payoff_after_boundary_handoff() -> None:
+    outcome = _outcome_with_boundary()
+    for fact in outcome["semantic_representation"]["supporting_facts"]:
+        fact["evidence_end"] = 18.0
+
+    with pytest.raises(ProductionPlanError, match="BOUNDARY_PAYOFF_LOST"):
+        build_production_plan(outcome, AppConfig().production)
+
+
+def test_production_plan_blocks_incomplete_boundary_decision() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["boundary_decision"] = _boundary_decision(semantic_completion=False)
+
+    with pytest.raises(ProductionPlanError, match="BOUNDARY_INCOMPLETE_THOUGHT"):
+        build_production_plan(outcome, AppConfig().production)
+
+
+def test_production_plan_blocks_question_without_answer_context() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["boundary_decision"]["question_context"] = {
+        "end_is_question": True,
+        "answer_or_completion_included": False,
+    }
+
+    with pytest.raises(ProductionPlanError, match="BOUNDARY_QUESTION_CONTEXT_MISSING"):
+        build_production_plan(outcome, AppConfig().production)
+
+
+def test_legacy_production_plan_without_boundary_decision_remains_readable() -> None:
+    plan = build_production_plan(_transformation_outcome(), AppConfig().production)
+    legacy = deepcopy(plan.model_dump(mode="json"))
+    legacy.pop("boundary_decision")
+    for segment in legacy["dialogue_mappings"]:
+        segment.pop("boundary_decision_id")
+    for segment in legacy["segments"]:
+        if segment["segment_type"] == "original_dialogue":
+            segment.pop("boundary_decision_id")
+
+    migrated = ProductionPlan.model_validate(legacy)
+
+    assert migrated.boundary_decision is None
+    assert all(segment.boundary_decision_id is None for segment in migrated.dialogue_mappings)
 
 
 def test_dialogue_mapping_has_fact_transcript_timestamps_speaker_and_confidence() -> None:

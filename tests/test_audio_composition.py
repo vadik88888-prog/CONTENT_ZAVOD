@@ -9,12 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.audio_models import NarrationClip
-from app.audio_service import AudioCompositionService, audio_report_section
+from app.audio_service import AudioCompositionService, _narration_source_ranges, audio_report_section
 from app.errors import DUPLICATE_EXACT_SOURCE_RANGE, ProductionPlanHandoffError
 from app.cli import build_parser
 from app.config import AppConfig
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import ProductionPlan, validate_audio_handoff
+from app.production_models import ProductionPlan, SourceSegmentRange, validate_audio_handoff
 from app.sources import Source, local_source
 from app.tts_providers import MockTTSProvider
 from app.tts_service import TTSService
@@ -137,6 +137,15 @@ def _plan_with_adjacent_dialogues(*, duplicate_exact_range: bool) -> ProductionP
         {**raw["timeline"]["entries"][-1], "order": 3},
     ]
     return ProductionPlan.model_validate(raw)
+
+
+def test_narration_source_bed_prefers_validated_plan_range_over_full_transcript_segment() -> None:
+    narration = next(segment for segment in _plan(narration=True, dialogue=False).segments if segment.segment_type == "narration")
+    narration.source_ranges = [SourceSegmentRange(
+        transcript_segment_id=0, source_start_seconds=0.5, source_end_seconds=1.5,
+    )]
+
+    assert _narration_source_ranges(narration, {"segments": [{"id": 0, "start": 0, "end": 3}]}) == [(0.5, 1.5)]
 
 
 def test_duplicate_exact_source_range_is_blocked_before_audio_composition(tmp_path: Path) -> None:

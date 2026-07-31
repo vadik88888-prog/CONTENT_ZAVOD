@@ -119,6 +119,9 @@ class SourceContext:
     scene_boundaries: list[dict[str, Any]] = field(default_factory=list)
     audio_energy_summary: dict[str, Any] = field(default_factory=dict)
     candidate_features: dict[str, Any] = field(default_factory=dict)
+    # Empty is the explicit compatibility state for transformation artifacts
+    # written before Goal 5C. New candidates carry the immutable decision here.
+    boundary_decision: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "2.0"
 
     def primary_text(self) -> str:
@@ -150,6 +153,7 @@ class SourceContext:
             "scene_boundaries": self.scene_boundaries,
             "audio_energy_summary": self.audio_energy_summary,
             "candidate_features": self.candidate_features,
+            "boundary_decision": self.boundary_decision,
         }
 
 
@@ -586,6 +590,7 @@ def source_context_from_dict(data: dict[str, Any]) -> SourceContext:
         scene_boundaries=[dict(item) for item in data.get("scene_boundaries", []) if isinstance(item, dict)],
         audio_energy_summary=dict(data.get("audio_energy_summary", {})),
         candidate_features=dict(data.get("candidate_features", {})),
+        boundary_decision=dict(data.get("boundary_decision", {})),
         schema_version=str(data.get("schema_version", "2.0")),
     )
 

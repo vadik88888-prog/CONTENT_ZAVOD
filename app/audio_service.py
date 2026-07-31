@@ -418,6 +418,12 @@ def _tts_result_path(data: dict[str, Any] | None) -> str | None:
 
 
 def _narration_source_ranges(segment: NarrationSegment, transcript: dict[str, Any]) -> list[tuple[float, float]]:
+    if segment.source_ranges:
+        return [
+            (item.source_start_seconds, item.source_end_seconds)
+            for item in segment.source_ranges
+            if item.source_end_seconds > item.source_start_seconds
+        ]
     raw_segments = transcript.get("segments", []) if isinstance(transcript, dict) else []
     by_id = {
         int(item.get("id", index)): item for index, item in enumerate(raw_segments)

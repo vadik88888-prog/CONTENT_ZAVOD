@@ -128,7 +128,7 @@ class ContentUnderstandingConfig:
     min_story_unit_seconds: float = 12.0
     target_story_unit_seconds: float = 38.0
     max_story_unit_seconds: float = 90.0
-    boundary_schema_version: str = "5A.1"
+    boundary_schema_version: str = "5C.1"
     max_head_padding_seconds: float = 0.5
     target_head_padding_seconds: float = 0.25
     min_tail_padding_seconds: float = 0.25

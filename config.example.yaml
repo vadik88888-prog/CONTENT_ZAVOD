@@ -50,7 +50,7 @@ content_understanding:
   profile_schema_version: 5A.1
   content_map_schema_version: 5A.1
   story_unit_schema_version: 5A.1
-  boundary_schema_version: 5A.1
+  boundary_schema_version: 5C.1
   coverage_schema_version: 5A.1
   coverage_selection_version: 5A.1
   chapter_pause_seconds: 1.25

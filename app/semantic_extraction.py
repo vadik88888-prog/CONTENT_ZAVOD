@@ -109,6 +109,11 @@ def build_source_context(
         scene_boundaries=scene_boundaries,
         audio_energy_summary=audio_summary,
         candidate_features=dict(candidate.feature_vector),
+        boundary_decision=(
+            dict(candidate.boundary_diagnostics.get("boundary_decision", {}))
+            if isinstance(candidate.boundary_diagnostics, dict)
+            else {}
+        ),
     )
 
 
