@@ -7,7 +7,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtCore import QCoreApplication, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
@@ -74,6 +74,10 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
     def capture_preview_range(
         _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None, candidate_title=None,
     ) -> None:
+        # The real set_range invalidates the source request before binding its
+        # new range. Keep that lifecycle invariant in this lightweight UI
+        # wiring stub as well.
+        _preview._expected_source = QUrl()
         _preview.play_button.setEnabled(True)
         preview_ranges.append((Path(path), float(start_seconds), float(end_seconds), cache_directory, candidate_title))
 
@@ -441,20 +445,20 @@ def test_video_preview_frames_drafts_and_final_outputs_as_a_phone(tmp_path: Path
         app.processEvents()
 
 
-def test_av1_webm_candidate_preview_uses_existing_proxy(tmp_path: Path, monkeypatch) -> None:
+def test_range_selection_does_not_run_ffprobe_in_the_ui_click_path(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "source.webm"; source.write_bytes(b"source")
     preview = VideoPreview()
-    monkeypatch.setattr(
-        "app.gui.components.video_preview.probe_video",
-        lambda _path: {"video_codec": "av1"},
-    )
+    queued: list[int] = []
+    monkeypatch.setattr(preview, "_queue_source_load", lambda: queued.append(preview._selection_token))
 
     try:
-        assert preview._qt_can_decode_source(source) is False
+        preview.set_range(source, 1.0, 3.0, autoplay=False)
+        assert queued == [preview._selection_token]
+        assert preview._path == source
     finally:
         preview.close()
         preview.deleteLater()
@@ -471,6 +475,8 @@ def test_candidate_switch_ignores_stale_player_position(tmp_path: Path, monkeypa
     monkeypatch.setattr(preview, "_stop_at_range_end", lambda: stopped.append(True))
 
     try:
+        preview._path = tmp_path / "active.mp4"
+        monkeypatch.setattr(preview, "_is_current_player_source", lambda: True)
         preview._range_end_ms = 10
         preview._range_media_ready = False
         preview._position_changed(20)

@@ -321,9 +321,12 @@ class FinalResultsWorkspace(QWidget):
         if output is None:
             return
         self._active_id = output.result_id
-        self.preview.show_final(output.path, output.title)
         self._render_details(output, warnings)
         self._mark_active()
+        # Update card/details synchronously, then let VideoPreview queue the
+        # backend source handoff.  A slow multimedia backend must never delay
+        # the visible selection change.
+        self.preview.show_final(output.path, output.title)
         if emit:
             self.output_selected.emit(output.result_id)
 

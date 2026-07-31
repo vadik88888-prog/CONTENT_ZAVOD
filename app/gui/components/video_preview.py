@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import shutil
 import tempfile
 
-from PySide6.QtCore import QProcess, QSize, QTimer, QUrl, Signal, Qt
+from PySide6.QtCore import QEvent, QProcess, QSignalBlocker, QSize, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLayout, QLabel, QPushButton, QSlider, QSizePolicy, QVBoxLayout, QWidget
 
-from app.media import probe_video
 from app.utils import safe_name, stable_text_hash
 
 
 PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-v2"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,12 +99,15 @@ class VideoPreview(QFrame):
         self._range_end_ms: int | None = None
         self._range_autoplay = False
         self._range_media_ready = False
+        self._media_ready = False
         self._using_proxy = False
         self._presentation = "source"
         self._vertical_frame_size = (270, 480)
         self._selection_token = 0
+        self._expected_source = QUrl()
+        self._media_loading = False
+        self._last_audible_volume = 100
         self._proxy_cache_directory = Path(tempfile.gettempdir()) / "content-factory-preview-proxies"
-        self._support_cache: dict[str, bool] = {}
         self._active_proxy: _ProxyRequest | None = None
         self._pending_proxy: _ProxyRequest | None = None
         self._poster_cache_directory = Path(tempfile.gettempdir()) / "content-factory-preview-posters"
@@ -129,6 +133,8 @@ class VideoPreview(QFrame):
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
+        self.video.installEventFilter(self)
+        self.video.videoSink().videoSizeChanged.connect(self._video_size_changed)
 
         layout = QVBoxLayout(self)
         # Do not let a loaded stream's native frame size become a hard
@@ -144,14 +150,20 @@ class VideoPreview(QFrame):
         self.media_stage_layout.setContentsMargins(0, 0, 0, 0)
         self.media_stage_layout.addStretch()
         self.media_stage_layout.addWidget(self.video)
-        self.poster = QLabel()
+        self.media_stage_layout.addStretch()
+        # Keep the QVideoWidget visible for its entire lifetime. On Windows,
+        # hiding its native surface for a poster can let the Qt media backend
+        # continue audio playback while it stops presenting video frames.
+        # Poster and loading text are lightweight overlays, not layout peers.
+        self.poster = QLabel(self.media_stage)
         self.poster.setObjectName("videoPoster")
         self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.poster.setWordWrap(True)
         self.poster.hide()
-        self.media_stage_layout.addWidget(self.poster)
-        self.media_stage_layout.addWidget(self.placeholder)
-        self.media_stage_layout.addStretch()
+        self.placeholder.setParent(self.media_stage)
+        self.placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.poster.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.media_stage.installEventFilter(self)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.active_candidate = QLabel()
         self.active_candidate.setObjectName("active-candidate")
@@ -201,6 +213,8 @@ class VideoPreview(QFrame):
         buttons.addWidget(self.fullscreen_button)
         buttons.addWidget(self.open_button)
         layout.addLayout(buttons)
+        self.audio.volumeChanged.connect(self._audio_volume_changed)
+        self.audio.mutedChanged.connect(self._audio_muted_changed)
         self.audio.setVolume(1.0)
         self._set_available(False)
         self._set_presentation("source")
@@ -282,6 +296,7 @@ class VideoPreview(QFrame):
         self._range_end_ms = None
         self._range_autoplay = False
         self._range_media_ready = False
+        self._media_ready = False
         self._using_proxy = False
         candidate = Path(path) if path else None
         self._set_presentation(self._file_presentation(candidate, presentation))
@@ -295,16 +310,16 @@ class VideoPreview(QFrame):
         self._path = self._source_path
         self._clear_status()
         if self._path:
-            self.player.stop()
-            # Detach before loading the next source.  Windows Media Foundation
-            # otherwise can emit a late frame from the previous MP4.
-            self.player.setSource(QUrl())
-            self.player.setSource(QUrl.fromLocalFile(str(self._path)))
+            self._expected_source = QUrl.fromLocalFile(str(self._path))
+            self._stop_current_playback()
+            self._reset_timeline()
             self._show_placeholder("Готовим первый кадр…")
             self._request_poster(self._path)
+            self._queue_source_load()
         else:
             self._clear_media()
-        self._set_available(self._path is not None)
+        if self._path is None:
+            self._set_available(False)
 
     def set_range(
         self,
@@ -338,6 +353,7 @@ class VideoPreview(QFrame):
         self.active_candidate.show()
         self._range_autoplay = autoplay
         self._range_media_ready = False
+        self._media_ready = False
         self._clear_status()
         if not self.usable_media_path(self._source_path):
             self._show_error("Не удалось открыть исходный файл для предпросмотра.")
@@ -345,9 +361,10 @@ class VideoPreview(QFrame):
             return
         cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
         self._proxy_cache_directory = cache
-        if not self._qt_can_decode_source(self._source_path):
-            self._request_proxy(cache, "Готовим совместимый H.264/AAC предпросмотр для этого формата.")
-            return
+        # Do not run ffprobe here.  This method runs from a card click, and a
+        # synchronous probe can freeze the UI on a large or remote source.
+        # QMediaPlayer reports an unsupported source asynchronously; that path
+        # still creates the existing compatible short proxy when needed.
         self._activate_direct_source()
 
     def _activate_direct_source(self) -> None:
@@ -358,13 +375,59 @@ class VideoPreview(QFrame):
         self._range_start_ms = int(round(start * 1000))
         self._range_end_ms = int(round(end * 1000))
         self._range_media_ready = False
-        self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(self._path)))
+        self._media_ready = False
+        self._expected_source = QUrl.fromLocalFile(str(self._path))
+        self._stop_current_playback()
         self.poster.hide()
-        self.placeholder.hide()
         self.video.show()
-        self._set_available(True)
+        self._show_placeholder("Загружаем исходный фрагмент…")
+        self._queue_source_load()
         self._show_status("Загружаем исходный фрагмент…")
+
+    def _queue_source_load(self) -> None:
+        """Schedule the inexpensive Qt source handoff after the card repaint.
+
+        QMediaPlayer must stay on the GUI thread because it owns a widget
+        output, but the Windows backend performs the actual open/decode
+        asynchronously.  Deferring the handoff lets the clicked card, loading
+        state and controls repaint first, and coalesces rapid selections.
+        """
+
+        if self._path is None:
+            return
+        token = self._selection_token
+        self._media_loading = True
+        self._set_available(False)
+        QTimer.singleShot(0, lambda value=token: self._load_selected_source(value))
+
+    def _load_selected_source(self, token: int) -> None:
+        if token != self._selection_token or self._path is None:
+            return
+        self._ensure_video_output()
+        source = QUrl.fromLocalFile(str(self._path))
+        if source != self._expected_source:
+            return
+        logger.info("media source load requested token=%s source=%s", token, self._path)
+        # Do not set an empty source between selections. With the Windows Qt
+        # multimedia backend that forces renderer teardown and was the source
+        # of multi-second UI stalls on rapid card switches.
+        self.player.setSource(source)
+
+    def _stop_current_playback(self) -> None:
+        state_getter = getattr(self.player, "playbackState", None)
+        stop = getattr(self.player, "stop", None)
+        if callable(stop) and (not callable(state_getter) or state_getter() != QMediaPlayer.PlaybackState.StoppedState):
+            logger.info("media playback stopped before source switch")
+            stop()
+
+    def _ensure_video_output(self) -> None:
+        """Recover a detached output without rebinding a healthy live sink."""
+
+        output_getter = getattr(self.player, "videoOutput", None)
+        output = output_getter() if callable(output_getter) else self.video
+        if output is not self.video:
+            logger.warning("media video output was detached; restoring persistent QVideoWidget")
+            self.player.setVideoOutput(self.video)
 
     def _request_poster(self, source_path: Path) -> None:
         request = _PosterRequest(
@@ -425,6 +488,8 @@ class VideoPreview(QFrame):
     def _show_poster(self, request: _PosterRequest) -> None:
         if request.token != self._selection_token or self._source_path != request.source_path:
             return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return
         pixmap = QPixmap(str(request.destination))
         if pixmap.isNull():
             self._show_placeholder("Первый кадр недоступен. Нажмите «Воспроизвести».")
@@ -434,15 +499,18 @@ class VideoPreview(QFrame):
             self.poster.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         ))
-        self.video.hide()
         self.placeholder.hide()
+        self._sync_stage_overlays()
         self.poster.show()
+        self.poster.raise_()
 
     def _show_placeholder(self, message: str) -> None:
         self.poster.hide()
-        self.video.hide()
+        self.video.show()
         self.placeholder.setText(message)
+        self._sync_stage_overlays()
         self.placeholder.show()
+        self.placeholder.raise_()
 
     def _show_video(self) -> None:
         self.poster.hide()
@@ -452,13 +520,9 @@ class VideoPreview(QFrame):
     def _file_presentation(self, candidate: Path | None, presentation: str) -> str:
         if presentation in {"source", "vertical"}:
             return presentation
-        if candidate and self.usable_media_path(candidate):
-            try:
-                metadata = probe_video(candidate)
-                if float(metadata.get("height") or 0) > float(metadata.get("width") or 0):
-                    return "vertical"
-            except Exception:
-                pass
+        # This is invoked from the UI thread.  Final and draft callers pass an
+        # explicit presentation, and auto mode deliberately avoids a blocking
+        # ffprobe just to infer an optional visual frame.
         return "source"
 
     def _set_presentation(self, presentation: str) -> None:
@@ -492,31 +556,33 @@ class VideoPreview(QFrame):
         self.media_stage.style().unpolish(self.media_stage)
         self.media_stage.style().polish(self.media_stage)
 
-    def _qt_can_decode_source(self, source_path: Path) -> bool:
-        """Return whether a candidate interval is safe for direct Qt playback."""
+        # Layout geometry is applied asynchronously by Qt after an output
+        # changes its native stream size.
+        QTimer.singleShot(0, self._sync_stage_overlays)
 
-        try:
-            stat = source_path.stat()
-            key = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
-        except OSError:
-            key = str(source_path)
-        cached = self._support_cache.get(key)
-        if cached is not None:
-            return cached
-        supported = True
-        try:
-            metadata = probe_video(source_path)
-            if str(metadata.get("video_codec") or "").lower() == "av1" and source_path.suffix.lower() == ".webm":
-                # Media Foundation can report AV1/WebM as supported yet show a
-                # black frame after a later range seek. Candidate previews
-                # need predictable seeking, so use the existing short proxy.
-                supported = False
-        except Exception:
-            # Probe failure is not a reason to reject a potentially playable
-            # file; the QMediaPlayer error path still has the proxy fallback.
-            supported = True
-        self._support_cache[key] = supported
-        return supported
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched in {self.video, self.media_stage} and event.type() in {
+            QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show, QEvent.Type.LayoutRequest,
+        }:
+            QTimer.singleShot(0, self._sync_stage_overlays)
+        if (
+            watched is self.video
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+            and self.video.isFullScreen()
+        ):
+            self.video.setFullScreen(False)
+            return True
+        return super().eventFilter(watched, event)
+
+    def _sync_stage_overlays(self) -> None:
+        if self.video.isFullScreen():
+            return
+        geometry = self.video.geometry()
+        if geometry.width() <= 0 or geometry.height() <= 0:
+            geometry = self.media_stage.rect()
+        self.poster.setGeometry(geometry)
+        self.placeholder.setGeometry(geometry)
 
     def _request_proxy(self, cache_directory: Path, reason: str) -> None:
         assert self._source_path is not None and self._source_range_seconds is not None
@@ -528,13 +594,17 @@ class VideoPreview(QFrame):
             end_seconds=end,
             destination=preview_proxy_path(cache_directory, self._source_path, start, end),
         )
-        self.player.stop()
+        self._expected_source = QUrl()
+        self._stop_current_playback()
         self._path = None
+        self._media_loading = True
         self._using_proxy = True
         self._set_available(False)
         self.placeholder.setText("Подготавливаем совместимый предпросмотр…")
         self.placeholder.show()
-        self.video.hide()
+        self.video.show()
+        self._sync_stage_overlays()
+        self.placeholder.raise_()
         self._show_status(reason)
         if self.usable_media_path(request.destination):
             self._cancel_proxy()
@@ -611,41 +681,54 @@ class VideoPreview(QFrame):
         self._range_start_ms = 0
         self._range_end_ms = int(round((request.end_seconds - request.start_seconds) * 1000))
         self._range_media_ready = False
-        self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(self._path)))
+        self._media_ready = False
+        self._expected_source = QUrl.fromLocalFile(str(self._path))
+        self._stop_current_playback()
         self.poster.hide()
-        self.placeholder.hide()
         self.video.show()
-        self._set_available(True)
+        self._show_placeholder("Загружаем совместимый предпросмотр…")
+        self._queue_source_load()
         self._show_status(
             f"Совместимый preview готов: {request.start_seconds:.1f}–{request.end_seconds:.1f} с исходного видео."
         )
         self.preview_ready.emit(str(request.destination))
 
     def _media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
-        if self._path is None:
+        if not self._is_current_player_source():
             return
+        logger.info("media status=%s source=%s", status.name, self._path)
         if (
             status == QMediaPlayer.MediaStatus.EndOfMedia
             and self._range_media_ready
             and self._range_end_ms is not None
         ):
-            # Windows Media Foundation can reset position to zero after the
+            # The Windows Qt backend can reset position to zero after the
             # terminal frame.  Keep the stopped candidate visibly at its end.
             self._stop_at_range_end()
             return
         if status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._media_loading = False
             if self._source_path and self._source_range_seconds and not self._using_proxy:
                 self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не смог открыть исходный формат; создаём совместимый preview.")
             else:
                 self._show_error("Qt Multimedia не смог открыть подготовленный предпросмотр.")
             return
-        if self._range_start_ms is None:
-            return
         if status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
+            self._media_loading = False
+            self._set_available(True)
+            if self._range_start_ms is None:
+                # Decode/present frame zero while the poster is still merely an
+                # overlay.  The QVideoWidget has never been hidden, so Play can
+                # transition directly to moving frames rather than recreating a
+                # native video surface.
+                if not self._media_ready:
+                    self._media_ready = True
+                    self.player.setPosition(0)
+                self._clear_status()
+                return
             if self._range_media_ready:
                 return
-            # Media Foundation updates QVideoWidget's native size after the
+            # The Qt backend updates QVideoWidget's native size after the
             # source is loaded.  Reapply the bounded presentation afterwards
             # so a 1440p landscape source cannot widen the review page.
             self._set_presentation(self._presentation)
@@ -657,6 +740,8 @@ class VideoPreview(QFrame):
                 self._start_range_playback()
 
     def _position_changed(self, position: int) -> None:
+        if not self._is_current_player_source():
+            return
         self._update_timeline(position)
         if not self._range_media_ready or self._range_end_ms is None:
             return
@@ -670,6 +755,8 @@ class VideoPreview(QFrame):
             self._stop_at_range_end()
 
     def _duration_changed(self, _duration: int) -> None:
+        if not self._is_current_player_source():
+            return
         self._update_timeline(self.player.position())
 
     def _update_timeline(self, position: int) -> None:
@@ -694,7 +781,7 @@ class VideoPreview(QFrame):
             self.time_label.setText(f"{self._format_time(round(duration * value / 1000))} / {self._format_time(duration)}")
 
     def _seek_released(self) -> None:
-        if not self._path:
+        if not self._path or self._media_loading:
             return
         duration = self._timeline_duration()
         if duration <= 0:
@@ -722,11 +809,16 @@ class VideoPreview(QFrame):
             return
         self.player.pause()
         # Seeking to an exact file duration is normalized to zero by Windows
-        # Media Foundation.  The final millisecond is the same visible end
+        # Windows Qt backend. The final millisecond is the same visible end
         # frame while remaining a stable, paused position.
         last_frame = max(self._range_start_ms or 0, self._range_end_ms - 1)
-        QTimer.singleShot(0, lambda position=last_frame: self.player.setPosition(position))
+        token = self._selection_token
+        QTimer.singleShot(0, lambda position=last_frame, value=token: self._seek_if_current(value, position))
         self._show_status("Просмотр завершён на конце выбранного фрагмента.")
+
+    def _seek_if_current(self, token: int, position: int) -> None:
+        if token == self._selection_token and self._is_current_player_source():
+            self.player.setPosition(position)
 
     def open_externally(self) -> None:
         target = self._source_path or self._path
@@ -740,10 +832,13 @@ class VideoPreview(QFrame):
         self._play()
 
     def _play(self) -> None:
-        if not self._path:
+        if not self._path or self._media_loading:
             if self._active_proxy is not None:
                 self._show_status("Предпросмотр ещё подготавливается.")
+            elif self._media_loading:
+                self._show_status("Видео ещё загружается.")
             return
+        self._ensure_video_output()
         self._show_video()
         if self._range_start_ms is None:
             self.player.play()
@@ -755,23 +850,61 @@ class VideoPreview(QFrame):
             return
         if self._range_start_ms > 0:
             self.player.setPosition(self._range_start_ms)
-        QTimer.singleShot(0, self.player.play)
+        token = self._selection_token
+        QTimer.singleShot(0, lambda value=token: self._play_if_current(value))
         self._show_status("Воспроизведение выбранного фрагмента…")
 
+    def _play_if_current(self, token: int) -> None:
+        if token == self._selection_token and self._is_current_player_source():
+            self.player.play()
+
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        playing = not self._media_loading and state == QMediaPlayer.PlaybackState.PlayingState
+        logger.info("media playback state=%s source=%s", state.name, self._path)
         self.play_button.setText("❚❚" if playing else "▶")
         self.play_button.setToolTip("Пауза" if playing else "Воспроизвести")
 
     def _toggle_mute(self) -> None:
-        self.audio.setMuted(not self.audio.isMuted())
+        if self.audio.isMuted():
+            if self.volume_slider.value() == 0:
+                self._set_slider_volume(self._last_audible_volume)
+            self.audio.setMuted(False)
+        elif self.volume_slider.value() == 0:
+            # A zero slider is silent but not necessarily QAudioOutput-muted.
+            # The speaker control restores the last audible level as users
+            # expect from an unmute action.
+            self._set_slider_volume(self._last_audible_volume)
+            self.audio.setMuted(False)
+        else:
+            self.audio.setMuted(True)
         self._update_volume_button()
 
     def _set_volume(self, value: int) -> None:
-        self.audio.setVolume(max(0, min(100, value)) / 100)
+        value = max(0, min(100, int(value)))
+        if value > 0:
+            self._last_audible_volume = value
+        self.audio.setVolume(value / 100.0)
         if value > 0 and self.audio.isMuted():
             self.audio.setMuted(False)
         self._update_volume_button()
+
+    def _audio_volume_changed(self, value: float) -> None:
+        percent = max(0, min(100, round(float(value) * 100)))
+        if percent > 0:
+            self._last_audible_volume = percent
+        if self.volume_slider.value() != percent:
+            self._set_slider_volume(percent)
+        self._update_volume_button()
+
+    def _audio_muted_changed(self, _muted: bool) -> None:
+        self._update_volume_button()
+
+    def _set_slider_volume(self, value: int) -> None:
+        value = max(0, min(100, int(value)))
+        blocker = QSignalBlocker(self.volume_slider)
+        self.volume_slider.setValue(value)
+        del blocker
+        self._set_volume(value)
 
     def _update_volume_button(self) -> None:
         muted = self.audio.isMuted() or self.volume_slider.value() == 0
@@ -779,13 +912,40 @@ class VideoPreview(QFrame):
         self.volume_button.setToolTip("Включить звук" if muted else "Выключить звук")
 
     def _toggle_fullscreen(self) -> None:
+        if not self._path or self._media_loading:
+            return
+        self._ensure_video_output()
+        self._show_video()
         self.video.setFullScreen(not self.video.isFullScreen())
 
     def _fullscreen_changed(self, enabled: bool) -> None:
+        logger.info("media fullscreen=%s source=%s", enabled, self._path)
         self.fullscreen_button.setText("⤢" if enabled else "⛶")
         self.fullscreen_button.setToolTip("Выйти из полного экрана" if enabled else "На весь экран")
+        if not enabled:
+            QTimer.singleShot(0, self._sync_stage_overlays)
+
+    def _video_size_changed(self) -> None:
+        size = self.video.videoSink().videoSize()
+        logger.info("media video size=%sx%s source=%s", size.width(), size.height(), self._path)
+        if not self.video.isFullScreen():
+            self._set_presentation(self._presentation)
+
+    def _is_current_player_source(self) -> bool:
+        if self._path is None:
+            return False
+        source_getter = getattr(self.player, "source", None)
+        if not self._expected_source.isValid():
+            # Keeps small unit fakes that only exercise state handling simple,
+            # while rejecting real backend notifications after a source clear.
+            return not callable(source_getter)
+        return not callable(source_getter) or source_getter() == self._expected_source
 
     def _media_error(self, *_: object) -> None:
+        if not self._is_current_player_source():
+            return
+        self._media_loading = False
+        logger.error("media error source=%s details=%s", self._path, self.player.errorString().strip())
         if self._source_path and self._source_range_seconds and not self._using_proxy:
             self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не поддержал исходный формат; создаём совместимый preview.")
             return
@@ -803,15 +963,18 @@ class VideoPreview(QFrame):
             self._poster_process.kill()
 
     def _clear_media(self) -> None:
-        self.player.stop()
-        self.player.setSource(QUrl())
+        self._expected_source = QUrl()
+        self._stop_current_playback()
         self._path = None
+        self._media_loading = False
         self._range_media_ready = False
+        self._media_ready = False
         self.poster.hide()
-        self.video.hide()
+        self.video.show()
         self.placeholder.show()
-        self.time_label.setText("00:00 / 00:00")
-        self.seek_slider.setValue(0)
+        self._sync_stage_overlays()
+        self.placeholder.raise_()
+        self._reset_timeline()
         self._set_available(False)
 
     def _show_status(self, message: str) -> None:
@@ -824,18 +987,29 @@ class VideoPreview(QFrame):
         self.preview_status.hide()
 
     def _show_error(self, message: str) -> None:
-        self.player.stop()
+        self._expected_source = QUrl()
+        self._stop_current_playback()
         self._path = None
+        self._media_loading = False
         self._range_media_ready = False
+        self._media_ready = False
         self.poster.hide()
         self.placeholder.setText(message)
         self.placeholder.show()
-        self.video.hide()
+        self.video.show()
+        self._sync_stage_overlays()
+        self.placeholder.raise_()
         self.preview_status.setStyleSheet("color: #d66;")
         self.preview_status.setText(message)
         self.preview_status.show()
         self._set_available(False)
         self.preview_error.emit(message)
+
+    def _reset_timeline(self) -> None:
+        self.time_label.setText("00:00 / 00:00")
+        blocker = QSignalBlocker(self.seek_slider)
+        self.seek_slider.setValue(0)
+        del blocker
 
     def _ffmpeg_error_text(self) -> str:
         return bytes(self._proxy_process.readAllStandardError()).decode("utf-8", errors="replace").strip()
@@ -851,3 +1025,12 @@ class VideoPreview(QFrame):
     @staticmethod
     def usable_media_path(path: Path | None) -> bool:
         return bool(path and path.is_file() and path.stat().st_size > 0)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self.video.isFullScreen():
+            self.video.setFullScreen(False)
+        self._expected_source = QUrl()
+        self._stop_current_playback()
+        self._cancel_proxy()
+        self._cancel_poster()
+        super().closeEvent(event)
