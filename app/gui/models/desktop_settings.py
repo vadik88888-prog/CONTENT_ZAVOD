@@ -15,6 +15,10 @@ class DesktopSettings:
     theme: str = "dark"
     onboarding_completed: bool = False
     window_geometry: str | None = None
+    # Navigation restoration is deliberately small: a project identity and
+    # the shell route, never transient pipeline state or artifact paths.
+    last_open_project_id: str | None = None
+    last_screen: str = "projects"
 
     @classmethod
     def defaults(cls, data_directory: Path) -> "DesktopSettings":
@@ -31,6 +35,10 @@ class DesktopSettings:
             raise ValueError("Unsupported device preference.")
         if not isinstance(self.local_test_mode, bool) or not isinstance(self.onboarding_completed, bool):
             raise ValueError("Settings booleans are invalid.")
+        if self.last_screen not in {"projects", "project", "settings"}:
+            raise ValueError("Unsupported restored screen.")
+        if self.last_open_project_id is not None and not self.last_open_project_id.strip():
+            raise ValueError("Restored project identity is invalid.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -47,6 +55,8 @@ class DesktopSettings:
             theme=str(value.get("theme", "dark")),
             onboarding_completed=bool(value.get("onboarding_completed", False)),
             window_geometry=str(value["window_geometry"]) if value.get("window_geometry") else None,
+            last_open_project_id=str(value["last_open_project_id"]) if value.get("last_open_project_id") else None,
+            last_screen=str(value.get("last_screen", "projects")),
         )
         settings.validate()
         return settings

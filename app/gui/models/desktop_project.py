@@ -152,6 +152,10 @@ class DesktopProject:
     review_selected_candidate_ids: list[str] = field(default_factory=list)
     selected_candidate_ids: list[str] = field(default_factory=list)
     candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The result viewer is part of the durable project workspace.  Store the
+    # stable result identity rather than a list index or filename, so a
+    # reopened project returns to the exact output the person last reviewed.
+    last_final_result_id: str | None = None
     schema_version: int = 3
 
     def validate(self) -> None:
@@ -182,6 +186,8 @@ class DesktopProject:
         if any(not candidate_id or not isinstance(message, str) or not message.strip()
                for candidate_id, message in self.candidate_errors.items()):
             raise ValueError("Candidate error is invalid.")
+        if self.last_final_result_id is not None and not self.last_final_result_id.strip():
+            raise ValueError("Last final result identity is invalid.")
         for candidate_id, override in self.candidate_boundary_overrides.items():
             if not candidate_id or not isinstance(override, dict):
                 raise ValueError("Candidate boundary override is invalid.")
@@ -265,6 +271,9 @@ class DesktopProject:
                 str(key): dict(item) for key, item in dict(value.get("candidate_boundary_overrides") or {}).items()
                 if isinstance(item, dict)
             },
+            last_final_result_id=(
+                str(value["last_final_result_id"]) if value.get("last_final_result_id") else None
+            ),
             # Older projects had only ``source_path``.  They are migrated in memory
             # to an explicit local source and written as v3 on the next save.
             schema_version=3,

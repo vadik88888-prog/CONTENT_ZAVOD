@@ -51,26 +51,47 @@ class MainWindow(QMainWindow):
         self.projects_screen.project_opened.connect(self.show_project)
         self.project_screen.back_requested.connect(self.show_projects)
         layout.addWidget(self.stack, 1)
-        self.show_projects()
+        self._restore_last_screen()
         QTimer.singleShot(0, self._maybe_onboard)
 
-    def show_projects(self) -> None:
+    def show_projects(self, *, remember: bool = True) -> None:
         self.stack.setCurrentIndex(self.projects_index)
         self._set_selected(self.projects_button)
         self.projects_screen.refresh()
+        if remember:
+            self.services.settings.last_screen = "projects"
 
-    def show_project(self, project) -> None:
+    def show_project(self, project, *, remember: bool = True) -> None:
         self.project_screen.open(project)
         self.stack.setCurrentIndex(self.project_index)
         self._set_selected(None)
+        if remember:
+            self.services.settings.last_screen = "project"
+            self.services.settings.last_open_project_id = project.project_id
 
     def show_settings(self) -> None:
         self.stack.setCurrentIndex(self.settings_index)
         self._set_selected(self.settings_button)
+        self.services.settings.last_screen = "settings"
 
     def _new_project(self) -> None:
         self.show_projects()
         self.projects_screen.choose_file()
+
+    def _restore_last_screen(self) -> None:
+        if self.services.settings.last_screen == "project" and self.services.settings.last_open_project_id:
+            try:
+                project = self.services.projects.load(self.services.settings.last_open_project_id)
+            except Exception:
+                self.show_projects(remember=False)
+                return
+            self.show_project(project, remember=False)
+            return
+        if self.services.settings.last_screen == "settings":
+            self.stack.setCurrentIndex(self.settings_index)
+            self._set_selected(self.settings_button)
+            return
+        self.show_projects(remember=False)
 
     def _maybe_onboard(self) -> None:
         if not self.services.settings.onboarding_completed:

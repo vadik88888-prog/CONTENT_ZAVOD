@@ -13,10 +13,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QVBoxLayout, QWidget,
 )
 
-from app.gui.components import CandidateThumbnailLoader, ProcessingProgress, VideoPreview
+from app.clip_results import ClipResult, primary_clip_results, unique_primary_results
+from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
 from app.gui.services.error_mapping import dialog_message
 from app.gui.viewmodels import ProjectViewModel
+from app.media import probe_video
 from app.utils import format_seconds, read_json
 
 
@@ -55,6 +57,7 @@ class ProjectScreen(QWidget):
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
         self._candidate_cards: dict[str, QFrame] = {}
         self._flow_step = "settings"
+        self._results_subflow_override: str | None = None
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.thumbnail_unavailable.connect(self._thumbnail_unavailable)
@@ -217,6 +220,11 @@ class ProjectScreen(QWidget):
         self.production_button.setObjectName("primary")
         self.production_button.clicked.connect(self._confirm_production_render)
         left.addWidget(self.candidate_review)
+        self.final_results = FinalResultsWorkspace()
+        self.final_results.output_selected.connect(self._final_output_selected)
+        self.final_results.create_more_requested.connect(self._create_more_outputs)
+        self.final_results.projects_requested.connect(self.back_requested)
+        left.addWidget(self.final_results)
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
         self.progress.continue_waiting_requested.connect(self.viewmodel.continue_waiting)
@@ -334,11 +342,16 @@ class ProjectScreen(QWidget):
         self.viewmodel.error_occurred.connect(self._error)
 
     def open(self, project: DesktopProject) -> None:
+        # Explicit navigation back to a project starts from its reconciled
+        # persisted state; the temporary "create more" route is session-only.
+        self._results_subflow_override = None
         self.viewmodel.open(project)
 
     def _project_changed(self, project: DesktopProject) -> None:
         is_new_project = self.project is None or self.project.project_id != project.project_id
         self.project = project
+        if is_new_project:
+            self._results_subflow_override = None
         self.title.setText(project.name)
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
         self.run_button.setText("Начать поиск моментов")
@@ -371,6 +384,7 @@ class ProjectScreen(QWidget):
         self._update_download_card(project)
         self._update_setup_card(project)
         self._update_candidate_review(project)
+        self._update_final_results(project)
         self._update_next_step(project)
         self._refresh_active_candidate_detail(project)
         self._apply_flow_visibility(project)
@@ -417,6 +431,10 @@ class ProjectScreen(QWidget):
             return "download" if snapshot.stage == "download" else "processing"
         if not project.source_spec.is_ready:
             return "download"
+        if self._results_subflow_override == "candidates" and project.analysis_artifact_path:
+            return "candidates"
+        if self._final_output_records(project):
+            return "finished"
         states = project.candidate_states.values()
         if project.selected_candidate_ids or any(state in {"draft_ready", "selected"} for state in states):
             return "drafts"
@@ -447,9 +465,12 @@ class ProjectScreen(QWidget):
         self.download_card.setVisible(step == "download" and not active)
         self.setup_card.setVisible(step == "settings" and not active)
         review_visible = step in {"candidates", "drafts", "finished"} and not active
-        self.candidate_review.setVisible(review_visible)
-        self.preview.setVisible(review_visible and project.source_spec.is_ready)
-        self.candidate_detail.setVisible(review_visible and self._active_candidate_id is not None)
+        final_visible = step == "finished" and bool(self._final_output_records(project)) and not active
+        self.candidate_review.setVisible(review_visible and not final_visible)
+        self.preview.setVisible(review_visible and not final_visible and project.source_spec.is_ready)
+        self.candidate_detail.setVisible(review_visible and not final_visible and self._active_candidate_id is not None)
+        self.final_results.setVisible(final_visible)
+        self.flow_card.setVisible(not final_visible)
         self.progress.setVisible(active)
         self.next_step.hide()
         self.metadata.hide()
@@ -547,6 +568,8 @@ class ProjectScreen(QWidget):
                 "drafts": "Проверьте черновики",
                 "finished": "Готовые ролики",
             }.get(step, "Моменты"))
+        if self._derive_flow_step(project) == "finished" and self._final_output_records(project):
+            return
         persistent = {self.workflow_hint, self.draft_button, self.production_button}
         while layout.count() > 1:
             item = layout.takeAt(1)
@@ -804,28 +827,198 @@ class ProjectScreen(QWidget):
             return
         self.workflow_hint.setText("Посмотрите моменты и добавьте к черновикам от одного до трёх лучших.")
 
-    def _final_outputs_by_candidate(self) -> dict[str, Path]:
-        """Find candidate-owned final MP4s listed by saved production reports."""
+    def _runs_for_project(self, project: DesktopProject) -> list[ProjectRun]:
+        if self.runs and all(run.project_id == project.project_id for run in self.runs):
+            return self.runs
+        return self.viewmodel.services.runs_for(project)
 
-        outputs: dict[str, Path] = {}
-        for run in self.runs:
+    def _final_output_records(self, project: DesktopProject) -> list[ClipResult]:
+        """Read only the canonical result registry, never folders or list positions."""
+
+        collected: list[ClipResult] = []
+        for run in self._runs_for_project(project):
             if not run.report_path:
                 continue
             report = read_json(Path(run.report_path), {})
             if not isinstance(report, dict):
                 continue
-            items = report.get("primary_results", [])
-            if not isinstance(items, list):
-                production = report.get("production_render", {})
-                items = production.get("items", []) if isinstance(production, dict) else []
-            for item in items:
-                if not isinstance(item, dict) or str(item.get("status") or "") not in {"completed", "warning"}:
+            raw_registry = report.get("primary_results")
+            if isinstance(raw_registry, list):
+                registry = [item for raw in raw_registry if (item := ClipResult.from_dict(raw)) is not None]
+            else:
+                registry = primary_clip_results(report.get("production_render"))
+            for result in registry:
+                path = Path(result.output_file)
+                if path.is_absolute() and VideoPreview.usable_media_path(path):
+                    collected.append(result)
+        return unique_primary_results(collected)
+
+    def _final_outputs_by_candidate(self) -> dict[str, Path]:
+        """Compatibility map for the candidate workspace, based on canonical records."""
+
+        if not self.project:
+            return {}
+        return {
+            result.candidate_id: Path(result.output_file)
+            for result in self._final_output_records(self.project)
+        }
+
+    def _update_final_results(self, project: DesktopProject) -> None:
+        records = self._final_output_records(project)
+        if not records:
+            return
+        candidates = self._final_candidate_metadata(project)
+        outputs: list[FinalOutput] = []
+        for result in records:
+            path = Path(result.output_file)
+            try:
+                media = probe_video(path)
+            except Exception:
+                media = {}
+            result_id = result.clip_result_id or result.candidate_id
+            outputs.append(FinalOutput(
+                result_id=result_id,
+                candidate_id=result.candidate_id,
+                path=path,
+                title=str(candidates.get(result.candidate_id, {}).get("title") or f"Ролик из момента {result.candidate_id}"),
+                duration_seconds=self._float_or_none(media.get("duration")),
+                width=self._int_or_none(media.get("width")),
+                height=self._int_or_none(media.get("height")),
+                source_start_seconds=(
+                    result.source_start_seconds
+                    if result.source_start_seconds is not None
+                    else self._float_or_none(candidates.get(result.candidate_id, {}).get("start"))
+                ),
+                source_end_seconds=(
+                    result.source_end_seconds
+                    if result.source_end_seconds is not None
+                    else self._float_or_none(candidates.get(result.candidate_id, {}).get("end"))
+                ),
+                status=result.status,
+            ))
+        self.final_results.set_results(
+            outputs,
+            selected_id=project.last_final_result_id,
+            project_directory=project.directory,
+            warnings=self._final_warnings(project),
+        )
+
+    def _final_candidate_metadata(self, project: DesktopProject) -> dict[str, dict[str, object]]:
+        """Read titles and source ranges from already-persisted candidate metadata."""
+
+        path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
+        analysis = read_json(path, {}) if path and path.is_file() else {}
+        candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
+        metadata = {
+            str(item.get("candidate_id")): {
+                "title": str(item.get("title") or item.get("core_idea") or "Готовый ролик"),
+                "start": item.get("start_seconds", item.get("start")),
+                "end": item.get("end_seconds", item.get("end")),
+            }
+            for item in candidates if isinstance(item, dict) and item.get("candidate_id")
+        }
+        for run in self._runs_for_project(project):
+            if not run.report_path:
+                continue
+            report = read_json(Path(run.report_path), {})
+            intelligence = report.get("clip_intelligence", {}) if isinstance(report, dict) else {}
+            candidates = intelligence.get("candidates", []) if isinstance(intelligence, dict) else []
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
                     continue
-                candidate_id = str(item.get("candidate_id") or "")
-                output_file = Path(str(item.get("output_file") or ""))
-                if candidate_id and output_file.is_file():
-                    outputs.setdefault(candidate_id, output_file)
-        return outputs
+                candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "")
+                if not candidate_id or candidate_id in metadata:
+                    continue
+                excerpt = str(candidate.get("title") or candidate.get("core_idea") or candidate.get("text") or "").strip()
+                metadata[candidate_id] = {
+                    "title": (excerpt[:96].rstrip() + "…") if len(excerpt) > 96 else excerpt,
+                    "start": candidate.get("start_seconds", candidate.get("start")),
+                    "end": candidate.get("end_seconds", candidate.get("end")),
+                }
+        return metadata
+
+    def _final_warnings(self, project: DesktopProject) -> list[str]:
+        warnings: list[str] = []
+        for run in self._runs_for_project(project):
+            warnings.extend(run.warnings)
+            if run.report_path:
+                report = read_json(Path(run.report_path), {})
+                if isinstance(report, dict):
+                    values = report.get("warnings", [])
+                    if isinstance(values, list):
+                        warnings.extend(str(value) for value in values if str(value).strip())
+                    production = report.get("production_render", {})
+                    if isinstance(production, dict):
+                        values = production.get("warnings", [])
+                        if isinstance(values, list):
+                            warnings.extend(str(value) for value in values if str(value).strip())
+        return self._summarize_final_warnings(list(dict.fromkeys(warnings)))
+
+    @staticmethod
+    def _summarize_final_warnings(warnings: list[str]) -> list[str]:
+        """Keep the persisted warnings concrete without exposing raw FFmpeg logs."""
+
+        summarized: list[str] = []
+        evidence_counts: dict[str, int] = {}
+        cpu_fallback = False
+        for warning in warnings:
+            text = str(warning).strip()
+            if not text:
+                continue
+            if text.startswith("Transformation ") and "source_evidence_map was restored" in text:
+                candidate_id = text.split(":", 1)[0].replace("Transformation ", "").strip()
+                evidence_counts[candidate_id] = evidence_counts.get(candidate_id, 0) + 1
+                continue
+            if text.startswith("NVENC render failed; CPU fallback used"):
+                cpu_fallback = True
+                continue
+            if text == "AI transformation failed -> local fallback used.":
+                summarized.append("AI-преобразование недоступно; использован локальный fallback сценария.")
+                continue
+            summarized.append(text[:280] + ("…" if len(text) > 280 else ""))
+        for candidate_id, count in evidence_counts.items():
+            summarized.append(
+                f"{candidate_id}: связь фактов с исходными сегментами восстановлена автоматически ({count})."
+            )
+        if cpu_fallback:
+            summarized.append(
+                "Для финального рендера использован CPU: NVENC недоступен для установленной версии драйвера NVIDIA."
+            )
+        return list(dict.fromkeys(summarized))
+
+    def _final_output_selected(self, result_id: str) -> None:
+        self.viewmodel.select_final_output(result_id)
+
+    def _create_more_outputs(self) -> None:
+        if not self.project:
+            return
+        if not self.project.analysis_artifact_path:
+            QMessageBox.information(
+                self,
+                "Создать ещё ролики",
+                "Для этого проекта не сохранился список моментов. Создать дополнительные ролики без нового анализа нельзя.",
+            )
+            return
+        self._results_subflow_override = "candidates"
+        self.preview.show_source(self.project.source)
+        self._update_candidate_review(self.project)
+        self._apply_flow_visibility(self.project)
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _int_or_none(value: object) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _draft_action(self) -> None:
         if not self.project:
@@ -1116,16 +1309,8 @@ class ProjectScreen(QWidget):
             folder.clicked.connect(lambda _, path=Path(run.log_path).parent if run.log_path else None: self._open_folder(path))
             layout.addWidget(folder)
             self.history_layout.insertWidget(self.history_layout.count() - 1, frame)
-        final_run = next(
-            (run for run in runs if run.run_kind in {"selected_render", "render_revision"}), None,
-        )
-        if final_run:
-            result = next(
-                (Path(item) for item in final_run.artifact_paths if Path(item).suffix.lower() == ".mp4" and Path(item).is_file()), None,
-            )
-            if result:
-                self._show_final_preview(result)
         if self.project:
+            self._update_final_results(self.project)
             self._update_candidate_review(self.project)
             self._update_next_step(self.project)
 

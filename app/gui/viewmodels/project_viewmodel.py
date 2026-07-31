@@ -193,6 +193,19 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def select_final_output(self, result_id: str) -> None:
+        """Persist the exact canonical result currently open in the viewer."""
+
+        if not self.project or self.active or not result_id.strip():
+            return
+        try:
+            self.project.last_final_result_id = result_id
+            self.services.projects.save(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return
+        self.project_changed.emit(self.project)
+
     def render_selected(self) -> None:
         if not self.project or self.active:
             return
