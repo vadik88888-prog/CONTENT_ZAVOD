@@ -703,7 +703,8 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
     assert report["quality"]["status"] in {"passed", "warning"}
     assert report["subtitles_enabled"] is True
     layout = report["subtitle_layout"]
-    assert layout["contract_version"] == "4D.0"
+    assert layout["contract_version"] == "5E.0"
+    assert layout["quality_decision"]["schema_version"] == "5E.0"
     assert layout["resolved_cue_count"] == report["subtitle_cue_count"]
     assert layout["final_validation"] == report["quality"]
     assert all({

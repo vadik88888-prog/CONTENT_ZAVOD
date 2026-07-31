@@ -12,7 +12,15 @@ from app.config import ProductionRenderConfig
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import stable_text_hash, write_bytes_atomic
-from app.video_models import SubtitleCue, SubtitleProject, SubtitleStyle, SubtitleWordTiming
+from app.video_models import (
+    SubtitleCue,
+    SubtitleProject,
+    SubtitleQualityDecision,
+    SubtitleQualityFinding,
+    SubtitleRenderedBounds,
+    SubtitleStyle,
+    SubtitleWordTiming,
+)
 
 
 _STYLE_PRESETS: dict[str, dict[str, Any]] = {
@@ -28,6 +36,14 @@ _NO_BREAK_AFTER = frozenset({
 })
 _PUNCTUATION = frozenset(".!?;:,")
 _METRICS_APPLICATION: Any | None = None
+_PLATFORM_SAFE_INSETS: dict[str, tuple[float, float, float, float]] = {
+    # left, top, right, bottom. The bottom inset deliberately stays below the
+    # established documentary margin so current safe layouts remain valid.
+    "universal": (0.03, 0.03, 0.03, 0.03),
+    "tiktok": (0.06, 0.05, 0.12, 0.08),
+    "reels": (0.06, 0.05, 0.08, 0.08),
+    "shorts": (0.05, 0.05, 0.05, 0.07),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,8 +62,32 @@ class _ResolvedGroup:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class SubtitleLanguageProfile:
+    language: str
+    target_cps: float
+    maximum_cps: float
+    max_chars_per_line: int
+    max_lines: int
+    min_timing_confidence: float
+    long_word_characters: int
+
+
+_LANGUAGE_PROFILES: dict[str, SubtitleLanguageProfile] = {
+    "ru": SubtitleLanguageProfile(
+        language="ru", target_cps=17.0, maximum_cps=20.0, max_chars_per_line=28,
+        max_lines=2, min_timing_confidence=0.70, long_word_characters=20,
+    ),
+    "en": SubtitleLanguageProfile(
+        language="en", target_cps=19.0, maximum_cps=22.0, max_chars_per_line=32,
+        max_lines=2, min_timing_confidence=0.70, long_word_characters=24,
+    ),
+}
+
+
 def build_subtitle_project(
     plan: ProductionPlan, audio_project: Any, config: ProductionRenderConfig, transcript: dict[str, Any] | None = None,
+    *, composition_segments: list[Any] | None = None, platform: str = "universal",
 ) -> SubtitleProject:
     """Build a final, fitted subtitle plan from actual AudioProject timing.
 
@@ -78,12 +118,28 @@ def build_subtitle_project(
             )
         cues.extend(_resolved_cues(
             resolved, text, clip.production_segment_id or clip.clip_id, speaker, source_type, style, config,
+            timing_source="source_word_timings" if isinstance(segment, DialogueSegment) and words else "estimated",
         ))
     duration = float(audio_project.timeline.duration_seconds)
     project_id = f"subtitles-{audio_project.project_id}-{stable_text_hash(style.model_dump_json())[:12]}"
+    decision = assess_subtitle_quality(
+        cues, style, config, composition_segments=composition_segments, platform=platform,
+        provenance={
+            "stage": "pre_render_ass_layout",
+            "fitter": "production_subtitles._fit_tokens",
+            "renderer": "production_subtitles.write_production_ass",
+            "quality_config_version": config.subtitle_quality_version,
+            "platform": platform,
+        },
+    )
+    if decision.status == "blocked":
+        warnings.append(
+            "Subtitle Quality V2 blocked the resolved ASS layout: " + ", ".join(decision.reason_codes)
+        )
     return SubtitleProject(
         project_id=project_id, audio_project_id=audio_project.project_id, duration_seconds=duration,
         style=style, cues=cues, font_fallback_used=font_fallback, warnings=_unique(warnings),
+        quality_decision=decision,
     )
 
 
@@ -330,7 +386,7 @@ def _measure_width(text: str, style: SubtitleStyle, font_size: int) -> float:
 
 def _resolved_cues(
     groups: list[_ResolvedGroup], original_text: str, segment_id: str, speaker: str, source_type: str,
-    style: SubtitleStyle, config: ProductionRenderConfig,
+    style: SubtitleStyle, config: ProductionRenderConfig, timing_source: str = "estimated",
 ) -> list[SubtitleCue]:
     base_size = _ass_font_size(style, config.output_width, config.output_height)
     original_tokens = _tokens(original_text, [], 0.0, max(1.0, len(original_text.split()) / 2.0))
@@ -348,12 +404,373 @@ def _resolved_cues(
             cue_id=f"cue-{segment_id}-{index:03d}", segment_id=segment_id, speaker=speaker,
             text=rendered, start_seconds=round(start, 3), end_seconds=round(end, 3),
             word_count=len(group.tokens), line_count=len(rendered_lines), style_id=style.style_id,
-            source_type=source_type, word_timings=timings, original_text=original_text,
+            source_type=source_type, word_timings=timings, timing_source=timing_source, original_text=original_text,
             original_line_count=original_line_count, resolved_lines=rendered_lines,
             resolved_font_size=group.font_size, split_reason=group.reason,
             layout_state=state, fallback_used=group.fallback,
         ))
     return cues
+
+
+def assess_subtitle_quality(
+    cues: list[SubtitleCue], style: SubtitleStyle, config: ProductionRenderConfig,
+    *, composition_segments: list[Any] | None = None, platform: str = "universal",
+    provenance: dict[str, str] | None = None,
+) -> SubtitleQualityDecision:
+    """Assess the fitted ASS payload without creating a parallel subtitle writer.
+
+    Bounds are calculated from the same style metrics and resolved lines that
+    ``write_production_ass`` emits. This gives the renderer a deterministic
+    layout blocker before an expensive media render starts.
+    """
+
+    language = _resolve_subtitle_language(cues, config)
+    profile = _LANGUAGE_PROFILES.get(language)
+    line_limit = min(style.max_chars_per_line, profile.max_chars_per_line) if profile else style.max_chars_per_line
+    max_lines = min(style.max_lines, profile.max_lines) if profile else style.max_lines
+    maximum_cps = profile.maximum_cps if profile else 20.0
+    target_cps = profile.target_cps if profile else min(maximum_cps, config.subtitle_reading_speed_cps)
+    min_timing_confidence = profile.min_timing_confidence if profile else 0.70
+    long_word_limit = profile.long_word_characters if profile else 20
+    findings: list[SubtitleQualityFinding] = []
+    bounds: list[SubtitleRenderedBounds] = []
+    cps_values: list[float] = []
+    timing_confidences: list[float] = []
+    max_line_length = 0
+    composition_segments = list(composition_segments or [])
+
+    def add(
+        reason_code: str, severity: str, message: str, *, cue_id: str | None = None,
+        metrics: dict[str, float | int | bool] | None = None,
+    ) -> None:
+        findings.append(SubtitleQualityFinding(
+            reason_code=reason_code, severity=severity, cue_id=cue_id,
+            metrics=metrics or {}, message=message,
+        ))
+
+    if profile is None:
+        add(
+            "LANGUAGE_PROFILE_UNKNOWN", "warning",
+            "Subtitle language could not be matched to a supported RU or EN profile.",
+        )
+
+    for cue in cues:
+        duration = max(0.001, cue.end_seconds - cue.start_seconds)
+        rendered_lines = list(cue.resolved_lines or [cue.text])
+        cps = _subtitle_cps(cue.text, duration)
+        cps_values.append(cps)
+        timing_confidence = _timing_confidence(cue)
+        timing_confidences.append(timing_confidence)
+        if cps > target_cps:
+            add(
+                "CPS_TOO_HIGH", "blocker" if cps > maximum_cps and timing_confidence >= min_timing_confidence else "warning",
+                f"Cue reading speed is {cps:.1f} CPS; profile target is {target_cps:.1f} and maximum is {maximum_cps:.1f}.",
+                cue_id=cue.cue_id, metrics={"cps": round(cps, 3), "target_cps": target_cps, "maximum_cps": maximum_cps},
+            )
+        if len(rendered_lines) > max_lines or cue.line_count > max_lines:
+            add(
+                "TOO_MANY_LINES", "blocker",
+                f"Cue resolves to {len(rendered_lines)} lines; the {language} profile permits {max_lines}.",
+                cue_id=cue.cue_id, metrics={"line_count": len(rendered_lines), "maximum_lines": max_lines},
+            )
+        for line in rendered_lines:
+            max_line_length = max(max_line_length, len(line))
+            if len(line) > line_limit:
+                width_excess = _measure_width(line, style, cue.resolved_font_size or _ass_font_size(style, config.output_width, config.output_height)) > _maximum_width(style, config)
+                add(
+                    "LINE_TOO_LONG", "blocker" if width_excess or len(line) > line_limit * 1.30 else "warning",
+                    f"Resolved line contains {len(line)} characters; the {language} profile limit is {line_limit}.",
+                    cue_id=cue.cue_id,
+                    metrics={"line_length": len(line), "maximum_line_length": line_limit, "rendered_width_excess": width_excess},
+                )
+            for word in line.split():
+                if len(_normalise_word(word)) > long_word_limit:
+                    add(
+                        "WORD_SPLIT_RISK", "warning",
+                        f"Unbreakable word '{word[:80]}' exceeds the {language} profile's safe word length.",
+                        cue_id=cue.cue_id,
+                        metrics={"word_length": len(_normalise_word(word)), "safe_word_length": long_word_limit},
+                    )
+        if _has_weak_line_break(rendered_lines) or cue.split_reason == "width_fit":
+            add(
+                "WEAK_SEMANTIC_BREAK", "warning",
+                "Resolved layout required a width-driven or syntactically weak semantic break.",
+                cue_id=cue.cue_id,
+            )
+        if cue.fallback_used or cue.layout_state == "fallback_fitted":
+            add(
+                "FALLBACK_FITTING_USED", "warning",
+                "Safe fallback fitting was used; the subtitle layout is not a clean pass.",
+                cue_id=cue.cue_id,
+            )
+        if timing_confidence < min_timing_confidence:
+            add(
+                "TIMING_CONFIDENCE_LOW", "warning",
+                f"Cue timing confidence is {timing_confidence:.2f}; profile minimum is {min_timing_confidence:.2f}.",
+                cue_id=cue.cue_id,
+                metrics={"timing_confidence": timing_confidence, "minimum_timing_confidence": min_timing_confidence},
+            )
+        rendered_bounds = _rendered_bounds(cue, style, config)
+        bounds.append(rendered_bounds)
+        if _outside_canvas(rendered_bounds, config.output_width, config.output_height):
+            add(
+                "SUBTITLE_OUT_OF_FRAME", "blocker",
+                "Resolved ASS bounds extend outside the output frame.", cue_id=cue.cue_id,
+                metrics=_bounds_metrics(rendered_bounds, config.output_width, config.output_height),
+            )
+        if _violates_platform_safe_zone(rendered_bounds, config.output_width, config.output_height, platform):
+            add(
+                "PLATFORM_SAFE_ZONE_VIOLATION", "blocker",
+                f"Resolved ASS bounds enter the {platform} platform exclusion zone.", cue_id=cue.cue_id,
+                metrics=_bounds_metrics(rendered_bounds, config.output_width, config.output_height),
+            )
+        for target_kind, target_rect, target_id in _overlapping_targets(cue, composition_segments, config):
+            overlap = _overlap_ratio(rendered_bounds, target_rect)
+            if overlap <= 0:
+                continue
+            if target_kind == "face":
+                add(
+                    "SUBTITLE_OVERLAPS_FACE", "blocker",
+                    "Resolved subtitle bounds overlap an observed face.", cue_id=cue.cue_id,
+                    metrics={"overlap_ratio": overlap, "target_id": target_id},
+                )
+            else:
+                add(
+                    "SUBTITLE_OVERLAPS_TARGET", "blocker",
+                    "Resolved subtitle bounds overlap an observed composition target.", cue_id=cue.cue_id,
+                    metrics={"overlap_ratio": overlap, "target_id": target_id},
+                )
+
+    for left, right in zip(cues, cues[1:]):
+        if left.segment_id == right.segment_id and _weak_cue_boundary(left, right):
+            add(
+                "WEAK_SEMANTIC_BREAK", "warning",
+                "Adjacent fitted cues split a continuous phrase without a strong semantic boundary.",
+                cue_id=right.cue_id,
+            )
+
+    reason_codes = list(dict.fromkeys(item.reason_code for item in findings))
+    severity = "blocker" if any(item.severity == "blocker" for item in findings) else "warning" if findings else "none"
+    status = "blocked" if severity == "blocker" else "passed_with_warning" if severity == "warning" else "passed"
+    return SubtitleQualityDecision(
+        status=status,
+        language_profile=language,
+        severity=severity,
+        metrics={
+            "cue_count": len(cues),
+            "max_cps": round(max(cps_values, default=0.0), 3),
+            "mean_cps": round(sum(cps_values) / len(cps_values), 3) if cps_values else 0.0,
+            "max_line_length": max_line_length,
+            "max_line_count": max((cue.line_count for cue in cues), default=0),
+            "fallback_cue_count": sum(cue.fallback_used for cue in cues),
+            "minimum_timing_confidence": round(min(timing_confidences, default=1.0), 3),
+            "mean_timing_confidence": round(sum(timing_confidences) / len(timing_confidences), 3) if timing_confidences else 1.0,
+            "rendered_bounds_count": len(bounds),
+            "face_overlap_count": sum(item.reason_code == "SUBTITLE_OVERLAPS_FACE" for item in findings),
+            "target_overlap_count": sum(item.reason_code == "SUBTITLE_OVERLAPS_TARGET" for item in findings),
+            "platform_safe_zone_violation_count": sum(item.reason_code == "PLATFORM_SAFE_ZONE_VIOLATION" for item in findings),
+            "out_of_frame_count": sum(item.reason_code == "SUBTITLE_OUT_OF_FRAME" for item in findings),
+            "language_profile_recognized": profile is not None,
+        },
+        reason_codes=reason_codes,
+        findings=findings,
+        rendered_bounds=bounds,
+        provenance={
+            "stage": "pre_render_ass_layout",
+            "fitter": "production_subtitles._fit_tokens",
+            "renderer": "production_subtitles.write_production_ass",
+            "geometry": "ass_style_metrics_v1",
+            "language_detection": "subtitle_language_override_or_unicode_script",
+            "quality_config_version": config.subtitle_quality_version,
+            "platform": platform,
+            **(provenance or {}),
+        },
+    )
+
+
+def _resolve_subtitle_language(cues: list[SubtitleCue], config: ProductionRenderConfig) -> str:
+    if config.subtitle_language in _LANGUAGE_PROFILES:
+        return config.subtitle_language
+    text = " ".join(cue.text for cue in cues)
+    cyrillic = sum("\u0400" <= character <= "\u052f" for character in text)
+    latin = sum(character.isascii() and character.isalpha() for character in text)
+    if cyrillic and cyrillic >= latin:
+        return "ru"
+    if latin:
+        return "en"
+    return "unknown"
+
+
+def _subtitle_cps(text: str, duration: float) -> float:
+    return len("".join(text.split())) / max(duration, 0.001)
+
+
+def _timing_confidence(cue: SubtitleCue) -> float:
+    timings = list(cue.word_timings)
+    if not timings:
+        return 0.45
+    coverage = min(1.0, len(timings) / max(1, cue.word_count))
+    within_cue = all(
+        timing.start_seconds >= cue.start_seconds - 0.02 and timing.end_seconds <= cue.end_seconds + 0.02
+        for timing in timings
+    )
+    ordered = within_cue and all(
+        left.end_seconds <= right.start_seconds + 0.02
+        for left, right in zip(timings, timings[1:])
+    )
+    if cue.timing_source == "source_word_timings":
+        return round(min(1.0, 0.50 + 0.25 * coverage + (0.25 if ordered else 0.0)), 3)
+    # Estimated narration timings retain useful cue-level placement evidence,
+    # but must not turn a CPS warning into a false hard block.
+    return round(min(0.68, 0.35 + 0.20 * coverage + (0.13 if ordered else 0.0)), 3)
+
+
+def _has_weak_line_break(lines: list[str]) -> bool:
+    for left, right in zip(lines, lines[1:]):
+        left_words, right_words = left.split(), right.split()
+        if not left_words or not right_words:
+            continue
+        if _normalise_word(left_words[-1]) in _NO_BREAK_AFTER:
+            return True
+        if right_words[0][:1] in _PUNCTUATION:
+            return True
+    return False
+
+
+def _weak_cue_boundary(left: SubtitleCue, right: SubtitleCue) -> bool:
+    left_words, right_words = left.text.split(), right.text.split()
+    if not left_words or not right_words:
+        return False
+    gap = max(0.0, right.start_seconds - left.end_seconds)
+    return (
+        gap < 0.12
+        and not left_words[-1].rstrip().endswith(tuple(_PUNCTUATION))
+        and _normalise_word(left_words[-1]) not in _NO_BREAK_AFTER
+    )
+
+
+def _rendered_bounds(cue: SubtitleCue, style: SubtitleStyle, config: ProductionRenderConfig) -> SubtitleRenderedBounds:
+    font_size, outline, shadow, margin_horizontal, margin_vertical = _ass_metrics(
+        style, config.output_width, config.output_height,
+    )
+    resolved_font_size = cue.resolved_font_size or font_size
+    lines = list(cue.resolved_lines or [cue.text])
+    width = max((_measure_width(line, style, resolved_font_size) for line in lines), default=float(resolved_font_size)) + 2 * (outline + shadow)
+    line_height = max(float(resolved_font_size) * 1.22, float(resolved_font_size + 2 * outline + shadow))
+    height = line_height * len(lines) + 2 * (outline + shadow)
+    if style.alignment == "left":
+        x = float(margin_horizontal)
+    else:
+        x = (config.output_width - width) / 2
+    y = float(margin_vertical) if style.position == "top" else config.output_height - margin_vertical - height
+    return SubtitleRenderedBounds(
+        cue_id=cue.cue_id, x=round(x, 3), y=round(y, 3), width=round(width, 3), height=round(height, 3),
+        start_seconds=cue.start_seconds, end_seconds=cue.end_seconds,
+    )
+
+
+def _outside_canvas(bounds: SubtitleRenderedBounds, width: int, height: int) -> bool:
+    return bounds.x < 0 or bounds.y < 0 or bounds.x + bounds.width > width or bounds.y + bounds.height > height
+
+
+def _violates_platform_safe_zone(bounds: SubtitleRenderedBounds, width: int, height: int, platform: str) -> bool:
+    left, top, right, bottom = _PLATFORM_SAFE_INSETS.get(platform, _PLATFORM_SAFE_INSETS["universal"])
+    return (
+        bounds.x < width * left
+        or bounds.y < height * top
+        or bounds.x + bounds.width > width * (1 - right)
+        or bounds.y + bounds.height > height * (1 - bottom)
+    )
+
+
+def _bounds_metrics(bounds: SubtitleRenderedBounds, width: int, height: int) -> dict[str, float | int | bool]:
+    return {
+        "x": round(bounds.x, 3), "y": round(bounds.y, 3),
+        "right": round(bounds.x + bounds.width, 3), "bottom": round(bounds.y + bounds.height, 3),
+        "canvas_width": width, "canvas_height": height,
+    }
+
+
+def _overlapping_targets(
+    cue: SubtitleCue, segments: list[Any], config: ProductionRenderConfig,
+) -> list[tuple[str, SubtitleRenderedBounds, int]]:
+    result: list[tuple[str, SubtitleRenderedBounds, int]] = []
+    for segment in segments:
+        if cue.end_seconds <= float(getattr(segment, "start_seconds", 0)) or cue.start_seconds >= float(getattr(segment, "end_seconds", 0)):
+            continue
+        for index, bound in enumerate(list(getattr(segment, "subject_bounds", []) or [])):
+            if float(getattr(bound, "confidence", 0)) < 0.20:
+                continue
+            projected = _project_subject_bounds(segment, bound, config)
+            target_id = index + 1
+            target = str(getattr(bound, "target", "none"))
+            if target == "primary_face":
+                result.append(("face", projected, target_id))
+            if target != "none":
+                result.append(("target", projected, target_id))
+    return result
+
+
+def _project_subject_bounds(segment: Any, bound: Any, config: ProductionRenderConfig) -> SubtitleRenderedBounds:
+    center_x, center_y = float(getattr(bound, "center_x", 0.5)), float(getattr(bound, "center_y", 0.5))
+    width, height = float(getattr(bound, "width", 0.16)), float(getattr(bound, "height", 0.20))
+    crop = getattr(segment, "target_crop", None)
+    if crop is None or not getattr(crop, "crop_width", None) or not getattr(crop, "crop_height", None):
+        return SubtitleRenderedBounds(
+            cue_id="target", x=center_x * config.output_width - width * config.output_width / 2,
+            y=center_y * config.output_height - height * config.output_height / 2,
+            width=width * config.output_width, height=height * config.output_height,
+            start_seconds=0, end_seconds=1,
+        )
+    crop_width, crop_height = float(crop.crop_width), float(crop.crop_height)
+    source_width, source_height = float(crop.source_width), float(crop.source_height)
+    crop_x, crop_y = _crop_origin_for_bound(segment, bound)
+    x = ((center_x - width / 2) * source_width - crop_x) / crop_width * config.output_width
+    y = ((center_y - height / 2) * source_height - crop_y) / crop_height * config.output_height
+    return SubtitleRenderedBounds(
+        cue_id="target", x=x, y=y, width=width * source_width / crop_width * config.output_width,
+        height=height * source_height / crop_height * config.output_height, start_seconds=0, end_seconds=1,
+    )
+
+
+def _crop_origin_for_bound(segment: Any, bound: Any) -> tuple[float, float]:
+    crop = segment.target_crop
+    assert crop is not None and crop.crop_width and crop.crop_height
+    frames = list(getattr(crop, "tracking_keyframes", []) or [])
+    if frames:
+        source_start = float(getattr(segment, "source_start_seconds", 0) or 0)
+        local_time = max(0.0, float(getattr(bound, "time_seconds", 0)) - source_start)
+        center_x, center_y = _tracking_center_at(frames, local_time)
+        x = center_x * crop.source_width - crop.crop_width / 2
+        y = center_y * crop.source_height - crop.crop_height / 2
+    elif crop.crop_x is not None and crop.crop_y is not None:
+        x, y = float(crop.crop_x), float(crop.crop_y)
+    else:
+        x = float(crop.normalized_x) * crop.source_width - crop.crop_width / 2
+        y = float(crop.normalized_y) * crop.source_height - crop.crop_height / 2
+    return (
+        min(max(0.0, x), crop.source_width - crop.crop_width),
+        min(max(0.0, y), crop.source_height - crop.crop_height),
+    )
+
+
+def _tracking_center_at(frames: list[Any], time_seconds: float) -> tuple[float, float]:
+    if time_seconds <= float(frames[0].time_seconds):
+        return float(frames[0].normalized_x), float(frames[0].normalized_y)
+    for left, right in zip(frames, frames[1:]):
+        if time_seconds <= float(right.time_seconds):
+            progress = (time_seconds - float(left.time_seconds)) / max(0.001, float(right.time_seconds) - float(left.time_seconds))
+            return (
+                float(left.normalized_x) + (float(right.normalized_x) - float(left.normalized_x)) * progress,
+                float(left.normalized_y) + (float(right.normalized_y) - float(left.normalized_y)) * progress,
+            )
+    return float(frames[-1].normalized_x), float(frames[-1].normalized_y)
+
+
+def _overlap_ratio(left: SubtitleRenderedBounds, right: SubtitleRenderedBounds) -> float:
+    overlap_width = max(0.0, min(left.x + left.width, right.x + right.width) - max(left.x, right.x))
+    overlap_height = max(0.0, min(left.y + left.height, right.y + right.height) - max(left.y, right.y))
+    return round((overlap_width * overlap_height) / max(1.0, left.width * left.height), 4)
 
 
 def _transcript_words(transcript: dict[str, Any] | None) -> list[tuple[str, float, float]]:

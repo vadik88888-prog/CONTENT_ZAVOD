@@ -10,6 +10,7 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
 
     warnings: list[str] = []
     errors: list[str] = []
+    subtitle_quality: dict[str, Any] | None = None
     clips = list(getattr(getattr(project, "timeline", None), "clips", []) or [])
     if not clips:
         errors.append("Output has no visual timeline clips.")
@@ -33,6 +34,29 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
                 break
             if cue.fallback_used:
                 warnings.append(f"Subtitle cue {cue.cue_id} uses the safe fitted fallback.")
+        decision = getattr(subtitles, "quality_decision", None)
+        if decision is None:
+            warnings.append("Subtitle Quality V2 decision is unavailable for this legacy subtitle project.")
+        else:
+            subtitle_quality = decision.model_dump(mode="json") if hasattr(decision, "model_dump") else {
+                "status": getattr(decision, "status", "legacy_unassessed"),
+                "reason_codes": list(getattr(decision, "reason_codes", []) or []),
+                "severity": getattr(decision, "severity", "warning"),
+            }
+            decision_status = str(getattr(decision, "status", subtitle_quality.get("status", "legacy_unassessed")))
+            codes = list(getattr(decision, "reason_codes", subtitle_quality.get("reason_codes", [])) or [])
+            if decision_status == "blocked":
+                errors.append(
+                    "Subtitle Quality V2 blocks the resolved ASS layout: "
+                    + (", ".join(str(code) for code in codes) or "unresolved subtitle safety failure")
+                    + "."
+                )
+            elif decision_status in {"passed_with_warning", "legacy_unassessed"}:
+                warnings.append(
+                    "Subtitle Quality V2 requires attention: "
+                    + (", ".join(str(code) for code in codes) or decision_status)
+                    + "."
+                )
     reframe = getattr(project, "reframe_plan", None)
     fallback = getattr(reframe, "fallback_reason", None)
     composition_segments = list(getattr(reframe, "composition_segments", []) or [])
@@ -96,6 +120,7 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
             "decisions_requiring_attention": tracking_validation,
         },
         "composition_quality": composition_quality,
+        "subtitle_quality": subtitle_quality,
         "fallback_fill_count": len(fills),
         "visual_clip_count": len(clips),
     }

@@ -115,7 +115,11 @@ class VideoCompositionService:
                 "AudioProject timeline и mixed_audio.wav имеют несовместимую длительность: "
                 f"{timeline.duration_seconds:.3f}s vs {actual_audio_duration:.3f}s."
             )
-        subtitle_project = build_subtitle_project(plan, audio_project, render_config, transcript).model_copy(update={
+        subtitle_project = build_subtitle_project(
+            plan, audio_project, render_config, transcript,
+            composition_segments=reframe_plan.composition_segments,
+            platform=self.config.product_flow.platform,
+        ).model_copy(update={
             "plan_reference": plan_reference,
         })
         cache_key = _render_cache_key(
@@ -153,6 +157,12 @@ class VideoCompositionService:
                 *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else []),
             ],
         )
+        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        if quality["status"] == "failed":
+            raise ProductionRenderError(
+                "Resolved Subtitle Quality V2 validation failed before final-ready state: "
+                + "; ".join(quality["errors"])
+            )
         render_root = output_directory / "production-render"
         cache_path = self.root / "work" / "production-render-cache" / f"{cache_key}.json"
         cached = self._try_cache(project, render_root, cache_path, force_recompute)
@@ -180,12 +190,16 @@ class VideoCompositionService:
             return None
         if validation.status == "invalid":
             return None
+        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        if quality["status"] == "failed":
+            return None
         artifacts = _artifacts(render_root, final_path)
+        warnings = [*project.warnings, *validation.messages, *quality["warnings"]]
         result = RenderResult(
-            status="warning" if validation.status == "warning" else "completed", output_file=str(final_path),
+            status="warning" if warnings or validation.status == "warning" else "completed", output_file=str(final_path),
             encoder=str(cached.get("encoder") or "cache"), hardware_fallback=bool(cached.get("hardware_fallback", False)),
             cache_hit=True, validation=validation, artifacts=artifacts,
-            warnings=[*project.warnings, *validation.messages],
+            warnings=warnings,
         )
         complete = project.model_copy(update={
             "status": result.status, "actual_duration_seconds": validation.video_duration_seconds or 0,
@@ -2254,6 +2268,7 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "subtitle_cue_count": len(subtitles.cues) if subtitles else 0,
         "subtitle_layout": {
             "contract_version": subtitles.layout_contract_version if subtitles else None,
+            "quality_decision": subtitles.quality_decision.model_dump(mode="json") if subtitles else None,
             "resolved_cue_count": len(subtitles.cues) if subtitles else 0,
             "cues": [
                 {

@@ -11,6 +11,7 @@ VIDEO_PROJECT_SCHEMA_VERSION = "3D.0"
 VIDEO_TIMELINE_VERSION = "3D.0"
 SUBTITLE_PROJECT_SCHEMA_VERSION = "3D.0"
 COMPOSITION_QUALITY_DECISION_SCHEMA_VERSION = "5D.0"
+SUBTITLE_QUALITY_DECISION_SCHEMA_VERSION = "5E.0"
 
 
 SceneType = Literal[
@@ -33,6 +34,22 @@ CompositionReasonCode = Literal[
     "FULL_BODY_ACTION_CROPPED", "SCREEN_CONTENT_CROPPED", "CINEMATIC_COMPOSITION_BROKEN",
     "EMPTY_FRAME_DOMINANT", "EXCESSIVE_DIGITAL_ZOOM", "UNKNOWN_SCENE_FALLBACK",
     "VISUAL_EVIDENCE_UNAVAILABLE",
+]
+SubtitleQualityStatus = Literal["passed", "passed_with_warning", "blocked", "legacy_unassessed"]
+SubtitleQualitySeverity = Literal["none", "warning", "blocker"]
+SubtitleQualityReasonCode = Literal[
+    "CPS_TOO_HIGH",
+    "LINE_TOO_LONG",
+    "TOO_MANY_LINES",
+    "WEAK_SEMANTIC_BREAK",
+    "WORD_SPLIT_RISK",
+    "SUBTITLE_OUT_OF_FRAME",
+    "SUBTITLE_OVERLAPS_FACE",
+    "SUBTITLE_OVERLAPS_TARGET",
+    "PLATFORM_SAFE_ZONE_VIOLATION",
+    "FALLBACK_FITTING_USED",
+    "LANGUAGE_PROFILE_UNKNOWN",
+    "TIMING_CONFIDENCE_LOW",
 ]
 
 
@@ -402,6 +419,7 @@ class SubtitleCue(BaseModel):
     style_id: str
     source_type: Literal["narration", "dialogue"]
     word_timings: list["SubtitleWordTiming"] = Field(default_factory=list)
+    timing_source: Literal["source_word_timings", "estimated"] = "estimated"
     original_text: str = ""
     original_line_count: int = Field(default=1, ge=1, le=32)
     resolved_lines: list[str] = Field(default_factory=list)
@@ -414,6 +432,73 @@ class SubtitleCue(BaseModel):
     def _ordered(self) -> "SubtitleCue":
         if self.end_seconds <= self.start_seconds:
             raise ValueError("subtitle cue must have positive duration")
+        return self
+
+
+class SubtitleRenderedBounds(BaseModel):
+    """Resolved ASS-layout bounds in output-canvas pixels for one subtitle cue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cue_id: str
+    x: float
+    y: float
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "SubtitleRenderedBounds":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("subtitle rendered bounds must have positive duration")
+        return self
+
+
+class SubtitleQualityFinding(BaseModel):
+    """One explainable Subtitle Quality V2 finding with local evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: SubtitleQualityReasonCode
+    severity: SubtitleQualitySeverity
+    cue_id: str | None = None
+    metrics: dict[str, float | int | bool] = Field(default_factory=dict)
+    message: str = Field(min_length=1, max_length=1200)
+
+
+class SubtitleQualityDecision(BaseModel):
+    """Versioned assessment of the exact fitted lines emitted to ASS.
+
+    It intentionally remains a subtitle-local safety contract. Goal 5G will
+    later aggregate it with the other quality domains into the final report.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = SUBTITLE_QUALITY_DECISION_SCHEMA_VERSION
+    status: SubtitleQualityStatus = "legacy_unassessed"
+    language_profile: str = "unknown"
+    severity: SubtitleQualitySeverity = "warning"
+    metrics: dict[str, float | int | bool] = Field(default_factory=dict)
+    reason_codes: list[SubtitleQualityReasonCode] = Field(default_factory=lambda: ["LANGUAGE_PROFILE_UNKNOWN"])
+    findings: list[SubtitleQualityFinding] = Field(default_factory=list)
+    rendered_bounds: list[SubtitleRenderedBounds] = Field(default_factory=list)
+    provenance: dict[str, str] = Field(default_factory=lambda: {
+        "stage": "legacy_contract",
+        "reason": "Subtitle Quality V2 was not persisted by the older subtitle project.",
+    })
+
+    @model_validator(mode="after")
+    def _valid_decision(self) -> "SubtitleQualityDecision":
+        if not self.schema_version:
+            raise ValueError("subtitle quality decision needs a schema version")
+        if self.status == "blocked" and self.severity != "blocker":
+            raise ValueError("blocked subtitle quality decision must have blocker severity")
+        if self.status == "passed" and self.severity != "none":
+            raise ValueError("passed subtitle quality decision cannot have warning severity")
+        if not self.provenance:
+            raise ValueError("subtitle quality decision needs provenance")
         return self
 
 
@@ -466,7 +551,8 @@ class SubtitleProject(BaseModel):
     cues: list[SubtitleCue] = Field(default_factory=list)
     font_fallback_used: bool = False
     warnings: list[str] = Field(default_factory=list)
-    layout_contract_version: str = "4D.0"
+    layout_contract_version: str = "5E.0"
+    quality_decision: SubtitleQualityDecision = Field(default_factory=SubtitleQualityDecision)
 
     @model_validator(mode="after")
     def _valid_cues(self) -> "SubtitleProject":
