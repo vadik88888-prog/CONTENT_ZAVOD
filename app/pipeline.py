@@ -57,7 +57,12 @@ from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
-from app.production_plan import PRODUCTION_PLAN_VERSION, build_production_plan, production_summary
+from app.production_plan import (
+    PRODUCTION_PLAN_VERSION,
+    ProductionPlanEnvelopeContext,
+    build_production_plan,
+    production_summary,
+)
 from app.scene_detection import detect_scene_boundaries
 from app.selection import select_clips
 from app.sources import Source, local_source, url_source, validate_source_arguments
@@ -699,8 +704,20 @@ class Pipeline:
             audio_features, scenes, work_directory, output_directory,
         )
         self.warnings.extend(transformation.get("warnings", []))
+        plan_analysis_fingerprint = _hash({
+            "source": source.id,
+            "profile": content_profile,
+            "content_map": content_map,
+            "coverage": coverage_map,
+        })
         production = self._build_production_plans(
             tracker, transformation, work_directory, output_directory,
+            self._production_plan_envelope_context(
+                source,
+                transcript,
+                analysis_id=f"analysis-{plan_analysis_fingerprint[:16]}",
+                analysis_fingerprint=plan_analysis_fingerprint,
+            ),
         )
         tts = self._run_tts(tracker, production, work_directory, output_directory)
         audio = self._run_audio(
@@ -1190,7 +1207,18 @@ class Pipeline:
             audio_features, scenes, work_directory, output_directory,
         )
         self.warnings.extend(transformation.get("warnings", []))
-        production = self._build_production_plans(tracker, transformation, work_directory, output_directory)
+        production = self._build_production_plans(
+            tracker,
+            transformation,
+            work_directory,
+            output_directory,
+            self._production_plan_envelope_context(
+                source,
+                transcript,
+                analysis_id=analysis.analysis_id,
+                analysis_fingerprint=analysis.analysis_fingerprint,
+            ),
+        )
         return self._finish_draft_preview(
             tracker=tracker,
             analysis=analysis,
@@ -1550,6 +1578,7 @@ class Pipeline:
                 parsed = ProductionPlan.model_validate(plan)
             except Exception as error:
                 raise ClipEngineError(f"Draft ProductionPlan is invalid for {candidate_id}: {sanitize_api_error(error)}") from error
+            self._assert_draft_plan_identity(parsed, draft, analysis, source, candidate_id)
             source_range = _plan_source_range(parsed)
             plans.append({
                 "candidate_id": candidate_id,
@@ -1697,6 +1726,43 @@ class Pipeline:
             terminal_status=terminal["status"], error_code=terminal.get("error_code"),
             analysis_id=analysis.analysis_id, draft_path=self.draft_artifact_path, draft_id=draft.draft_id,
         )
+
+    def _assert_draft_plan_identity(
+        self,
+        plan: ProductionPlan,
+        draft: DraftArtifact,
+        analysis: AnalysisArtifact,
+        source: Source,
+        candidate_id: str,
+    ) -> None:
+        """Reject a reused draft before TTS/audio/render can attach it elsewhere."""
+
+        envelope = plan.envelope
+        if envelope is None:
+            raise ClipEngineError("EDIT_PLAN_SCHEMA_INVALID: Draft ProductionPlan has no envelope.")
+        if envelope.compatibility_mode == "legacy_adapter":
+            self.warnings.append(
+                f"LEGACY_PLAN_ADAPTER: approved draft {plan.plan_id} is using the explicit 3A compatibility adapter."
+            )
+            return
+        if envelope.input_fingerprints.analysis_sha256 != analysis.analysis_fingerprint:
+            raise ClipEngineError(
+                "STALE_INPUTS: Draft ProductionPlan analysis fingerprint does not match its approved analysis artifact."
+            )
+        expected = {
+            "candidate_id": candidate_id,
+            "source_id": source.id,
+            "analysis_id": analysis.analysis_id,
+            "project_id": self.project_id or analysis.project_id or f"project-{source.id}",
+        }
+        if draft.run_id:
+            expected["run_id"] = draft.run_id
+        for field, value in expected.items():
+            actual = getattr(envelope.identity, field)
+            if actual != value:
+                raise ClipEngineError(
+                    f"IDENTITY_MISMATCH: Draft ProductionPlan {field}={actual!r}; expected {value!r}."
+                )
 
     def _source_stage(
         self, tracker: StageTracker, cache_tracker: StageTracker, artifact: Path, source: Source,
@@ -1862,9 +1928,37 @@ class Pipeline:
         data = {"output_files": [], "warnings": [reason], "errors": [], "nvenc_used": False}
         return data
 
+    def _production_plan_envelope_context(
+        self,
+        source: Source,
+        transcript: dict[str, Any],
+        *,
+        analysis_id: str,
+        analysis_fingerprint: str,
+    ) -> ProductionPlanEnvelopeContext:
+        """Capture immutable identity and inputs once, without re-analysis."""
+
+        render = self.config.production_render
+        flow = self.config.product_flow
+        return ProductionPlanEnvelopeContext(
+            project_id=self.project_id or f"project-{source.id}",
+            run_id=self.run_id,
+            analysis_id=analysis_id,
+            analysis_fingerprint=analysis_fingerprint,
+            source_sha256=stable_file_hash(source.path),
+            transcript_sha256=_hash(transcript),
+            preset_id=flow.subtitle_preset,
+            preset_version=flow.preset_version,
+            platform=flow.platform,
+            target_width=render.output_width,
+            target_height=render.output_height,
+            target_fps=render.output_fps,
+        )
+
     def _build_production_plans(
         self, tracker: StageTracker, transformation: dict[str, Any],
         work_directory: Path, output_directory: Path,
+        envelope_context: ProductionPlanEnvelopeContext | None = None,
     ) -> dict[str, Any]:
         enabled = self.config.production.enabled or self.production_plan_only
         items = [
@@ -1893,6 +1987,7 @@ class Pipeline:
                 "source_context": transformation_item.get("source_context", {}),
                 "semantic": transformation_item.get("semantic_representation", {}),
                 "production": self.config.production,
+                "envelope": envelope_context,
             })
             stage_name = f"production_plan:{candidate_id}"
             use_cache = self.config.production.cache_enabled and tracker.completed(stage_name, artifact, cache_key)
@@ -1921,7 +2016,11 @@ class Pipeline:
             if not use_cache:
                 tracker.start(stage_name, cache_key)
                 try:
-                    plan = build_production_plan(transformation_item, self.config.production)
+                    plan = build_production_plan(
+                        transformation_item,
+                        self.config.production,
+                        envelope_context=envelope_context,
+                    )
                 except (ProductionPlanError, ValueError) as error:
                     tracker.finish(stage_name, "failed", str(error))
                     outcomes.append({"status": "failed", "candidate_id": candidate_id, "error": str(error), "cache_hit": False})

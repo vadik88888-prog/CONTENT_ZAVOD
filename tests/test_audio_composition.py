@@ -188,6 +188,7 @@ def test_audio_project_builds_dialogue_ducked_narration_and_artifacts(tmp_path: 
     assert narration.loudness_normalized and narration.source_bed_path and narration.ducked_source_bed_path
     assert project.mix.ducking.duck_level == config.audio_composition.duck_level
     assert Path(project.mix.mixed_audio_path or "").is_file()
+    assert project.metadata.plan_reference == plan.reference()
     for name in ("audio-project.json", "audio-manifest.json", "audio-summary.txt"):
         assert (tmp_path / "out" / "audio" / name).is_file()
     report = audio_report_section(project)

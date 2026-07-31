@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -13,11 +14,11 @@ from app.content_transformation import run_content_transformation
 from app.errors import ProductionPlanError
 from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
-from app.production_plan import build_production_plan, production_summary
+from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_renderer_handoff
+from app.production_plan import ProductionPlanEnvelopeContext, build_production_plan, production_summary
 from app.reporting import make_report
 from app.semantic_extraction import build_source_context
-from app.utils import read_json, write_json
+from app.utils import read_json, stable_text_hash, write_json
 
 
 def _transformation_outcome() -> dict:
@@ -99,6 +100,24 @@ def _outcome_with_boundary() -> dict:
     return outcome
 
 
+def _native_envelope_context() -> ProductionPlanEnvelopeContext:
+    return ProductionPlanEnvelopeContext(
+        project_id="project-production", run_id="run-production", analysis_id="analysis-production",
+        analysis_fingerprint="b" * 64, source_sha256="c" * 64,
+        transcript_sha256="d" * 64, preset_id="documentary", preset_version="4B.1",
+        platform="universal", target_width=1080, target_height=1920, target_fps=30,
+        created_at="2026-07-31T00:00:00Z",
+    )
+
+
+def _native_plan() -> ProductionPlan:
+    return build_production_plan(
+        _outcome_with_boundary(),
+        AppConfig().production,
+        envelope_context=_native_envelope_context(),
+    )
+
+
 def test_pydantic_production_models_reject_invalid_narration() -> None:
     with pytest.raises(ValidationError):
         NarrationSegment(
@@ -118,6 +137,93 @@ def test_builder_creates_narration_dialogue_pauses_and_placeholders() -> None:
     assert all(item.status == "placeholder" for item in plan.audio_layers)
     assert plan.metadata.tts_generated is False
     assert plan.metadata.render_generated is False
+
+
+def test_native_envelope_is_deterministic_and_binds_v2_identity_contract() -> None:
+    first = _native_plan()
+    second = _native_plan()
+
+    assert first.schema_version == "5F.1"
+    assert first.envelope and first.envelope.compatibility_mode == "native"
+    assert first.envelope.identity.project_id == "project-production"
+    assert first.envelope.boundary_decision_ref == first.boundary_decision.decision_id
+    assert first.envelope.input_fingerprints.final_script_sha256 == first.metadata.final_script_hash
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+    assert first.plan_fingerprint() == second.plan_fingerprint()
+
+
+def test_native_renderer_handoff_rejects_wrong_identity_and_stale_transcript_without_rendering() -> None:
+    plan = _native_plan()
+    transcript = {"segments": []}
+    # The envelope context deliberately uses a known transcript fingerprint.
+    plan = plan.model_copy(update={
+        "envelope": plan.envelope.model_copy(update={
+            "input_fingerprints": plan.envelope.input_fingerprints.model_copy(update={
+                "transcript_sha256": stable_text_hash(json.dumps(transcript, sort_keys=True)),
+            }),
+        }),
+    })
+    audio = SimpleNamespace(metadata=SimpleNamespace(
+        plan_reference=plan.reference(), production_plan_id=plan.plan_id, source_id=plan.metadata.source_id,
+    ))
+
+    accepted = validate_renderer_handoff(
+        plan, audio, source_id=plan.metadata.source_id, source_sha256="c" * 64, transcript=transcript,
+        expected_project_id="project-production", expected_analysis_id="analysis-production",
+        expected_plan_run_id="run-production", expected_candidate_id=plan.metadata.candidate_id,
+        expected_preset_id="documentary", expected_preset_version="4B.1", expected_platform="universal",
+        expected_target=(1080, 1920, 30.0),
+    )
+    assert accepted is None
+
+    wrong_source = validate_renderer_handoff(
+        plan, audio, source_id="wrong-source", source_sha256="c" * 64, transcript=transcript,
+    )
+    stale_transcript = validate_renderer_handoff(
+        plan, audio, source_id=plan.metadata.source_id, source_sha256="c" * 64,
+        transcript={"segments": [{"id": 0}]},
+    )
+    changed_boundary_plan = plan.model_copy(update={
+        "boundary_decision": plan.boundary_decision.model_copy(update={"confidence": 0.8}),
+    })
+    changed_boundary_audio = SimpleNamespace(metadata=SimpleNamespace(
+        plan_reference=changed_boundary_plan.reference(),
+        production_plan_id=changed_boundary_plan.plan_id,
+        source_id=changed_boundary_plan.metadata.source_id,
+    ))
+    stale_boundary = validate_renderer_handoff(
+        changed_boundary_plan,
+        changed_boundary_audio,
+        source_id=changed_boundary_plan.metadata.source_id,
+        source_sha256="c" * 64,
+        transcript=transcript,
+    )
+    assert wrong_source and wrong_source.code == "IDENTITY_MISMATCH"
+    assert stale_transcript and stale_transcript.code == "STALE_INPUTS"
+    assert stale_boundary and stale_boundary.code == "STALE_INPUTS"
+
+
+def test_native_envelope_blocks_candidate_or_boundary_tampering_and_unknown_legacy_versions() -> None:
+    plan = _native_plan()
+    wrong_candidate = plan.model_dump(mode="json")
+    wrong_candidate["metadata"]["candidate_id"] = "candidate-other"
+    wrong_boundary = plan.model_dump(mode="json")
+    wrong_boundary["envelope"]["boundary_decision_ref"] = "boundary-other"
+    unknown_legacy = build_production_plan(_transformation_outcome(), AppConfig().production).model_dump(mode="json")
+    unknown_legacy.pop("envelope")
+    unknown_legacy["metadata"]["plan_version"] = "2A.9"
+    unknown_top_level = build_production_plan(_transformation_outcome(), AppConfig().production).model_dump(mode="json")
+    unknown_top_level.pop("envelope")
+    unknown_top_level["schema_version"] = "2A.9"
+
+    with pytest.raises(ValidationError, match="IDENTITY_MISMATCH"):
+        ProductionPlan.model_validate(wrong_candidate)
+    with pytest.raises(ValidationError, match="IDENTITY_MISMATCH"):
+        ProductionPlan.model_validate(wrong_boundary)
+    with pytest.raises(ValidationError, match="UNSUPPORTED_LEGACY_PLAN_VERSION"):
+        ProductionPlan.model_validate(unknown_legacy)
+    with pytest.raises(ValidationError, match="UNSUPPORTED_LEGACY_PLAN_VERSION"):
+        ProductionPlan.model_validate(unknown_top_level)
 
 
 def test_production_plan_persists_boundary_decision_and_links_every_dialogue_source_range() -> None:

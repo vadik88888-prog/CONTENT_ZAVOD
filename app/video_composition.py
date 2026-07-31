@@ -13,7 +13,7 @@ from app.audio_models import AudioProject
 from app.config import AppConfig, ProductionRenderConfig
 from app.errors import ProductionRenderError
 from app.output_quality import validate_output_quality
-from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
+from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_renderer_handoff
 from app.production_subtitles import build_subtitle_project, write_production_ass
 from app.rendering import nvenc_available
 from app.sources import Source
@@ -62,6 +62,22 @@ class VideoCompositionService:
         render_config = self.config.production_render
         if not source.path.is_file():
             raise ProductionRenderError("Исходный video file для production render не найден.")
+        handoff_failure = validate_renderer_handoff(
+            plan,
+            audio_project,
+            source_id=source.id,
+            source_sha256=stable_file_hash(source.path),
+            transcript=transcript,
+            expected_preset_id=self.config.product_flow.subtitle_preset,
+            expected_preset_version=self.config.product_flow.preset_version,
+            expected_platform=self.config.product_flow.platform,
+            expected_target=(render_config.output_width, render_config.output_height, render_config.output_fps),
+        )
+        if handoff_failure is not None:
+            raise ProductionRenderError(
+                f"{handoff_failure.code}: ProductionPlan render handoff rejected: "
+                f"{json.dumps(handoff_failure.evidence, ensure_ascii=False, sort_keys=True)}"
+            )
         source_info = probe_media(source.path, require_video=True)
         if visual_analysis and isinstance(visual_analysis.get("subject_keyframes"), list):
             source_info["subject_keyframes"] = visual_analysis["subject_keyframes"]
@@ -81,7 +97,10 @@ class VideoCompositionService:
         timeline, fallback_reasons = build_video_timeline(
             plan, audio_project, transcript, source.path, source_info, canvas, render_config,
         )
-        reframe_plan = build_reframe_plan(source_info, canvas, render_config, timeline)
+        plan_reference = plan.reference()
+        reframe_plan = build_reframe_plan(source_info, canvas, render_config, timeline).model_copy(update={
+            "plan_reference": plan_reference,
+        })
         timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
         composition_fallbacks = [
             f"{segment.segment_id}: {segment.fallback_reason}"
@@ -94,7 +113,9 @@ class VideoCompositionService:
                 "AudioProject timeline и mixed_audio.wav имеют несовместимую длительность: "
                 f"{timeline.duration_seconds:.3f}s vs {actual_audio_duration:.3f}s."
             )
-        subtitle_project = build_subtitle_project(plan, audio_project, render_config, transcript)
+        subtitle_project = build_subtitle_project(plan, audio_project, render_config, transcript).model_copy(update={
+            "plan_reference": plan_reference,
+        })
         cache_key = _render_cache_key(
             plan, source_checksum, mixed_checksum, audio_project, timeline, subtitle_project, canvas, render_config,
             platform=self.config.product_flow.platform,
@@ -118,7 +139,8 @@ class VideoCompositionService:
         )
         project = VideoProject(
             project_id=project_id, status="skipped", source_video_path=str(source.path), source_checksum=source_checksum,
-            production_plan_id=plan.plan_id, audio_project_id=audio_project.project_id, mixed_audio_path=str(mixed_path),
+            production_plan_id=plan.plan_id, plan_reference=plan_reference,
+            audio_project_id=audio_project.project_id, mixed_audio_path=str(mixed_path),
             canvas=canvas, target_duration_seconds=timeline.duration_seconds, actual_duration_seconds=0,
             timeline=timeline, reframe_plan=reframe_plan, tracks=[track], subtitle_project=subtitle_project, render_request=request,
             metadata=metadata,
@@ -1570,7 +1592,8 @@ def _render_cache_key(
             ],
             "final_script_hash": plan.metadata.final_script_hash,
             "audio_mode": plan.audio_mode,
-            "plan_fingerprint": stable_text_hash(plan.model_dump_json()),
+            "plan_fingerprint": plan.plan_fingerprint(),
+            "plan_envelope": plan.envelope.model_dump(mode="json", exclude={"created_at"}) if plan.envelope else None,
         },
         "audio_project_checksum": stable_text_hash(audio_project.model_dump_json()),
         "timeline": timeline.model_dump(mode="json"), "subtitle_project": subtitles.model_dump(mode="json"),

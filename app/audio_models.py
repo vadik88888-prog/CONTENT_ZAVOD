@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.production_models import ProductionPlanReference
+
 
 AUDIO_PROJECT_SCHEMA_VERSION = "3C.0"
 AUDIO_TIMELINE_VERSION = "3C.0"
@@ -193,6 +195,7 @@ class AudioMetadata(BaseModel):
     schema_version: str = AUDIO_PROJECT_SCHEMA_VERSION
     audio_project_id: str
     production_plan_id: str
+    plan_reference: ProductionPlanReference | None = None
     source_id: str
     source_media_path: str
     audio_mode: Literal["original", "original_enhanced", "voiceover", "replace_voice", "mixed"] = "original"

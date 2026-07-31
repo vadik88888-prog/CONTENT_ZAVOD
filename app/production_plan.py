@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.errors import ProductionPlanError
@@ -10,6 +11,11 @@ from app.production_models import (
     BoundaryDecision,
     DialogueSegment,
     NarrationSegment,
+    ProductionPlanEnvelope,
+    ProductionPlanIdentity,
+    ProductionPlanInputFingerprints,
+    ProductionPlanPreset,
+    ProductionPlanTarget,
     PauseSegment,
     ProductionMetadata,
     ProductionPlan,
@@ -21,16 +27,73 @@ from app.production_models import (
     VoiceProfile,
 )
 from app.transformation_models import validate_final_script
-from app.utils import stable_text_hash
+from app.utils import stable_text_hash, utc_now
 
 
-PRODUCTION_PLAN_VERSION = "3A.2"
+PRODUCTION_PLAN_VERSION = "5F.1"
+LEGACY_PRODUCTION_PLAN_VERSION = "3A.2"
 TIMELINE_VERSION = "3A.0"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionPlanEnvelopeContext:
+    """Pipeline-owned immutable inputs needed to create a native 5F plan."""
+
+    project_id: str
+    run_id: str
+    analysis_id: str
+    analysis_fingerprint: str
+    source_sha256: str
+    transcript_sha256: str
+    preset_id: str
+    preset_version: str
+    platform: str
+    target_width: int
+    target_height: int
+    target_fps: float
+    created_at: str | None = None
+
+    def build(
+        self, *, candidate_id: str, source_id: str, final_script_hash: str,
+        boundary_decision: BoundaryDecision | None,
+    ) -> ProductionPlanEnvelope:
+        if boundary_decision is None:
+            raise ProductionPlanError("EDIT_PLAN_SCHEMA_INVALID: native ProductionPlan requires a BoundaryDecision.")
+        return ProductionPlanEnvelope(
+            identity=ProductionPlanIdentity(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                analysis_id=self.analysis_id,
+                candidate_id=candidate_id,
+                source_id=source_id,
+            ),
+            boundary_decision_ref=boundary_decision.decision_id,
+            preset=ProductionPlanPreset(
+                preset_id=self.preset_id,
+                preset_version=self.preset_version,
+                platform=self.platform,  # type: ignore[arg-type]
+            ),
+            target=ProductionPlanTarget(
+                width=self.target_width,
+                height=self.target_height,
+                fps=self.target_fps,
+            ),
+            input_fingerprints=ProductionPlanInputFingerprints(
+                source_sha256=self.source_sha256,
+                transcript_sha256=self.transcript_sha256,
+                analysis_sha256=self.analysis_fingerprint,
+                final_script_sha256=final_script_hash,
+                boundary_decision_sha256=stable_text_hash(boundary_decision.model_dump_json()),
+            ),
+            created_at=self.created_at or utc_now(),
+        )
+
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
 
 
 def build_production_plan(
     transformation: dict[str, Any], production_config: Any,
+    *, envelope_context: ProductionPlanEnvelopeContext | None = None,
 ) -> ProductionPlan:
     """Build the Goal 3A source of truth without generating any media."""
 
@@ -171,9 +234,17 @@ def build_production_plan(
     subtitle_track = _build_subtitle_track(segments, timeline, language)
     source = _dict(context.get("source"), "SourceContext.source")
     final_script_hash = stable_text_hash(json.dumps(final, ensure_ascii=False, sort_keys=True))
+    native_envelope = envelope_context.build(
+        candidate_id=candidate_id,
+        source_id=str(source.get("id", "")),
+        final_script_hash=final_script_hash,
+        boundary_decision=boundary_decision,
+    ) if envelope_context is not None else None
     try:
         return ProductionPlan(
             plan_id=f"production-{candidate_id}-{final_script_hash[:12]}",
+            schema_version=PRODUCTION_PLAN_VERSION if native_envelope is not None else LEGACY_PRODUCTION_PLAN_VERSION,
+            envelope=native_envelope,
             segments=segments,
             dialogue_mappings=dialogue_mappings,
             timeline=timeline,
@@ -186,7 +257,7 @@ def build_production_plan(
             ],
             subtitle_track=subtitle_track,
             metadata=ProductionMetadata(
-                plan_version=PRODUCTION_PLAN_VERSION,
+                plan_version=PRODUCTION_PLAN_VERSION if native_envelope is not None else LEGACY_PRODUCTION_PLAN_VERSION,
                 candidate_id=candidate_id,
                 source_id=str(source.get("id", "")),
                 final_script_hash=final_script_hash,

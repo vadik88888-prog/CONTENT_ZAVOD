@@ -223,6 +223,7 @@ class AudioCompositionService:
             metadata=AudioMetadata(
                 schema_version=AUDIO_PROJECT_SCHEMA_VERSION, audio_project_id=project_id,
                 production_plan_id=plan.plan_id, source_id=source.id,
+                plan_reference=plan.reference(),
                 source_media_path=str(source.path),
                 audio_mode=plan.audio_mode,
                 tts_result_path=_tts_result_path(tts_result),

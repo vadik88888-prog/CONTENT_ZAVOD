@@ -577,6 +577,9 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
     assert first.result and first.result.validation.status == "valid"
     assert Path(first.result.output_file or "").is_file()
     assert first.metadata.ai_called is False and first.metadata.tts_regenerated is False and first.metadata.audio_remixed is False
+    assert first.plan_reference == plan.reference()
+    assert first.reframe_plan.plan_reference == plan.reference()
+    assert first.subtitle_project and first.subtitle_project.plan_reference == plan.reference()
     second = service.compose(plan, audio, source, transcript, tmp_path / "work", tmp_path / "out")
     assert second.result and second.result.cache_hit
     cache = tmp_path / "work" / "production-render-cache" / f"{second.metadata.cache_key}.json"

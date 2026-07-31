@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.production_models import ProductionPlanReference
+
 
 VIDEO_PROJECT_SCHEMA_VERSION = "3D.0"
 VIDEO_TIMELINE_VERSION = "3D.0"
@@ -180,6 +182,7 @@ class ReframePlan(BaseModel):
     composition_segments: list[CompositionSegment] = Field(default_factory=list)
     subject_detection_used: bool = False
     fallback_reason: str | None = None
+    plan_reference: ProductionPlanReference | None = None
 
     @model_validator(mode="after")
     def _valid_plan(self) -> "ReframePlan":
@@ -379,6 +382,7 @@ class SubtitleProject(BaseModel):
     project_id: str
     schema_version: str = SUBTITLE_PROJECT_SCHEMA_VERSION
     audio_project_id: str
+    plan_reference: ProductionPlanReference | None = None
     duration_seconds: float = Field(ge=0)
     style: SubtitleStyle
     cues: list[SubtitleCue] = Field(default_factory=list)
@@ -483,6 +487,7 @@ class VideoProject(BaseModel):
     source_video_path: str
     source_checksum: str = Field(pattern=r"^[a-f0-9]{64}$")
     production_plan_id: str
+    plan_reference: ProductionPlanReference | None = None
     audio_project_id: str
     mixed_audio_path: str
     canvas: CanvasConfig
@@ -505,4 +510,15 @@ class VideoProject(BaseModel):
             raise ValueError("VideoProject target duration must match video timeline")
         if {track.track_type for track in self.tracks} != {"visual"}:
             raise ValueError("VideoProject must contain one visual track")
+        if self.plan_reference is not None:
+            if self.plan_reference.plan_id != self.production_plan_id:
+                raise ValueError("VideoProject plan reference must match production_plan_id")
+            if self.reframe_plan.plan_reference is not None and self.reframe_plan.plan_reference != self.plan_reference:
+                raise ValueError("ReframePlan must reference the same ProductionPlan")
+            if (
+                self.subtitle_project is not None
+                and self.subtitle_project.plan_reference is not None
+                and self.subtitle_project.plan_reference != self.plan_reference
+            ):
+                raise ValueError("SubtitleProject must reference the same ProductionPlan")
         return self

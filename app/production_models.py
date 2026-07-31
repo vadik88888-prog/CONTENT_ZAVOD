@@ -1,12 +1,118 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.utils import stable_text_hash
+
 
 BOUNDARY_EPSILON_SECONDS = 0.001
+PRODUCTION_PLAN_ENVELOPE_VERSION = "5F.1"
+SUPPORTED_LEGACY_PLAN_VERSIONS = frozenset({"3A.0", "3A.1", "3A.2"})
+
+
+class ProductionPlanIdentity(BaseModel):
+    """Immutable parents of a plan; paths are deliberately not identities."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    analysis_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+
+
+class ProductionPlanPreset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preset_id: str = Field(min_length=1)
+    preset_version: str = Field(min_length=1)
+    platform: Literal["tiktok", "reels", "shorts", "universal"]
+
+
+class ProductionPlanTarget(BaseModel):
+    """The stable output contract, not a replacement composition plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    width: int = Field(ge=2, le=7680)
+    height: int = Field(ge=2, le=7680)
+    fps: float = Field(gt=1, le=120)
+    video_codec: Literal["h264"] = "h264"
+    pixel_format: Literal["yuv420p"] = "yuv420p"
+
+    @model_validator(mode="after")
+    def _vertical_target_is_valid(self) -> "ProductionPlanTarget":
+        if self.width % 2 or self.height % 2:
+            raise ValueError("ProductionPlan target dimensions must be even")
+        if abs((self.width / self.height) - (9 / 16)) > 0.002:
+            raise ValueError("ProductionPlan target must use a 9:16 aspect ratio")
+        return self
+
+
+class ProductionPlanInputFingerprints(BaseModel):
+    """Fingerprints for the immutable inputs a later render must not replace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    transcript_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    analysis_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    final_script_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    boundary_decision_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProductionPlanEnvelope(BaseModel):
+    """Versioned V2 envelope around the existing ProductionPlan contract.
+
+    ``legacy_adapter`` is intentionally explicit.  It keeps known cached 3A
+    plans inspectable and renderable through the old typed path while making an
+    unrecognised historical schema a visible hand-off failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["5F.1"] = PRODUCTION_PLAN_ENVELOPE_VERSION
+    identity: ProductionPlanIdentity
+    boundary_decision_ref: str | None = Field(default=None, min_length=1)
+    preset: ProductionPlanPreset
+    target: ProductionPlanTarget
+    input_fingerprints: ProductionPlanInputFingerprints
+    created_at: str = Field(min_length=1)
+    warnings: list[str] = Field(default_factory=list)
+    compatibility_mode: Literal["native", "legacy_adapter"] = "native"
+    legacy_source_version: str | None = None
+
+    @model_validator(mode="after")
+    def _legacy_marker_is_consistent(self) -> "ProductionPlanEnvelope":
+        if self.compatibility_mode == "native" and self.legacy_source_version is not None:
+            raise ValueError("native ProductionPlan envelope cannot carry a legacy source version")
+        if self.compatibility_mode == "legacy_adapter" and self.legacy_source_version not in SUPPORTED_LEGACY_PLAN_VERSIONS:
+            raise ValueError("UNSUPPORTED_LEGACY_PLAN_VERSION")
+        return self
+
+
+class ProductionPlanReference(BaseModel):
+    """A compact immutable link used by Audio/Subtitle/Reframe/Video artifacts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str = Field(min_length=1)
+    schema_version: Literal["5F.1"] = PRODUCTION_PLAN_ENVELOPE_VERSION
+    plan_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    identity: ProductionPlanIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionPlanValidationFailure:
+    """Machine-readable rejection returned before the existing renderer runs."""
+
+    code: str
+    evidence: dict[str, object]
 
 
 class BoundaryRange(BaseModel):
@@ -264,6 +370,11 @@ class ProductionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_id: str
+    # ``schema_version`` and ``envelope`` turn the established ProductionPlan
+    # into the V2 migration base.  They deliberately do not introduce another
+    # EditPlan class or renderer.
+    schema_version: str = PRODUCTION_PLAN_ENVELOPE_VERSION
+    envelope: ProductionPlanEnvelope | None = None
     status: Literal["draft", "skipped"] = "draft"
     segments: list[ProductionSegmentModel]
     dialogue_mappings: list[DialogueSegment]
@@ -282,18 +393,33 @@ class ProductionPlan(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _migrate_pre_audio_mode_plans(cls, value: object) -> object:
-        """Old cached plans with narration retain their historical voiceover intent."""
+        """Adapt known 3A plans and retain their historical audio intent.
 
-        if not isinstance(value, dict) or "audio_mode" in value:
+        Models in this repository use ``extra=forbid``, so loading historical
+        JSON needs to happen before field validation.  The adapter never
+        invents a boundary decision; it records its compatibility mode instead.
+        """
+
+        if not isinstance(value, dict):
             return value
         migrated = dict(value)
-        has_narration = any(
-            isinstance(item, dict) and item.get("segment_type") == "narration"
-            for item in migrated.get("segments", [])
-        )
-        migrated["audio_mode"] = "voiceover" if has_narration else "original"
-        migrated["tts_eligible"] = has_narration
-        migrated["audio_mode_reason"] = "legacy_plan_migration"
+        if "audio_mode" not in migrated:
+            has_narration = any(
+                isinstance(item, dict) and item.get("segment_type") == "narration"
+                for item in migrated.get("segments", [])
+            )
+            migrated["audio_mode"] = "voiceover" if has_narration else "original"
+            migrated["tts_eligible"] = has_narration
+            migrated["audio_mode_reason"] = "legacy_plan_migration"
+        envelope = migrated.get("envelope")
+        mode = envelope.get("compatibility_mode") if isinstance(envelope, dict) else None
+        if envelope is None or mode == "legacy_adapter":
+            legacy_source_version = _legacy_plan_version(migrated)
+            migrated["schema_version"] = PRODUCTION_PLAN_ENVELOPE_VERSION
+            migrated["envelope"] = _legacy_envelope_payload(
+                migrated,
+                legacy_source_version=legacy_source_version,
+            )
         return migrated
 
     @model_validator(mode="after")
@@ -317,11 +443,49 @@ class ProductionPlan(BaseModel):
             raise ValueError("source audio modes cannot contain generated narration segments")
         if self.tts_eligible and (not has_narration or self.audio_mode not in {"voiceover", "replace_voice", "mixed"}):
             raise ValueError("TTS eligibility requires explicit voiceover intent and narration")
+        envelope = self.envelope
+        if self.schema_version != PRODUCTION_PLAN_ENVELOPE_VERSION or envelope is None:
+            raise ValueError("EDIT_PLAN_SCHEMA_INVALID")
+        if envelope.identity.candidate_id != self.metadata.candidate_id:
+            raise ValueError("IDENTITY_MISMATCH: candidate_id")
+        if envelope.identity.source_id != self.metadata.source_id:
+            raise ValueError("IDENTITY_MISMATCH: source_id")
+        if envelope.compatibility_mode == "native":
+            if self.boundary_decision is None or not envelope.boundary_decision_ref:
+                raise ValueError("EDIT_PLAN_SCHEMA_INVALID: boundary_decision_ref")
+            if envelope.boundary_decision_ref != self.boundary_decision.decision_id:
+                raise ValueError("IDENTITY_MISMATCH: boundary_decision_ref")
+            if envelope.input_fingerprints.final_script_sha256 != self.metadata.final_script_hash:
+                raise ValueError("EDIT_PLAN_SCHEMA_INVALID: final_script fingerprint")
         if self.boundary_decision is not None:
             boundary_errors = _boundary_handoff_errors(self)
             if boundary_errors:
                 raise ValueError("; ".join(boundary_errors))
         return self
+
+    def plan_fingerprint(self) -> str:
+        """Stable plan identity excluding its wall-clock creation timestamp.
+
+        Rebuilding the same semantic plan in another run therefore produces the
+        same fingerprint while ``created_at`` remains an audit fact rather than
+        a cache-invalidating input.
+        """
+
+        value = self.model_dump(mode="json")
+        envelope = value.get("envelope")
+        if isinstance(envelope, dict):
+            envelope = dict(envelope)
+            envelope.pop("created_at", None)
+            value["envelope"] = envelope
+        return stable_text_hash(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+    def reference(self) -> ProductionPlanReference:
+        assert self.envelope is not None
+        return ProductionPlanReference(
+            plan_id=self.plan_id,
+            plan_fingerprint=self.plan_fingerprint(),
+            identity=self.envelope.identity,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +494,159 @@ class ProductionPlanHandoffFailure:
 
     code: str
     evidence: dict[str, object]
+
+
+def validate_renderer_handoff(
+    plan: ProductionPlan,
+    audio_project: Any,
+    *,
+    source_id: str,
+    source_sha256: str,
+    transcript: dict[str, Any],
+    expected_project_id: str | None = None,
+    expected_analysis_id: str | None = None,
+    expected_plan_run_id: str | None = None,
+    expected_candidate_id: str | None = None,
+    expected_preset_id: str | None = None,
+    expected_preset_version: str | None = None,
+    expected_platform: str | None = None,
+    expected_target: tuple[int, int, float] | None = None,
+) -> ProductionPlanValidationFailure | None:
+    """Validate the V2 envelope before the existing renderer touches media.
+
+    This is intentionally a pure hand-off check.  It does not analyse source
+    media, regenerate TTS/audio, or mutate the plan, which keeps render-only
+    and visual rerender flows independent from expensive analysis.
+    """
+
+    envelope = plan.envelope
+    if plan.schema_version != PRODUCTION_PLAN_ENVELOPE_VERSION or envelope is None:
+        return ProductionPlanValidationFailure(
+            "EDIT_PLAN_SCHEMA_INVALID", {"plan_id": plan.plan_id, "schema_version": plan.schema_version},
+        )
+    if envelope.compatibility_mode == "legacy_adapter" and envelope.legacy_source_version not in SUPPORTED_LEGACY_PLAN_VERSIONS:
+        return ProductionPlanValidationFailure(
+            "UNSUPPORTED_LEGACY_PLAN_VERSION",
+            {"plan_id": plan.plan_id, "legacy_source_version": envelope.legacy_source_version},
+        )
+    identity = envelope.identity
+    identity_pairs = {
+        "candidate_id": (identity.candidate_id, plan.metadata.candidate_id),
+        "source_id": (identity.source_id, plan.metadata.source_id),
+        "project_id": (identity.project_id, expected_project_id),
+        "analysis_id": (identity.analysis_id, expected_analysis_id),
+        "run_id": (identity.run_id, expected_plan_run_id),
+        "candidate_id_runtime": (identity.candidate_id, expected_candidate_id),
+    }
+    if envelope.compatibility_mode == "native":
+        identity_pairs["source_id_runtime"] = (identity.source_id, source_id)
+    for name, (actual, expected) in identity_pairs.items():
+        if expected is not None and actual != expected:
+            return ProductionPlanValidationFailure(
+                "IDENTITY_MISMATCH",
+                {"plan_id": plan.plan_id, "field": name, "expected": expected, "actual": actual},
+            )
+    if envelope.compatibility_mode == "native":
+        if plan.boundary_decision is None or envelope.boundary_decision_ref != plan.boundary_decision.decision_id:
+            return ProductionPlanValidationFailure(
+                "IDENTITY_MISMATCH",
+                {
+                    "plan_id": plan.plan_id,
+                    "field": "boundary_decision_ref",
+                    "expected": plan.boundary_decision.decision_id if plan.boundary_decision else None,
+                    "actual": envelope.boundary_decision_ref,
+                },
+            )
+        boundary_sha256 = stable_text_hash(plan.boundary_decision.model_dump_json())
+        if envelope.input_fingerprints.boundary_decision_sha256 != boundary_sha256:
+            return ProductionPlanValidationFailure(
+                "STALE_INPUTS",
+                {
+                    "plan_id": plan.plan_id,
+                    "input": "boundary_decision",
+                    "expected": envelope.input_fingerprints.boundary_decision_sha256,
+                    "actual": boundary_sha256,
+                },
+            )
+        if envelope.input_fingerprints.source_sha256 != source_sha256:
+            return ProductionPlanValidationFailure(
+                "SOURCE_FINGERPRINT_MISMATCH",
+                {
+                    "plan_id": plan.plan_id,
+                    "expected": envelope.input_fingerprints.source_sha256,
+                    "actual": source_sha256,
+                },
+            )
+        transcript_sha256 = _json_fingerprint(transcript)
+        if envelope.input_fingerprints.transcript_sha256 != transcript_sha256:
+            return ProductionPlanValidationFailure(
+                "STALE_INPUTS",
+                {
+                    "plan_id": plan.plan_id,
+                    "input": "transcript",
+                    "expected": envelope.input_fingerprints.transcript_sha256,
+                    "actual": transcript_sha256,
+                },
+            )
+        preset_pairs = {
+            "preset_id": (envelope.preset.preset_id, expected_preset_id),
+            "preset_version": (envelope.preset.preset_version, expected_preset_version),
+            "platform": (envelope.preset.platform, expected_platform),
+        }
+        for name, (actual, expected) in preset_pairs.items():
+            if expected is not None and actual != expected:
+                return ProductionPlanValidationFailure(
+                    "PRESET_CONSTRAINT_VIOLATION",
+                    {"plan_id": plan.plan_id, "field": name, "expected": expected, "actual": actual},
+                )
+        if expected_target is not None:
+            target = (envelope.target.width, envelope.target.height, envelope.target.fps)
+            if target != expected_target:
+                return ProductionPlanValidationFailure(
+                    "OUTPUT_CONTRACT_INVALID",
+                    {"plan_id": plan.plan_id, "expected": expected_target, "actual": target},
+                )
+    audio_metadata = getattr(audio_project, "metadata", None)
+    audio_reference = getattr(audio_metadata, "plan_reference", None)
+    if envelope.compatibility_mode == "native" and audio_reference is None:
+        return ProductionPlanValidationFailure(
+            "EDIT_PLAN_SCHEMA_INVALID", {"plan_id": plan.plan_id, "missing": "AudioProject.metadata.plan_reference"},
+        )
+    if audio_reference is not None:
+        expected_reference = plan.reference()
+        if (
+            audio_reference.plan_id != expected_reference.plan_id
+            or audio_reference.plan_fingerprint != expected_reference.plan_fingerprint
+            or audio_reference.identity != expected_reference.identity
+        ):
+            return ProductionPlanValidationFailure(
+                "IDENTITY_MISMATCH",
+                {
+                    "plan_id": plan.plan_id,
+                    "field": "audio_project.plan_reference",
+                    "audio_project_id": getattr(audio_project, "project_id", None),
+                },
+            )
+    if getattr(audio_metadata, "production_plan_id", None) != plan.plan_id:
+        return ProductionPlanValidationFailure(
+            "IDENTITY_MISMATCH",
+            {
+                "plan_id": plan.plan_id,
+                "field": "audio_project.production_plan_id",
+                "actual": getattr(audio_metadata, "production_plan_id", None),
+            },
+        )
+    if getattr(audio_metadata, "source_id", None) != source_id:
+        return ProductionPlanValidationFailure(
+            "IDENTITY_MISMATCH",
+            {
+                "plan_id": plan.plan_id,
+                "field": "audio_project.source_id",
+                "expected": source_id,
+                "actual": getattr(audio_metadata, "source_id", None),
+            },
+        )
+    return None
 
 
 def validate_audio_handoff(plan: ProductionPlan) -> ProductionPlanHandoffFailure | None:
@@ -446,3 +763,78 @@ def _range_is_covered(required: BoundaryRange, ranges: list[BoundaryRange]) -> b
         if cursor >= required.end_seconds - BOUNDARY_EPSILON_SECONDS:
             return True
     return False
+
+
+def _legacy_envelope_payload(
+    value: dict[str, Any], *, legacy_source_version: str | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic compatibility envelope for known 3A JSON.
+
+    The data is intentionally marked as an adapter output.  Native plans are
+    created by ``build_production_plan`` with real project/run/analysis and
+    source fingerprints; this path is solely for persisted historical drafts
+    and test fixtures that still use the 3A contract.
+    """
+
+    metadata_value = value.get("metadata")
+    if isinstance(metadata_value, dict):
+        metadata = metadata_value
+    elif isinstance(metadata_value, BaseModel):
+        metadata = metadata_value.model_dump(mode="json")
+    else:
+        metadata = {}
+    candidate_id = str(metadata.get("candidate_id") or "legacy-candidate")
+    source_id = str(metadata.get("source_id") or "legacy-source")
+    plan_id = str(value.get("plan_id") or "legacy-plan")
+    source_version = legacy_source_version or str(metadata.get("plan_version") or value.get("schema_version") or "")
+    decision = value.get("boundary_decision") if isinstance(value.get("boundary_decision"), dict) else {}
+    decision_id = str(decision.get("decision_id") or "") or None
+    final_script_hash = str(metadata.get("final_script_hash") or "")
+    if len(final_script_hash) != 64:
+        final_script_hash = stable_text_hash(final_script_hash or plan_id)
+    digest = lambda label: stable_text_hash(f"{label}:{plan_id}:{candidate_id}:{source_id}")
+    return {
+        "schema_version": PRODUCTION_PLAN_ENVELOPE_VERSION,
+        "identity": {
+            "project_id": f"legacy-project-{stable_text_hash(source_id)[:12]}",
+            "run_id": f"legacy-run-{stable_text_hash(plan_id)[:12]}",
+            "analysis_id": f"legacy-analysis-{stable_text_hash(source_id)[:12]}",
+            "candidate_id": candidate_id,
+            "source_id": source_id,
+        },
+        "boundary_decision_ref": decision_id,
+        "preset": {"preset_id": "legacy", "preset_version": "3A", "platform": "universal"},
+        "target": {"width": 1080, "height": 1920, "fps": 30.0, "video_codec": "h264", "pixel_format": "yuv420p"},
+        "input_fingerprints": {
+            "source_sha256": digest("source"),
+            "transcript_sha256": digest("transcript"),
+            "analysis_sha256": digest("analysis"),
+            "final_script_sha256": final_script_hash,
+            "boundary_decision_sha256": stable_text_hash(decision_id or "legacy-boundary-unavailable"),
+        },
+        "created_at": "1970-01-01T00:00:00Z",
+        "warnings": ["LEGACY_PLAN_ADAPTER"],
+        "compatibility_mode": "legacy_adapter",
+        "legacy_source_version": source_version,
+    }
+
+
+def _json_fingerprint(value: dict[str, Any]) -> str:
+    # Match the pipeline's established ``_hash`` serialization so a native
+    # plan does not appear stale merely because the hand-off uses it later.
+    return stable_text_hash(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
+def _legacy_plan_version(value: dict[str, Any]) -> str:
+    raw_schema_version = str(value.get("schema_version") or "")
+    # A historical 3A record had no top-level envelope version.  If one is
+    # present and is not the value injected by this migration reader, it is the
+    # authoritative claim and must not be silently downgraded via metadata.
+    if raw_schema_version and raw_schema_version != PRODUCTION_PLAN_ENVELOPE_VERSION:
+        return raw_schema_version
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        return str(metadata.get("plan_version") or raw_schema_version)
+    if isinstance(metadata, BaseModel):
+        return str(getattr(metadata, "plan_version", "") or raw_schema_version)
+    return raw_schema_version
