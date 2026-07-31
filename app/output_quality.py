@@ -51,15 +51,26 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
         if validation_status == "failed_repaired":
             warnings.append(f"Composition segment {segment.segment_id} disabled tracking and applied its safe fallback.")
         composition_status = str(getattr(segment, "composition_quality_status", "passed"))
+        decision = getattr(segment, "composition_quality_decision", None)
+        decision_status = str(getattr(decision, "status", "evidence_unavailable"))
+        decision_codes = list(getattr(decision, "reason_codes", []) or [])
         if composition_status in {"failed", "failed_repairable"}:
-            errors.append(f"Composition segment {segment.segment_id} did not resolve its composition quality failure.")
+            errors.append(
+                f"Composition segment {segment.segment_id} is blocked by content-aware composition: "
+                f"{', '.join(decision_codes) or 'unresolved composition failure'}."
+            )
         elif composition_status == "passed_with_warning":
             warnings.append(f"Composition segment {segment.segment_id} has composition-quality warnings.")
+        if decision_status in {"fallback", "evidence_unavailable"}:
+            warnings.append(
+                f"Composition segment {segment.segment_id} uses explicit {decision_status} visual evidence handling."
+            )
         composition_quality.append({
             "segment_id": segment.segment_id,
             "status": composition_status,
             "reasons": list(getattr(segment, "composition_quality_reasons", []) or []),
             "diagnostics": dict(getattr(segment, "composition_diagnostics", {}) or {}),
+            "decision": decision.model_dump(mode="json") if decision is not None else None,
         })
         if mode in {"safe_fallback", "scene_wide", "group_framing"} or getattr(segment, "fallback_reason", None):
             tracking_validation.append({

@@ -22,6 +22,7 @@ from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, wr
 from app.video_models import (
     CanvasConfig,
     CompositionSegment,
+    CompositionQualityDecision,
     CropPlan,
     FillClip,
     FreezeFrameClip,
@@ -44,7 +45,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "3D.3"
+PRODUCTION_RENDER_ENGINE_VERSION = "5D.0"
 
 
 class VideoCompositionService:
@@ -81,6 +82,7 @@ class VideoCompositionService:
         source_info = probe_media(source.path, require_video=True)
         if visual_analysis and isinstance(visual_analysis.get("subject_keyframes"), list):
             source_info["subject_keyframes"] = visual_analysis["subject_keyframes"]
+        _attach_visual_evidence_context(source_info, visual_analysis)
         scene_analysis = read_json(work_directory / "scene_boundaries.json", {})
         if isinstance(scene_analysis, dict) and isinstance(scene_analysis.get("boundaries"), list):
             source_info["scene_boundaries"] = scene_analysis["boundaries"]
@@ -629,6 +631,118 @@ _TRACKING_TARGETS = {
     "primary_face", "primary_person", "active_speaker", "important_object",
     "screen_region", "subject_group", "scene_center", "none",
 }
+_SCENE_TYPES = {
+    "TALKING_HEAD", "INTERVIEW_SINGLE", "INTERVIEW_MULTI", "PODCAST",
+    "PRODUCT_DEMO", "HANDS_ON_DEMO", "PRESENTATION_SCREEN", "GAMEPLAY",
+    "CINEMATIC_SCENE", "FULL_BODY_ACTION", "UNKNOWN",
+}
+_PERSON_SCENES = {"TALKING_HEAD", "INTERVIEW_SINGLE", "PODCAST"}
+_ACTION_SCENES = {"CINEMATIC_SCENE", "FULL_BODY_ACTION"}
+_SCREEN_SCENES = {"PRESENTATION_SCREEN", "GAMEPLAY"}
+_PRODUCT_SCENES = {"PRODUCT_DEMO", "HANDS_ON_DEMO"}
+
+
+def _attach_visual_evidence_context(source_info: dict[str, Any], visual_analysis: dict[str, Any] | None) -> None:
+    """Carry the persisted visual-analysis evidence state into composition.
+
+    Older callers may pass subject keyframes directly.  They remain supported
+    as valid evidence when observations are present; an absent analysis is
+    explicitly unavailable rather than silently treated as a safe crop.
+    """
+
+    analysis = visual_analysis if isinstance(visual_analysis, dict) else {}
+    raw_status = analysis.get("evidence_status")
+    if raw_status in {"valid", "fallback", "evidence_unavailable"}:
+        status = str(raw_status)
+    elif analysis.get("status") == "completed" and isinstance(analysis.get("subject_keyframes"), list):
+        status = "valid"
+    elif analysis.get("status") == "fallback":
+        status = "fallback"
+    elif isinstance(source_info.get("subject_keyframes"), list) and source_info["subject_keyframes"]:
+        status = "valid"
+    else:
+        status = "evidence_unavailable"
+    source_info["visual_evidence_status"] = status
+    source_info["visual_evidence"] = {
+        "analysis_schema_version": analysis.get("schema_version"),
+        "analysis_status": analysis.get("status") or ("legacy_keyframes" if status == "valid" else "unavailable"),
+        "sample_count": analysis.get("sample_count", 0),
+        "keyframe_count": len(source_info.get("subject_keyframes") or []),
+    }
+    provenance = analysis.get("fallback_provenance")
+    if isinstance(provenance, dict):
+        source_info["visual_fallback_provenance"] = {
+            "stage": str(provenance.get("stage") or "visual_analysis"),
+            "reason": str(provenance.get("reason") or analysis.get("reason") or "unspecified"),
+        }
+    elif status != "valid":
+        source_info["visual_fallback_provenance"] = {
+            "stage": "visual_analysis",
+            "reason": str(analysis.get("reason") or "visual_evidence_unavailable"),
+        }
+
+
+def _visual_evidence_context(source_info: dict[str, Any], observations: list[SubjectBounds]) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """Normalize current and legacy visual-analysis records for one segment."""
+
+    raw = source_info.get("visual_evidence_status")
+    if raw in {"valid", "fallback", "evidence_unavailable"}:
+        status = str(raw)
+    elif observations:
+        status = "valid"
+    else:
+        status = "evidence_unavailable"
+    evidence = dict(source_info.get("visual_evidence") or {})
+    evidence.update({
+        "segment_observation_count": len(observations),
+        "source_scene_type": str(source_info.get("scene_type") or ""),
+    })
+    raw_provenance = source_info.get("visual_fallback_provenance")
+    provenance = (
+        {"stage": str(raw_provenance.get("stage") or "visual_analysis"), "reason": str(raw_provenance.get("reason") or "unspecified")}
+        if isinstance(raw_provenance, dict)
+        else {"stage": "composition", "reason": "No valid visual-analysis evidence was supplied for this segment."}
+    )
+    return status, evidence, provenance
+
+
+def _scene_type_for_segment(source_info: dict[str, Any], observations: list[SubjectBounds]) -> str:
+    """Choose a bounded visual scene type from evidence, never transcript guesswork."""
+
+    explicit = str(source_info.get("scene_type") or "").upper()
+    if explicit in _SCENE_TYPES:
+        return explicit
+    weights: dict[str, float] = {}
+    for item in observations:
+        if item.scene_type in _SCENE_TYPES and item.scene_type != "UNKNOWN":
+            weights[item.scene_type] = weights.get(item.scene_type, 0) + item.confidence
+    if weights:
+        return max(weights, key=weights.get)
+    targets = {item.target for item in observations}
+    face_count = max((item.visible_face_count for item in observations), default=0)
+    if "screen_region" in targets:
+        return "PRESENTATION_SCREEN"
+    if "important_object" in targets:
+        return "PRODUCT_DEMO"
+    if "subject_group" in targets or face_count > 1:
+        return "INTERVIEW_MULTI"
+    if targets & {"primary_face", "primary_person", "active_speaker"}:
+        return "TALKING_HEAD"
+    return "UNKNOWN"
+
+
+def _framing_intent(scene_type: str) -> str:
+    if scene_type in _PERSON_SCENES:
+        return "CHEST_UP_PERSON"
+    if scene_type == "INTERVIEW_MULTI":
+        return "GROUP_CONVERSATION"
+    if scene_type in _PRODUCT_SCENES:
+        return "PRODUCT_OR_HANDS"
+    if scene_type in _SCREEN_SCENES:
+        return "SCREEN_FIRST"
+    if scene_type in _ACTION_SCENES:
+        return "PRESERVE_WIDE_ACTION"
+    return "CONSERVATIVE_WIDE"
 
 
 def build_reframe_plan(
@@ -649,7 +763,7 @@ def build_reframe_plan(
     segments = build_composition_segments(source_info, canvas, config, timeline)
     segments = _apply_active_speaker_hysteresis(segments, canvas)
     segments = _validate_tracking_decisions(segments, canvas)
-    segments = _apply_composition_quality_diagnostics(segments, canvas)
+    segments = _apply_composition_quality_diagnostics(segments, canvas, source_info)
     observations = [
         ReframeKeyframe(
             time_seconds=bound.time_seconds, normalized_x=bound.center_x,
@@ -718,7 +832,7 @@ def build_composition_segments(
         result.append(_decide_composition_segment(
             segment_id, clip, observations, source_info, canvas, config, transition,
         ))
-    return result
+    return _apply_composition_quality_diagnostics(result, canvas, source_info)
 
 
 def apply_composition_segments(timeline: VideoTimeline, segments: list[CompositionSegment]) -> VideoTimeline:
@@ -806,6 +920,8 @@ def _decide_composition_segment(
     if scene_change_count:
         common["transition_type"] = "cut"
     duration = max(0.01, clip.source_end_seconds - clip.source_start_seconds)
+    scene_type = _scene_type_for_segment(source_info, observations)
+    framing_intent = _framing_intent(scene_type)
     if config.crop_strategy in {"center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"}:
         crop = make_crop_plan(source_info, canvas, config)
         strategy = "fit_with_blur" if crop.strategy == "fit_blur_background" else "center_crop"
@@ -860,6 +976,41 @@ def _decide_composition_segment(
         sum(item.confidence for item in observations), 0.001,
     )
 
+    if scene_type == "UNKNOWN":
+        crop = _wide_crop(source_info, canvas)
+        reason = "Scene type is unknown; use a conservative full-scene layout instead of a face-centric crop."
+        return CompositionSegment(
+            **common, strategy="fit_with_blur" if crop.strategy == "fit_blur_background" else "scene_wide",
+            target_crop=crop, confidence=confidence, target_center_x=0.5, target_center_y=0.5,
+            target_scale=_crop_scale(crop), tracking_mode="scene_wide", tracking_target="scene_center",
+            tracking_required=False, tracking_confidence=confidence, tracking_reason=reason,
+            static_crop_sufficient=False, tracking_risk="medium", fallback_strategy="scene_wide",
+            wide_safe_layout_required=True, fallback_reason=reason,
+        )
+
+    if scene_type in _ACTION_SCENES:
+        crop = _wide_crop(source_info, canvas)
+        reason = "The scene contains action or cinematic composition; preserve the wide source composition."
+        return CompositionSegment(
+            **common, strategy="fit_with_blur" if crop.strategy == "fit_blur_background" else "scene_wide",
+            target_crop=crop, confidence=confidence, target_center_x=0.5, target_center_y=0.5,
+            target_scale=_crop_scale(crop), tracking_mode="scene_wide", tracking_target="scene_center",
+            tracking_required=False, tracking_confidence=confidence, tracking_reason=reason,
+            static_crop_sufficient=False, tracking_risk="low", fallback_strategy="scene_wide",
+            wide_safe_layout_required=True,
+        )
+
+    if scene_type in _SCREEN_SCENES:
+        crop = _wide_crop(source_info, canvas)
+        return CompositionSegment(
+            **common, strategy="fit_with_blur" if crop.strategy == "fit_blur_background" else "scene_wide",
+            target_crop=crop, confidence=confidence, target_center_x=center_x, target_center_y=center_y,
+            target_scale=_crop_scale(crop), tracking_mode="scene_wide", tracking_target="screen_region",
+            tracking_required=False, tracking_confidence=confidence,
+            tracking_reason="Screen or gameplay content is scene-primary; preserve a wide readable layout.",
+            static_crop_sufficient=False, tracking_risk="none", fallback_strategy="none", wide_safe_layout_required=True,
+        )
+
     if scene_change_count:
         crop = _wide_crop(source_info, canvas)
         reason = "Shot changes occur inside this interval; a controlled cut/wide composition is safer than tracking across unrelated frames."
@@ -909,13 +1060,20 @@ def _decide_composition_segment(
         )
 
     if static_sufficient:
-        crop = _crop_plan_for_center(source_info, canvas, center_x, center_y)
+        crop_center_x, crop_center_y = _framing_crop_center(
+            observations, source_info, canvas, framing_intent,
+        )
+        crop = _crop_plan_for_center(source_info, canvas, crop_center_x, crop_center_y)
         return CompositionSegment(
-            **common, strategy="face_crop" if target == "primary_face" else "subject_crop", target_crop=crop,
-            confidence=confidence, target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
+            **common, strategy="subject_crop" if scene_type in _PERSON_SCENES else ("face_crop" if target == "primary_face" else "subject_crop"), target_crop=crop,
+            confidence=confidence, target_center_x=crop_center_x, target_center_y=crop_center_y, target_scale=_crop_scale(crop),
             tracking_mode="static_subject_crop", tracking_target=target, tracking_required=False,
             tracking_confidence=confidence,
-            tracking_reason="A single static crop keeps the important subject inside the safe area for this segment.",
+            tracking_reason=(
+                "A chest-up static crop keeps the person, shoulders and headroom inside the safe area."
+                if scene_type in _PERSON_SCENES else
+                "A single static crop keeps the important subject inside the safe area for this segment."
+            ),
             static_crop_sufficient=True, tracking_risk="none" if confidence >= _TRACKING_CONFIDENCE else "low",
             fallback_strategy="none",
         )
@@ -925,12 +1083,14 @@ def _decide_composition_segment(
         len(observations) >= 2 and confidence >= _TRACKING_CONFIDENCE
         and risk in {"none", "low", "medium"} and not face_too_small_for_tracking
     ):
-        crop = _tracking_crop(source_info, canvas, observations, clip.source_start_seconds, duration)
+        crop = _tracking_crop(
+            source_info, canvas, observations, clip.source_start_seconds, duration, framing_intent=framing_intent,
+        )
         mode = "object_tracking" if dynamic_target == "important_object" else (
             "face_tracking" if dynamic_target == "primary_face" else "person_tracking"
         )
         return CompositionSegment(
-            **common, strategy="face_crop" if mode == "face_tracking" else "subject_crop", target_crop=crop,
+            **common, strategy="subject_crop" if scene_type in _PERSON_SCENES else ("face_crop" if mode == "face_tracking" else "subject_crop"), target_crop=crop,
             confidence=confidence, target_center_x=center_x, target_center_y=center_y, target_scale=_crop_scale(crop),
             tracking_mode=mode, tracking_target=dynamic_target, tracking_required=True,
             tracking_confidence=confidence,
@@ -978,6 +1138,16 @@ def _subject_observations(source_info: dict[str, Any], start: float, end: float)
                 visible_face_count=max(0, int(item.get("visible_face_count", item.get("face_count", 1)))),
                 active_speaker_confidence=float(item.get("active_speaker_confidence", 0)),
                 scene_id=str(item["scene_id"])[:160] if item.get("scene_id") is not None else None,
+                scene_type=str(item.get("scene_type", "UNKNOWN")).upper() if str(item.get("scene_type", "UNKNOWN")).upper() in _SCENE_TYPES else "UNKNOWN",
+                framing_observation=(
+                    str(item.get("framing_observation", "unknown"))
+                    if str(item.get("framing_observation", "unknown")) in {
+                        "head_only", "head_shoulders", "chest_up", "upper_body", "full_body", "object", "screen", "unknown",
+                    } else "unknown"
+                ),
+                eye_line_y=float(item["eye_line_y"]) if item.get("eye_line_y") is not None else None,
+                gesture_active=bool(item.get("gesture_active", False)),
+                gesture_area_visible=bool(item.get("gesture_area_visible", False)),
             ))
         except (TypeError, ValueError, KeyError):
             continue
@@ -1030,7 +1200,7 @@ def _static_crop_sufficient(observations: list[SubjectBounds], source_info: dict
     crop_width, crop_height = _crop_dimensions(source_info, canvas)
     span_x = max(item.center_x + item.width / 2 for item in observations) - min(item.center_x - item.width / 2 for item in observations)
     span_y = max(item.center_y + item.height / 2 for item in observations) - min(item.center_y - item.height / 2 for item in observations)
-    return span_x <= (crop_width / width) * 0.72 and span_y <= (crop_height / height) * 0.56
+    return span_x <= (crop_width / width) * 0.78 and span_y <= (crop_height / height) * 0.56
 
 
 def _group_crop_sufficient(observations: list[SubjectBounds], source_info: dict[str, Any], canvas: CanvasConfig) -> bool:
@@ -1094,6 +1264,32 @@ def _crop_plan_for_center(source_info: dict[str, Any], canvas: CanvasConfig, cen
     )
 
 
+def _framing_crop_center(
+    observations: list[SubjectBounds], source_info: dict[str, Any], canvas: CanvasConfig, framing_intent: str,
+) -> tuple[float, float]:
+    """Place a person chest-up: preserve headroom and put eyes near the upper third.
+
+    The operation only shifts an already aspect-correct crop and clamps it to
+    source bounds.  It never introduces a new zoom rule or a separate tracker.
+    """
+
+    center_x, center_y = _weighted_center(observations)
+    if framing_intent != "CHEST_UP_PERSON" or not observations:
+        return center_x, center_y
+    width, height = int(source_info["display_width"]), int(source_info["display_height"])
+    _crop_width, crop_height = _crop_dimensions(source_info, canvas)
+    crop_fraction_y = min(1.0, crop_height / max(height, 1))
+    weight = sum(item.confidence for item in observations) or 1.0
+    eye_line = sum(
+        (item.eye_line_y if item.eye_line_y is not None else item.center_y - item.height * 0.18) * item.confidence
+        for item in observations
+    ) / weight
+    # A target at 0.34 of the crop creates modest headroom without turning a
+    # speaking person into a head-only close-up.
+    desired_crop_center_y = eye_line + 0.16 * crop_fraction_y
+    return center_x, max(crop_fraction_y / 2, min(1 - crop_fraction_y / 2, desired_crop_center_y))
+
+
 def _wide_crop(source_info: dict[str, Any], canvas: CanvasConfig) -> CropPlan:
     if not _source_is_vertical(source_info, canvas):
         return CropPlan(
@@ -1105,21 +1301,23 @@ def _wide_crop(source_info: dict[str, Any], canvas: CanvasConfig) -> CropPlan:
 
 def _tracking_crop(
     source_info: dict[str, Any], canvas: CanvasConfig, observations: list[SubjectBounds], source_start: float, duration: float,
+    *, framing_intent: str = "CONSERVATIVE_WIDE",
 ) -> CropPlan:
-    center_x, center_y = _weighted_center(observations)
+    center_x, center_y = _framing_crop_center(observations, source_info, canvas, framing_intent)
     crop = _crop_plan_for_center(source_info, canvas, center_x, center_y)
     raw: list[ReframeKeyframe] = []
     for item in observations:
         relative_time = max(0.0, min(duration, item.time_seconds - source_start))
+        item_x, item_y = _framing_crop_center([item], source_info, canvas, framing_intent)
         if raw and relative_time <= raw[-1].time_seconds:
             raw[-1] = ReframeKeyframe(
-                time_seconds=raw[-1].time_seconds, normalized_x=item.center_x,
-                normalized_y=item.center_y, confidence=item.confidence,
+                time_seconds=raw[-1].time_seconds, normalized_x=item_x,
+                normalized_y=item_y, confidence=item.confidence,
             )
         else:
             raw.append(ReframeKeyframe(
-                time_seconds=relative_time, normalized_x=item.center_x,
-                normalized_y=item.center_y, confidence=item.confidence,
+                time_seconds=relative_time, normalized_x=item_x,
+                normalized_y=item_y, confidence=item.confidence,
             ))
     if raw and raw[0].time_seconds > 0:
         raw.insert(0, raw[0].model_copy(update={"time_seconds": 0.0}))
@@ -1353,13 +1551,14 @@ def _crop_origin_for_center(center: float, source_size: int, crop_size: int) -> 
 
 
 def _apply_composition_quality_diagnostics(
-    segments: list[CompositionSegment], canvas: CanvasConfig,
+    segments: list[CompositionSegment], canvas: CanvasConfig, source_info: dict[str, Any],
 ) -> list[CompositionSegment]:
-    """Persist blur/foreground/subject diagnostics for every composition segment."""
+    """Persist 5D scene-aware checks without taking ownership of Goal 5G readiness."""
 
     result: list[CompositionSegment] = []
     for segment in segments:
         diagnostics = _composition_diagnostics(segment, canvas)
+        decision = _composition_quality_decision(segment, canvas, source_info, diagnostics)
         reasons = list(segment.composition_quality_reasons)
         if diagnostics["blur_coverage_ratio"] > 0.75:
             reasons.append("Blur background occupies too much of the vertical canvas.")
@@ -1367,13 +1566,220 @@ def _apply_composition_quality_diagnostics(
             reasons.append("The detected subject would be too small to read reliably on a mobile screen.")
         if segment.tracking_validation_status == "failed_repaired":
             reasons.append("The composition was recalculated after tracking quality validation failed.")
-        status = "passed_with_warning" if reasons else "passed"
+        reasons.extend(decision.reason_codes)
+        quality_status = "failed" if decision.status == "blocked" else (
+            "passed_with_warning" if decision.status != "passed" or reasons else "passed"
+        )
         result.append(segment.model_copy(update={
             "composition_diagnostics": diagnostics,
-            "composition_quality_status": status,
+            "composition_quality_status": quality_status,
             "composition_quality_reasons": list(dict.fromkeys(reasons)),
+            "composition_quality_decision": decision,
         }))
     return result
+
+
+def _composition_quality_decision(
+    segment: CompositionSegment, canvas: CanvasConfig, source_info: dict[str, Any], diagnostics: dict[str, float],
+) -> CompositionQualityDecision:
+    """Evaluate crop safety against the declared content meaning and evidence state."""
+
+    evidence_status, evidence, fallback_provenance = _visual_evidence_context(source_info, segment.subject_bounds)
+    scene_type = _scene_type_for_segment(source_info, segment.subject_bounds)
+    framing_intent = _framing_intent(scene_type)
+    selected_target = segment.tracking_target
+    metrics = _composition_quality_metrics(segment, canvas, diagnostics, scene_type, framing_intent)
+    codes: list[str] = []
+    hard_codes: set[str] = set()
+    has_person = scene_type in _PERSON_SCENES | {"INTERVIEW_MULTI"}
+    valid_observations = bool(segment.subject_bounds)
+
+    if evidence_status == "evidence_unavailable":
+        codes.append("VISUAL_EVIDENCE_UNAVAILABLE")
+    if scene_type == "UNKNOWN":
+        codes.append("UNKNOWN_SCENE_FALLBACK")
+    if has_person and scene_type in _PERSON_SCENES:
+        if metrics["chest_shoulder_framing"] < 0.5:
+            codes.append("CHEST_FRAMING_MISSING")
+        if metrics["head_only_ratio"] > 0.5:
+            codes.extend(["HEAD_ONLY_CROP", "SHOULDERS_CROPPED"])
+            hard_codes.add("HEAD_ONLY_CROP")
+        if metrics["headroom_ratio"] < 0.035:
+            codes.append("INSUFFICIENT_HEADROOM")
+        if metrics["face_edge_margin"] < 0.025:
+            codes.append("FACE_TOO_CLOSE_TO_EDGE")
+            hard_codes.add("FACE_TOO_CLOSE_TO_EDGE")
+        if metrics["gesture_active_ratio"] > 0 and metrics["gesture_area_visibility"] < 0.95:
+            codes.append("GESTURE_AREA_CROPPED")
+            hard_codes.add("GESTURE_AREA_CROPPED")
+        if segment.strategy == "face_crop":
+            codes.append("WRONG_FRAMING_FOR_CONTENT_TYPE")
+            hard_codes.add("WRONG_FRAMING_FOR_CONTENT_TYPE")
+    if scene_type == "INTERVIEW_MULTI":
+        if selected_target == "active_speaker" and metrics["active_speaker_presence"] < 0.80:
+            codes.append("ACTIVE_SPEAKER_MISSING")
+            hard_codes.add("ACTIVE_SPEAKER_MISSING")
+        if selected_target not in {"active_speaker", "subject_group", "scene_center"}:
+            codes.append("WRONG_FRAMING_FOR_CONTENT_TYPE")
+            hard_codes.add("WRONG_FRAMING_FOR_CONTENT_TYPE")
+    if evidence_status == "valid" and scene_type != "UNKNOWN" and not metrics["scene_framing_match"]:
+        codes.append("WRONG_FRAMING_FOR_CONTENT_TYPE")
+        hard_codes.add("WRONG_FRAMING_FOR_CONTENT_TYPE")
+    if scene_type in _PRODUCT_SCENES and valid_observations and metrics["product_screen_visibility"] < 0.98:
+        codes.append("PRODUCT_TARGET_MISSING")
+        hard_codes.add("PRODUCT_TARGET_MISSING")
+    if scene_type in _SCREEN_SCENES:
+        if selected_target != "screen_region" or metrics["product_screen_visibility"] < 0.98:
+            codes.append("SCREEN_CONTENT_CROPPED")
+            hard_codes.add("SCREEN_CONTENT_CROPPED")
+    if scene_type == "FULL_BODY_ACTION":
+        if segment.tracking_mode not in {"scene_wide", "safe_fallback"} or metrics["full_body_visibility"] < 0.98:
+            codes.append("FULL_BODY_ACTION_CROPPED")
+            hard_codes.add("FULL_BODY_ACTION_CROPPED")
+    if scene_type == "CINEMATIC_SCENE" and segment.tracking_mode not in {"scene_wide", "safe_fallback"}:
+        codes.append("CINEMATIC_COMPOSITION_BROKEN")
+        hard_codes.add("CINEMATIC_COMPOSITION_BROKEN")
+    if valid_observations and metrics["target_presence"] < 0.98:
+        # A detected target that lies outside its resolved crop is unsafe even
+        # when another metric looks visually plausible.
+        if scene_type in _PRODUCT_SCENES:
+            codes.append("PRODUCT_TARGET_MISSING")
+            hard_codes.add("PRODUCT_TARGET_MISSING")
+        elif scene_type in _SCREEN_SCENES:
+            codes.append("SCREEN_CONTENT_CROPPED")
+            hard_codes.add("SCREEN_CONTENT_CROPPED")
+        elif has_person:
+            codes.append("FACE_TOO_CLOSE_TO_EDGE")
+            hard_codes.add("FACE_TOO_CLOSE_TO_EDGE")
+    if valid_observations and metrics["empty_frame_risk"] >= 0.90:
+        codes.append("EMPTY_FRAME_DOMINANT")
+        hard_codes.add("EMPTY_FRAME_DOMINANT")
+    # A 16:9 source needs roughly 3.16x horizontal scaling to fill 9:16;
+    # flag only materially tighter crops instead of blocking normal reframes.
+    if metrics["digital_zoom_scale"] > 3.60:
+        codes.append("EXCESSIVE_DIGITAL_ZOOM")
+        hard_codes.add("EXCESSIVE_DIGITAL_ZOOM")
+
+    codes = list(dict.fromkeys(codes))
+    if hard_codes:
+        status = "blocked"
+    elif evidence_status == "evidence_unavailable":
+        status = "evidence_unavailable"
+    elif scene_type == "UNKNOWN" or evidence_status == "fallback" or segment.fallback_reason:
+        status = "fallback"
+    elif codes or segment.tracking_validation_status in {"passed_with_warning", "failed_repaired"}:
+        status = "passed_with_warning"
+    else:
+        status = "passed"
+    if status in {"fallback", "evidence_unavailable"} or segment.fallback_reason:
+        fallback_provenance = {
+            "stage": "composition" if segment.fallback_reason else fallback_provenance["stage"],
+            "reason": segment.fallback_reason or fallback_provenance["reason"],
+        }
+    else:
+        fallback_provenance = {}
+    return CompositionQualityDecision(
+        status=status, scene_type=scene_type, framing_intent=framing_intent,
+        selected_target=selected_target, evidence_status=evidence_status, evidence=evidence,
+        confidence=segment.confidence, metrics=metrics, reason_codes=codes,
+        fallback_provenance=fallback_provenance,
+    )
+
+
+def _composition_quality_metrics(
+    segment: CompositionSegment, canvas: CanvasConfig, diagnostics: dict[str, float], scene_type: str, framing_intent: str,
+) -> dict[str, float | int | bool]:
+    """Measure target retention, framing, empty-frame risk and crop motion."""
+
+    crop = segment.target_crop
+    bounds = segment.subject_bounds
+    fully_visible: list[bool] = []
+    headroom: list[float] = []
+    edge_margins: list[float] = []
+    full_body_visible: list[bool] = []
+    if crop is not None and crop.crop_width and crop.crop_height:
+        for bound in bounds:
+            crop_x, crop_y, crop_width, crop_height = _crop_window_at(segment, bound.time_seconds)
+            left = (bound.center_x - bound.width / 2) * crop.source_width
+            right = (bound.center_x + bound.width / 2) * crop.source_width
+            top = (bound.center_y - bound.height / 2) * crop.source_height
+            bottom = (bound.center_y + bound.height / 2) * crop.source_height
+            fully_visible.append(
+                left >= crop_x and right <= crop_x + crop_width and top >= crop_y and bottom <= crop_y + crop_height
+            )
+            headroom.append(max(0.0, (top - crop_y) / max(crop_height, 1)))
+            edge_margins.append(max(0.0, min(
+                (left - crop_x) / max(crop_width, 1), (crop_x + crop_width - right) / max(crop_width, 1),
+                (top - crop_y) / max(crop_height, 1), (crop_y + crop_height - bottom) / max(crop_height, 1),
+            )))
+            if bound.framing_observation == "full_body":
+                full_body_visible.append(fully_visible[-1])
+    elif bounds:
+        # fit/contain layouts preserve the complete source frame.
+        fully_visible = [True] * len(bounds)
+        headroom = [max(0.0, item.center_y - item.height / 2) for item in bounds]
+        edge_margins = [max(0.0, min(
+            item.center_x - item.width / 2, 1 - (item.center_x + item.width / 2),
+            item.center_y - item.height / 2, 1 - (item.center_y + item.height / 2),
+        )) for item in bounds]
+        full_body_visible = [True for item in bounds if item.framing_observation == "full_body"]
+    tracking = segment.tracking_diagnostics or _tracking_quality_metrics(segment)
+    chest_observations = [item for item in bounds if item.framing_observation in {"chest_up", "upper_body", "full_body"}]
+    head_only = [item for item in bounds if item.framing_observation == "head_only"]
+    gesture_active = [item for item in bounds if item.gesture_active]
+    important = [item for item in bounds if item.target in {"important_object", "screen_region"}]
+    if scene_type in _SCREEN_SCENES:
+        important = [item for item in bounds if item.target == "screen_region"] or important
+    if scene_type in _PRODUCT_SCENES:
+        important = [item for item in bounds if item.target == "important_object"] or important
+    visible_ratio = sum(fully_visible) / len(fully_visible) if fully_visible else 0.0
+    subject_area = diagnostics["subject_screen_ratio"]
+    crop_scale = _crop_scale(crop) if crop is not None else 1.0
+    return {
+        "face_visibility": round(visible_ratio, 4),
+        "chest_shoulder_framing": round(len(chest_observations) / len(bounds), 4) if bounds else 0.0,
+        "head_only_ratio": round(len(head_only) / len(bounds), 4) if bounds else 0.0,
+        "headroom_ratio": round(min(headroom, default=0.0), 4),
+        "face_edge_margin": round(min(edge_margins, default=0.0), 4),
+        "target_presence": round(visible_ratio, 4),
+        "active_speaker_presence": round(max((item.active_speaker_confidence for item in bounds), default=0.0), 4),
+        "gesture_active_ratio": round(len(gesture_active) / len(bounds), 4) if bounds else 0.0,
+        "gesture_area_visibility": round(
+            sum(item.gesture_area_visible for item in gesture_active) / len(gesture_active), 4,
+        ) if gesture_active else 1.0,
+        "product_screen_visibility": round(
+            sum(fully_visible[bounds.index(item)] for item in important) / len(important), 4,
+        ) if important else 0.0,
+        "full_body_visibility": round(sum(full_body_visible) / len(full_body_visible), 4) if full_body_visible else 1.0,
+        "empty_frame_risk": round(max(0.0, diagnostics["unused_visual_area_ratio"] + (0.0 if subject_area >= 0.025 else 0.25)), 4),
+        "digital_zoom_scale": round(float(crop_scale or 1.0), 4),
+        "crop_stability": bool(float(tracking.get("max_crop_speed", 0.0)) <= _MAX_SAFE_TRACKING_SPEED),
+        "crop_velocity": round(float(tracking.get("max_crop_speed", 0.0)), 4),
+        "crop_movement": round(float(tracking.get("crop_motion", 0.0)), 4),
+        "crop_switch_frequency": round(1 / max(segment.minimum_focus_hold_seconds, 0.001) if segment.tracking_mode == "active_speaker_tracking" else 0.0, 4),
+        "scene_framing_match": bool(
+            (framing_intent == "CHEST_UP_PERSON" and segment.strategy == "subject_crop")
+            or (framing_intent == "GROUP_CONVERSATION" and segment.tracking_target in {"subject_group", "active_speaker"})
+            or (framing_intent == "PRODUCT_OR_HANDS" and segment.tracking_target == "important_object")
+            or (framing_intent == "SCREEN_FIRST" and segment.tracking_target == "screen_region")
+            or (framing_intent in {"PRESERVE_WIDE_ACTION", "CONSERVATIVE_WIDE"} and segment.tracking_mode in {"scene_wide", "safe_fallback"})
+        ),
+    }
+
+
+def _crop_window_at(segment: CompositionSegment, time_seconds: float) -> tuple[int, int, int, int]:
+    crop = segment.target_crop
+    assert crop is not None and crop.crop_width and crop.crop_height
+    if crop.tracking_keyframes:
+        center_x, center_y = _tracking_center_at(
+            crop.tracking_keyframes, max(0.0, time_seconds - (segment.source_start_seconds or 0.0)),
+        )
+        return (
+            _crop_origin_for_center(center_x, crop.source_width, crop.crop_width),
+            _crop_origin_for_center(center_y, crop.source_height, crop.crop_height),
+            crop.crop_width, crop.crop_height,
+        )
+    return crop.crop_x or 0, crop.crop_y or 0, crop.crop_width, crop.crop_height
 
 
 def _composition_diagnostics(segment: CompositionSegment, canvas: CanvasConfig) -> dict[str, float]:

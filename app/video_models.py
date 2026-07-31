@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,6 +10,75 @@ from app.production_models import ProductionPlanReference
 VIDEO_PROJECT_SCHEMA_VERSION = "3D.0"
 VIDEO_TIMELINE_VERSION = "3D.0"
 SUBTITLE_PROJECT_SCHEMA_VERSION = "3D.0"
+COMPOSITION_QUALITY_DECISION_SCHEMA_VERSION = "5D.0"
+
+
+SceneType = Literal[
+    "TALKING_HEAD", "INTERVIEW_SINGLE", "INTERVIEW_MULTI", "PODCAST",
+    "PRODUCT_DEMO", "HANDS_ON_DEMO", "PRESENTATION_SCREEN", "GAMEPLAY",
+    "CINEMATIC_SCENE", "FULL_BODY_ACTION", "UNKNOWN",
+]
+FramingIntent = Literal[
+    "CHEST_UP_PERSON", "GROUP_CONVERSATION", "PRODUCT_OR_HANDS",
+    "SCREEN_FIRST", "PRESERVE_WIDE_ACTION", "CONSERVATIVE_WIDE",
+]
+VisualEvidenceStatus = Literal["valid", "fallback", "evidence_unavailable"]
+CompositionDecisionStatus = Literal[
+    "passed", "passed_with_warning", "fallback", "evidence_unavailable", "blocked",
+]
+CompositionReasonCode = Literal[
+    "WRONG_FRAMING_FOR_CONTENT_TYPE", "HEAD_ONLY_CROP", "CHEST_FRAMING_MISSING",
+    "INSUFFICIENT_HEADROOM", "FACE_TOO_CLOSE_TO_EDGE", "SHOULDERS_CROPPED",
+    "GESTURE_AREA_CROPPED", "PRODUCT_TARGET_MISSING", "ACTIVE_SPEAKER_MISSING",
+    "FULL_BODY_ACTION_CROPPED", "SCREEN_CONTENT_CROPPED", "CINEMATIC_COMPOSITION_BROKEN",
+    "EMPTY_FRAME_DOMINANT", "EXCESSIVE_DIGITAL_ZOOM", "UNKNOWN_SCENE_FALLBACK",
+    "VISUAL_EVIDENCE_UNAVAILABLE",
+]
+
+
+class CompositionQualityDecision(BaseModel):
+    """Versioned, evidence-grounded safety decision for one composition segment.
+
+    This is deliberately a pre-render composition contract, not the Goal 5G
+    final QualityReport.  ``fallback`` and ``evidence_unavailable`` are
+    distinct non-pass states so a conservative crop cannot hide uncertainty.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = COMPOSITION_QUALITY_DECISION_SCHEMA_VERSION
+    status: CompositionDecisionStatus = "evidence_unavailable"
+    scene_type: SceneType = "UNKNOWN"
+    framing_intent: FramingIntent = "CONSERVATIVE_WIDE"
+    selected_target: Literal[
+        "primary_face", "primary_person", "active_speaker", "important_object",
+        "screen_region", "subject_group", "scene_center", "none",
+    ] = "none"
+    evidence_status: VisualEvidenceStatus = "evidence_unavailable"
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(default=0, ge=0, le=1)
+    metrics: dict[str, float | int | bool] = Field(default_factory=dict)
+    reason_codes: list[CompositionReasonCode] = Field(default_factory=lambda: [
+        "UNKNOWN_SCENE_FALLBACK", "VISUAL_EVIDENCE_UNAVAILABLE",
+    ])
+    fallback_provenance: dict[str, str] = Field(default_factory=lambda: {
+        "stage": "legacy_contract", "reason": "Composition quality decision was not persisted by the older plan.",
+    })
+
+    @model_validator(mode="after")
+    def _valid_decision(self) -> "CompositionQualityDecision":
+        if not self.schema_version:
+            raise ValueError("composition quality decision needs a schema version")
+        if self.status == "passed" and self.evidence_status != "valid":
+            raise ValueError("a passed composition decision requires valid visual evidence")
+        if self.status == "evidence_unavailable":
+            if self.evidence_status != "evidence_unavailable":
+                raise ValueError("evidence-unavailable decision must record unavailable evidence")
+            if "VISUAL_EVIDENCE_UNAVAILABLE" not in self.reason_codes:
+                raise ValueError("evidence-unavailable decision must record its reason code")
+        if self.status == "fallback" and not self.fallback_provenance:
+            raise ValueError("fallback composition decision must record provenance")
+        return self
 
 
 class CanvasConfig(BaseModel):
@@ -95,6 +164,14 @@ class SubjectBounds(BaseModel):
     visible_face_count: int = Field(default=1, ge=0, le=32)
     active_speaker_confidence: float = Field(default=0, ge=0, le=1)
     scene_id: str | None = Field(default=None, max_length=160)
+    scene_type: SceneType = "UNKNOWN"
+    framing_observation: Literal[
+        "head_only", "head_shoulders", "chest_up", "upper_body", "full_body",
+        "object", "screen", "unknown",
+    ] = "unknown"
+    eye_line_y: float | None = Field(default=None, ge=0, le=1)
+    gesture_active: bool = False
+    gesture_area_visible: bool = False
 
 
 class CompositionSegment(BaseModel):
@@ -147,6 +224,7 @@ class CompositionSegment(BaseModel):
     composition_quality_status: Literal["passed", "passed_with_warning", "failed_repairable", "failed"] = "passed"
     composition_quality_reasons: list[str] = Field(default_factory=list)
     composition_diagnostics: dict[str, float] = Field(default_factory=dict)
+    composition_quality_decision: CompositionQualityDecision = Field(default_factory=CompositionQualityDecision)
 
     @model_validator(mode="after")
     def _valid_composition_segment(self) -> "CompositionSegment":

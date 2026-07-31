@@ -382,6 +382,118 @@ def test_tracking_engine_uses_group_or_safe_fallback_for_risky_scenes() -> None:
     assert screen.tracking_target == "screen_region"
 
 
+def test_content_aware_talking_head_persists_chest_up_quality_decision() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    source = {
+        "display_width": 320, "display_height": 180, "rotation": 0,
+        "visual_evidence_status": "valid",
+        "subject_keyframes": [
+            {
+                "time_seconds": 0, "normalized_x": 0.48, "normalized_y": 0.42,
+                "normalized_width": 0.22, "normalized_height": 0.46, "confidence": 0.93,
+                "tracking_target": "primary_face", "visible_face_count": 1,
+                "scene_type": "TALKING_HEAD", "framing_observation": "chest_up",
+                "eye_line_y": 0.34, "gesture_active": True, "gesture_area_visible": True,
+            },
+            {
+                "time_seconds": 3, "normalized_x": 0.50, "normalized_y": 0.42,
+                "normalized_width": 0.22, "normalized_height": 0.46, "confidence": 0.94,
+                "tracking_target": "primary_face", "visible_face_count": 1,
+                "scene_type": "TALKING_HEAD", "framing_observation": "chest_up",
+                "eye_line_y": 0.34, "gesture_active": True, "gesture_area_visible": True,
+            },
+        ],
+    }
+    plan = build_reframe_plan(
+        source, canvas, config, _tracking_timeline("source.mp4", make_crop_plan(source, canvas, config)),
+    )
+    segment = plan.composition_segments[0]
+    decision = segment.composition_quality_decision
+    assert segment.strategy == "subject_crop"
+    assert decision.schema_version == "5D.0"
+    assert decision.status == "passed"
+    assert decision.scene_type == "TALKING_HEAD"
+    assert decision.framing_intent == "CHEST_UP_PERSON"
+    assert decision.selected_target == "primary_face"
+    assert decision.evidence_status == "valid"
+    assert {"face_visibility", "chest_shoulder_framing", "headroom_ratio", "gesture_area_visibility", "crop_stability"} <= decision.metrics.keys()
+
+
+def test_content_aware_product_and_screen_decisions_protect_content_targets() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    product_source = {
+        "display_width": 320, "display_height": 180, "rotation": 0, "visual_evidence_status": "valid",
+        "subject_keyframes": [{
+            "time_seconds": 1, "normalized_x": 0.50, "normalized_y": 0.48,
+            "normalized_width": 0.16, "normalized_height": 0.40, "confidence": 0.94,
+            "tracking_target": "important_object", "visible_face_count": 0,
+            "scene_type": "HANDS_ON_DEMO", "framing_observation": "object", "eye_line_y": 0.48,
+            "gesture_active": True, "gesture_area_visible": True,
+        }],
+    }
+    timeline = _tracking_timeline("source.mp4", make_crop_plan(product_source, canvas, config))
+    product = build_reframe_plan(product_source, canvas, config, timeline).composition_segments[0].composition_quality_decision
+    assert product.status == "passed"
+    assert product.scene_type == "HANDS_ON_DEMO"
+    assert product.framing_intent == "PRODUCT_OR_HANDS"
+    assert product.selected_target == "important_object"
+
+    unsafe_screen_source = {
+        "display_width": 320, "display_height": 180, "rotation": 0, "visual_evidence_status": "valid",
+        "subject_keyframes": [{
+            "time_seconds": 1, "normalized_x": 0.50, "normalized_y": 0.42,
+            "normalized_width": 0.20, "normalized_height": 0.35, "confidence": 0.94,
+            "tracking_target": "primary_face", "visible_face_count": 1,
+            "scene_type": "PRESENTATION_SCREEN", "framing_observation": "head_shoulders", "eye_line_y": 0.35,
+            "gesture_active": False, "gesture_area_visible": False,
+        }],
+    }
+    blocked = build_reframe_plan(
+        unsafe_screen_source, canvas, config,
+        _tracking_timeline("source.mp4", make_crop_plan(unsafe_screen_source, canvas, config)),
+    ).composition_segments[0].composition_quality_decision
+    assert blocked.status == "blocked"
+    assert "SCREEN_CONTENT_CROPPED" in blocked.reason_codes
+
+
+def test_head_only_and_unavailable_visual_evidence_never_pass_composition() -> None:
+    from app.config import ProductionRenderConfig
+
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    config = ProductionRenderConfig(output_width=180, output_height=320, crop_strategy="safe_auto")
+    head_only_source = {
+        "display_width": 320, "display_height": 180, "rotation": 0, "visual_evidence_status": "valid",
+        "subject_keyframes": [{
+            "time_seconds": 1, "normalized_x": 0.50, "normalized_y": 0.40,
+            "normalized_width": 0.16, "normalized_height": 0.18, "confidence": 0.95,
+            "tracking_target": "primary_face", "visible_face_count": 1,
+            "scene_type": "TALKING_HEAD", "framing_observation": "head_only", "eye_line_y": 0.36,
+            "gesture_active": False, "gesture_area_visible": False,
+        }],
+    }
+    head_only = build_reframe_plan(
+        head_only_source, canvas, config,
+        _tracking_timeline("source.mp4", make_crop_plan(head_only_source, canvas, config)),
+    ).composition_segments[0].composition_quality_decision
+    assert head_only.status == "blocked"
+    assert {"HEAD_ONLY_CROP", "CHEST_FRAMING_MISSING", "SHOULDERS_CROPPED"} <= set(head_only.reason_codes)
+
+    unavailable_source = {"display_width": 320, "display_height": 180, "rotation": 0, "visual_evidence_status": "evidence_unavailable"}
+    unavailable = build_reframe_plan(
+        unavailable_source, canvas, config,
+        _tracking_timeline("source.mp4", make_crop_plan(unavailable_source, canvas, config)),
+    ).composition_segments[0].composition_quality_decision
+    assert unavailable.status == "evidence_unavailable"
+    assert {"UNKNOWN_SCENE_FALLBACK", "VISUAL_EVIDENCE_UNAVAILABLE"} <= set(unavailable.reason_codes)
+    assert unavailable.fallback_provenance
+
+
 def test_scene_boundaries_split_the_render_timeline_and_force_controlled_cuts() -> None:
     from app.config import ProductionRenderConfig
 
