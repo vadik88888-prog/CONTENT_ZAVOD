@@ -26,7 +26,8 @@ from app.product_flow import (
     estimate_processing,
     resolve_processing_intent,
 )
-from app.utils import read_json, safe_name
+from app.quality_report import QUALITY_REPORT_SCHEMA_VERSION, aggregate_quality_status, read_quality_report
+from app.utils import read_json, safe_name, stable_file_hash
 
 
 STATE_PERSISTENCE_WARNING = "Ролики созданы, но не удалось сохранить служебное состояние"
@@ -80,6 +81,9 @@ class PipelineCompletion:
     technical_details: str | None
     cost_estimate: float | None
     canonical_results: bool = False
+    quality_status: str | None = None
+    quality_report_paths: tuple[Path, ...] = ()
+    legacy_technical_completion: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,8 +508,21 @@ class PipelineFacade:
                 artifact_error = self._validate_final_mp4(candidate)
                 if artifact_error:
                     return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", artifact_error)
+            quality_status, quality_paths, quality_warnings, quality_error = self._validate_quality_gate(
+                raw, manifest, registry, prepared,
+            )
+            if quality_error:
+                return self._failed_completion(
+                    prepared,
+                    "Final Quality Gate не подтвердил готовность результата.",
+                    quality_error,
+                )
+            warnings.extend(item for item in quality_warnings if item not in warnings)
             cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
-            return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost, True)
+            return PipelineCompletion(
+                prepared.report_path, output_files, warnings, None, None, cost, True,
+                quality_status, tuple(quality_paths), quality_status is None,
+            )
         output_files = [final_path]
         for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
             path = Path(str(value))
@@ -522,8 +539,21 @@ class PipelineFacade:
                 warnings.append("Один из дополнительных роликов не прошёл проверку и не был добавлен в результаты.")
                 continue
             output_files.append(candidate)
+        quality_status, quality_paths, quality_warnings, quality_error = self._validate_quality_gate(
+            raw, manifest, [], prepared,
+        )
+        if quality_error:
+            return self._failed_completion(
+                prepared,
+                "Final Quality Gate не подтвердил готовность результата.",
+                quality_error,
+            )
+        warnings.extend(item for item in quality_warnings if item not in warnings)
         cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
-        return PipelineCompletion(prepared.report_path, output_files, warnings, None, None, cost)
+        return PipelineCompletion(
+            prepared.report_path, output_files, warnings, None, None, cost, False,
+            quality_status, tuple(quality_paths), quality_status is None,
+        )
 
     def recovery_completion(self, prepared: PreparedPipelineRun, started_at: str) -> PipelineCompletion | None:
         """Return a verified canonical completion suitable for a failed process.
@@ -777,6 +807,83 @@ class PipelineFacade:
     @staticmethod
     def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:
         return PipelineCompletion(prepared.report_path, [], [], summary, details, None)
+
+    @staticmethod
+    def _validate_quality_gate(
+        raw: dict[str, Any],
+        manifest: dict[str, Any] | None,
+        registry: list[ClipResult],
+        prepared: PreparedPipelineRun,
+    ) -> tuple[str | None, list[Path], list[str], str | None]:
+        """Trust only persisted V2 reports; older runs remain legacy technical completion."""
+
+        report_gate = raw.get("quality_gate")
+        manifest_gate = manifest.get("quality_gate") if isinstance(manifest, dict) else None
+        if report_gate is None and manifest_gate is None:
+            return None, [], [], None
+        if not isinstance(report_gate, dict) or not isinstance(manifest_gate, dict):
+            return None, [], [], "V2 Quality Gate must be present in both report.json and manifest.json."
+        if (
+            report_gate.get("schema_version") != QUALITY_REPORT_SCHEMA_VERSION
+            or manifest_gate.get("schema_version") != QUALITY_REPORT_SCHEMA_VERSION
+            or report_gate.get("status") != manifest_gate.get("status")
+        ):
+            return None, [], [], "report.json and manifest.json disagree on the V2 Quality Gate contract."
+        status = str(report_gate.get("status") or "")
+        references = report_gate.get("reports")
+        manifest_references = manifest_gate.get("reports")
+        if status not in {"PASS", "PASS_WITH_WARNINGS", "BLOCKED"} or not isinstance(references, list) or not references:
+            return None, [], [], "V2 Quality Gate is missing a valid persisted QualityReport reference."
+        if not isinstance(manifest_references, list) or {
+            str(item.get("report_id")) for item in references if isinstance(item, dict)
+        } != {
+            str(item.get("report_id")) for item in manifest_references if isinstance(item, dict)
+        }:
+            return None, [], [], "report.json and manifest.json reference different QualityReports."
+        by_report_id = {item.quality_report_id: item for item in registry if item.quality_report_id}
+        paths: list[Path] = []
+        report_statuses: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for reference in references:
+            if not isinstance(reference, dict):
+                return None, [], [], "QualityReport reference is not an object."
+            report_path_value = reference.get("path")
+            if not isinstance(report_path_value, str) or not report_path_value.strip():
+                return None, [], [], "QualityReport reference is missing its path."
+            report_path = Path(report_path_value)
+            if not is_run_scoped_path(report_path, prepared.output_directory) or not report_path.is_file():
+                return None, [], [], "QualityReport path is missing or outside the current run."
+            report = read_quality_report(read_json(report_path, {}))
+            if report is None:
+                return None, [], [], f"QualityReport is invalid: {report_path}"
+            if report.get("report_id") != reference.get("report_id") or report.get("status") != reference.get("status"):
+                return None, [], [], "QualityReport reference does not match persisted report contents."
+            result = by_report_id.get(str(report.get("report_id") or ""))
+            if registry and result is None:
+                return None, [], [], "Canonical ClipResult is missing its QualityReport reference."
+            if result is not None:
+                if (
+                    report.get("artifact_id") != result.artifact_id
+                    or report.get("candidate_id") != result.candidate_id
+                    or report.get("edit_plan_id") != result.production_plan_id
+                    or report.get("run_id") != result.run_id
+                    or Path(str(report.get("artifact_path") or "")).resolve() != Path(result.output_file).resolve()
+                ):
+                    return None, [], [], "QualityReport artifact identity does not match canonical ClipResult."
+                if report.get("artifact_sha256") != stable_file_hash(Path(result.output_file)):
+                    return None, [], [], "QualityReport checksum does not match the final MP4."
+            for finding in report.get("findings", []):
+                if isinstance(finding, dict) and finding.get("severity") == "warning":
+                    message = str(finding.get("user_message") or finding.get("code") or "Quality warning")
+                    if message not in warnings:
+                        warnings.append(message)
+            paths.append(report_path)
+            report_statuses.append(report)
+        if aggregate_quality_status(report_statuses) != status:
+            return None, [], [], "Quality Gate aggregate status does not match persisted QualityReports."
+        if status == "BLOCKED":
+            return None, [], [], "Final Quality Gate is BLOCKED; inspect persisted QualityReport findings."
+        return status, paths, warnings, None
 
     @staticmethod
     def _report_is_current(report_path: Path, started_at: str) -> bool:

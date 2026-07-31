@@ -25,6 +25,11 @@ class ClipResult:
     content_fingerprint: str = ""
     run_id: str = ""
     revision_id: str = ""
+    artifact_id: str = ""
+    artifact_checksum: str = ""
+    quality_report_id: str = ""
+    quality_report_path: str = ""
+    quality_status: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +43,11 @@ class ClipResult:
             "content_fingerprint": self.content_fingerprint,
             "run_id": self.run_id,
             "revision_id": self.revision_id,
+            "artifact_id": self.artifact_id,
+            "artifact_checksum": self.artifact_checksum,
+            "quality_report_id": self.quality_report_id,
+            "quality_report_path": self.quality_report_path,
+            "quality_status": self.quality_status,
             "status": self.status,
             "primary": self.primary,
         }
@@ -64,6 +74,11 @@ class ClipResult:
             content_fingerprint=str(value.get("content_fingerprint") or "").strip(),
             run_id=str(value.get("run_id") or "").strip(),
             revision_id=str(value.get("revision_id") or "").strip(),
+            artifact_id=str(value.get("artifact_id") or "").strip(),
+            artifact_checksum=str(value.get("artifact_checksum") or "").strip(),
+            quality_report_id=str(value.get("quality_report_id") or "").strip(),
+            quality_report_path=str(value.get("quality_report_path") or "").strip(),
+            quality_status=str(value.get("quality_status") or "").strip(),
         )
 
 

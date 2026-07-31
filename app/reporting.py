@@ -33,6 +33,7 @@ def make_report(
     candidate_flow: dict[str, Any] | None = None,
     terminal: dict[str, Any] | None = None,
     primary_results: list[dict[str, Any]] | None = None,
+    quality_gate: dict[str, Any] | None = None,
     run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stages = state.get("stages", {})
@@ -89,6 +90,7 @@ def make_report(
         "state_persistence": state.get("state_persistence", {"status": "saved"}),
         "primary_results": primary_results or [],
         "produced_clips_count": len(primary_results or []),
+        "quality_gate": quality_gate,
         "run": run or {},
     }
     write_json(path, report)

@@ -92,7 +92,13 @@ class RunHistoryStore:
             self.project_store.save(project)
         return changed
 
-    def snapshot_report_and_outputs(self, run: ProjectRun, report_path: Path, output_files: list[Path]) -> ProjectRun:
+    def snapshot_report_and_outputs(
+        self,
+        run: ProjectRun,
+        report_path: Path,
+        output_files: list[Path],
+        quality_report_paths: tuple[Path, ...] = (),
+    ) -> ProjectRun:
         """Keep immutable history without copying the source video.
 
         Reports are copied; generated final files use a hard link on one volume and
@@ -108,6 +114,12 @@ class RunHistoryStore:
             shutil.copy2(report_path, report_copy)
             run.report_path = str(report_copy)
             stored.append(str(report_copy))
+        for index, source in enumerate(quality_report_paths, start=1):
+            if not source.is_file():
+                continue
+            target = artifacts / f"quality-report-{index:02d}.json"
+            shutil.copy2(source, target)
+            stored.append(str(target))
         for index, source in enumerate(output_files, start=1):
             if not source.is_file():
                 continue

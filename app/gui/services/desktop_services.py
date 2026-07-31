@@ -666,16 +666,23 @@ class DesktopServices:
         state_persistence_degraded: bool = False,
     ) -> ProjectRun:
         warnings = list(completion.warnings)
+        quality_driven = completion.quality_status is not None and not completion.legacy_technical_completion
         if state_persistence_degraded and STATE_PERSISTENCE_WARNING not in warnings:
             warnings.append(STATE_PERSISTENCE_WARNING)
         report = read_json(completion.report_path, {})
-        run.status = RunStatus.COMPLETED_WITH_WARNINGS if warnings else RunStatus.COMPLETED
+        run.status = (
+            RunStatus.COMPLETED_WITH_WARNINGS
+            if quality_driven and completion.quality_status == "PASS_WITH_WARNINGS"
+            else RunStatus.COMPLETED_WITH_WARNINGS if not quality_driven and warnings else RunStatus.COMPLETED
+        )
         run.finished_at = utc_now()
         run.warnings = warnings
         run.cost_estimate = completion.cost_estimate
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
         self._snapshot_engine_paths(run)
-        self.runs.snapshot_report_and_outputs(run, completion.report_path, completion.output_files)
+        self.runs.snapshot_report_and_outputs(
+            run, completion.report_path, completion.output_files, completion.quality_report_paths,
+        )
         self.runs.save(run)
         run_info = report.get("run", {}) if isinstance(report, dict) else {}
         if run.run_kind == RunKind.ANALYSIS:
@@ -739,6 +746,14 @@ class DesktopServices:
                 project.selected_candidate_ids = [
                     candidate_id for candidate_id in project.selected_candidate_ids if candidate_id not in completed_ids
                 ]
+            elif quality_driven and completion.quality_status == "PASS_WITH_WARNINGS":
+                run.status = RunStatus.COMPLETED_WITH_WARNINGS
+                project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
+                project.selected_candidate_ids = []
+            elif quality_driven:
+                run.status = RunStatus.COMPLETED
+                project.status = ProjectStatus.COMPLETED
+                project.selected_candidate_ids = []
             elif warnings:
                 run.status = RunStatus.COMPLETED_WITH_WARNINGS
                 project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
@@ -748,7 +763,11 @@ class DesktopServices:
                 project.status = ProjectStatus.COMPLETED
                 project.selected_candidate_ids = []
         else:
-            project.status = ProjectStatus.COMPLETED_WITH_WARNINGS if warnings else ProjectStatus.COMPLETED
+            project.status = (
+                ProjectStatus.COMPLETED_WITH_WARNINGS
+                if quality_driven and completion.quality_status == "PASS_WITH_WARNINGS"
+                else ProjectStatus.COMPLETED_WITH_WARNINGS if not quality_driven and warnings else ProjectStatus.COMPLETED
+            )
         project.latest_run_id = run.run_id
         # Run-kind-specific terminal states (analysis_ready/draft_ready) are
         # assigned after snapshots are copied; persist the final value too.

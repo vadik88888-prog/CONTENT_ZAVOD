@@ -6,7 +6,7 @@ import shutil
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -57,6 +57,7 @@ from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
+from app.quality_report import build_quality_report
 from app.production_plan import (
     PRODUCTION_PLAN_VERSION,
     ProductionPlanEnvelopeContext,
@@ -745,6 +746,19 @@ class Pipeline:
                 )
             )
         registry = primary_clip_results(production_render)
+        quality_reports: list[dict[str, Any]] | None = None
+        if production_is_primary:
+            registry, quality_reports = self._persist_quality_reports(
+                output_directory=output_directory,
+                registry=registry,
+                source_data=source_data,
+                production=production,
+                audio=audio,
+                production_render=production_render,
+                final_scored=final_scored,
+                diversity_decision=final_data.get("diversity_decision") if isinstance(final_data, dict) else None,
+            )
+            production_render["quality_reports"] = quality_reports
         self._assert_current_run_results(registry, output_directory)
         outputs = result_paths(registry, output_directory) if production_is_primary else [
             Path(value) for value in render_data.get("output_files", []) if Path(value).is_file()
@@ -757,6 +771,7 @@ class Pipeline:
             outputs,
             candidate_flow,
             delivery_required=not self.production_plan_only and not self.tts_only and not self.audio_only,
+            quality_reports=quality_reports,
         )
         tracker.start("terminal")
         tracker.finish(
@@ -844,6 +859,7 @@ class Pipeline:
             },
             virality=virality_report,
             primary_results=[item.to_dict() for item in registry],
+            quality_gate=_quality_gate_summary(quality_reports),
             run={
                 "run_id": self.run_id,
                 "source_id": source.id,
@@ -874,6 +890,7 @@ class Pipeline:
                 "analysis_fingerprint": _hash({"profiles": virality_profiles, "ranking": virality_ranking}) if self.config.virality.enabled else None,
             },
             terminal=terminal,
+            quality_gate=_quality_gate_summary(quality_reports),
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
@@ -1653,6 +1670,17 @@ class Pipeline:
         })
         production_render["render_settings_fingerprint"] = render_settings_fingerprint
         registry = primary_clip_results(production_render)
+        registry, quality_reports = self._persist_quality_reports(
+            output_directory=output_directory,
+            registry=registry,
+            source_data=source_data,
+            production=production,
+            audio=audio,
+            production_render=production_render,
+            final_scored=final_scored,
+            diversity_decision=None,
+        )
+        production_render["quality_reports"] = quality_reports
         self._assert_current_run_results(registry, output_directory)
         outputs = result_paths(registry, output_directory)
         # Draft FinalScripts were already validated before the user approved
@@ -1668,7 +1696,9 @@ class Pipeline:
         candidate_flow = build_candidate_flow(
             final_scored, selected_ids, approved_transformation, production, production_render,
         )
-        terminal = build_terminal_state(len(plans), outputs, candidate_flow, delivery_required=True)
+        terminal = build_terminal_state(
+            len(plans), outputs, candidate_flow, delivery_required=True, quality_reports=quality_reports,
+        )
         tracker.start("terminal")
         tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)
         if terminal["status"] == "failed":
@@ -1707,6 +1737,7 @@ class Pipeline:
                 "terminal_status": terminal["status"], "error_code": terminal.get("error_code"),
             },
             primary_results=[item.to_dict() for item in registry],
+            quality_gate=_quality_gate_summary(quality_reports),
         )
         manifest = write_run_manifest(
             output_directory / "manifest.json", run_id=self.run_id, source=source_data,
@@ -1716,6 +1747,7 @@ class Pipeline:
                 "analysis_id": analysis.analysis_id, "draft_id": draft.draft_id,
                 "draft_artifact_ref": str(self.draft_artifact_path), "selected_candidate_ids": list(self.selected_candidate_ids),
             }, terminal=terminal,
+            quality_gate=_quality_gate_summary(quality_reports),
         )
         report["run"]["manifest_path"] = str(output_directory / "manifest.json")
         report["run"]["finished_at"] = manifest["finished_at"]
@@ -2350,6 +2382,74 @@ class Pipeline:
                     f"Canonical ClipResult points outside current run directory: {result.output_file}"
                 )
 
+    def _persist_quality_reports(
+        self,
+        *,
+        output_directory: Path,
+        registry: list[ClipResult],
+        source_data: dict[str, Any],
+        production: dict[str, Any],
+        audio: dict[str, Any],
+        production_render: dict[str, Any],
+        final_scored: list[Any],
+        diversity_decision: dict[str, Any] | None,
+    ) -> tuple[list[ClipResult], list[dict[str, Any]]]:
+        """Persist one Final Quality Gate report for each canonical V2 MP4.
+
+        All inputs are reports already produced by upstream stages.  This is an
+        aggregation/persistence step only, so render-only recovery never causes
+        a second ffprobe scan, media analysis, or expensive rerender.
+        """
+
+        plans = {
+            str(item.get("candidate_id") or ""): item.get("plan")
+            for item in production.get("items", []) if isinstance(item, dict) and isinstance(item.get("plan"), dict)
+        }
+        audio_items = {
+            str(item.get("candidate_id") or ""): item.get("report")
+            for item in audio.get("items", []) if isinstance(item, dict) and isinstance(item.get("report"), dict)
+        }
+        render_items = {
+            str(item.get("candidate_id") or ""): item.get("report")
+            for item in production_render.get("items", [])
+            if isinstance(item, dict) and isinstance(item.get("report"), dict)
+        }
+        candidates = {
+            str(getattr(item, "candidate", item).id): item.to_dict()
+            for item in final_scored if getattr(getattr(item, "candidate", item), "id", None)
+        }
+        persisted: list[ClipResult] = []
+        references: list[dict[str, Any]] = []
+        for index, result in enumerate(registry, start=1):
+            render_report = render_items.get(result.candidate_id)
+            if render_report is None and len(registry) == 1:
+                render_report = production_render
+            report = build_quality_report(
+                artifact_path=Path(result.output_file),
+                result=result,
+                run_id=self.run_id,
+                project_id=self.project_id,
+                source=source_data,
+                plan=plans.get(result.candidate_id),
+                candidate=candidates.get(result.candidate_id),
+                diversity_decision=diversity_decision,
+                render_report=render_report,
+                audio_report=audio_items.get(result.candidate_id),
+                all_results=registry,
+            )
+            report_path = output_directory / "results" / f"quality-report-{index:02d}.json"
+            write_json(report_path, report.to_dict())
+            persisted.append(replace(
+                result,
+                artifact_id=report.artifact_id,
+                artifact_checksum=report.artifact_sha256,
+                quality_report_id=report.report_id,
+                quality_report_path=str(report_path),
+                quality_status=report.status,
+            ))
+            references.append(report.reference(report_path))
+        return persisted, references
+
     def _run_tts_only(
         self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
     ) -> PipelineResult:
@@ -2527,6 +2627,23 @@ class Pipeline:
             })
             existing["production_render"] = production_render
         registry = primary_clip_results(production_render)
+        registry, quality_reports = self._persist_quality_reports(
+            output_directory=output_directory,
+            registry=registry,
+            source_data=source.to_dict(),
+            production={"items": [{
+                "candidate_id": plan.metadata.candidate_id,
+                "plan": plan.model_dump(mode="json"),
+            }]},
+            audio={"items": [{
+                "candidate_id": plan.metadata.candidate_id,
+                "report": audio_report_section(audio_project),
+            }]},
+            production_render=production_render,
+            final_scored=[],
+            diversity_decision=None,
+        )
+        production_render["quality_reports"] = quality_reports
         self._assert_current_run_results(registry, output_directory)
         existing["primary_results"] = [item.to_dict() for item in registry]
         existing["produced_clips_count"] = len(registry)
@@ -2538,11 +2655,20 @@ class Pipeline:
             "run_id": self.run_id, "source_id": source.id, "run_directory": str(output_directory),
             "started_at": self.started_at or utc_now(), "manifest_path": str(output_directory / "manifest.json"),
         }
+        existing["quality_gate"] = _quality_gate_summary(quality_reports)
+        existing["terminal"] = build_terminal_state(
+            1,
+            [path for path in result_paths(registry, output_directory) if path.is_file()],
+            {},
+            delivery_required=True,
+            quality_reports=quality_reports,
+        )
         write_json(report_path, existing)
         write_run_manifest(
             output_directory / "manifest.json", run_id=self.run_id, source=source.to_dict(),
             started_at=self.started_at or utc_now(), requested_clip_count=1,
             production_render=production_render, results=registry, run_directory=output_directory, project_id=self.project_id,
+            terminal=existing["terminal"], quality_gate=_quality_gate_summary(quality_reports),
         )
         output_files = [path for path in result_paths(registry, output_directory) if path.is_file()]
         return PipelineResult(
@@ -3021,7 +3147,12 @@ def build_candidate_flow(
 
 
 def build_terminal_state(
-    requested_clip_count: int, output_files: list[Path], candidate_flow: dict[str, Any], *, delivery_required: bool,
+    requested_clip_count: int,
+    output_files: list[Path],
+    candidate_flow: dict[str, Any],
+    *,
+    delivery_required: bool,
+    quality_reports: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return a terminal contract after reportable artifacts already exist."""
 
@@ -3030,6 +3161,7 @@ def build_terminal_state(
         key: int(candidate_flow.get(key, 0) or 0)
         for key in ("found", "selected", "transformed", "production_plans", "render_attempts", "rendered", "rejected", "failed")
     }
+    quality = _quality_gate_summary(quality_reports)
     if delivery_required and requested_clip_count > 0 and produced == 0:
         return {
             "status": "failed",
@@ -3038,7 +3170,31 @@ def build_terminal_state(
             "requested_clip_count": requested_clip_count,
             "produced_clips_count": produced,
             "candidate_counts": details,
+            "quality_gate": quality,
         }
+    # ``None`` is the explicit legacy path.  An empty list is a V2 gate that
+    # failed to persist a report and must never make an MP4 ready.
+    if delivery_required and quality_reports is not None:
+        if not quality_reports:
+            return {
+                "status": "failed",
+                "error_code": "QUALITY_REPORT_MISSING",
+                "message": "Final output has no persisted QualityReport.",
+                "requested_clip_count": requested_clip_count,
+                "produced_clips_count": produced,
+                "candidate_counts": details,
+                "quality_gate": quality,
+            }
+        if quality and quality["status"] == "BLOCKED":
+            return {
+                "status": "failed",
+                "error_code": "QUALITY_GATE_BLOCKED",
+                "message": "Final Quality Gate blocked the output; see QualityReport findings.",
+                "requested_clip_count": requested_clip_count,
+                "produced_clips_count": produced,
+                "candidate_counts": details,
+                "quality_gate": quality,
+            }
     if produced and details["failed"]:
         return {
             "status": "completed_with_warnings",
@@ -3047,6 +3203,7 @@ def build_terminal_state(
             "requested_clip_count": requested_clip_count,
             "produced_clips_count": produced,
             "candidate_counts": details,
+            "quality_gate": quality,
         }
     return {
         "status": "completed",
@@ -3055,6 +3212,23 @@ def build_terminal_state(
         "requested_clip_count": requested_clip_count,
         "produced_clips_count": produced,
         "candidate_counts": details,
+        "quality_gate": quality,
+    }
+
+
+def _quality_gate_summary(quality_reports: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Create a shared terminal/manifest/report reference, never a second gate."""
+
+    if quality_reports is None:
+        return None
+    statuses = [str(item.get("status") or "") for item in quality_reports]
+    status = "BLOCKED" if not statuses or "BLOCKED" in statuses else (
+        "PASS_WITH_WARNINGS" if "PASS_WITH_WARNINGS" in statuses else "PASS"
+    )
+    return {
+        "schema_version": "5G.0",
+        "status": status,
+        "reports": quality_reports,
     }
 
 

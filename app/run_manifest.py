@@ -9,7 +9,7 @@ from app.clip_results import ClipResult
 from app.utils import utc_now, write_json
 
 
-MANIFEST_VERSION = "4D.0"
+MANIFEST_VERSION = "5G.0"
 
 
 def write_run_manifest(
@@ -17,6 +17,7 @@ def write_run_manifest(
     requested_clip_count: int, production_render: dict[str, Any], results: list[ClipResult],
     run_directory: Path, project_id: str | None = None, content_understanding: dict[str, Any] | None = None,
     virality: dict[str, Any] | None = None, terminal: dict[str, Any] | None = None,
+    quality_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = run_directory.resolve()
     seen_clip_results: set[str] = set()
@@ -77,6 +78,7 @@ def write_run_manifest(
         "content_understanding": content_understanding or {},
         "virality": virality or {},
         "terminal": terminal or {"status": "completed", "error_code": None},
+        "quality_gate": quality_gate,
     }
     write_json(path, data)
     return data
