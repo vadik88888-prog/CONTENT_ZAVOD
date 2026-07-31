@@ -308,11 +308,14 @@ DEFAULT_SCORING_WEIGHTS = {
 
 @dataclass(slots=True)
 class ScoringConfig:
+    candidate_quality_config_version: str = "5B.1"
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
     repetition_penalty_weight: float = 12.0
     filler_penalty_weight: float = 18.0
 
     def validate(self) -> None:
+        if not isinstance(self.candidate_quality_config_version, str) or not self.candidate_quality_config_version.strip():
+            raise ClipEngineError("scoring.candidate_quality_config_version не должен быть пустым.")
         expected = set(DEFAULT_SCORING_WEIGHTS)
         if set(self.weights) != expected:
             raise ClipEngineError("scoring.weights должен содержать все заданные компоненты local scoring.")

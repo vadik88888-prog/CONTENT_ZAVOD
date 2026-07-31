@@ -8,6 +8,8 @@ NO_RENDERABLE_CLIPS_MESSAGE = (
     "Проверьте отчёт анализа или попробуйте другой режим."
 )
 
+DUPLICATE_EXACT_SOURCE_RANGE = "DUPLICATE_EXACT_SOURCE_RANGE"
+
 
 class DependencyError(ClipEngineError):
     """Не установлена или недоступна внешняя программа."""
@@ -63,6 +65,15 @@ class TTSError(ClipEngineError):
 
 class AudioCompositionError(ClipEngineError):
     """Audio Project could not be safely composed from existing plan and audio artifacts."""
+
+
+class ProductionPlanHandoffError(AudioCompositionError):
+    """A machine-readable ProductionPlan invariant failed before audio work began."""
+
+    def __init__(self, code: str, evidence: dict[str, object]) -> None:
+        self.code = code
+        self.evidence = evidence
+        super().__init__(f"{code}: ProductionPlan audio handoff rejected.")
 
 
 class ProductionRenderError(ClipEngineError):

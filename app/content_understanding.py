@@ -1249,6 +1249,17 @@ def generate_semantic_candidates(
             explanations=["Кандидат построен из самостоятельной StoryUnit с проверенными границами."],
             chapter_id=unit.chapter_id, story_unit_id=unit.story_unit_id, core_idea=unit.core_idea,
             content_signature=dict(unit.content_signature), boundary_diagnostics=diagnostics,
+            semantic_evidence={
+                "story_unit_id": unit.story_unit_id,
+                "hook": unit.hook_seed,
+                "payoff": unit.payoff,
+                "setup": unit.setup,
+                "ending": unit.ending,
+                "completeness_score": unit.completeness_score,
+                "context_dependency_score": unit.context_dependency_score,
+                "information_density": unit.information_density,
+                "evidence": unit.evidence,
+            },
         )
         candidates.append(candidate)
     return candidates, len(candidates)
@@ -1350,6 +1361,7 @@ def select_with_coverage(
     requested = min(config.max_clips, config.ai_reranking.final_clip_count)
     for item in scored:
         boundary = item.candidate.boundary_diagnostics
+        decision = item.candidate.eligibility_decision
         story = stories.get(str(item.candidate.story_unit_id or ""))
         strong_story = bool(
             story
@@ -1363,6 +1375,10 @@ def select_with_coverage(
         )
         if not item.selected:
             rejected[item.candidate.id] = item.rejection_reason or "Не прошёл базовый quality ranking."
+        elif decision is None or not decision.explicitly_eligible:
+            state = decision.state.value if decision is not None else "legacy_unassessed"
+            codes = [code.value for code in decision.reason_codes] if decision is not None else ["LEGACY_UNASSESSED"]
+            rejected[item.candidate.id] = f"Eligibility gate rejected candidate: state={state}; codes={','.join(codes)}."
         elif item.candidate.duration < float(config.min_clip_duration):
             rejected[item.candidate.id] = (
                 f"Длительность {item.candidate.duration:.2f} с меньше минимальных "

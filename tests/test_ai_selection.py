@@ -1,4 +1,5 @@
 from app.ai import MockScorer
+from app.candidate_quality import CANDIDATE_QUALITY_SCHEMA_VERSION, EligibilityDecision, EligibilityState
 from app.config import AppConfig
 from app.models import Candidate, ScoredCandidate
 from app.selection import select_clips
@@ -11,6 +12,13 @@ def test_mock_scorer_is_deterministic_and_selection_removes_overlap() -> None:
         Candidate("overlap", 4, 37, "Второй фрагмент пересекается с первым, но тоже понятен."),
         Candidate("third", 50, 85, "Третий фрагмент расположен отдельно и содержит завершённую мысль."),
     ]
+    for candidate in candidates:
+        candidate.eligibility_decision = EligibilityDecision(
+            schema_version=CANDIDATE_QUALITY_SCHEMA_VERSION,
+            config_version="test",
+            state=EligibilityState.ASSESSED,
+            eligible=True,
+        )
     scored, usage = MockScorer(config).score(candidates, {"language": "ru"})
 
     selected = select_clips(scored, config)
@@ -23,7 +31,15 @@ def test_mock_scorer_is_deterministic_and_selection_removes_overlap() -> None:
 
 def _scored(candidate_id: str, start: float, end: float, text: str, score: int) -> ScoredCandidate:
     return ScoredCandidate(
-        candidate=Candidate(candidate_id, start, end, text), title=candidate_id, hook="hook", summary="summary",
+        candidate=Candidate(
+            candidate_id, start, end, text,
+            eligibility_decision=EligibilityDecision(
+                schema_version=CANDIDATE_QUALITY_SCHEMA_VERSION,
+                config_version="test",
+                state=EligibilityState.ASSESSED,
+                eligible=True,
+            ),
+        ), title=candidate_id, hook="hook", summary="summary",
         score=score, hook_score=score, completeness_score=score, emotional_score=score,
         clarity_score=score, context_dependency_score=0, rejection_reason=None, selected=True,
     )

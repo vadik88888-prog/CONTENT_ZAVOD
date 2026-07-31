@@ -29,6 +29,17 @@ def select_clips(
             item.selection_reason = str(boundary.get("fallback_reason") or "Semantic boundary не прошла no-cut-off validation.")
             item.selection_diagnostics = {"decision": "rejected_boundary", "boundary": boundary}
             continue
+        decision = item.candidate.eligibility_decision
+        if decision is None or not decision.explicitly_eligible:
+            item.selected = False
+            state = decision.state.value if decision is not None else "legacy_unassessed"
+            item.selection_reason = "Candidate не имеет явного eligibility PASS."
+            item.selection_diagnostics = {
+                "decision": "rejected_eligibility",
+                "eligibility_state": state,
+                "reason_codes": [code.value for code in decision.reason_codes] if decision else ["LEGACY_UNASSESSED"],
+            }
+            continue
         if item.score < config.score_threshold:
             item.selected = False
             item.selection_reason = "Оценка ниже порога."

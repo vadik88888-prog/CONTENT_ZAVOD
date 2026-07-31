@@ -26,8 +26,8 @@ from app.audio_models import (
     SilenceClip,
 )
 from app.config import AppConfig
-from app.errors import AudioCompositionError
-from app.production_models import DialogueSegment, NarrationSegment, PauseSegment, ProductionPlan
+from app.errors import AudioCompositionError, ProductionPlanHandoffError
+from app.production_models import DialogueSegment, NarrationSegment, PauseSegment, ProductionPlan, validate_audio_handoff
 from app.sources import Source
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.tts_models import TTSSegmentResult
@@ -45,6 +45,9 @@ class AudioCompositionService:
         tts_result: dict[str, Any] | None, work_directory: Path, output_directory: Path,
         force_recompute: bool = False, prepared_source_audio_path: Path | None = None,
     ) -> AudioProject:
+        handoff_failure = validate_audio_handoff(plan)
+        if handoff_failure is not None:
+            raise ProductionPlanHandoffError(handoff_failure.code, handoff_failure.evidence)
         if not source.path.is_file():
             raise AudioCompositionError("Исходный media file для Audio Project не найден.")
         started_at = utc_now()

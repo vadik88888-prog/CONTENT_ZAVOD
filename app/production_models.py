@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -202,3 +203,40 @@ class ProductionPlan(BaseModel):
         if self.tts_eligible and (not has_narration or self.audio_mode not in {"voiceover", "replace_voice", "mixed"}):
             raise ValueError("TTS eligibility requires explicit voiceover intent and narration")
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionPlanHandoffFailure:
+    """A deterministic precondition for the existing AudioCompositionService."""
+
+    code: str
+    evidence: dict[str, object]
+
+
+def validate_audio_handoff(plan: ProductionPlan) -> ProductionPlanHandoffFailure | None:
+    """Reject only adjacent, exactly equal dialogue source intervals.
+
+    The plan remains untouched: a later contract evolution may intentionally
+    model a shared source range, but this V2 foundation must never silently
+    delete or merge either dialogue segment.
+    """
+
+    from app.errors import DUPLICATE_EXACT_SOURCE_RANGE
+
+    dialogues = sorted(plan.dialogue_mappings, key=lambda item: item.order)
+    for first, second in zip(dialogues, dialogues[1:]):
+        first_range = (first.source_start_seconds, first.source_end_seconds)
+        second_range = (second.source_start_seconds, second.source_end_seconds)
+        if first_range == second_range:
+            return ProductionPlanHandoffFailure(
+                code=DUPLICATE_EXACT_SOURCE_RANGE,
+                evidence={
+                    "candidate_id": plan.metadata.candidate_id,
+                    "segment_ids": [first.segment_id, second.segment_id],
+                    "source_start": first.source_start_seconds,
+                    "source_end": first.source_end_seconds,
+                    "source_start_seconds": first.source_start_seconds,
+                    "source_end_seconds": first.source_end_seconds,
+                },
+            )
+    return None

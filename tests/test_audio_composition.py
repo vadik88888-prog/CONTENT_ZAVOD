@@ -10,11 +10,12 @@ from pydantic import ValidationError
 
 from app.audio_models import NarrationClip
 from app.audio_service import AudioCompositionService, audio_report_section
+from app.errors import DUPLICATE_EXACT_SOURCE_RANGE, ProductionPlanHandoffError
 from app.cli import build_parser
 from app.config import AppConfig
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import ProductionPlan
-from app.sources import local_source
+from app.production_models import ProductionPlan, validate_audio_handoff
+from app.sources import Source, local_source
 from app.tts_providers import MockTTSProvider
 from app.tts_service import TTSService
 from app.utils import read_json, write_json
@@ -112,6 +113,56 @@ def _source_wav(path: Path) -> Path:
 def _tts_result(root: Path, config: AppConfig, plan: ProductionPlan) -> dict:
     result = TTSService(root, config).generate(plan, root / "run", root / "out", provider=MockTTSProvider())
     return result.model_dump(mode="json")
+
+
+def _plan_with_adjacent_dialogues(*, duplicate_exact_range: bool) -> ProductionPlan:
+    raw = _plan(narration=False, dialogue=True).model_dump(mode="json")
+    first = dict(raw["dialogue_mappings"][0])
+    first["order"] = 1
+    second = dict(first)
+    second["segment_id"] = "dialogue-002"
+    second["order"] = 2
+    second["fact_id"] = "fact-002"
+    second["source_start_seconds"] = 1.0 if duplicate_exact_range else 2.0
+    second["source_end_seconds"] = 2.0 if duplicate_exact_range else 3.0
+    raw["segments"] = [dict(first), second, {**raw["segments"][-1], "order": 3}]
+    raw["dialogue_mappings"] = [first, dict(second)]
+    raw["timeline"]["dialogue_count"] = 2
+    raw["timeline"]["entries"] = [
+        {**raw["timeline"]["entries"][0], "order": 1},
+        {
+            "segment_id": "dialogue-002", "order": 2, "estimated_start_seconds": 0,
+            "estimated_end_seconds": 0, "included_in_master_timeline": False, "linked_segment_ids": [],
+        },
+        {**raw["timeline"]["entries"][-1], "order": 3},
+    ]
+    return ProductionPlan.model_validate(raw)
+
+
+def test_duplicate_exact_source_range_is_blocked_before_audio_composition(tmp_path: Path) -> None:
+    plan = _plan_with_adjacent_dialogues(duplicate_exact_range=True)
+    missing_source = Source("missing-source", tmp_path / "does-not-exist.wav", "missing.wav", "test")
+
+    with pytest.raises(ProductionPlanHandoffError) as raised:
+        AudioCompositionService(tmp_path, _audio_config()).compose(
+            plan, missing_source, {"segments": []}, None, tmp_path / "work", tmp_path / "out",
+        )
+
+    assert raised.value.code == DUPLICATE_EXACT_SOURCE_RANGE
+    assert raised.value.evidence == {
+        "candidate_id": "candidate-audio",
+        "segment_ids": ["dialogue-001", "dialogue-002"],
+        "source_start": 1.0,
+        "source_end": 2.0,
+        "source_start_seconds": 1.0,
+        "source_end_seconds": 2.0,
+    }
+
+
+def test_adjacent_nonidentical_source_ranges_are_allowed_by_duplicate_gate() -> None:
+    plan = _plan_with_adjacent_dialogues(duplicate_exact_range=False)
+
+    assert validate_audio_handoff(plan) is None
 
 
 def test_audio_project_builds_dialogue_ducked_narration_and_artifacts(tmp_path: Path) -> None:

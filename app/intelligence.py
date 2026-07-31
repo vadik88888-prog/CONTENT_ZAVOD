@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.config import AppConfig
+from app.candidate_quality import set_ai_merge_provenance
 from app.models import Candidate, ScoredCandidate
 
 
@@ -18,13 +19,17 @@ def merge_ai_ranking(
     candidates: list[Candidate], ai_scored: list[ScoredCandidate], ai_ok: bool
 ) -> list[ScoredCandidate]:
     if not ai_ok:
-        return local_rank(candidates)
+        ranked = local_rank(candidates)
+        for item in ranked:
+            set_ai_merge_provenance(item.candidate, ai_score=None, merged_score=None, reason="ai_result_unavailable")
+        return ranked
     ai_by_id = {item.candidate.id: item for item in ai_scored}
     ranked: list[ScoredCandidate] = []
     for candidate in candidates:
         local = _local_scored(candidate)
         semantic = ai_by_id.get(candidate.id)
         if semantic is None:
+            set_ai_merge_provenance(candidate, ai_score=None, merged_score=None, reason="ai_result_missing_or_ungrounded")
             ranked.append(local)
             continue
         candidate.ai_score = float(semantic.score)
@@ -33,6 +38,7 @@ def merge_ai_ranking(
         semantic.score = max(0, min(100, final))
         semantic.selected = True
         semantic.selection_reason = None
+        set_ai_merge_provenance(candidate, ai_score=candidate.ai_score, merged_score=semantic.score, reason="ai_merge")
         ranked.append(semantic)
     return ranked
 

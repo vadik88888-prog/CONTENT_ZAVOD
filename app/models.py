@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.candidate_quality import (
+    CandidateScoreV2,
+    EligibilityDecision,
+    legacy_eligibility_decision,
+    legacy_score_v2,
+)
+
 
 @dataclass(slots=True)
 class Word:
@@ -51,6 +58,9 @@ class Candidate:
     core_idea: str = ""
     content_signature: dict[str, Any] = field(default_factory=dict)
     boundary_diagnostics: dict[str, Any] = field(default_factory=dict)
+    semantic_evidence: dict[str, Any] = field(default_factory=dict)
+    eligibility_decision: EligibilityDecision | None = None
+    candidate_score_v2: CandidateScoreV2 | None = None
     incremental_coverage_score: float = 0.0
 
     @property
@@ -78,6 +88,11 @@ class Candidate:
             "core_idea": self.core_idea,
             "content_signature": self.content_signature,
             "boundary_diagnostics": self.boundary_diagnostics,
+            "semantic_evidence": self.semantic_evidence,
+            # Old candidate JSON has no V2 decision. Serialize that distinction
+            # explicitly so it cannot masquerade as a V2 pass on a later read.
+            "eligibility_decision": (self.eligibility_decision or legacy_eligibility_decision()).to_dict(),
+            "candidate_score_v2": (self.candidate_score_v2 or legacy_score_v2()).to_dict(),
             "incremental_coverage_score": round(self.incremental_coverage_score, 3),
         }
 
@@ -147,6 +162,19 @@ def candidate_from_dict(data: dict[str, Any]) -> Candidate:
         core_idea=str(data.get("core_idea", "")),
         content_signature=dict(data.get("content_signature", {})),
         boundary_diagnostics=dict(data.get("boundary_diagnostics", {})),
+        semantic_evidence=dict(data.get("semantic_evidence", {})),
+        eligibility_decision=(
+            EligibilityDecision.from_dict(data["eligibility_decision"])
+            if isinstance(data.get("eligibility_decision"), dict)
+            and str(data["eligibility_decision"].get("state") or "") != "legacy_unassessed"
+            else legacy_eligibility_decision()
+        ),
+        candidate_score_v2=(
+            CandidateScoreV2.from_dict(data["candidate_score_v2"])
+            if isinstance(data.get("candidate_score_v2"), dict)
+            and str(data["candidate_score_v2"].get("state") or "") != "legacy_unassessed"
+            else legacy_score_v2()
+        ),
         incremental_coverage_score=float(data.get("incremental_coverage_score", 0)),
     )
 

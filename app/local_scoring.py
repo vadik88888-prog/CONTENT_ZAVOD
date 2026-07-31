@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from app.audio_features import window_audio_features
+from app.candidate_quality import build_eligibility_decision, build_score_v2
 from app.config import ScoringConfig
 from app.models import Candidate
 from app.scene_detection import window_scene_features
 
 
 def score_candidates(
-    candidates: list[Candidate], audio_features: dict[str, Any], scene_boundaries: dict[str, Any], config: ScoringConfig
+    candidates: list[Candidate], audio_features: dict[str, Any], scene_boundaries: dict[str, Any], config: ScoringConfig,
+    *, min_duration_seconds: float | None = None, max_duration_seconds: float | None = None,
+    visual_analysis: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     for candidate in candidates:
         transcript = candidate.feature_vector
@@ -30,7 +33,6 @@ def score_candidates(
         weighted = sum(scores[name] * config.weights[name] for name in config.weights)
         repetition_penalty = _bounded(float(features.get("repetition_score", 0)) * config.repetition_penalty_weight)
         filler_penalty = _bounded(float(features.get("filler_word_ratio", 0)) * config.filler_penalty_weight)
-        local_quality = _bounded(weighted - repetition_penalty - filler_penalty)
         candidate.feature_vector = features
         candidate.local_scores = {
             **{key: round(value, 3) for key, value in scores.items()},
@@ -38,7 +40,18 @@ def score_candidates(
             "filler_penalty": round(filler_penalty, 3),
             "weighted_score": round(weighted, 3),
         }
-        candidate.local_quality_score = round(local_quality, 3)
+        candidate.eligibility_decision = build_eligibility_decision(
+            candidate, features, config_version=config.candidate_quality_config_version,
+            min_duration_seconds=min_duration_seconds, max_duration_seconds=max_duration_seconds,
+            visual_analysis=visual_analysis,
+        )
+        candidate.candidate_score_v2 = build_score_v2(
+            candidate, scores, features, candidate.eligibility_decision,
+            config_version=config.candidate_quality_config_version,
+            min_duration_seconds=min_duration_seconds, max_duration_seconds=max_duration_seconds,
+            visual_analysis=visual_analysis,
+        )
+        candidate.local_quality_score = round(candidate.candidate_score_v2.final_score, 3)
         candidate.explanations = _explanations(candidate, scores, repetition_penalty, filler_penalty)
     return candidates
 

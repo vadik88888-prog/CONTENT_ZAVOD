@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.config import AppConfig
+from app.candidate_quality import CANDIDATE_QUALITY_SCHEMA_VERSION, EligibilityDecision, EligibilityState
 from app.content_understanding import (
     GlobalContentMap,
     build_global_content_map,
@@ -40,6 +41,12 @@ def _scored(content_map: dict, scores: list[int]) -> list[ScoredCandidate]:
             story_unit_id=story.story_unit_id, core_idea=story.core_idea,
             content_signature=story.content_signature,
             boundary_diagnostics={"eligible": True, "overall_boundary_score": 0.9},
+            eligibility_decision=EligibilityDecision(
+                schema_version=CANDIDATE_QUALITY_SCHEMA_VERSION,
+                config_version="test",
+                state=EligibilityState.ASSESSED,
+                eligible=True,
+            ),
         )
         result.append(ScoredCandidate(candidate, story.title, story.hook_seed, story.core_idea, score, score, 90, 50, 90, 10, None, True))
     return result

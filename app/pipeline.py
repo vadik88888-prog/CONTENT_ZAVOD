@@ -516,8 +516,20 @@ class Pipeline:
         candidates = [candidate_from_dict(item) for item in raw_candidates.get("candidates", [])]
         local_data = self._cached(
             tracker, "local_scoring", work_directory / "candidates.local.json",
-            {"candidates": _hash(raw_candidates), "settings": self.config.scoring},
-            lambda: _write_candidates(work_directory / "candidates.local.json", score_candidates(candidates, audio_features, scenes, self.config.scoring)),
+            {
+                "candidates": _hash(raw_candidates), "settings": self.config.scoring,
+                "duration_constraints": [self.config.min_clip_duration, self.config.max_clip_duration],
+                "visual_analysis": _hash(visual_analysis),
+            },
+            lambda: _write_candidates(
+                work_directory / "candidates.local.json",
+                score_candidates(
+                    candidates, audio_features, scenes, self.config.scoring,
+                    min_duration_seconds=self.config.min_clip_duration,
+                    max_duration_seconds=self.config.max_clip_duration,
+                    visual_analysis=visual_analysis,
+                ),
+            ),
             cache_tracker=source_cache,
         )
         candidates = [candidate_from_dict(item) for item in local_data.get("candidates", [])]
@@ -2072,7 +2084,10 @@ class Pipeline:
             except AudioCompositionError as error:
                 safe = sanitize_api_error(error)
                 tracker.finish(stage_name, "failed", safe)
-                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": safe})
+                outcomes.append({
+                    "candidate_id": candidate_id, "status": "failed", "error": safe,
+                    **_audio_handoff_failure_details(error),
+                })
                 self.errors.append(f"audio:{candidate_id}: {safe}")
                 continue
             tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
@@ -2304,6 +2319,8 @@ class Pipeline:
         except AudioCompositionError as error:
             safe = sanitize_api_error(error)
             tracker.finish(stage_name, "failed", safe)
+            if hasattr(error, "code") and hasattr(error, "evidence"):
+                raise error
             raise AudioCompositionError(f"Audio Composition не завершён: {safe}") from error
         tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
         self.warnings.extend(project.warnings)
@@ -3039,6 +3056,16 @@ def _write_generated_candidates(path: Path, generated: tuple[list[Candidate], in
 
 def _local_ai_usage(provider: str, errors: list[str] | None = None) -> dict[str, Any]:
     return {"provider": provider, "model": None, "input_tokens": 0, "output_tokens": 0, "retries": 0, "api_errors": errors or []}
+
+
+def _audio_handoff_failure_details(error: AudioCompositionError) -> dict[str, Any]:
+    """Keep pre-composition plan invariant failures structured in the stage artifact."""
+
+    code = getattr(error, "code", None)
+    evidence = getattr(error, "evidence", None)
+    if isinstance(code, str) and isinstance(evidence, dict):
+        return {"failure_code": code, "evidence": evidence}
+    return {}
 
 
 class _UnavailableTransformer:
