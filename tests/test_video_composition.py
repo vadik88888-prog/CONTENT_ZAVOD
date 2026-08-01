@@ -134,6 +134,20 @@ def test_prepared_source_clip_keeps_freeze_padding_duration(tmp_path: Path) -> N
     assert abs(actual - clip.duration_seconds) <= 0.15
 
 
+def test_fit_background_filters_center_the_foreground_instead_of_bottom_aligning_it() -> None:
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    crop = CropPlan(strategy="fit_blur_background", source_width=320, source_height=180)
+    clip = SourceVideoClip(
+        clip_id="visual-centered-fit", order=1, timeline_start_seconds=0, timeline_end_seconds=1,
+        duration_seconds=1, source_path="source.mp4", source_start_seconds=0, source_end_seconds=1,
+        visual_strategy="mapped_source", crop_plan=crop, status="ready",
+    )
+
+    graph = _visual_filter(clip, canvas)
+
+    assert "overlay=(W-w)/2:(H-h)/2" in graph
+
+
 def test_missing_or_invalid_mapping_is_reported_without_random_clip_selection(tmp_path: Path) -> None:
     config, plan, source, _transcript, audio = _upstream(tmp_path)
     raw = plan.model_dump(mode="json")

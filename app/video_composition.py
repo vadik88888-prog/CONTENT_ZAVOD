@@ -1871,13 +1871,13 @@ def _visual_filter(clip: SourceVideoClip | FreezeFrameClip, canvas: CanvasConfig
         return (
             f"[0:v]split=2[bg][fg];[bg]scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
             f"crop={canvas.width}:{canvas.height},boxblur=20:10[blur];[fg]scale={canvas.width}:{canvas.height}:"
-            f"force_original_aspect_ratio=decrease[fit];[blur][fit]overlay=(W-w)/2:(H-h),setsar=1" + tail
+            f"force_original_aspect_ratio=decrease[fit];[blur][fit]overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     if crop.strategy == "fit_solid_background":
         return (
             f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}[bg];"
             f"[0:v]scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease[fit];"
-            f"[bg][fit]overlay=(W-w)/2:(H-h),setsar=1" + tail
+            f"[bg][fit]overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
     if crop.tracking_keyframes:
