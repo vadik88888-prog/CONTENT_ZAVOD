@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel
 
 
@@ -12,15 +12,24 @@ class VideoDropZone(QFrame):
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        title = QLabel("Перетащите одно видео сюда")
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(4)
+        icon = QLabel("⇧")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet("font-size: 34px; font-weight: 300; color: #FF7900;")
+        title = QLabel("Перетащите видео сюда")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 16px; font-weight: 600;")
         detail = QLabel("или выберите файл кнопкой выше")
         detail.setObjectName("muted")
         detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        formats = QLabel("Поддерживаются MP4, MOV, MKV, AVI и WebM")
+        formats.setObjectName("muted")
+        formats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(icon)
         layout.addWidget(title)
         layout.addWidget(detail)
+        layout.addWidget(formats)
 
     def dragEnterEvent(self, event):  # type: ignore[override]
         urls = event.mimeData().urls()
@@ -32,6 +41,3 @@ class VideoDropZone(QFrame):
         if len(urls) == 1 and urls[0].isLocalFile():
             self.file_dropped.emit(urls[0].toLocalFile())
             event.acceptProposedAction()
-
-
-from PySide6.QtCore import Qt

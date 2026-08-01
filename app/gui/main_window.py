@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QTimer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.gui.screens import OnboardingDialog, ProjectScreen, ProjectsScreen, SettingsScreen
 from app.gui.services.desktop_services import DesktopServices
@@ -9,6 +19,8 @@ from app.gui.viewmodels import ProjectViewModel, ProjectsViewModel, SettingsView
 
 
 class MainWindow(QMainWindow):
+    """The durable desktop shell; project flow itself stays in the existing screens."""
+
     def __init__(self, services: DesktopServices) -> None:
         super().__init__()
         self.services = services
@@ -16,32 +28,88 @@ class MainWindow(QMainWindow):
         self.project_viewmodel = ProjectViewModel(services, self)
         self.settings_viewmodel = SettingsViewModel(services, self)
         self.setWindowTitle("Content Factory")
-        self.setMinimumSize(960, 680)
+        # A smaller, practical lower bound lets Windows use the application at
+        # 1280×720 and elevated scaling without making the shell itself clip.
+        self.setMinimumSize(760, 480)
         self.resize(1320, 840)
         if services.settings.window_geometry:
             geometry = QByteArray.fromBase64(services.settings.window_geometry.encode("ascii", errors="ignore"))
             if not geometry.isEmpty():
                 self.restoreGeometry(geometry)
-        shell = QWidget(); shell.setObjectName("appShell"); self.setCentralWidget(shell)
-        layout = QHBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
-        sidebar = QFrame(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(220)
-        nav = QVBoxLayout(sidebar); nav.setContentsMargins(14, 20, 14, 20)
-        brand = QPushButton("CONTENT\nFACTORY")
-        brand.setEnabled(False); brand.setStyleSheet("text-align: left; font-size: 18px; font-weight: 700; border: 0; background: transparent;")
+
+        shell = QWidget()
+        shell.setObjectName("appShell")
+        self.setCentralWidget(shell)
+        layout = QHBoxLayout(shell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setFixedWidth(208)
+        nav = QVBoxLayout(self.sidebar)
+        nav.setContentsMargins(16, 20, 16, 18)
+        nav.setSpacing(7)
+
+        brand = QFrame()
+        brand.setObjectName("brand")
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(2, 0, 2, 10)
+        brand_layout.setSpacing(0)
+        self.brand_content = QLabel("CONTENT")
+        self.brand_content.setStyleSheet(
+            "font-size: 20px; font-weight: 700; letter-spacing: 1px; color: #F4F6F8;"
+        )
+        self.brand_factory = QLabel("FACTORY")
+        self.brand_factory.setStyleSheet(
+            "font-size: 20px; font-weight: 700; letter-spacing: 1px; color: #101216; "
+            "background: #FF7900; padding: 0 4px;"
+        )
+        self.brand_factory.setMaximumWidth(108)
+        brand_layout.addWidget(self.brand_content)
+        brand_layout.addWidget(self.brand_factory)
         nav.addWidget(brand)
-        nav.addSpacing(20)
-        self.projects_button = self._nav_button("Проекты")
-        self.new_button = self._nav_button("Новый проект")
-        self.settings_button = self._nav_button("Настройки")
+        nav.addSpacing(18)
+
+        self.new_button = self._nav_button("＋  Новый проект")
+        self.new_button.setObjectName("primary")
+        self.new_button.setMinimumHeight(38)
+        self.projects_button = self._nav_button("▢  Проекты")
+        self.settings_button = self._nav_button("⚙  Настройки")
         self.projects_button.clicked.connect(self.show_projects)
         self.new_button.clicked.connect(self._new_project)
         self.settings_button.clicked.connect(self.show_settings)
-        nav.addWidget(self.projects_button); nav.addWidget(self.new_button); nav.addWidget(self.settings_button); nav.addStretch()
-        footer = QPushButton("Локально · без облака")
-        footer.setEnabled(False); footer.setStyleSheet("text-align: left; color: #737D8C; border: 0; background: transparent;")
-        nav.addWidget(footer)
-        layout.addWidget(sidebar)
-        self.stack = QStackedWidget(); self.stack.setObjectName("contentStack")
+        nav.addWidget(self.new_button)
+        nav.addSpacing(7)
+        nav.addWidget(self.projects_button)
+        nav.addWidget(self.settings_button)
+        nav.addStretch()
+
+        self.system_status = QFrame()
+        self.system_status.setObjectName("card")
+        status_layout = QVBoxLayout(self.system_status)
+        status_layout.setContentsMargins(12, 11, 12, 11)
+        status_layout.setSpacing(4)
+        status_title = QLabel("●  Система готова")
+        status_title.setStyleSheet("font-weight: 600; color: #DCE4DD;")
+        status_detail = QLabel("Локальная обработка\nВсе проекты остаются здесь")
+        status_detail.setObjectName("muted")
+        status_detail.setWordWrap(True)
+        status_layout.addWidget(status_title)
+        status_layout.addWidget(status_detail)
+        nav.addWidget(self.system_status)
+
+        self.help_button = QPushButton("?  Помощь и поддержка")
+        self.help_button.setObjectName("nav")
+        self.help_button.clicked.connect(self._show_help)
+        nav.addWidget(self.help_button)
+        self.version = QLabel("Локальная версия")
+        self.version.setObjectName("muted")
+        nav.addWidget(self.version)
+
+        layout.addWidget(self.sidebar)
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("contentStack")
         self.projects_screen = ProjectsScreen(self.projects_viewmodel)
         self.project_screen = ProjectScreen(self.project_viewmodel)
         self.settings_screen = SettingsScreen(self.settings_viewmodel)
@@ -75,8 +143,12 @@ class MainWindow(QMainWindow):
         self.services.settings.last_screen = "settings"
 
     def _new_project(self) -> None:
+        # ProjectsScreen is the source onboarding workspace.  Do not open a
+        # file dialog automatically: it would skip the source choice and make
+        # a public URL harder to discover.
         self.show_projects()
-        self.projects_screen.choose_file()
+        self._set_selected(self.new_button)
+        self.projects_screen.focus_source()
 
     def _restore_last_screen(self) -> None:
         if self.services.settings.last_screen == "project" and self.services.settings.last_open_project_id:
@@ -102,6 +174,24 @@ class MainWindow(QMainWindow):
         for item in (self.projects_button, self.new_button, self.settings_button):
             item.setChecked(item is button)
 
+    def _show_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "Помощь Content Factory",
+            "Выберите длинное видео или публичную ссылку, настройте обработку и подтвердите лучшие моменты. "
+            "Все данные и ролики остаются на этом компьютере.",
+        )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        # Keep a useful work area on compact laptops while retaining a fixed,
+        # recognisable creator-tool sidebar at normal desktop widths.
+        if not hasattr(self, "sidebar"):
+            return
+        target_width = 156 if self.width() < 920 else 184 if self.width() < 1120 else 208
+        if self.sidebar.width() != target_width:
+            self.sidebar.setFixedWidth(target_width)
+
     @staticmethod
     def _nav_button(text: str) -> QPushButton:
         button = QPushButton(text)
@@ -112,7 +202,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.project_viewmodel.active:
             answer = QMessageBox.question(
-                self, "Закрыть приложение?",
+                self,
+                "Закрыть приложение?",
                 "Сейчас создаётся ролик. При закрытии запуск будет отмечен как прерванный и его можно будет начать снова.",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
             )
