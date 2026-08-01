@@ -44,6 +44,8 @@ _PLATFORM_SAFE_INSETS: dict[str, tuple[float, float, float, float]] = {
     "reels": (0.06, 0.05, 0.08, 0.08),
     "shorts": (0.05, 0.05, 0.05, 0.07),
 }
+_MAX_RETIMED_CUE_START_LAG_SECONDS = 0.75
+_CPS_HARD_BLOCK_EPSILON = 0.001
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,15 +113,21 @@ def build_subtitle_project(
         else:
             continue
         tokens = _tokens(text, words, float(clip.timeline_start_seconds), float(clip.timeline_end_seconds))
-        resolved = _fit_tokens(tokens, style, config)
+        resolved = _fit_tokens(tokens, style, config, platform=platform)
         if any(item.fallback for item in resolved):
             warnings.append(
                 f"Subtitle fallback fit used for {clip.production_segment_id or clip.clip_id}; text was preserved."
             )
-        cues.extend(_resolved_cues(
+        resolved_cues = _resolved_cues(
             resolved, text, clip.production_segment_id or clip.clip_id, speaker, source_type, style, config,
             timing_source="source_word_timings" if isinstance(segment, DialogueSegment) and words else "estimated",
-        ))
+        )
+        cues.extend(resolved_cues)
+    # A source-dialogue edit can consist of adjacent fact clips.  A fast
+    # phrase at the end of one clip may therefore use approved safe post-roll
+    # on the final adjacent clip.  Retiming the full contiguous run avoids
+    # treating an artificial edit seam as an unreadable speech-rate boundary.
+    cues = _retime_dialogue_runs_for_readability(cues, audio_project, config)
     duration = float(audio_project.timeline.duration_seconds)
     project_id = f"subtitles-{audio_project.project_id}-{stable_text_hash(style.model_dump_json())[:12]}"
     decision = assess_subtitle_quality(
@@ -130,6 +138,7 @@ def build_subtitle_project(
             "renderer": "production_subtitles.write_production_ass",
             "quality_config_version": config.subtitle_quality_version,
             "platform": platform,
+            "timing_normalizer": "source_word_readability_ceiling_v1",
         },
     )
     if decision.status == "blocked":
@@ -214,14 +223,16 @@ def _tokens(text: str, timings: list[SubtitleWordTiming], start: float, end: flo
     return [_Token(word, start + index * duration, start + (index + 1) * duration) for index, word in enumerate(words)]
 
 
-def _fit_tokens(tokens: list[_Token], style: SubtitleStyle, config: ProductionRenderConfig) -> list[_ResolvedGroup]:
+def _fit_tokens(
+    tokens: list[_Token], style: SubtitleStyle, config: ProductionRenderConfig, *, platform: str = "universal",
+) -> list[_ResolvedGroup]:
     if not tokens:
         return []
     groups = _semantic_groups(tokens, config)
     base_size = _ass_font_size(style, config.output_width, config.output_height)
     result: list[_ResolvedGroup] = []
     for group, reason in groups:
-        result.extend(_fit_group(tuple(group), reason, style, config, base_size))
+        result.extend(_fit_group(tuple(group), reason, style, config, base_size, platform))
     return result
 
 
@@ -271,20 +282,21 @@ def _boundary_score(tokens: list[_Token], index: int, start: int, total: int) ->
 
 def _fit_group(
     tokens: tuple[_Token, ...], reason: str, style: SubtitleStyle, config: ProductionRenderConfig, base_size: int,
+    platform: str,
 ) -> list[_ResolvedGroup]:
     if not tokens:
         return []
     widths = _font_sizes(base_size, config.subtitle_min_font_scale)
     for font_size in widths:
-        lines = _wrapped_token_lines(tokens, style, config, font_size)
-        if len(lines) <= style.max_lines and _lines_fit(lines, style, config, font_size):
+        lines = _wrapped_token_lines(tokens, style, config, font_size, platform)
+        if len(lines) <= style.max_lines and _lines_fit(lines, style, config, font_size, platform):
             return [_ResolvedGroup(tokens, tuple(tuple(line) for line in lines), font_size, font_size != base_size, reason)]
     if len(tokens) > 1:
         split = _best_fit_split(tokens)
         if split:
             return [
-                *_fit_group(tokens[:split], "width_fit", style, config, base_size),
-                *_fit_group(tokens[split:], "width_fit", style, config, base_size),
+                *_fit_group(tokens[:split], "width_fit", style, config, base_size, platform),
+                *_fit_group(tokens[split:], "width_fit", style, config, base_size, platform),
             ]
     # A single unbreakable word cannot be silently removed. Keep it with the
     # approved minimum font size and mark the explicit safe fallback.
@@ -312,8 +324,9 @@ def _font_sizes(base: int, minimum_scale: float) -> list[int]:
 
 def _wrapped_token_lines(
     tokens: tuple[_Token, ...], style: SubtitleStyle, config: ProductionRenderConfig, font_size: int,
+    platform: str = "universal",
 ) -> list[list[_Token]]:
-    maximum_width = _maximum_width(style, config)
+    maximum_width = _maximum_width(style, config, platform)
     lines: list[list[_Token]] = []
     current: list[_Token] = []
     for token in tokens:
@@ -342,13 +355,22 @@ def _wrapped_token_lines(
     return lines
 
 
-def _lines_fit(lines: list[list[_Token]], style: SubtitleStyle, config: ProductionRenderConfig, font_size: int) -> bool:
-    maximum_width = _maximum_width(style, config)
+def _lines_fit(
+    lines: list[list[_Token]], style: SubtitleStyle, config: ProductionRenderConfig, font_size: int,
+    platform: str = "universal",
+) -> bool:
+    maximum_width = _maximum_width(style, config, platform)
     return all(_measure_width(_line_text(line, style), style, font_size) <= maximum_width for line in lines)
 
 
-def _maximum_width(style: SubtitleStyle, config: ProductionRenderConfig) -> float:
-    return max(24.0, config.output_width * config.subtitle_max_rendered_width_ratio - (style.outline_width * 4))
+def _maximum_width(style: SubtitleStyle, config: ProductionRenderConfig, platform: str = "universal") -> float:
+    left, _top, right, _bottom = _PLATFORM_SAFE_INSETS.get(platform, _PLATFORM_SAFE_INSETS["universal"])
+    safe_width = config.output_width * max(0.0, 1.0 - left - right)
+    configured_width = config.output_width * config.subtitle_max_rendered_width_ratio
+    # The measured text width becomes an actual rendered bound after outline
+    # and shadow expansion.  Reserve that expansion inside the platform-safe
+    # horizontal area so fitting cannot hand a known unsafe line to Quality V2.
+    return max(24.0, min(configured_width, safe_width) - 2 * (style.outline_width + style.shadow))
 
 
 def _line_text(tokens: list[_Token], style: SubtitleStyle) -> str:
@@ -412,6 +434,100 @@ def _resolved_cues(
     return cues
 
 
+def _maximum_reading_cps(text: str, config: ProductionRenderConfig) -> float:
+    """Return the hard readable ceiling for the resolved language profile."""
+
+    profile = _LANGUAGE_PROFILES.get(_resolve_subtitle_language_from_text(text, config))
+    return profile.maximum_cps if profile else 20.0
+
+
+def _retime_dialogue_runs_for_readability(
+    cues: list[SubtitleCue], audio_project: Any, config: ProductionRenderConfig,
+) -> list[SubtitleCue]:
+    """Retain readable source captions across contiguous dialogue edit clips."""
+
+    clips = list(getattr(getattr(audio_project, "timeline", None), "clips", []) or [])
+    runs: list[tuple[set[str], float, float]] = []
+    active_ids: set[str] = set()
+    active_start = 0.0
+    active_end = 0.0
+
+    def flush() -> None:
+        nonlocal active_ids
+        if active_ids:
+            runs.append((set(active_ids), active_start, active_end))
+            active_ids = set()
+
+    for clip in clips:
+        if getattr(clip, "clip_type", None) != "dialogue":
+            flush()
+            continue
+        segment_id = str(getattr(clip, "production_segment_id", "") or "")
+        start = float(getattr(clip, "timeline_start_seconds", 0.0))
+        end = float(getattr(clip, "timeline_end_seconds", 0.0))
+        if not segment_id or end <= start:
+            flush()
+            continue
+        if active_ids and start > active_end + 0.02:
+            flush()
+        if not active_ids:
+            active_start = start
+        active_ids.add(segment_id)
+        active_end = end
+    flush()
+
+    result = list(cues)
+    for segment_ids, start, end in runs:
+        indices = [index for index, cue in enumerate(result) if cue.segment_id in segment_ids and cue.source_type == "dialogue"]
+        if not indices:
+            continue
+        run_cues = [result[index] for index in indices]
+        retimed = _retime_cues_for_readability(
+            run_cues,
+            clip_start=start,
+            clip_end=end,
+            maximum_cps=_maximum_reading_cps(" ".join(cue.text for cue in run_cues), config),
+        )
+        for index, cue in zip(indices, retimed):
+            result[index] = cue
+    return result
+
+
+def _retime_cues_for_readability(
+    cues: list[SubtitleCue], *, clip_start: float, clip_end: float, maximum_cps: float,
+) -> list[SubtitleCue]:
+    """Use available dialogue time to prevent fast micro-cues from blocking.
+
+    The fitter preserves source words and their evidence timings.  This step
+    only extends an already-resolved cue and moves later cues forward when the
+    full dialogue clip has room.  A following cue is never shown before its
+    first source word, and a bounded lag prevents a visual timing repair from
+    becoming a hidden timing-drift regression.  If all cues cannot be made
+    readable inside those constraints, return the original timings so Quality
+    V2 retains its hard blocker.
+    """
+
+    if maximum_cps <= 0 or clip_end <= clip_start or not cues:
+        return cues
+    cursor = clip_start
+    retimed: list[SubtitleCue] = []
+    for cue in cues:
+        original_start, original_end = cue.start_seconds, cue.end_seconds
+        start = max(original_start, cursor)
+        if start - original_start > _MAX_RETIMED_CUE_START_LAG_SECONDS:
+            return cues
+        reading_duration = len("".join(cue.text.split())) / maximum_cps
+        end = max(original_end, start + reading_duration)
+        if end > clip_end + 0.001:
+            return cues
+        retimed.append(cue.model_copy(update={
+            "start_seconds": round(start, 3),
+            "end_seconds": round(end, 3),
+        }))
+        cursor = end
+    return retimed
+
+
 def assess_subtitle_quality(
     cues: list[SubtitleCue], style: SubtitleStyle, config: ProductionRenderConfig,
     *, composition_segments: list[Any] | None = None, platform: str = "universal",
@@ -463,7 +579,7 @@ def assess_subtitle_quality(
         timing_confidences.append(timing_confidence)
         if cps > target_cps:
             add(
-                "CPS_TOO_HIGH", "blocker" if cps > maximum_cps and timing_confidence >= min_timing_confidence else "warning",
+                "CPS_TOO_HIGH", "blocker" if cps > maximum_cps + _CPS_HARD_BLOCK_EPSILON and timing_confidence >= min_timing_confidence else "warning",
                 f"Cue reading speed is {cps:.1f} CPS; profile target is {target_cps:.1f} and maximum is {maximum_cps:.1f}.",
                 cue_id=cue.cue_id, metrics={"cps": round(cps, 3), "target_cps": target_cps, "maximum_cps": maximum_cps},
             )
@@ -589,9 +705,12 @@ def assess_subtitle_quality(
 
 
 def _resolve_subtitle_language(cues: list[SubtitleCue], config: ProductionRenderConfig) -> str:
+    return _resolve_subtitle_language_from_text(" ".join(cue.text for cue in cues), config)
+
+
+def _resolve_subtitle_language_from_text(text: str, config: ProductionRenderConfig) -> str:
     if config.subtitle_language in _LANGUAGE_PROFILES:
         return config.subtitle_language
-    text = " ".join(cue.text for cue in cues)
     cyrillic = sum("\u0400" <= character <= "\u052f" for character in text)
     latin = sum(character.isascii() and character.isalpha() for character in text)
     if cyrillic and cyrillic >= latin:

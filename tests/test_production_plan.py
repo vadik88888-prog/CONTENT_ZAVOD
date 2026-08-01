@@ -14,7 +14,7 @@ from app.content_transformation import run_content_transformation
 from app.errors import ProductionPlanError
 from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_renderer_handoff
+from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_audio_handoff, validate_renderer_handoff
 from app.production_plan import ProductionPlanEnvelopeContext, build_production_plan, production_summary
 from app.reporting import make_report
 from app.semantic_extraction import build_source_context
@@ -422,6 +422,40 @@ def test_default_audio_mode_builds_source_dialogue_without_tts_narration() -> No
     assert not plan.tts_eligible
     assert not any(isinstance(segment, NarrationSegment) for segment in plan.segments)
     assert plan.dialogue_mappings
+
+
+def test_native_plan_suppresses_repeated_exact_dialogue_source_range_with_evidence() -> None:
+    plan = _native_plan()
+
+    assert len(plan.dialogue_mappings) == 1
+    assert validate_audio_handoff(plan) is None
+    assert plan.envelope is not None
+    assert plan.envelope.warnings == [
+        "DUPLICATE_EXACT_SOURCE_RANGE_SUPPRESSED:fact-002:4.000-20.000",
+    ]
+
+
+def test_native_plan_carries_approved_boundary_pre_and_post_roll_into_source_dialogue() -> None:
+    outcome = _outcome_with_boundary()
+    for fact in outcome["semantic_representation"]["supporting_facts"]:
+        fact["evidence_start"] = 5.0
+        fact["evidence_end"] = 19.0
+    required = outcome["source_context"]["boundary_decision"]["required_evidence"]
+    required[0]["source_range"] = {"start_seconds": 5.0, "end_seconds": 10.0}
+    required[1]["source_range"] = {"start_seconds": 10.0, "end_seconds": 19.0}
+    required[2]["source_range"] = {"start_seconds": 18.0, "end_seconds": 19.0}
+
+    plan = build_production_plan(outcome, AppConfig().production, envelope_context=_native_envelope_context())
+
+    assert len(plan.dialogue_mappings) == 1
+    dialogue = plan.dialogue_mappings[0]
+    assert (dialogue.source_start_seconds, dialogue.source_end_seconds) == (4.0, 20.0)
+    assert validate_audio_handoff(plan) is None
+    assert plan.envelope is not None
+    assert {
+        "BOUNDARY_PRE_ROLL_APPLIED:dialogue-001:5.000->4.000",
+        "BOUNDARY_POST_ROLL_APPLIED:dialogue-001:19.000->20.000",
+    } <= set(plan.envelope.warnings)
 
 
 def test_production_plan_only_does_not_overwrite_existing_render_cache(tmp_path: Path) -> None:

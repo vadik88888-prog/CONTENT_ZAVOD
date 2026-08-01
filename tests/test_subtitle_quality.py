@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from app.config import AppConfig
 from app.output_quality import validate_output_quality
-from app.production_subtitles import assess_subtitle_quality, resolve_subtitle_style
+from app.production_subtitles import _retime_cues_for_readability, assess_subtitle_quality, resolve_subtitle_style
 from app.video_models import SubtitleCue, SubtitleProject, SubtitleWordTiming
 
 
@@ -111,6 +111,39 @@ def test_trusted_high_cps_and_geometry_collisions_block_before_final_ready() -> 
     )
     assert report["status"] == "failed"
     assert report["subtitle_quality"]["severity"] == "blocker"
+
+
+def test_source_word_caption_retiming_uses_available_dialogue_time_without_relaxing_cps_ceiling() -> None:
+    config = _config()
+    config.production_render.subtitle_language = "ru"
+    style, _fallback, _warning = resolve_subtitle_style(config.production_render)
+    first = _cue("fast phrase one two now", lines=["fast phrase", "one two now"], duration=0.8)
+    source_second = _cue("slow cue", duration=2.2)
+    second = source_second.model_copy(update={
+        "cue_id": "cue-quality-002",
+        "start_seconds": 0.8,
+        "end_seconds": 3.0,
+        "word_timings": [
+            item.model_copy(update={
+                "start_seconds": round(item.start_seconds + 0.8, 3),
+                "end_seconds": round(item.end_seconds + 0.8, 3),
+            })
+            for item in source_second.word_timings
+        ],
+    })
+
+    retimed = _retime_cues_for_readability(
+        [first, second], clip_start=0.0, clip_end=3.0, maximum_cps=20.0,
+    )
+    decision = assess_subtitle_quality(retimed, style, config.production_render)
+
+    assert retimed[0].start_seconds == 0
+    assert retimed[0].end_seconds == 0.95
+    assert retimed[1].start_seconds == 0.95
+    assert all(left.end_seconds <= right.start_seconds for left, right in zip(retimed, retimed[1:]))
+    assert retimed[1].start_seconds - second.start_seconds <= 0.75
+    assert decision.status == "passed_with_warning"
+    assert "CPS_TOO_HIGH" in decision.reason_codes
 
 
 def test_legacy_subtitle_project_remains_readable_as_unassessed_warning() -> None:

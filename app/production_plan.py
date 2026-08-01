@@ -130,6 +130,11 @@ def build_production_plan(
     dialogue_mappings: list[DialogueSegment] = []
     narration_to_dialogue: dict[str, list[str]] = {}
     used_dialogue_fact_ids: set[str] = set()
+    # One transcript range may ground more than one fact, but original-audio
+    # delivery must not replay it as sequential dialogue.  Keep the first
+    # deterministic mapping and preserve every suppression as plan evidence.
+    used_dialogue_source_ranges: set[tuple[float, float]] = set()
+    suppressed_duplicate_dialogue_ranges: list[tuple[str, float, float]] = []
     audio_mode = str(getattr(production_config, "audio_mode", "original"))
     source_audio_mode = audio_mode in {"original", "original_enhanced"}
     # A transformed FinalScript is evidence for selection, never implicit consent
@@ -150,18 +155,24 @@ def build_production_plan(
                 fact = facts[fact_id]
                 source_id = _first_known_segment_id(fact, evidence, source_ids)
                 source = evidence[source_id]
+                source_start = float(fact.get("evidence_start", source.get("start", 0)))
+                source_end = float(fact.get("evidence_end", source.get("end", 0)))
+                source_range = (source_start, source_end)
+                if source_range in used_dialogue_source_ranges:
+                    used_dialogue_fact_ids.add(fact_id)
+                    suppressed_duplicate_dialogue_ranges.append((fact_id, source_start, source_end))
+                    continue
                 dialogue = DialogueSegment(
                     segment_id=f"dialogue-{len(dialogue_mappings) + 1:03d}",
                     order=order,
                     estimated_duration_seconds=max(
                         0.0,
-                        float(fact.get("evidence_end", source.get("end", 0)))
-                        - float(fact.get("evidence_start", source.get("start", 0))),
+                        source_end - source_start,
                     ),
                     fact_id=fact_id,
                     transcript_segment_id=source_id,
-                    source_start_seconds=float(fact.get("evidence_start", source.get("start", 0))),
-                    source_end_seconds=float(fact.get("evidence_end", source.get("end", 0))),
+                    source_start_seconds=source_start,
+                    source_end_seconds=source_end,
                     source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                     speaker=str(production_config.original_dialogue_speaker),
                     confidence=float(fact.get("confidence", 0.0)),
@@ -171,6 +182,7 @@ def build_production_plan(
                 segments.append(dialogue)
                 dialogue_mappings.append(dialogue)
                 used_dialogue_fact_ids.add(fact_id)
+                used_dialogue_source_ranges.add(source_range)
                 order += 1
             continue
         narration_id = f"narration-{index + 1:03d}"
@@ -198,15 +210,22 @@ def build_production_plan(
             fact = facts[fact_id]
             segment_id = _first_known_segment_id(fact, evidence, source_ids)
             source = evidence[segment_id]
+            source_start = float(fact.get("evidence_start", source.get("start", 0)))
+            source_end = float(fact.get("evidence_end", source.get("end", 0)))
+            source_range = (source_start, source_end)
+            if source_range in used_dialogue_source_ranges:
+                used_dialogue_fact_ids.add(fact_id)
+                suppressed_duplicate_dialogue_ranges.append((fact_id, source_start, source_end))
+                continue
             dialogue_id = f"dialogue-{len(dialogue_mappings) + 1:03d}"
             dialogue = DialogueSegment(
                 segment_id=dialogue_id,
                 order=order,
-                estimated_duration_seconds=max(0.0, float(fact.get("evidence_end", source.get("end", 0))) - float(fact.get("evidence_start", source.get("start", 0)))),
+                estimated_duration_seconds=max(0.0, source_end - source_start),
                 fact_id=fact_id,
                 transcript_segment_id=segment_id,
-                source_start_seconds=float(fact.get("evidence_start", source.get("start", 0))),
-                source_end_seconds=float(fact.get("evidence_end", source.get("end", 0))),
+                source_start_seconds=source_start,
+                source_end_seconds=source_end,
                 source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                 speaker=str(production_config.original_dialogue_speaker),
                 confidence=float(fact.get("confidence", 0.0)),
@@ -217,6 +236,7 @@ def build_production_plan(
             dialogue_mappings.append(dialogue)
             narration_to_dialogue[narration_id].append(dialogue_id)
             used_dialogue_fact_ids.add(fact_id)
+            used_dialogue_source_ranges.add(source_range)
             order += 1
         if index < len(sentences) - 1:
             reason = "intro_breath" if index == 0 else "outro_breath" if index == len(sentences) - 2 else "narration_transition"
@@ -230,6 +250,7 @@ def build_production_plan(
     for segment in segments:
         if isinstance(segment, NarrationSegment):
             segment.linked_segment_ids = narration_to_dialogue[segment.segment_id]
+    boundary_padding_warnings = _apply_boundary_padding(dialogue_mappings, boundary_decision)
     timeline = _build_timeline(segments)
     subtitle_track = _build_subtitle_track(segments, timeline, language)
     source = _dict(context.get("source"), "SourceContext.source")
@@ -240,6 +261,21 @@ def build_production_plan(
         final_script_hash=final_script_hash,
         boundary_decision=boundary_decision,
     ) if envelope_context is not None else None
+    if native_envelope is not None and suppressed_duplicate_dialogue_ranges:
+        native_envelope = native_envelope.model_copy(update={
+            "warnings": [
+                *native_envelope.warnings,
+                *[
+                    "DUPLICATE_EXACT_SOURCE_RANGE_SUPPRESSED:"
+                    f"{fact_id}:{source_start:.3f}-{source_end:.3f}"
+                    for fact_id, source_start, source_end in suppressed_duplicate_dialogue_ranges
+                ],
+            ],
+        })
+    if native_envelope is not None and boundary_padding_warnings:
+        native_envelope = native_envelope.model_copy(update={
+            "warnings": [*native_envelope.warnings, *boundary_padding_warnings],
+        })
     try:
         return ProductionPlan(
             plan_id=f"production-{candidate_id}-{final_script_hash[:12]}",
@@ -313,6 +349,72 @@ def _build_timeline(segments: list[Any]) -> TimelineEstimate:
         pause_count=sum(isinstance(item, PauseSegment) for item in segments),
         entries=entries,
     )
+
+
+def _apply_boundary_padding(
+    dialogue_mappings: list[DialogueSegment], decision: BoundaryDecision | None,
+) -> list[str]:
+    """Keep approved word-safe pre/post-roll in the source-audio hand-off.
+
+    Facts generally start and end on words; a selected BoundaryDecision can
+    additionally retain a safe silence before the hook and after the payoff.
+    Without this hand-off the subtitle fitter has no legitimate tail time to
+    finish a fast final phrase, despite the approved source boundary providing
+    it.  The first/last *source-time* mappings are used rather than script
+    order, so an editorially reordered FinalScript remains source-safe.
+    """
+
+    if decision is None or not dialogue_mappings:
+        return []
+    # Padding is presentation-only.  It must never turn a plan that omitted a
+    # required hook/completion/payoff into an apparently valid one.
+    if not _required_boundary_evidence_is_covered(dialogue_mappings, decision):
+        return []
+    refined = decision.refined_range
+    first = min(dialogue_mappings, key=lambda item: (item.source_start_seconds, item.order))
+    last = max(dialogue_mappings, key=lambda item: (item.source_end_seconds, -item.order))
+    warnings: list[str] = []
+    if refined.start_seconds < first.source_start_seconds:
+        previous = first.source_start_seconds
+        first.source_start_seconds = refined.start_seconds
+        first.estimated_duration_seconds = max(0.0, first.source_end_seconds - first.source_start_seconds)
+        warnings.append(
+            "BOUNDARY_PRE_ROLL_APPLIED:"
+            f"{first.segment_id}:{previous:.3f}->{first.source_start_seconds:.3f}"
+        )
+    if refined.end_seconds > last.source_end_seconds:
+        previous = last.source_end_seconds
+        last.source_end_seconds = refined.end_seconds
+        last.estimated_duration_seconds = max(0.0, last.source_end_seconds - last.source_start_seconds)
+        warnings.append(
+            "BOUNDARY_POST_ROLL_APPLIED:"
+            f"{last.segment_id}:{previous:.3f}->{last.source_end_seconds:.3f}"
+        )
+    return warnings
+
+
+def _required_boundary_evidence_is_covered(
+    dialogue_mappings: list[DialogueSegment], decision: BoundaryDecision,
+) -> bool:
+    ranges = sorted(
+        ((item.source_start_seconds, item.source_end_seconds) for item in dialogue_mappings),
+        key=lambda item: item[0],
+    )
+    for requirement in decision.required_evidence:
+        if not requirement.required:
+            continue
+        cursor = requirement.source_range.start_seconds
+        for start, end in ranges:
+            if end < cursor - 0.001:
+                continue
+            if start > cursor + 0.001:
+                break
+            cursor = max(cursor, end)
+            if cursor >= requirement.source_range.end_seconds - 0.001:
+                break
+        if cursor < requirement.source_range.end_seconds - 0.001:
+            return False
+    return True
 
 
 def _build_subtitle_track(segments: list[Any], timeline: TimelineEstimate, language: str) -> SubtitleTrack:
