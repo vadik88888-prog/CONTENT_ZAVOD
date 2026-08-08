@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.config import AppConfig
 from app.intelligence import merge_ai_ranking
 from app.local_scoring import score_candidates
@@ -118,6 +120,42 @@ def test_missing_vision_is_safe_and_lowers_confidence_only() -> None:
     assert score.factors["visual_interest"].evidence_refs[0].state.value == "unavailable"
     assert score.factors["confidence"].score < 90
     assert candidate.composition_intent["evidence_status"] == "unavailable"
+
+
+def test_low_confidence_visual_evidence_cannot_boost_editorial_or_composition_intent() -> None:
+    candidate = _candidate("low-confidence-visual", hook=70, completeness=84, information=75)
+    _attach_strong_pass2(candidate)
+    assert candidate.vision_pass2_evidence is not None
+    result = candidate.vision_pass2_evidence["result"]
+    result["verification"]["confidence"] = 0.25
+    result["observations"][0]["confidence"] = 0.25
+    candidate.multimodal_provenance["visual_evidence"][0]["confidence"] = 0.25
+
+    _score([candidate])
+
+    score = candidate.candidate_score_v2
+    assert score is not None
+    assert score.factors["visual_interest"].score == 32.5
+    assert score.factors["vertical_viability"].score == 50
+    assert score.provenance["pass2_status"] == "completed"
+    assert candidate.composition_intent["evidence_status"] == "unavailable"
+
+
+def test_raw_loudness_is_weaker_than_grounded_audio_editorial_event() -> None:
+    ungrounded = _candidate("ungrounded-loudness", hook=70, completeness=84, information=75)
+    grounded = _candidate("grounded-audio-event", hook=70, completeness=84, information=75)
+    grounded.multimodal_provenance = {
+        "audio_evidence": [{"event_type": "emphasis", "confidence": 0.9}],
+        "generation": {"reasons": ["editorial_roles:hook"]},
+    }
+
+    _score([ungrounded, grounded], energetic=True)
+
+    assert grounded.candidate_score_v2 is not None
+    assert ungrounded.candidate_score_v2 is not None
+    assert grounded.candidate_score_v2.factors["audio_energy"].score == 85
+    assert ungrounded.candidate_score_v2.factors["audio_energy"].score == pytest.approx(29.75)
+    assert grounded.local_quality_score > ungrounded.local_quality_score + 6
 
 
 def test_ai_overall_score_and_selected_flag_do_not_own_final_ranking() -> None:

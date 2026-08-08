@@ -29,6 +29,7 @@ FACTOR_WEIGHTS: dict[str, float] = {
     "confidence": 0.05,
 }
 CONTEXT_DEBT_WEIGHT = 0.10
+MIN_EDITORIAL_MULTIMODAL_CONFIDENCE = 0.65
 
 
 class EvidenceState(StrEnum):
@@ -538,7 +539,13 @@ def build_score_v2(
     if information <= 1:
         information *= 100
     audio_score = _bounded(float(features.get("audio_energy", 0)) * 100)
-    emotional = _bounded(audio_score * 0.72 + float(features.get("exclamation_count", 0)) * 10)
+    audio_evidence = (candidate.multimodal_provenance or {}).get("audio_evidence", [])
+    audio_editorial_grounded = bool(audio_evidence) or float(features.get("exclamation_count", 0)) > 0
+    # Goal 6E benchmark: raw loudness alone repeatedly lifted candidates without
+    # an editorial event.  Preserve it as weak relevance evidence, while a
+    # grounded emphasis/reaction event keeps the full audio contribution.
+    audio_editorial_score = audio_score if audio_editorial_grounded else audio_score * 0.35
+    emotional = _bounded(audio_editorial_score * 0.72 + float(features.get("exclamation_count", 0)) * 10)
     novelty = _bounded((100 - float(features.get("repetition_score", 0)) * 100) * 0.55 + hook * 0.45)
     text_ref = EvidenceReference(
         "candidate_text", EvidenceState.AVAILABLE, "candidate_transcript",
@@ -598,7 +605,7 @@ def build_score_v2(
         "information_value": factor(information or min(100.0, float(features.get("word_count", 0)) * 3), [text_ref], transcript_confidence, "text"),
         "emotional_intensity": factor(emotional, [text_ref, audio_ref, *( [pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [])], max(transcript_confidence, visual_confidence, 0.7), "text", "audio", "visual"),
         "visual_interest": factor(visual_score, visual_refs, visual_confidence, "visual"),
-        "audio_energy": factor(audio_score, [audio_ref], 0.8, "audio"),
+        "audio_energy": factor(audio_editorial_score, [audio_ref], 0.8 if audio_editorial_grounded else 0.45, "audio"),
         "self_containedness": factor((completeness + context_independence + boundary_score) / 3, [text_ref, *[item for item in decision.evidence_refs if item.code in {"semantic_boundary", "semantic_story_unit", "context_dependency_score"}]], transcript_confidence, "text"),
         # For context_debt a higher score is deliberately worse and is subtracted below.
         "context_debt": factor(context_debt, [text_ref, *[item for item in decision.evidence_refs if item.code in {code.value for code in decision.reason_codes}]], transcript_confidence, "text"),
@@ -713,6 +720,8 @@ def _pass2_verification(candidate: Any) -> dict[str, Any] | None:
     verification = result.get("verification") if isinstance(result, dict) else None
     if wrapper.get("status") not in {"completed", "partial"} or not isinstance(verification, dict):
         return None
+    if float(verification.get("confidence", 0) or 0) < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE:
+        return None
     return verification
 
 
@@ -739,10 +748,18 @@ def _visual_factor_evidence(
     candidate: Any, scores: dict[str, float], visual_analysis: dict[str, Any] | None,
 ) -> tuple[EvidenceReference, float, float, float]:
     provenance = candidate.multimodal_provenance or {}
-    local_visual = provenance.get("visual_evidence", []) if isinstance(provenance, dict) else []
+    raw_local_visual = provenance.get("visual_evidence", []) if isinstance(provenance, dict) else []
     pass2 = candidate.vision_pass2_evidence or {}
     result = pass2.get("result") if isinstance(pass2, dict) else None
-    observations = result.get("observations", []) if isinstance(result, dict) else []
+    raw_observations = result.get("observations", []) if isinstance(result, dict) else []
+    local_visual = [
+        item for item in raw_local_visual
+        if isinstance(item, dict) and float(item.get("confidence", (item.get("observation") or {}).get("confidence", 0)) or 0) >= MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
+    ]
+    observations = [
+        item for item in raw_observations
+        if isinstance(item, dict) and float(item.get("confidence", 0) or 0) >= MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
+    ]
     global_available = bool((visual_analysis or {}).get("status") == "completed" and (visual_analysis or {}).get("subject_keyframes"))
     available = bool(local_visual or observations or global_available)
     confidences = [
@@ -751,7 +768,7 @@ def _visual_factor_evidence(
         if isinstance(item, dict) and item.get("confidence") is not None
     ]
     confidence = max(confidences, default=0.65 if global_available else 0.2)
-    roles = (provenance.get("generation", {}) or {}).get("reasons", []) if isinstance(provenance, dict) else []
+    roles = (provenance.get("generation", {}) or {}).get("reasons", []) if available and isinstance(provenance, dict) else []
     role_bonus = 0.0
     joined = " ".join(str(item) for item in roles)
     for role in ("action", "reaction", "payoff"):
@@ -814,7 +831,10 @@ def build_composition_intent(candidate: Any) -> dict[str, Any]:
     wrapper = candidate.vision_pass2_evidence or {}
     result = wrapper.get("result") if isinstance(wrapper, dict) else None
     observations = [item for item in result.get("observations", []) if isinstance(item, dict)] if isinstance(result, dict) else []
-    combined = [*visual, *observations]
+    combined = [
+        item for item in [*visual, *observations]
+        if float(item.get("confidence", 0) or 0) >= MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
+    ]
     source = "vision_pass2" if observations else "multimodal_candidate_provenance"
     status = "available" if combined else "unavailable"
     confidence = max((float(item.get("confidence", 0)) for item in combined), default=0.0)

@@ -1,0 +1,43 @@
+{
+  "schema_version": "6E.fixture.1",
+  "policy": {
+    "media_class": "local-user-supplied-evaluation-only",
+    "redistribute": false,
+    "download_during_benchmark": false,
+    "notes": "Sources remain outside git; only derived metrics and short transcript excerpts are persisted."
+  },
+  "sources": [
+    {
+      "source_key": "podcast_talking_head",
+      "content_type": "podcast / talking head",
+      "work_directory": "Большинство_бизнесов_провалит_ИИ-трансформацию-c0dcb7e71e9f",
+      "localappdata_project_id": "4ff8578b101f455b89c08de926342ccd",
+      "expected_source_id": "c0dcb7e71e9f7024963fee97",
+      "title": "Большинство бизнесов провалит ИИ-трансформацию — Андрей Дороничев"
+    },
+    {
+      "source_key": "interview",
+      "content_type": "interview",
+      "work_directory": "Еда_которая_нас_убивает-k1Q30JUpxfY-78b451974b0f",
+      "localappdata_project_id": "b6bbc8e6ce7c400cb59a5488e208e548",
+      "expected_source_id": "78b451974b0f765a207365c3",
+      "title": "Еда, которая нас убивает"
+    },
+    {
+      "source_key": "food_vlog",
+      "content_type": "vlog / food / travel",
+      "work_directory": "Пробую_Пельмени_Зубарева_в_Китае_Оправдали_ожидания_-i5B9665RdXw-407d92201de7",
+      "localappdata_project_id": "7a6c55c73bf54c1398a48d1e07a0f713",
+      "expected_source_id": "407d92201de7718447356430",
+      "title": "Пробую пельмени Зубарева в Китае"
+    },
+    {
+      "source_key": "gameplay",
+      "content_type": "visual-heavy / gameplay",
+      "work_directory": "pubg_source-bc2ec91aded2",
+      "workspace_source": "input/pubg_source.webm",
+      "expected_source_id": "bc2ec91aded24860bf292f06",
+      "title": "PUBG local gameplay source"
+    }
+  ]
+}
