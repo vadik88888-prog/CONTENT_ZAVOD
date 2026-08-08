@@ -242,6 +242,7 @@ class CompositionSegment(BaseModel):
     composition_quality_reasons: list[str] = Field(default_factory=list)
     composition_diagnostics: dict[str, float] = Field(default_factory=dict)
     composition_quality_decision: CompositionQualityDecision = Field(default_factory=CompositionQualityDecision)
+    editorial_intent: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _valid_composition_segment(self) -> "CompositionSegment":

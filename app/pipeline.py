@@ -94,7 +94,7 @@ from app.virality import apply_virality_ranking, build_virality_assessments
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
+    "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
     "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
     "coverage_map", "clip_count_recommendation", "render", "report",
 )
@@ -700,9 +700,30 @@ class Pipeline:
         for candidate in candidates:
             if candidate.id in pass2_by_id:
                 candidate.vision_pass2_evidence = pass2_by_id[candidate.id]
+        multimodal_scoring_data = self._cached(
+            tracker, "multimodal_scoring", work_directory / "candidates.multimodal.json",
+            {
+                "local_scoring": _hash(local_data), "pass2": _hash(pass2_data),
+                "scoring_contract": "6D.1", "settings": self.config.scoring,
+                "visual_analysis": _hash(visual_analysis),
+            },
+            lambda: _write_candidates(
+                work_directory / "candidates.multimodal.json",
+                score_candidates(
+                    candidates, audio_features, scenes, self.config.scoring,
+                    min_duration_seconds=self.config.min_clip_duration,
+                    max_duration_seconds=self.config.max_clip_duration,
+                    visual_analysis=visual_analysis,
+                ),
+            ),
+            cache_tracker=source_cache,
+        )
+        candidates = [candidate_from_dict(item) for item in multimodal_scoring_data.get("candidates", [])]
+        rescored_by_id = {candidate.id: candidate for candidate in candidates}
+        short_candidates = [rescored_by_id[item.id] for item in short_candidates if item.id in rescored_by_id]
         ai_data = self._cached(
             tracker, "ai_ranking", work_directory / "ai_ranking.json",
-            {"shortlist": _hash(pass2_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
+            {"shortlist": _hash(pass2_data), "multimodal_scoring": _hash(multimodal_scoring_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
             lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
             cache_tracker=source_cache,
         )
@@ -713,7 +734,7 @@ class Pipeline:
             virality_profiles = self._cached(
                 tracker, "virality_profiles", work_directory / "virality_profiles.json",
                 {
-                    "source": source.id, "candidates": _hash(local_data), "content_map": _hash(content_map),
+                    "source": source.id, "candidates": _hash(multimodal_scoring_data), "content_map": _hash(content_map),
                     "transcript_features": _hash(transcript_features), "audio_features": _hash(audio_features),
                     "visual_features": _hash(visual_analysis), "content_profile": _hash(content_profile),
                     "virality": {
@@ -729,7 +750,7 @@ class Pipeline:
                 lambda: _write(
                     work_directory / "virality_profiles.json",
                     build_virality_assessments(
-                        [candidate_from_dict(item) for item in local_data.get("candidates", [])], content_map,
+                        [candidate_from_dict(item) for item in multimodal_scoring_data.get("candidates", [])], content_map,
                         transcript_features, audio_features, visual_analysis, content_profile, self.config.virality,
                     ),
                 ),

@@ -752,8 +752,10 @@ def build_openai_payload(
     return {
         **_base_payload(candidates, transcript),
         "instruction": (
-            "Оцени каждый кандидат. Оценки — целые числа 0..100. "
-            "Верни только candidate_id из входного списка. selected=true только у сильных автономных и завершённых фрагментов."
+            "Assess every supplied candidate, not only a best-five list. Scores are integers 0..100. "
+            "Ground hook_score, completeness_score, emotional_score, clarity_score and context_dependency_score "
+            "in the supplied candidate evidence. The application ignores AI score/selected for final scoring, "
+            "ranking and selection. Return only candidate_id values from the input and never change start/end."
         ),
     }
 
@@ -764,11 +766,11 @@ def build_gemini_payload(
     return {
         **_base_payload(candidates, transcript),
         "instruction": (
-            "Оцени каждый кандидат для короткого вертикального клипа. Верни только JSON-массив. "
-            "Каждый элемент обязан строго содержать все поля: "
+            "Assess every supplied candidate for a short vertical clip; do not return only a best-five list. "
+            "Return only a JSON array. Every item must contain all fields: "
             + ", ".join(AI_FIELDS)
-            + ". Оценки integer 0..100. Не меняй start/end. "
-            "selected=true только у сильных автономных и завершённых фрагментов."
+            + ". Scores are integer 0..100. Do not change start/end. Ground factor fields in candidate evidence. "
+            "The application ignores AI score/selected and owns final scoring, ranking and selection."
         ),
     }
 

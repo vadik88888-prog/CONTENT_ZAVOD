@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.config import AppConfig
-from app.candidate_quality import set_ai_merge_provenance
+from app.candidate_quality import apply_ai_factor_assessments, set_ai_merge_provenance
 from app.models import Candidate, ScoredCandidate
 
 
@@ -19,10 +19,10 @@ def merge_ai_ranking(
     candidates: list[Candidate], ai_scored: list[ScoredCandidate], ai_ok: bool
 ) -> list[ScoredCandidate]:
     if not ai_ok:
-        ranked = local_rank(candidates)
-        for item in ranked:
+        local_items = local_rank(candidates)
+        for item in local_items:
             set_ai_merge_provenance(item.candidate, ai_score=None, merged_score=None, reason="ai_result_unavailable")
-        return ranked
+        return local_items
     ai_by_id = {item.candidate.id: item for item in ai_scored}
     ranked: list[ScoredCandidate] = []
     for candidate in candidates:
@@ -32,13 +32,20 @@ def merge_ai_ranking(
             set_ai_merge_provenance(candidate, ai_score=None, merged_score=None, reason="ai_result_missing_or_ungrounded")
             ranked.append(local)
             continue
-        candidate.ai_score = float(semantic.score)
-        semantic.candidate.ai_score = candidate.ai_score
-        final = round(candidate.local_quality_score * 0.55 + candidate.ai_score * 0.45)
-        semantic.score = max(0, min(100, final))
+        # Overall score/selected are compatibility fields. Code consumes only
+        # factor assessments and remains the final-score/ranking owner.
+        candidate.ai_score = round((
+            semantic.hook_score + semantic.completeness_score + semantic.emotional_score
+            + semantic.clarity_score + (100 - semantic.context_dependency_score)
+        ) / 5, 3)
+        apply_ai_factor_assessments(candidate, semantic)
+        if candidate.candidate_score_v2 is not None:
+            candidate.local_quality_score = round(candidate.candidate_score_v2.final_score, 3)
+        semantic.candidate = candidate
+        semantic.score = max(0, min(100, round(candidate.local_quality_score)))
         semantic.selected = True
         semantic.selection_reason = None
-        set_ai_merge_provenance(candidate, ai_score=candidate.ai_score, merged_score=semantic.score, reason="ai_merge")
+        set_ai_merge_provenance(candidate, ai_score=candidate.ai_score, merged_score=semantic.score, reason="ai_factor_assessment")
         ranked.append(semantic)
     return ranked
 

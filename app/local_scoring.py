@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.audio_features import window_audio_features
-from app.candidate_quality import build_eligibility_decision, build_score_v2
+from app.candidate_quality import build_composition_intent, build_eligibility_decision, build_score_v2
 from app.config import ScoringConfig
 from app.models import Candidate
 from app.scene_detection import window_scene_features
@@ -52,6 +52,7 @@ def score_candidates(
             visual_analysis=visual_analysis,
         )
         candidate.local_quality_score = round(candidate.candidate_score_v2.final_score, 3)
+        candidate.composition_intent = build_composition_intent(candidate)
         candidate.explanations = _explanations(candidate, scores, repetition_penalty, filler_penalty)
     return candidates
 

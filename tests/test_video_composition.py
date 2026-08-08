@@ -344,12 +344,14 @@ def test_tracking_engine_uses_group_or_safe_fallback_for_risky_scenes() -> None:
     timeline = _tracking_timeline("source.mp4", make_crop_plan(source, canvas, config), duration=1)
     group = build_composition_segments({
         **source,
+        "composition_intent": {"schema_version": "6D.composition-intent.1", "multiple_subjects": {"value": True}},
         "subject_keyframes": [
             {"time_seconds": 0, "normalized_x": 0.45, "normalized_y": 0.4, "confidence": 0.9, "visible_face_count": 2, "active_speaker_confidence": 0.95},
             {"time_seconds": 1, "normalized_x": 0.55, "normalized_y": 0.4, "confidence": 0.9, "visible_face_count": 2, "active_speaker_confidence": 0.95},
         ],
     }, canvas, config, timeline)[0]
     assert group.tracking_mode == "group_framing"
+    assert group.editorial_intent["multiple_subjects"]["value"] is True
     assert not group.tracking_required
     assert group.minimum_focus_hold_seconds == pytest.approx(1.25)
 

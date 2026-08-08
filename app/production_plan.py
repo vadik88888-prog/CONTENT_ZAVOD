@@ -302,6 +302,7 @@ def build_production_plan(
             tts_eligible=not dialogue_only and audio_mode in {"voiceover", "replace_voice", "mixed"},
             audio_mode_reason="source_audio_mode" if source_audio_mode else "explicit_voiceover_intent",
             boundary_decision=boundary_decision,
+            composition_intent=dict(context.get("composition_intent") or {}),
         )
     except ValueError as error:
         raise ProductionPlanError(str(error)) from error
@@ -382,12 +383,16 @@ def _apply_boundary_padding(
             "BOUNDARY_PRE_ROLL_APPLIED:"
             f"{first.segment_id}:{previous:.3f}->{first.source_start_seconds:.3f}"
         )
-    if refined.end_seconds > last.source_end_seconds:
+    preserve_until = float(decision.multimodal_context.get("preserve_until_seconds", refined.end_seconds))
+    if not decision.multimodal_context.get("multimodal_payoff_grounded"):
+        preserve_until = refined.end_seconds
+    target_end = min(decision.allowed_source_range.end_seconds, max(refined.end_seconds, preserve_until))
+    if target_end > last.source_end_seconds:
         previous = last.source_end_seconds
-        last.source_end_seconds = refined.end_seconds
+        last.source_end_seconds = target_end
         last.estimated_duration_seconds = max(0.0, last.source_end_seconds - last.source_start_seconds)
         warnings.append(
-            "BOUNDARY_POST_ROLL_APPLIED:"
+            ("MULTIMODAL_PAYOFF_POST_ROLL_APPLIED:" if target_end > refined.end_seconds else "BOUNDARY_POST_ROLL_APPLIED:") +
             f"{last.segment_id}:{previous:.3f}->{last.source_end_seconds:.3f}"
         )
     return warnings

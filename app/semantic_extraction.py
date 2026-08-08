@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from app.audio_features import window_audio_features
+from app.candidate_quality import boundary_multimodal_context
 from app.config import TransformationConfig
 from app.models import Candidate
 from app.transformation_models import (
@@ -77,6 +78,33 @@ def build_source_context(
         if candidate.start <= float(item.get("timestamp", -1)) <= candidate.end
     ]
     audio_summary = window_audio_features(candidate.start, candidate.end, audio_features)
+    boundary_decision = (
+        dict(candidate.boundary_diagnostics.get("boundary_decision", {}))
+        if isinstance(candidate.boundary_diagnostics, dict)
+        else {}
+    )
+    multimodal_context = boundary_multimodal_context(candidate)
+    if boundary_decision:
+        boundary_decision["multimodal_context"] = multimodal_context
+        if multimodal_context.get("multimodal_payoff_grounded"):
+            refined = dict(boundary_decision.get("refined_range") or {})
+            allowed = dict(boundary_decision.get("allowed_source_range") or {})
+            preserve_until = min(
+                float(multimodal_context.get("preserve_until_seconds", candidate.end)),
+                float(allowed.get("end_seconds", candidate.end)),
+            )
+            if preserve_until > float(refined.get("end_seconds", candidate.end)):
+                refined["end_seconds"] = preserve_until
+                boundary_decision["refined_range"] = refined
+                boundary_decision["post_roll_seconds"] = max(
+                    float(boundary_decision.get("post_roll_seconds", 0)),
+                    preserve_until - candidate.end,
+                )
+                boundary_decision["safe_end_points"] = sorted({
+                    *[float(item) for item in boundary_decision.get("safe_end_points", [])],
+                    preserve_until,
+                })
+                boundary_decision["end_reason"] = "multimodal_payoff_preservation"
     return SourceContext(
         candidate_id=candidate.id,
         source_id=str(source.get("id", "")),
@@ -109,11 +137,9 @@ def build_source_context(
         scene_boundaries=scene_boundaries,
         audio_energy_summary=audio_summary,
         candidate_features=dict(candidate.feature_vector),
-        boundary_decision=(
-            dict(candidate.boundary_diagnostics.get("boundary_decision", {}))
-            if isinstance(candidate.boundary_diagnostics, dict)
-            else {}
-        ),
+        boundary_decision=boundary_decision,
+        multimodal_context=multimodal_context,
+        composition_intent=dict(candidate.composition_intent),
     )
 
 

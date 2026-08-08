@@ -122,6 +122,8 @@ class SourceContext:
     # Empty is the explicit compatibility state for transformation artifacts
     # written before Goal 5C. New candidates carry the immutable decision here.
     boundary_decision: dict[str, Any] = field(default_factory=dict)
+    multimodal_context: dict[str, Any] = field(default_factory=dict)
+    composition_intent: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "2.0"
 
     def primary_text(self) -> str:
@@ -154,6 +156,8 @@ class SourceContext:
             "audio_energy_summary": self.audio_energy_summary,
             "candidate_features": self.candidate_features,
             "boundary_decision": self.boundary_decision,
+            "multimodal_context": self.multimodal_context,
+            "composition_intent": self.composition_intent,
         }
 
 

@@ -1768,6 +1768,34 @@ def select_with_coverage(
             "reason_code": exclusion.reason_code,
             "diversity": exclusion.to_dict(),
         }
+    score_order = {
+        item.candidate.id: position
+        for position, item in enumerate(
+            sorted(scored, key=lambda value: (-value.score, value.candidate.id)), start=1,
+        )
+    }
+    selection_order = {item.candidate.id: position for position, item in enumerate(selected, start=1)}
+    for item in scored:
+        quality = item.candidate.candidate_score_v2
+        score_diagnostics = quality.diagnostics if quality is not None else {}
+        contributions = dict(score_diagnostics.get("positive_contributions") or {})
+        strongest = sorted(contributions.items(), key=lambda value: (-float(value[1]), value[0]))[:4]
+        item.selection_diagnostics["ranking"] = {
+            "code_owned_final_score": item.score,
+            "quality_rank": score_order[item.candidate.id],
+            "selection_rank": selection_order.get(item.candidate.id),
+            "strongest_factor_contributions": [
+                {"factor": name, "points": round(float(points), 3)} for name, points in strongest
+            ],
+            "context_debt_deduction": score_diagnostics.get("context_debt_deduction", 0),
+            "penalty_total": score_diagnostics.get("penalty_total", 0),
+            "placement_reason": (
+                "selected_by_existing_mmr_after_code_owned_quality_and_eligibility"
+                if item.candidate.id in selection_order
+                else str(item.selection_diagnostics.get("reason_code") or "not_selected")
+            ),
+            "ai_final_selection_used": False,
+        }
     coverage = build_coverage_map(content_map_data, scored, selected, config)
     result_reason_code = "REQUEST_SATISFIED"
     if len(selected) < requested:

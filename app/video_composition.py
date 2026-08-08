@@ -83,6 +83,7 @@ class VideoCompositionService:
         if visual_analysis and isinstance(visual_analysis.get("subject_keyframes"), list):
             source_info["subject_keyframes"] = visual_analysis["subject_keyframes"]
         _attach_visual_evidence_context(source_info, visual_analysis)
+        source_info["composition_intent"] = dict(plan.composition_intent)
         scene_analysis = read_json(work_directory / "scene_boundaries.json", {})
         if isinstance(scene_analysis, dict) and isinstance(scene_analysis.get("boundaries"), list):
             source_info["scene_boundaries"] = scene_analysis["boundaries"]
@@ -930,6 +931,7 @@ def _decide_composition_segment(
         "speaker_id": clip.speaker,
         "scene_change_count": scene_change_count,
         "subject_bounds": observations, "transition_type": transition,
+        "editorial_intent": dict(source_info.get("composition_intent") or {}),
     }
     if scene_change_count:
         common["transition_type"] = "cut"

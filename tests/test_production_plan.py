@@ -139,6 +139,28 @@ def test_builder_creates_narration_dialogue_pauses_and_placeholders() -> None:
     assert plan.metadata.render_generated is False
 
 
+def test_multimodal_boundary_context_and_composition_intent_survive_plan_handoff() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["boundary_decision"]["allowed_source_range"]["end_seconds"] = 21.0
+    outcome["source_context"]["boundary_decision"]["safe_end_points"].append(21.0)
+    outcome["source_context"]["boundary_decision"]["multimodal_context"] = {
+        "schema_version": "6D.boundary-context.1", "preserve_until_seconds": 21.0,
+        "multimodal_payoff_grounded": True, "visual_payoff_verified": True,
+        "evidence_refs": [{"source": "vision_pass2"}], "confidence": 0.93,
+    }
+    outcome["source_context"]["composition_intent"] = {
+        "schema_version": "6D.composition-intent.1", "evidence_status": "available",
+        "reaction": {"value": "surprise", "confidence": 0.93, "evidence_refs": [{"source": "vision_pass2"}], "provenance": {"mode": "observed_evidence_only"}},
+    }
+
+    plan = build_production_plan(outcome, AppConfig().production)
+
+    assert plan.boundary_decision is not None
+    assert plan.boundary_decision.multimodal_context["visual_payoff_verified"] is True
+    assert max(item.source_end_seconds for item in plan.dialogue_mappings) == 21.0
+    assert plan.composition_intent["reaction"]["value"] == "surprise"
+
+
 def test_native_envelope_is_deterministic_and_binds_v2_identity_contract() -> None:
     first = _native_plan()
     second = _native_plan()

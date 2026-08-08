@@ -13,7 +13,22 @@ import re
 from typing import Any
 
 
-CANDIDATE_QUALITY_SCHEMA_VERSION = "5B.1"
+CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.1"
+
+FACTOR_WEIGHTS: dict[str, float] = {
+    "hook": 0.12,
+    "narrative_completeness": 0.12,
+    "payoff": 0.12,
+    "information_value": 0.10,
+    "emotional_intensity": 0.07,
+    "visual_interest": 0.09,
+    "audio_energy": 0.06,
+    "self_containedness": 0.12,
+    "vertical_viability": 0.07,
+    "novelty": 0.08,
+    "confidence": 0.05,
+}
+CONTEXT_DEBT_WEIGHT = 0.10
 
 
 class EvidenceState(StrEnum):
@@ -160,6 +175,34 @@ class ScorePenalty:
 
 
 @dataclass(slots=True)
+class FactorAssessment:
+    """One evidence-bearing editorial factor; never a final selection decision."""
+
+    score: float
+    evidence_refs: list[EvidenceReference]
+    confidence: float
+    provenance: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score": round(_bounded(self.score), 3),
+            "evidence_refs": [item.to_dict() for item in self.evidence_refs],
+            "confidence": round(max(0.0, min(1.0, self.confidence)), 6),
+            "provenance": self.provenance,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "FactorAssessment":
+        evidence = data.get("evidence_refs")
+        return cls(
+            score=_bounded(float(data.get("score") or 0)),
+            evidence_refs=[EvidenceReference.from_dict(item) for item in evidence if isinstance(item, dict)] if isinstance(evidence, list) else [],
+            confidence=max(0.0, min(1.0, float(data.get("confidence") or 0))),
+            provenance=dict(data.get("provenance") or {}),
+        )
+
+
+@dataclass(slots=True)
 class CandidateScoreV2:
     schema_version: str
     config_version: str
@@ -169,6 +212,9 @@ class CandidateScoreV2:
     final_score: float
     evidence_refs: list[EvidenceReference]
     provenance: dict[str, Any]
+    factors: dict[str, FactorAssessment] = field(default_factory=dict)
+    factor_weights: dict[str, float] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     state: EligibilityState = EligibilityState.ASSESSED
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,11 +223,14 @@ class CandidateScoreV2:
             "config_version": self.config_version,
             "state": self.state.value,
             "component_scores": {key: round(value, 3) for key, value in self.components.items()},
+            "factors": {key: value.to_dict() for key, value in self.factors.items()},
+            "factor_weights": {key: round(value, 6) for key, value in self.factor_weights.items()},
             "penalties": [item.to_dict() for item in self.penalties],
             "raw_score": round(self.raw_score, 3),
             "final_score": round(self.final_score, 3),
             "evidence_refs": [item.to_dict() for item in self.evidence_refs],
             "provenance": self.provenance,
+            "diagnostics": self.diagnostics,
         }
 
     @classmethod
@@ -193,15 +242,35 @@ class CandidateScoreV2:
             state = EligibilityState.LEGACY_UNASSESSED
         penalties = data.get("penalties")
         evidence = data.get("evidence_refs")
+        components = {str(key): float(value) for key, value in dict(data.get("component_scores") or {}).items()}
+        raw_factors = data.get("factors")
+        factors = {
+            str(key): FactorAssessment.from_dict(value)
+            for key, value in raw_factors.items()
+            if isinstance(value, dict)
+        } if isinstance(raw_factors, dict) else {}
+        if not factors:
+            factors = {
+                key: FactorAssessment(
+                    score=value,
+                    evidence_refs=[EvidenceReference(key, EvidenceState.LEGACY, "candidate_score_v2")],
+                    confidence=0.25,
+                    provenance={"mode": "legacy_component_adapter"},
+                )
+                for key, value in components.items()
+            }
         return cls(
             schema_version=str(data.get("schema_version") or CANDIDATE_QUALITY_SCHEMA_VERSION),
             config_version=str(data.get("config_version") or "unknown"),
-            components={str(key): float(value) for key, value in dict(data.get("component_scores") or {}).items()},
+            components=components,
             penalties=[ScorePenalty.from_dict(item) for item in penalties if isinstance(item, dict)] if isinstance(penalties, list) else [],
             raw_score=float(data.get("raw_score") or 0),
             final_score=float(data.get("final_score") or 0),
             evidence_refs=[EvidenceReference.from_dict(item) for item in evidence if isinstance(item, dict)] if isinstance(evidence, list) else [],
             provenance=dict(data.get("provenance") or {}),
+            factors=factors,
+            factor_weights={str(key): float(value) for key, value in dict(data.get("factor_weights") or {}).items()},
+            diagnostics=dict(data.get("diagnostics") or {}),
             state=state,
         )
 
@@ -380,8 +449,13 @@ def build_eligibility_decision(
 
     visual_status = str((visual_analysis or {}).get("status") or "unavailable")
     visual_keyframes = (visual_analysis or {}).get("subject_keyframes", [])
-    if visual_status == "completed" and visual_keyframes:
-        evidence.append(EvidenceReference("visual_viability", EvidenceState.AVAILABLE, "visual_analysis", {"status": visual_status, "keyframe_count": len(visual_keyframes)}))
+    pass2 = _pass2_verification(candidate)
+    candidate_visual = (candidate.multimodal_provenance or {}).get("visual_evidence", [])
+    if (visual_status == "completed" and visual_keyframes) or candidate_visual or pass2 is not None:
+        evidence.append(EvidenceReference("visual_viability", EvidenceState.AVAILABLE, "multimodal_visual_evidence", {
+            "status": visual_status, "keyframe_count": len(visual_keyframes),
+            "candidate_visual_evidence_count": len(candidate_visual), "pass2_available": pass2 is not None,
+        }))
     else:
         reason(EligibilityReasonCode.VISUAL_EVIDENCE_UNAVAILABLE)
         recoverable.append(EligibilityReasonCode.VISUAL_EVIDENCE_UNAVAILABLE)
@@ -424,14 +498,20 @@ def assess_hook_and_payoff(
     ending = candidate.text[-300:].casefold()
     boundary = boundary or {}
     natural_end = bool(boundary.get("payoff_preserved", False)) or bool(boundary.get("sentence_integrity", False))
-    payoff_present = bool(payoff_text) or any(marker in ending for marker in _PAYOFF_MARKERS) or (
+    pass2 = _pass2_verification(candidate)
+    visible_payoff = bool(pass2 and pass2.get("payoff_visible") is True)
+    generation = (candidate.multimodal_provenance or {}).get("generation", {})
+    generation_reasons = generation.get("reasons", []) if isinstance(generation, dict) else []
+    linked_payoff = any("payoff" in str(item) for item in generation_reasons)
+    payoff_present = bool(payoff_text) or visible_payoff or linked_payoff or any(marker in ending for marker in _PAYOFF_MARKERS) or (
         natural_end and float(boundary.get("semantic_completion", features.get("completeness_score", 0))) >= 0.5
     )
     hook_evidence = EvidenceReference("hook", EvidenceState.AVAILABLE, "story_unit" if hook_text else "transcript_features", {
         "hook_strength": round(hook_score, 3), "hook_text_available": bool(hook_text),
     })
-    payoff_evidence = EvidenceReference("payoff", EvidenceState.AVAILABLE if payoff_present else EvidenceState.UNAVAILABLE, "story_unit" if payoff_text else "semantic_boundary", {
+    payoff_evidence = EvidenceReference("payoff", EvidenceState.AVAILABLE if payoff_present else EvidenceState.UNAVAILABLE, "vision_pass2" if visible_payoff else ("multimodal_candidate_provenance" if linked_payoff else ("story_unit" if payoff_text else "semantic_boundary")), {
         "payoff_present": payoff_present, "story_payoff_available": bool(payoff_text), "natural_end": natural_end,
+        "visual_payoff_verified": visible_payoff, "linked_multimodal_payoff": linked_payoff,
     })
     return hook_score, payoff_present, hook_evidence, payoff_evidence, hook_score >= 55 and not payoff_present
 
@@ -453,36 +533,83 @@ def build_score_v2(
     completeness = float(scores.get("completeness", 0))
     context_independence = float(scores.get("context_independence", 0))
     boundary_score = float(scores.get("boundary_quality", 0))
-    visual_available = bool((visual_analysis or {}).get("status") == "completed" and (visual_analysis or {}).get("subject_keyframes"))
-    duration_fit = 100.0
-    if min_duration_seconds is not None and max_duration_seconds is not None:
-        target = (min_duration_seconds + max_duration_seconds) / 2
-        duration_fit = _bounded(100 - abs(candidate.duration - target) / max(1.0, (max_duration_seconds - min_duration_seconds) / 2) * 45)
+    transcript_confidence = max(0.0, min(1.0, float(features.get("transcript_confidence", 0.65) or 0.65)))
     information = float(semantic.get("information_density", 0))
     if information <= 1:
         information *= 100
-    emotional = _bounded(float(features.get("audio_energy", 0)) * 100 + float(features.get("exclamation_count", 0)) * 8)
+    audio_score = _bounded(float(features.get("audio_energy", 0)) * 100)
+    emotional = _bounded(audio_score * 0.72 + float(features.get("exclamation_count", 0)) * 10)
     novelty = _bounded((100 - float(features.get("repetition_score", 0)) * 100) * 0.55 + hook * 0.45)
-    components = {
-        "self_containment": _bounded((completeness + context_independence + boundary_score) / 3),
-        "hook_strength": _bounded(hook),
-        "payoff_strength": 82.0 if payoff_present else 0.0,
-        "narrative_arc": _bounded((completeness + boundary_score) / 2),
-        "informational_value": _bounded(information or min(100.0, float(features.get("word_count", 0)) * 3)),
-        "emotional_intensity": emotional,
-        "novelty_or_conflict": novelty,
-        "speech_clarity": _bounded(float(scores.get("clarity", 0))),
-        "visual_viability": _bounded(float(scores.get("scene_structure", 0)) if visual_available else 0.0),
-        "pacing_density": _bounded((float(scores.get("pacing", 0)) + float(scores.get("speech_density", 0))) / 2),
-        "platform_fit": duration_fit,
+    text_ref = EvidenceReference(
+        "candidate_text", EvidenceState.AVAILABLE, "candidate_transcript",
+        {"candidate_id": candidate.id, "story_unit_ids": list(candidate.story_unit_ids)},
+    )
+    audio_ref = EvidenceReference(
+        "audio_energy", EvidenceState.AVAILABLE, "multimodal_timeline_audio",
+        {"score": round(audio_score, 3), "event_count": len((candidate.multimodal_provenance or {}).get("audio_evidence", []))},
+    )
+    visual_ref, visual_score, vertical_score, visual_confidence = _visual_factor_evidence(candidate, scores, visual_analysis)
+    pass2 = _pass2_verification(candidate)
+    pass2_ref = _pass2_evidence_ref(candidate, pass2)
+    if pass2 is not None:
+        pass2_confidence = float(pass2.get("confidence", 0))
+        if pass2.get("hook_visible") is True:
+            hook = max(hook, 80 * pass2_confidence)
+        if pass2.get("payoff_visible") is True:
+            payoff_present = True
+        if pass2.get("reaction_visible") is True:
+            emotional = max(emotional, 88 * pass2_confidence)
+        visible_roles = sum(pass2.get(name) is True for name in ("hook_visible", "action_visible", "reaction_visible", "payoff_visible"))
+        visual_score = max(visual_score, visible_roles / 4 * 100 * pass2_confidence)
+        continuity = str(pass2.get("continuity_risk") or "unknown")
+        if continuity == "low":
+            completeness = max(completeness, 85 * pass2_confidence)
+        elif continuity == "high":
+            completeness = min(completeness, 55)
+
+    context_codes = sum(code in decision.reason_codes for code in (
+        EligibilityReasonCode.UNRESOLVED_PRONOUN, EligibilityReasonCode.UNNAMED_ENTITY,
+        EligibilityReasonCode.ANSWER_WITHOUT_QUESTION_CONTEXT, EligibilityReasonCode.REFERENCES_EARLIER_CONTENT,
+        EligibilityReasonCode.UNDEFINED_TERM_OR_SETUP,
+    ))
+    context_debt = _bounded(100 - context_independence + context_codes * 12)
+    multimodal_confidence = _multimodal_confidence(
+        transcript_confidence, audio_ref, visual_ref, visual_confidence, pass2,
+    )
+    provenance = {
+        "mode": "deterministic_evidence_fusion",
+        "formula_version": CANDIDATE_QUALITY_SCHEMA_VERSION,
+        "ai_owns_final_score": False,
     }
-    weights = {
-        "self_containment": 0.16, "hook_strength": 0.14, "payoff_strength": 0.12,
-        "narrative_arc": 0.10, "informational_value": 0.10, "emotional_intensity": 0.08,
-        "novelty_or_conflict": 0.08, "speech_clarity": 0.08, "visual_viability": 0.06,
-        "pacing_density": 0.04, "platform_fit": 0.04,
+
+    def factor(score: float, refs: list[EvidenceReference], confidence: float, *modalities: str) -> FactorAssessment:
+        return FactorAssessment(
+            score=_bounded(score), evidence_refs=refs,
+            confidence=max(0.0, min(1.0, confidence)),
+            provenance={**provenance, "modalities": list(modalities)},
+        )
+
+    visual_refs = [visual_ref, pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [visual_ref]
+    narrative_refs = [text_ref, payoff_evidence, pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [text_ref, payoff_evidence]
+    factors = {
+        "hook": factor(hook, [hook_evidence, *( [pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [])], max(transcript_confidence, visual_confidence), "text", "visual"),
+        "narrative_completeness": factor((completeness + boundary_score) / 2, narrative_refs, max(0.45, min(transcript_confidence, float(boundary.get("overall_boundary_score", 0.65)))), "text", "visual"),
+        "payoff": factor(92 if payoff_present and pass2 and pass2.get("payoff_visible") else (82 if payoff_present else 0), [payoff_evidence, *( [pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [])], max(transcript_confidence, visual_confidence), "text", "visual", "audio"),
+        "information_value": factor(information or min(100.0, float(features.get("word_count", 0)) * 3), [text_ref], transcript_confidence, "text"),
+        "emotional_intensity": factor(emotional, [text_ref, audio_ref, *( [pass2_ref] if pass2_ref.state is EvidenceState.AVAILABLE else [])], max(transcript_confidence, visual_confidence, 0.7), "text", "audio", "visual"),
+        "visual_interest": factor(visual_score, visual_refs, visual_confidence, "visual"),
+        "audio_energy": factor(audio_score, [audio_ref], 0.8, "audio"),
+        "self_containedness": factor((completeness + context_independence + boundary_score) / 3, [text_ref, *[item for item in decision.evidence_refs if item.code in {"semantic_boundary", "semantic_story_unit", "context_dependency_score"}]], transcript_confidence, "text"),
+        # For context_debt a higher score is deliberately worse and is subtracted below.
+        "context_debt": factor(context_debt, [text_ref, *[item for item in decision.evidence_refs if item.code in {code.value for code in decision.reason_codes}]], transcript_confidence, "text"),
+        "vertical_viability": factor(vertical_score, visual_refs, visual_confidence, "visual"),
+        "novelty": factor(novelty, [text_ref], transcript_confidence, "text"),
+        "confidence": factor(multimodal_confidence * 100, [text_ref, audio_ref, visual_ref, pass2_ref], 1.0, "text", "audio", "visual"),
     }
-    raw = sum(components[name] * weights[name] for name in weights)
+    components = {name: assessment.score for name, assessment in factors.items()}
+    contributions = {name: factors[name].score * weight for name, weight in FACTOR_WEIGHTS.items()}
+    context_contribution = factors["context_debt"].score * CONTEXT_DEBT_WEIGHT
+    raw = sum(contributions.values()) - context_contribution
     penalties: list[ScorePenalty] = []
 
     def penalty(code: str, amount: float, refs: list[EvidenceReference]) -> None:
@@ -491,19 +618,16 @@ def build_score_v2(
 
     repetition = float(features.get("repetition_score", 0)) * 15
     filler = float(features.get("filler_word_ratio", 0)) * 18
-    context_count = sum(code in decision.reason_codes for code in (
-        EligibilityReasonCode.UNRESOLVED_PRONOUN, EligibilityReasonCode.UNNAMED_ENTITY,
-        EligibilityReasonCode.ANSWER_WITHOUT_QUESTION_CONTEXT, EligibilityReasonCode.REFERENCES_EARLIER_CONTENT,
-        EligibilityReasonCode.UNDEFINED_TERM_OR_SETUP,
-    ))
     penalty("INTERNAL_REPETITION", repetition, [EvidenceReference("repetition_score", EvidenceState.AVAILABLE, "transcript_features", {"value": round(float(features.get("repetition_score", 0)), 3)})])
     penalty("FILLER_WORDS", filler, [EvidenceReference("filler_word_ratio", EvidenceState.AVAILABLE, "transcript_features", {"value": round(float(features.get("filler_word_ratio", 0)), 3)})])
-    penalty("CONTEXT_DEBT", min(25.0, context_count * 10.0), [item for item in decision.evidence_refs if item.code in {code.value for code in decision.reason_codes}])
-    if not visual_available:
-        penalty("VISUAL_EVIDENCE_UNAVAILABLE", 8.0, [item for item in decision.evidence_refs if item.code == "visual_viability"])
+    penalty("CONTEXT_DEBT", min(15.0, context_codes * 5.0), [item for item in decision.evidence_refs if item.code in {code.value for code in decision.reason_codes}])
+    if visual_ref.state is EvidenceState.UNAVAILABLE:
+        # Absence is uncertainty, not negative visual evidence.  The small
+        # audit penalty plus the confidence factor keeps text/audio usable.
+        penalty("VISUAL_EVIDENCE_UNAVAILABLE", 2.0, [visual_ref])
     if float(scores.get("clarity", 0)) < 45:
         penalty("LOW_SPEECH_CLARITY", 15.0, [item for item in decision.evidence_refs if item.code == "speech_clarity"])
-    final = _bounded(raw - sum(item.amount for item in penalties))
+    final = round(_bounded(raw - sum(item.amount for item in penalties)), 3)
     return CandidateScoreV2(
         schema_version=CANDIDATE_QUALITY_SCHEMA_VERSION,
         config_version=config_version,
@@ -512,8 +636,45 @@ def build_score_v2(
         raw_score=raw,
         final_score=final,
         evidence_refs=[hook_evidence, payoff_evidence, *decision.evidence_refs],
-        provenance={"mode": "deterministic_local", "fallback_used": True, "ai_merge": "not_attempted"},
+        provenance={**provenance, "fallback_used": True, "ai_merge": "not_attempted", "pass2_status": str((candidate.vision_pass2_evidence or {}).get("status") or "not_available")},
+        factors=factors,
+        factor_weights={**FACTOR_WEIGHTS, "context_debt": -CONTEXT_DEBT_WEIGHT},
+        diagnostics={
+            "positive_contributions": {key: round(value, 3) for key, value in contributions.items()},
+            "context_debt_deduction": round(context_contribution, 3),
+            "penalty_total": round(sum(item.amount for item in penalties), 3),
+            "modalities_available": _modalities_available(candidate, visual_ref),
+        },
     )
+
+
+def apply_ai_factor_assessments(candidate: Any, assessment: Any) -> None:
+    """Blend grounded AI factor assessments; code still calculates the final score."""
+
+    score = candidate.candidate_score_v2
+    if score is None or not score.factors:
+        return
+    mappings = {
+        "hook": float(assessment.hook_score),
+        "narrative_completeness": float(assessment.completeness_score),
+        "emotional_intensity": float(assessment.emotional_score),
+        "self_containedness": _bounded((float(assessment.clarity_score) + 100 - float(assessment.context_dependency_score)) / 2),
+        "context_debt": float(assessment.context_dependency_score),
+    }
+    for name, ai_value in mappings.items():
+        local = score.factors[name]
+        ai_ref = EvidenceReference(
+            f"ai_factor:{name}", EvidenceState.AVAILABLE, "ai_candidate_assessment",
+            {"candidate_id": candidate.id, "score": round(ai_value, 3)},
+        )
+        # AI is an assessor, not an authority: evidence-grounded local factors
+        # retain 80% ownership and all thresholds/penalties stay in code.
+        local.score = _bounded(local.score * 0.8 + ai_value * 0.2)
+        local.confidence = max(local.confidence, 0.65)
+        local.evidence_refs.append(ai_ref)
+        local.provenance = {**local.provenance, "ai_assessment_weight": 0.2, "ai_final_selection_ignored": True}
+        score.components[name] = local.score
+    _recalculate_score(score)
 
 
 def set_ai_merge_provenance(candidate: Any, *, ai_score: float | None, merged_score: float | None, reason: str) -> None:
@@ -521,15 +682,235 @@ def set_ai_merge_provenance(candidate: Any, *, ai_score: float | None, merged_sc
     if score is None:
         return
     score.provenance = {
-        "mode": "local_ai_merge" if ai_score is not None else "deterministic_local",
+        "mode": "code_owned_factor_fusion" if ai_score is not None else "deterministic_evidence_fusion",
         "fallback_used": ai_score is None,
         "fallback_reason": reason if ai_score is None else None,
         "local_score": round(score.final_score, 3),
         "ai_score": round(ai_score, 3) if ai_score is not None else None,
-        "merge_weights": {"local": 0.55, "ai": 0.45} if ai_score is not None else {"local": 1.0},
+        "ai_overall_score_ignored": ai_score is not None,
+        "ai_selected_ignored": ai_score is not None,
+        "factor_assessment_weight": 0.2 if ai_score is not None else 0.0,
+        "final_score_owner": "code",
     }
-    if merged_score is not None:
-        score.final_score = _bounded(merged_score)
+
+
+def _recalculate_score(score: CandidateScoreV2) -> None:
+    contributions = {name: score.factors[name].score * weight for name, weight in FACTOR_WEIGHTS.items()}
+    context = score.factors["context_debt"].score * CONTEXT_DEBT_WEIGHT
+    score.raw_score = round(sum(contributions.values()) - context, 6)
+    score.final_score = round(_bounded(score.raw_score - sum(item.amount for item in score.penalties)), 3)
+    score.components = {name: item.score for name, item in score.factors.items()}
+    score.diagnostics.update({
+        "positive_contributions": {key: round(value, 3) for key, value in contributions.items()},
+        "context_debt_deduction": round(context, 3),
+        "penalty_total": round(sum(item.amount for item in score.penalties), 3),
+    })
+
+
+def _pass2_verification(candidate: Any) -> dict[str, Any] | None:
+    wrapper = candidate.vision_pass2_evidence or {}
+    result = wrapper.get("result") if isinstance(wrapper, dict) else None
+    verification = result.get("verification") if isinstance(result, dict) else None
+    if wrapper.get("status") not in {"completed", "partial"} or not isinstance(verification, dict):
+        return None
+    return verification
+
+
+def _pass2_evidence_ref(candidate: Any, verification: dict[str, Any] | None) -> EvidenceReference:
+    wrapper = candidate.vision_pass2_evidence or {}
+    result = wrapper.get("result") if isinstance(wrapper, dict) else None
+    if verification is None:
+        return EvidenceReference(
+            "vision_pass2", EvidenceState.UNAVAILABLE, "vision_pass2",
+            {"status": str(wrapper.get("status") or "not_available"), "reason": wrapper.get("reason")},
+        )
+    return EvidenceReference(
+        "vision_pass2", EvidenceState.AVAILABLE, "vision_pass2",
+        {
+            "candidate_id": candidate.id,
+            "verification": dict(verification),
+            "observation_count": len(result.get("observations", [])) if isinstance(result, dict) else 0,
+            "schema_version": result.get("schema_version") if isinstance(result, dict) else None,
+        },
+    )
+
+
+def _visual_factor_evidence(
+    candidate: Any, scores: dict[str, float], visual_analysis: dict[str, Any] | None,
+) -> tuple[EvidenceReference, float, float, float]:
+    provenance = candidate.multimodal_provenance or {}
+    local_visual = provenance.get("visual_evidence", []) if isinstance(provenance, dict) else []
+    pass2 = candidate.vision_pass2_evidence or {}
+    result = pass2.get("result") if isinstance(pass2, dict) else None
+    observations = result.get("observations", []) if isinstance(result, dict) else []
+    global_available = bool((visual_analysis or {}).get("status") == "completed" and (visual_analysis or {}).get("subject_keyframes"))
+    available = bool(local_visual or observations or global_available)
+    confidences = [
+        float(item.get("confidence", 0))
+        for item in [*local_visual, *observations]
+        if isinstance(item, dict) and item.get("confidence") is not None
+    ]
+    confidence = max(confidences, default=0.65 if global_available else 0.2)
+    roles = (provenance.get("generation", {}) or {}).get("reasons", []) if isinstance(provenance, dict) else []
+    role_bonus = 0.0
+    joined = " ".join(str(item) for item in roles)
+    for role in ("action", "reaction", "payoff"):
+        if role in joined:
+            role_bonus += 18
+    base = float(scores.get("scene_structure", 0)) if available else 50.0
+    interest = _bounded(base * 0.65 + role_bonus)
+    risks = [str(item.get("composition_risk") or "unknown") for item in observations if isinstance(item, dict)]
+    if not available:
+        vertical = 50.0
+    elif any(item in {"target_missing", "crowded", "text_overlap", "face_edge"} for item in risks):
+        vertical = 38.0
+    else:
+        vertical = 82.0
+    return (
+        EvidenceReference(
+            "visual_editorial_evidence", EvidenceState.AVAILABLE if available else EvidenceState.UNAVAILABLE,
+            "multimodal_candidate_provenance",
+            {"local_evidence_count": len(local_visual), "pass2_observation_count": len(observations), "global_visual_available": global_available, "composition_risks": risks},
+        ),
+        interest,
+        vertical,
+        confidence,
+    )
+
+
+def _multimodal_confidence(
+    transcript_confidence: float, audio_ref: EvidenceReference, visual_ref: EvidenceReference,
+    visual_confidence: float, pass2: dict[str, Any] | None,
+) -> float:
+    audio_confidence = 0.75 if audio_ref.state is EvidenceState.AVAILABLE else 0.25
+    visual_value = visual_confidence if visual_ref.state is EvidenceState.AVAILABLE else 0.2
+    pass2_value = float(pass2.get("confidence", 0)) if pass2 is not None else 0.2
+    return max(0.0, min(1.0, transcript_confidence * 0.48 + audio_confidence * 0.22 + visual_value * 0.20 + pass2_value * 0.10))
+
+
+def _modalities_available(candidate: Any, visual_ref: EvidenceReference) -> list[str]:
+    result = ["text", "audio"]
+    if visual_ref.state is EvidenceState.AVAILABLE:
+        result.append("visual")
+    return result
+
+
+def build_composition_intent(candidate: Any) -> dict[str, Any]:
+    """Translate only observed multimodal evidence into the existing composition hand-off."""
+
+    provenance = candidate.multimodal_provenance or {}
+    raw_visual = [item for item in provenance.get("visual_evidence", []) if isinstance(item, dict)] if isinstance(provenance, dict) else []
+    visual = []
+    for item in raw_visual:
+        nested = item.get("observation")
+        if isinstance(nested, dict):
+            visual.append({
+                **nested,
+                "timestamp": nested.get("timestamp", item.get("start_seconds", 0)),
+                "confidence": nested.get("confidence", item.get("confidence", 0)),
+            })
+        else:
+            visual.append(item)
+    wrapper = candidate.vision_pass2_evidence or {}
+    result = wrapper.get("result") if isinstance(wrapper, dict) else None
+    observations = [item for item in result.get("observations", []) if isinstance(item, dict)] if isinstance(result, dict) else []
+    combined = [*visual, *observations]
+    source = "vision_pass2" if observations else "multimodal_candidate_provenance"
+    status = "available" if combined else "unavailable"
+    confidence = max((float(item.get("confidence", 0)) for item in combined), default=0.0)
+    subjects = {str(item.get("primary_subject") or "none") for item in combined}
+    scenes = {str(item.get("scene_type") or "UNKNOWN") for item in combined}
+    face_count = max((int(item.get("visible_face_count", 0)) for item in combined), default=0)
+    reactions = [str(item.get("reaction") or "none") for item in combined]
+    risks = [str(item.get("composition_risk") or "unknown") for item in combined]
+    refs = [
+        {
+            "source": source,
+            "candidate_id": candidate.id,
+            "timestamps": sorted({float(item.get("timestamp", 0)) for item in observations}),
+            "observation_count": len(combined),
+        }
+    ]
+
+    def intent(value: Any, reason: str) -> dict[str, Any]:
+        return {
+            "value": value,
+            "confidence": round(confidence, 6),
+            "evidence_refs": refs,
+            "provenance": {"mode": "observed_evidence_only", "source": source, "reason": reason},
+        }
+
+    risky = any(item in {"face_edge", "target_missing", "crowded", "text_overlap"} for item in risks)
+    return {
+        "schema_version": "6D.composition-intent.1",
+        "evidence_status": status,
+        "active_speaker": intent(
+            any(item.get("action") == "speaking" and item.get("primary_subject") in {"face", "person"} for item in combined),
+            "speaking person/face was explicitly observed",
+        ),
+        "important_subject_or_object": intent(
+            next((item for item in ("object", "person", "face", "group") if item in subjects), None),
+            "primary_subject classification",
+        ),
+        "screen_or_product": intent(
+            "screen" if "screen" in subjects or "PRESENTATION_SCREEN" in scenes else ("product" if scenes & {"PRODUCT_DEMO", "HANDS_ON_DEMO"} else None),
+            "screen/product scene classification",
+        ),
+        "reaction": intent(next((item for item in reactions if item not in {"none", "unknown"}), None), "visible reaction classification"),
+        "multiple_subjects": intent(face_count > 1 or "group" in subjects, "visible face count/group classification"),
+        "vertical_viability": intent("risky" if risky else ("viable" if combined else "unknown"), "explicit composition risks"),
+    }
+
+
+def boundary_multimodal_context(candidate: Any) -> dict[str, Any]:
+    """Persist payoff timing so later boundary consumers do not infer it from text end."""
+
+    provenance = candidate.multimodal_provenance or {}
+    generation = provenance.get("generation", {}) if isinstance(provenance, dict) else {}
+    anchors = generation.get("anchors", {}) if isinstance(generation, dict) else {}
+    pass2 = candidate.vision_pass2_evidence or {}
+    result = pass2.get("result") if isinstance(pass2, dict) else None
+    request = result.get("request", {}) if isinstance(result, dict) else {}
+    pass2_anchors = request.get("anchors", {}) if isinstance(request, dict) else {}
+    verification = result.get("verification", {}) if isinstance(result, dict) else {}
+    reasons = generation.get("reasons", []) if isinstance(generation, dict) else []
+    linked_payoff = any(any(role in str(item) for role in ("payoff", "reaction")) for item in reasons)
+    payoff_times = []
+    for value in (anchors.get("payoff"), pass2_anchors.get("payoff")):
+        if value is None:
+            continue
+        try:
+            payoff_times.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if linked_payoff:
+        for section in (provenance.get("audio_evidence", []), provenance.get("visual_evidence", [])):
+            for item in section if isinstance(section, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("end_seconds", "timestamp", "time_seconds"):
+                    value = item.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        payoff_times.append(float(value))
+                    except (TypeError, ValueError):
+                        continue
+    preserve_until = max([candidate.end, *payoff_times])
+    return {
+        "schema_version": "6D.boundary-context.1",
+        "preserve_until_seconds": round(preserve_until, 3),
+        "visual_payoff_verified": verification.get("payoff_visible") is True,
+        "visual_reaction_verified": verification.get("reaction_visible") is True,
+        "multimodal_payoff_grounded": linked_payoff or verification.get("payoff_visible") is True or verification.get("reaction_visible") is True,
+        "audio_or_visual_payoff_times": sorted(round(item, 3) for item in payoff_times),
+        "confidence": round(float(verification.get("confidence", 0)) if verification else 0.0, 6),
+        "evidence_refs": [
+            {"source": "multimodal_candidate_provenance", "analysis_run_id": provenance.get("analysis_run_id")},
+            {"source": "vision_pass2", "status": pass2.get("status")},
+        ],
+        "provenance": {"mode": "observed_evidence_only", "candidate_id": candidate.id},
+    }
 
 
 def _bounded(value: float) -> float:

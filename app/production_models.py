@@ -179,6 +179,9 @@ class BoundaryDecision(BaseModel):
     safe_end_points: list[float] = Field(default_factory=list)
     fallback_used: bool = False
     fallback_reason: str | None = None
+    # Goal 6D: observed audio/visual payoff timing accompanies the semantic
+    # text decision. Legacy 5C.1 artifacts load with an explicit empty state.
+    multimodal_context: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_contract(self) -> "BoundaryDecision":
@@ -389,6 +392,9 @@ class ProductionPlan(BaseModel):
     # None is the explicit migration state for 3A/5A artifacts.  New 5C plans
     # persist the full decision so a render-only run never has to recompute it.
     boundary_decision: BoundaryDecision | None = None
+    # Evidence-bearing editorial target hints only; the existing composition
+    # engine remains responsible for safe crop/tracking decisions.
+    composition_intent: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
