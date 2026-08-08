@@ -67,6 +67,7 @@ class VisionConfig:
     pass1_batch_size: int = 3
     pass2_min_frames: int = 3
     pass2_max_frames: int = 7
+    pass2_max_candidates: int = 4
     standard_max_frames: int = 12
     standard_max_calls: int = 4
     standard_max_tokens: int = 12000
@@ -95,6 +96,7 @@ class VisionConfig:
             ("vision.pass1_batch_size", self.pass1_batch_size, 2, 4),
             ("vision.pass2_min_frames", self.pass2_min_frames, 3, 7),
             ("vision.pass2_max_frames", self.pass2_max_frames, 3, 7),
+            ("vision.pass2_max_candidates", self.pass2_max_candidates, 0, 20),
             ("vision.standard_max_frames", self.standard_max_frames, 0, 256),
             ("vision.standard_max_calls", self.standard_max_calls, 0, 128),
             ("vision.standard_max_tokens", self.standard_max_tokens, 0, 1_000_000),
@@ -171,6 +173,9 @@ class CandidateGenerationConfig:
     boundary_search_radius_seconds: float = 4.0
     max_candidates: int = 100
     overlap_limit: float = 0.75
+    multimodal_min_confidence: float = 0.65
+    multimodal_link_gap_seconds: float = 8.0
+    multimodal_max_composite_candidates: int = 20
 
     def validate(self) -> None:
         if not (0 < self.min_duration_seconds <= self.target_duration_seconds <= self.max_duration_seconds <= 180):
@@ -181,6 +186,12 @@ class CandidateGenerationConfig:
             raise ClipEngineError("candidate_generation.max_candidates должен быть от 1 до 500.")
         if not 0 <= self.overlap_limit <= 1:
             raise ClipEngineError("candidate_generation.overlap_limit должен быть от 0 до 1.")
+        if not 0 <= self.multimodal_min_confidence <= 1:
+            raise ClipEngineError("candidate_generation.multimodal_min_confidence должен быть от 0 до 1.")
+        if not 0 <= self.multimodal_link_gap_seconds <= 30:
+            raise ClipEngineError("candidate_generation.multimodal_link_gap_seconds должен быть от 0 до 30.")
+        if not 0 <= self.multimodal_max_composite_candidates <= 100:
+            raise ClipEngineError("candidate_generation.multimodal_max_composite_candidates должен быть от 0 до 100.")
 
 
 @dataclass(slots=True)

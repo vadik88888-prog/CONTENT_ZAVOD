@@ -58,6 +58,11 @@ from app.multimodal_evidence import (
     multimodal_analysis_run_id,
     validate_multimodal_timeline,
 )
+from app.multimodal_candidates import (
+    CANDIDATE_PROVENANCE_SCHEMA_VERSION,
+    enrich_shortlist_with_pass2,
+    generate_multimodal_candidates,
+)
 from app.rendering import render_clip
 from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
@@ -90,7 +95,7 @@ from app.virality import apply_virality_ranking, build_virality_assessments
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
     "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
-    "global_content_map", "story_units", "semantic_boundaries", "virality_profiles", "virality_ranking",
+    "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
     "coverage_map", "clip_count_recommendation", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.8.0"
@@ -602,6 +607,10 @@ class Pipeline:
             {
                 "content_map": _hash(content_map), "transcript": _hash(transcript),
                 "transcript_features": _hash(transcript_features), "scenes": _hash(scenes),
+                "multimodal_timeline": _hash(multimodal_timeline),
+                "vision_pass1": _hash(vision_analysis),
+                "candidate_generation": self.config.candidate_generation,
+                "multimodal_candidate_version": CANDIDATE_PROVENANCE_SCHEMA_VERSION,
                 "boundary_settings": {
                     "schema_version": self.config.content_understanding.boundary_schema_version,
                     "max_head_padding_seconds": self.config.content_understanding.max_head_padding_seconds,
@@ -615,7 +624,11 @@ class Pipeline:
             },
             lambda: _write_generated_candidates(
                 work_directory / "semantic_boundaries.json",
-                generate_semantic_candidates(content_map, transcript, transcript_features, scenes, self.config),
+                generate_multimodal_candidates(
+                    content_map, transcript, transcript_features, scenes,
+                    multimodal_timeline, vision_analysis, self.config,
+                    semantic_generator=generate_semantic_candidates,
+                ),
             ),
             cache_tracker=source_cache,
         )
@@ -656,9 +669,40 @@ class Pipeline:
             cache_tracker=source_cache,
         )
         short_candidates = [candidate_from_dict(item) for item in shortlist_data.get("candidates", [])]
+        pass2_data = self._cached(
+            tracker, "vision_pass2", work_directory / "shortlist.vision.json",
+            {
+                "shortlist": _hash(shortlist_data),
+                "timeline": _hash(multimodal_timeline),
+                "vision": self.config.vision,
+                "processing_mode": self.config.product_flow.processing_mode,
+                "provider": "mock" if self.mock_ai else self.config.ai.provider,
+                "model": self.config.ai.model,
+            },
+            lambda: _write_candidates(
+                work_directory / "shortlist.vision.json",
+                enrich_shortlist_with_pass2(
+                    short_candidates,
+                    source=source.path,
+                    timeline=multimodal_timeline,
+                    gateway=VisionGateway(
+                        config=self.config,
+                        cache_directory=self.root / "work" / "vision-cache",
+                        provider=vision_provider,
+                    ),
+                    config=self.config,
+                ),
+            ),
+            cache_tracker=source_cache,
+        )
+        short_candidates = [candidate_from_dict(item) for item in pass2_data.get("candidates", [])]
+        pass2_by_id = {candidate.id: candidate.vision_pass2_evidence for candidate in short_candidates}
+        for candidate in candidates:
+            if candidate.id in pass2_by_id:
+                candidate.vision_pass2_evidence = pass2_by_id[candidate.id]
         ai_data = self._cached(
             tracker, "ai_ranking", work_directory / "ai_ranking.json",
-            {"shortlist": _hash(shortlist_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
+            {"shortlist": _hash(pass2_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
             lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
             cache_tracker=source_cache,
         )
@@ -1123,6 +1167,7 @@ class Pipeline:
             "visual_analysis": str(work_directory / "visual_analysis.json"),
             "multimodal_timeline": str(work_directory / "multimodal_timeline.json"),
             "vision_observations": str(work_directory / "vision-observations.json"),
+            "vision_pass2": str(work_directory / "shortlist.vision.json"),
             "content_profile": str(work_directory / "video_content_profile.json"),
             "content_map": str(work_directory / "global_content_map.json"),
             "story_units": str(work_directory / "story_units.json"),
@@ -1233,6 +1278,7 @@ class Pipeline:
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
                 "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
                 "vision_observations_ref": str(work_directory / "vision-observations.json"),
+                "vision_pass2_ref": str(work_directory / "shortlist.vision.json"),
                 "vision": vision_analysis,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),

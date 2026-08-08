@@ -1352,38 +1352,113 @@ def generate_semantic_candidates(
     engine = SemanticBoundaryEngine(config.content_understanding)
     candidates: list[Candidate] = []
     for unit in content_map.story_units:
-        resolution = engine.resolve(unit, transcript, transcript_features, scenes)
-        diagnostics = resolution.diagnostics
-        candidate_id = f"candidate-{unit.story_unit_id}"
-        if _has_complete_boundary_evidence(diagnostics) and not isinstance(diagnostics.get("boundary_decision"), dict):
-            diagnostics = {
-                **diagnostics,
-                "boundary_decision": _boundary_decision_payload(candidate_id, diagnostics),
-            }
-        candidate = Candidate(
-            id=candidate_id, start=resolution.start, end=resolution.end,
-            text=resolution.text, reason="SemanticBoundaryEngine: естественные границы StoryUnit.",
-            transcript_segment_ids=resolution.transcript_segment_ids,
-            start_boundary_reason=str(diagnostics.get("start_boundary", {}).get("reason", "")),
-            end_boundary_reason=str(diagnostics.get("end_boundary", {}).get("reason", "")),
-            feature_vector=candidate_transcript_features(resolution.start, resolution.end, transcript_features),
-            explanations=["Кандидат построен из самостоятельной StoryUnit с проверенными границами."],
-            chapter_id=unit.chapter_id, story_unit_id=unit.story_unit_id, core_idea=unit.core_idea,
-            content_signature=dict(unit.content_signature), boundary_diagnostics=diagnostics,
-            semantic_evidence={
-                "story_unit_id": unit.story_unit_id,
-                "hook": unit.hook_seed,
-                "payoff": unit.payoff,
-                "setup": unit.setup,
-                "ending": unit.ending,
-                "completeness_score": unit.completeness_score,
-                "context_dependency_score": unit.context_dependency_score,
-                "information_density": unit.information_density,
-                "evidence": unit.evidence,
-            },
-        )
-        candidates.append(candidate)
+        candidates.append(build_semantic_candidate(
+            [unit], transcript, transcript_features, scenes, engine,
+            candidate_id=f"candidate-{unit.story_unit_id}",
+        ))
     return candidates, len(candidates)
+
+
+def build_semantic_candidate(
+    units: list[StoryUnit],
+    transcript: dict[str, Any],
+    transcript_features: dict[str, Any],
+    scenes: dict[str, Any],
+    engine: SemanticBoundaryEngine,
+    *,
+    candidate_id: str,
+) -> Candidate:
+    """Resolve one or more adjacent StoryUnits through the existing boundary engine."""
+
+    if not units or any(unit.chapter_id != units[0].chapter_id for unit in units):
+        raise ValueError("A semantic candidate requires adjacent StoryUnits from one chapter.")
+    ordered = sorted(units, key=lambda item: (item.start, item.end, item.story_unit_id))
+    primary = max(ordered, key=lambda item: (item.standalone_score, item.completeness_score, item.story_unit_id))
+    boundary_unit = ordered[0] if len(ordered) == 1 else _combined_story_unit(ordered, primary)
+    resolution = engine.resolve(boundary_unit, transcript, transcript_features, scenes)
+    diagnostics = resolution.diagnostics
+    boundary_decision = diagnostics.get("boundary_decision")
+    if _has_complete_boundary_evidence(diagnostics) and (
+        not isinstance(boundary_decision, dict) or boundary_decision.get("candidate_id") != candidate_id
+    ):
+        diagnostics = {
+            **diagnostics,
+            "boundary_decision": _boundary_decision_payload(candidate_id, diagnostics),
+        }
+    story_unit_ids = [unit.story_unit_id for unit in ordered]
+    return Candidate(
+        id=candidate_id, start=resolution.start, end=resolution.end,
+        text=resolution.text, reason="SemanticBoundaryEngine: естественные границы StoryUnit.",
+        transcript_segment_ids=resolution.transcript_segment_ids,
+        start_boundary_reason=str(diagnostics.get("start_boundary", {}).get("reason", "")),
+        end_boundary_reason=str(diagnostics.get("end_boundary", {}).get("reason", "")),
+        feature_vector=candidate_transcript_features(resolution.start, resolution.end, transcript_features),
+        explanations=[
+            "Кандидат построен из самостоятельной StoryUnit с проверенными границами."
+            if len(ordered) == 1 else
+            "Кандидат построен из связанных StoryUnits с проверенными семантическими границами."
+        ],
+        chapter_id=primary.chapter_id, story_unit_id=primary.story_unit_id, story_unit_ids=story_unit_ids,
+        core_idea=primary.core_idea, content_signature=dict(primary.content_signature),
+        boundary_diagnostics=diagnostics,
+        semantic_evidence={
+            "story_unit_id": primary.story_unit_id,
+            "story_unit_ids": story_unit_ids,
+            "hook": ordered[0].hook_seed,
+            "payoff": ordered[-1].payoff,
+            "setup": ordered[0].setup,
+            "ending": ordered[-1].ending,
+            "completeness_score": max(unit.completeness_score for unit in ordered),
+            "context_dependency_score": min(unit.context_dependency_score for unit in ordered),
+            "information_density": max(unit.information_density for unit in ordered),
+            "evidence": (
+                ordered[0].evidence if len(ordered) == 1
+                else {unit.story_unit_id: unit.evidence for unit in ordered}
+            ),
+        },
+    )
+
+
+def _combined_story_unit(units: list[StoryUnit], primary: StoryUnit) -> StoryUnit:
+    first, last = units[0], units[-1]
+    segment_ids = [segment_id for unit in units for segment_id in unit.transcript_segment_ids]
+    development = " ".join(unit.development.strip() for unit in units if unit.development.strip())
+    signature = dict(primary.content_signature)
+    signature["source_range"] = {"start": first.start, "end": last.end}
+    signature["transcript_fingerprint"] = stable_text_hash("|".join(str(value) for value in segment_ids))
+    count = float(len(units))
+    return StoryUnit(
+        story_unit_id="+".join(unit.story_unit_id for unit in units),
+        chapter_id=first.chapter_id,
+        start=first.start,
+        end=last.end,
+        duration=round(last.end - first.start, 3),
+        transcript_segment_ids=segment_ids,
+        title=primary.title,
+        core_idea=primary.core_idea,
+        hook_seed=first.hook_seed,
+        setup=first.setup,
+        development=development,
+        payoff=last.payoff or last.ending,
+        ending=last.ending,
+        emotional_arc="multimodal_linked_sequence",
+        dominant_emotion=primary.dominant_emotion,
+        speaker_context=", ".join(dict.fromkeys(unit.speaker_context for unit in units)),
+        required_previous_context=first.required_previous_context,
+        required_next_context=last.required_next_context,
+        standalone_score=sum(unit.standalone_score for unit in units) / count,
+        completeness_score=max(unit.completeness_score for unit in units),
+        clarity_score=sum(unit.clarity_score for unit in units) / count,
+        context_dependency_score=min(unit.context_dependency_score for unit in units),
+        information_density=max(unit.information_density for unit in units),
+        repetition_score=sum(unit.repetition_score for unit in units) / count,
+        transformation_potential=max(unit.transformation_potential for unit in units),
+        publishability_precheck=any(unit.publishability_precheck for unit in units),
+        content_signature=signature,
+        confidence=min(unit.confidence for unit in units),
+        evidence={"story_unit_ids": [unit.story_unit_id for unit in units], "evidence_text": development[:1200]},
+        multimodal_evidence={},
+    )
 
 
 def _has_complete_boundary_evidence(diagnostics: dict[str, Any]) -> bool:

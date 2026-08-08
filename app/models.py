@@ -59,6 +59,10 @@ class Candidate:
     content_signature: dict[str, Any] = field(default_factory=dict)
     boundary_diagnostics: dict[str, Any] = field(default_factory=dict)
     semantic_evidence: dict[str, Any] = field(default_factory=dict)
+    candidate_kind: str = "transcript"
+    story_unit_ids: list[str] = field(default_factory=list)
+    multimodal_provenance: dict[str, Any] = field(default_factory=dict)
+    vision_pass2_evidence: dict[str, Any] = field(default_factory=dict)
     eligibility_decision: EligibilityDecision | None = None
     candidate_score_v2: CandidateScoreV2 | None = None
     incremental_coverage_score: float = 0.0
@@ -89,6 +93,10 @@ class Candidate:
             "content_signature": self.content_signature,
             "boundary_diagnostics": self.boundary_diagnostics,
             "semantic_evidence": self.semantic_evidence,
+            "candidate_kind": self.candidate_kind,
+            "story_unit_ids": self.story_unit_ids or ([self.story_unit_id] if self.story_unit_id else []),
+            "multimodal_provenance": self.multimodal_provenance,
+            "vision_pass2_evidence": self.vision_pass2_evidence,
             # Old candidate JSON has no V2 decision. Serialize that distinction
             # explicitly so it cannot masquerade as a V2 pass on a later read.
             "eligibility_decision": (self.eligibility_decision or legacy_eligibility_decision()).to_dict(),
@@ -163,6 +171,11 @@ def candidate_from_dict(data: dict[str, Any]) -> Candidate:
         content_signature=dict(data.get("content_signature", {})),
         boundary_diagnostics=dict(data.get("boundary_diagnostics", {})),
         semantic_evidence=dict(data.get("semantic_evidence", {})),
+        candidate_kind=str(data.get("candidate_kind") or "transcript"),
+        story_unit_ids=[str(value) for value in data.get("story_unit_ids", [])]
+        or ([str(data["story_unit_id"])] if data.get("story_unit_id") else []),
+        multimodal_provenance=dict(data.get("multimodal_provenance", {})),
+        vision_pass2_evidence=dict(data.get("vision_pass2_evidence", {})),
         eligibility_decision=(
             EligibilityDecision.from_dict(data["eligibility_decision"])
             if isinstance(data.get("eligibility_decision"), dict)
