@@ -25,6 +25,7 @@ from app.diversity import (
     transcript_similarity,
 )
 from app.models import Candidate, ScoredCandidate
+from app.multimodal_evidence import evidence_for_range, validate_multimodal_timeline
 from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
@@ -260,6 +261,7 @@ class StoryUnit:
     content_signature: dict[str, Any]
     confidence: float
     evidence: dict[str, Any]
+    multimodal_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -288,6 +290,7 @@ class StoryUnit:
             publishability_precheck=bool(data.get("publishability_precheck", False)),
             content_signature=dict(data.get("content_signature", {})),
             confidence=float(data.get("confidence", 0)), evidence=dict(data.get("evidence", {})),
+            multimodal_evidence=dict(data.get("multimodal_evidence", {})),
         )
 
 
@@ -338,6 +341,14 @@ class GlobalContentMap:
                 raise ValueError("StoryUnit must reference only its chapter transcript segments.")
             if not unit.evidence.get("evidence_text") or not unit.content_signature.get("transcript_fingerprint"):
                 raise ValueError("StoryUnit requires grounded evidence and a content signature.")
+            if unit.multimodal_evidence:
+                interval = unit.multimodal_evidence.get("interval", {})
+                if (
+                    unit.multimodal_evidence.get("source_id") != self.source_id
+                    or abs(float(interval.get("start_seconds", -1)) - unit.start) > 0.01
+                    or abs(float(interval.get("end_seconds", -1)) - unit.end) > 0.01
+                ):
+                    raise ValueError("StoryUnit multimodal evidence must match its source range.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -681,6 +692,7 @@ def build_global_content_map(
     visual_analysis: dict[str, Any],
     profile_data: dict[str, Any],
     config: Any,
+    multimodal_timeline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a fully grounded fallback ContentMap from ordered transcript evidence.
 
@@ -718,6 +730,10 @@ def build_global_content_map(
     story_units: list[StoryUnit] = []
     for chapter, group in zip(chapters, chapter_groups, strict=True):
         story_units.extend(_make_story_units(chapter, group, features, config.content_understanding))
+    if multimodal_timeline is not None:
+        validate_multimodal_timeline(multimodal_timeline, expected_source_id=profile.source_id)
+        for unit in story_units:
+            unit.multimodal_evidence = evidence_for_range(multimodal_timeline, unit.start, unit.end)
     result = GlobalContentMap(
         schema_version=GLOBAL_CONTENT_MAP_SCHEMA_VERSION,
         source_id=profile.source_id,

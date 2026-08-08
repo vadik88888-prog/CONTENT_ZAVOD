@@ -5,7 +5,7 @@ from pathlib import Path
 from app.config import AppConfig
 from app.pipeline import Pipeline
 from app.sources import Source
-from app.utils import write_json
+from app.utils import read_json, write_json
 
 
 def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkeypatch) -> None:
@@ -64,6 +64,7 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert len(first.output_files) == 1
     assert first.report_path.is_file()
     assert (first.work_directory / "transcript.json").is_file()
+    assert (first.work_directory / "multimodal_timeline.json").is_file()
     assert (first.work_directory / "candidates.raw.json").is_file()
     assert (first.work_directory / "candidates.scored.json").is_file()
     assert calls == {"media": 1, "transcription": 1, "render": 1}
@@ -76,6 +77,14 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert second.output_files[0].is_relative_to(second.output_directory)
     assert first.output_files[0].is_relative_to(first.output_directory)
     assert calls == {"media": 1, "transcription": 1, "render": 2}
+    timeline = read_json(second.work_directory / "multimodal_timeline.json", {})
+    story_units = read_json(second.work_directory / "story_units.json", {})["story_units"]
+    second_report = read_json(second.report_path, {})
+    assert timeline["source_id"]
+    assert timeline["diagnostics"]["external_vision_api_calls"] == 0
+    assert story_units and story_units[0]["multimodal_evidence"]["analysis_run_id"] == timeline["analysis_run_id"]
+    assert second_report["stages"]["multimodal_timeline"]["cache_hit"] is True
+    assert second_report["content_understanding"]["multimodal_timeline_ref"].endswith("multimodal_timeline.json")
 
 
 def test_pipeline_reports_video_without_audio_without_crashing(tmp_path, monkeypatch) -> None:
@@ -101,6 +110,9 @@ def test_pipeline_reports_video_without_audio_without_crashing(tmp_path, monkeyp
     report = result.report_path.read_text(encoding="utf-8")
     assert result.output_files == []
     assert "В видео нет аудиодорожки." in report
+    timeline = read_json(result.work_directory / "multimodal_timeline.json", {})
+    assert timeline["diagnostics"]["evidence"]["audio"]["status"] == "missing"
+    assert timeline["diagnostics"]["evidence"]["visual"]["status"] == "missing"
 
 
 def test_changed_config_invalidates_transcript_but_keeps_metadata(tmp_path, monkeypatch) -> None:

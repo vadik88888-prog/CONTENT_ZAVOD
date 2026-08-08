@@ -52,6 +52,12 @@ from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking,
 from app.local_scoring import score_candidates
 from app.media import prepare_media
 from app.models import Candidate, candidate_from_dict, scored_from_dict
+from app.multimodal_evidence import (
+    MULTIMODAL_ANALYSIS_VERSION,
+    build_multimodal_timeline,
+    multimodal_analysis_run_id,
+    validate_multimodal_timeline,
+)
 from app.rendering import render_clip
 from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
@@ -82,7 +88,7 @@ from app.virality import apply_virality_ranking, build_virality_assessments
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "video_content_profile",
+    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile",
     "global_content_map", "story_units", "semantic_boundaries", "virality_profiles", "virality_ranking",
     "coverage_map", "clip_count_recommendation", "render", "report",
 )
@@ -398,6 +404,39 @@ class Pipeline:
             lambda: prepare_media(source.path, work_directory), cache_tracker=source_cache,
         )
         if not metadata.get("audio_path"):
+            empty_transcript: dict[str, Any] = {"source_id": source.id, "segments": [], "words": [], "empty_transcript": True}
+            empty_audio: dict[str, Any] = {"energy_frames": [], "silence_intervals": [], "warning": "audio_track_unavailable"}
+            empty_scenes: dict[str, Any] = {"enabled": False, "boundaries": [], "scene_boundary_count": 0}
+            empty_visual: dict[str, Any] = {
+                "enabled": False, "status": "skipped", "evidence_status": "evidence_unavailable",
+                "reason": "audio_less_pipeline_short_circuit", "subject_keyframes": [],
+            }
+            empty_analysis_run_id = multimodal_analysis_run_id(
+                source.id, empty_transcript, empty_audio, empty_scenes, empty_visual,
+            )
+            self._cached(
+                tracker, "multimodal_timeline", work_directory / "multimodal_timeline.json",
+                {
+                    "source": source.id, "duration": metadata.get("duration"),
+                    "analysis_run_id": empty_analysis_run_id, "analysis_version": MULTIMODAL_ANALYSIS_VERSION,
+                },
+                lambda: _write(
+                    work_directory / "multimodal_timeline.json",
+                    build_multimodal_timeline(
+                        source_id=source.id,
+                        source_duration_seconds=float(metadata.get("duration") or 0),
+                        transcript=empty_transcript,
+                        audio_features=empty_audio,
+                        scenes=empty_scenes,
+                        visual_analysis=empty_visual,
+                        analysis_run_id=empty_analysis_run_id,
+                    ),
+                ),
+                cache_tracker=source_cache,
+                validator=lambda data: validate_multimodal_timeline(
+                    data, expected_source_id=source.id, expected_analysis_run_id=empty_analysis_run_id,
+                ),
+            )
             return self._complete_run(self._finish_without_audio(tracker, source_data, metadata, work_directory, output_directory))
         transcript = self._cached(
             tracker, "transcription", work_directory / "transcript.json",
@@ -428,6 +467,37 @@ class Pipeline:
             {"source": source.id, "duration": metadata.get("duration"), "enabled": self.config.optional_visual_features, "model": self.config.ai.model},
             lambda: _write(work_directory / "visual_analysis.json", analyse_video_subjects(source.path, float(metadata.get("duration") or 0), self.config)),
             cache_tracker=source_cache,
+        )
+        multimodal_analysis_id = multimodal_analysis_run_id(
+            source.id, transcript, audio_features, scenes, visual_analysis,
+        )
+        multimodal_timeline = self._cached(
+            tracker, "multimodal_timeline", work_directory / "multimodal_timeline.json",
+            {
+                "source": source.id,
+                "analysis_run_id": multimodal_analysis_id,
+                "analysis_version": MULTIMODAL_ANALYSIS_VERSION,
+                "transcript": _hash(transcript),
+                "audio_features": _hash(audio_features),
+                "scenes": _hash(scenes),
+                "visual_analysis": _hash(visual_analysis),
+            },
+            lambda: _write(
+                work_directory / "multimodal_timeline.json",
+                build_multimodal_timeline(
+                    source_id=source.id,
+                    source_duration_seconds=float(metadata.get("duration") or 0),
+                    transcript=transcript,
+                    audio_features=audio_features,
+                    scenes=scenes,
+                    visual_analysis=visual_analysis,
+                    analysis_run_id=multimodal_analysis_id,
+                ),
+            ),
+            cache_tracker=source_cache,
+            validator=lambda data: validate_multimodal_timeline(
+                data, expected_source_id=source.id, expected_analysis_run_id=multimodal_analysis_id,
+            ),
         )
         content_profile = self._cached(
             tracker, "video_content_profile", work_directory / "video_content_profile.json",
@@ -460,6 +530,7 @@ class Pipeline:
                 "audio_features": _hash(audio_features),
                 "scenes": _hash(scenes),
                 "visual_analysis": _hash(visual_analysis),
+                "multimodal_timeline": _hash(multimodal_timeline),
                 "profile": _hash(content_profile),
                 "content_map_settings": {
                     "strategy_version": self.config.content_understanding.strategy_version,
@@ -477,7 +548,7 @@ class Pipeline:
                 work_directory / "global_content_map.json",
                 build_global_content_map(
                     source_data, metadata, transcript, transcript_features, audio_features, scenes,
-                    visual_analysis, content_profile, self.config,
+                    visual_analysis, content_profile, self.config, multimodal_timeline,
                 ),
             ),
             cache_tracker=source_cache,
@@ -683,6 +754,7 @@ class Pipeline:
                 audio_features=audio_features,
                 scenes=scenes,
                 visual_analysis=visual_analysis,
+                multimodal_timeline=multimodal_timeline,
                 content_profile=content_profile,
                 content_map=content_map,
                 story_units=story_units,
@@ -846,6 +918,8 @@ class Pipeline:
                 "enabled": True,
                 "profile": content_profile,
                 "content_map": content_map,
+                "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
+                "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
@@ -878,12 +952,17 @@ class Pipeline:
             content_understanding={
                 "content_profile_ref": str(work_directory / "video_content_profile.json"),
                 "content_map_ref": str(work_directory / "global_content_map.json"),
+                "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
+                "multimodal_analysis_run_id": multimodal_timeline.get("analysis_run_id"),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundary_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
                 "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "strategy_version": self.config.content_understanding.strategy_version,
-                "analysis_fingerprint": _hash({"profile": content_profile, "map": content_map, "coverage": coverage_map}),
+                "analysis_fingerprint": _hash({
+                    "profile": content_profile, "map": content_map,
+                    "multimodal_timeline": multimodal_timeline, "coverage": coverage_map,
+                }),
             },
             virality={
                 **virality_report,
@@ -967,6 +1046,7 @@ class Pipeline:
         audio_features: dict[str, Any],
         scenes: dict[str, Any],
         visual_analysis: dict[str, Any],
+        multimodal_timeline: dict[str, Any],
         content_profile: dict[str, Any],
         content_map: dict[str, Any],
         story_units: dict[str, Any],
@@ -998,6 +1078,7 @@ class Pipeline:
             "audio_features": str(work_directory / "audio_features.json"),
             "scene_boundaries": str(work_directory / "scene_boundaries.json"),
             "visual_analysis": str(work_directory / "visual_analysis.json"),
+            "multimodal_timeline": str(work_directory / "multimodal_timeline.json"),
             "content_profile": str(work_directory / "video_content_profile.json"),
             "content_map": str(work_directory / "global_content_map.json"),
             "story_units": str(work_directory / "story_units.json"),
@@ -1014,6 +1095,7 @@ class Pipeline:
             "source": source.id,
             "profile": content_profile,
             "content_map": content_map,
+            "multimodal_timeline": multimodal_timeline,
             "ranking": final_data,
             "coverage": coverage_map,
             "recommendation": clip_count_recommendation,
@@ -1103,6 +1185,8 @@ class Pipeline:
                 "enabled": True,
                 "profile": content_profile,
                 "content_map": content_map,
+                "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
+                "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
@@ -1971,24 +2055,38 @@ class Pipeline:
     def _cached(
         self, tracker: StageTracker, stage: str, artifact: Path, fingerprint: Any,
         action: Callable[[], dict[str, Any]], *, cache_tracker: StageTracker | None = None,
+        validator: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict[str, Any]:
         if stage in INTELLIGENCE_STAGES:
             fingerprint = {"engine_version": INTELLIGENCE_ENGINE_VERSION, "input": fingerprint}
         cache_key = _hash(fingerprint)
         cache = cache_tracker or tracker
         if cache.completed(stage, artifact, cache_key):
-            # Keep the per-run report truthful even when the source-level
-            # cache supplied the artifact.  The cache index and the run state
-            # are different files and both writes are process-locked by
-            # write_json, so runs never replace one another's state.json.
-            tracker.start(stage, cache_key, cache_hit=True)
-            tracker.finish(stage)
-            return read_json(artifact, {})
+            try:
+                cached = read_json(artifact, {})
+                if not isinstance(cached, dict):
+                    raise ValueError("cached artifact is not an object")
+                if validator is not None:
+                    validator(cached)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                # A completed index entry is not enough: a partial, corrupt or
+                # identity-mismatched artifact must be rebuilt in place.
+                cache.invalidate(f"Invalid cached artifact for {stage}.", (stage,))
+            else:
+                # Keep the per-run report truthful even when the source-level
+                # cache supplied the artifact.  The cache index and the run state
+                # are different files and both writes are process-locked by
+                # write_json, so runs never replace one another's state.json.
+                tracker.start(stage, cache_key, cache_hit=True)
+                tracker.finish(stage)
+                return cached
         tracker.start(stage, cache_key, cache_hit=False)
         if cache is not tracker:
             cache.start(stage, cache_key)
         try:
             data = action()
+            if validator is not None:
+                validator(data)
         except ClipEngineError as error:
             tracker.finish(stage, "failed", str(error))
             if cache is not tracker:
@@ -3026,10 +3124,12 @@ class Pipeline:
     def _finish_without_audio(self, tracker: StageTracker, source: dict[str, Any], metadata: dict[str, Any], work_directory: Path, output_directory: Path) -> PipelineResult:
         warning = str(metadata.get("warning", "В видео нет аудио."))
         self.warnings.append(warning)
-        for stage in ("transcription", *INTELLIGENCE_STAGES, "production_plan"): tracker.skip(stage, warning)
+        for stage in ("transcription", *(name for name in INTELLIGENCE_STAGES if name != "multimodal_timeline"), "production_plan"):
+            tracker.skip(stage, warning)
+        multimodal_timeline = read_json(work_directory / "multimodal_timeline.json", {})
         report_path = output_directory / "report.json"
         tracker.start("report"); tracker.finish("report")
-        make_report(report_path, source, metadata, self.config, tracker.data, 0, 0, [], self.warnings, self.errors, _local_ai_usage("not-called"), False, False, clip_intelligence={"version": "1.6", "selection_mode": "no-audio"}, content_transformation={"enabled": bool(self.config.transformation.enabled), "status": "skipped", "reason": "no-audio"}, production_plan={"enabled": bool(self.config.production.enabled), "status": "skipped", "reason": "no-audio"}, audio={"enabled": bool(self.config.audio_composition.enabled), "status": "skipped", "reason": "no-audio"}, production_render={"enabled": bool(self.config.production_render.enabled), "status": "skipped", "reason": "no-audio"})
+        make_report(report_path, source, metadata, self.config, tracker.data, 0, 0, [], self.warnings, self.errors, _local_ai_usage("not-called"), False, False, clip_intelligence={"version": "1.6", "selection_mode": "no-audio"}, content_understanding={"enabled": True, "status": "insufficient_audio", "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"), "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {})}, content_transformation={"enabled": bool(self.config.transformation.enabled), "status": "skipped", "reason": "no-audio"}, production_plan={"enabled": bool(self.config.production.enabled), "status": "skipped", "reason": "no-audio"}, audio={"enabled": bool(self.config.audio_composition.enabled), "status": "skipped", "reason": "no-audio"}, production_render={"enabled": bool(self.config.production_render.enabled), "status": "skipped", "reason": "no-audio"})
         return PipelineResult(work_directory, output_directory, report_path, 0, [], self.warnings)
 
 
