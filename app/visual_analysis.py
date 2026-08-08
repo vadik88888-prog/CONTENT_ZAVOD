@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import base64
-import json
-import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
-from app.ai import sanitize_api_error
 from app.config import AppConfig
 
 
@@ -57,11 +51,13 @@ def _analysis_result(
 
 
 def analyse_video_subjects(source: Path, duration_seconds: float, config: AppConfig) -> dict[str, Any]:
-    """Return sparse, cacheable subject positions or a safe non-fatal fallback.
+    """Return the legacy local-evidence hand-off without making a paid call.
 
-    Only a handful of JPEG samples are sent when the user enabled deep analysis.
-    The result intentionally stores positions, not source frames, so project
-    storage remains local and compact.
+    Goal 6B centralizes every new frame request in ``VisionGateway`` after the
+    6A.1 timeline has selected sparse keyframes.  Keeping this compatibility
+    artifact avoids changing existing composition/render contracts while
+    preventing the former pre-timeline provider path from bypassing budgets or
+    charging for duplicate arbitrary samples.
     """
 
     if not config.optional_visual_features:
@@ -71,73 +67,12 @@ def analyse_video_subjects(source: Path, duration_seconds: float, config: AppCon
         )
         result["enabled"] = False
         return result
-    if config.ai.provider != "openai" or not os.getenv("OPENAI_API_KEY"):
-        return _analysis_result(
-            status="fallback", evidence_status="fallback", reason="visual_provider_unavailable",
-            fallback_stage="visual_provider",
-        )
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return _analysis_result(
-            status="fallback", evidence_status="fallback", reason="ffmpeg_unavailable",
-            fallback_stage="frame_sampling",
-        )
-    times = _sample_times(duration_seconds)
-    images: list[tuple[float, str]] = []
-    for time_seconds in times:
-        try:
-            result = subprocess.run(
-                [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{time_seconds:.3f}", "-i", str(source), "-frames:v", "1", "-vf", "scale=512:-2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-                capture_output=True, timeout=45, check=True,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if result.stdout:
-            images.append((time_seconds, base64.b64encode(result.stdout).decode("ascii")))
-    if not images:
-        return _analysis_result(
-            status="evidence_unavailable", evidence_status="evidence_unavailable", reason="no_sample_frames",
-            fallback_stage="frame_sampling",
-        )
-    try:
-        from openai import OpenAI
-
-        content: list[dict[str, Any]] = [{
-            "type": "input_text",
-            "text": (
-                "For each frame, return only non-identifying composition signals. Locate the most important visual target "
-                "with normalized center x/y (0..1), approximate normalized width/height, and confidence. Select a "
-                "tracking_target: primary_face, primary_person, important_object, screen_region, subject_group, "
-                "scene_center, or none. Count visible relevant faces. Set active_speaker_confidence only when visual "
-                "speaking evidence is clear; otherwise use 0. Classify scene_type and framing_observation only from "
-                "visible composition. scene_id may describe a stable shot/setup but must not identify people. Every "
-                "schema field is required; when a field is not observable, use UNKNOWN, unknown, none, false, or the "
-                "target center as appropriate. Do not infer names, identities, or unobserved facts."
-            ),
-        }]
-        for time_seconds, image in images:
-            content.append({"type": "input_text", "text": f"time_seconds={time_seconds:.3f}"})
-            content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{image}", "detail": "low"})
-        response = OpenAI(api_key=os.environ["OPENAI_API_KEY"]).responses.create(
-            model=config.ai.model, input=[{"role": "user", "content": content}],
-            text={"format": {"type": "json_schema", "name": "subject_positions", "strict": True, "schema": _SUBJECT_SCHEMA}},
-        )
-        parsed = json.loads(response.output_text)
-        keyframes = _validate_subject_response(parsed)
-        return _analysis_result(
-            status="completed", evidence_status="valid", subject_keyframes=keyframes, sample_count=len(images),
-        )
-    except VisualAnalysisSchemaError:
-        return _analysis_result(
-            status="evidence_unavailable", evidence_status="evidence_unavailable", reason="visual_schema_invalid",
-            sample_count=len(images), fallback_stage="strict_schema_validation",
-        )
-    except Exception as error:
-        return _analysis_result(
-            status="fallback", evidence_status="fallback",
-            reason=sanitize_api_error(error, os.getenv("OPENAI_API_KEY")), sample_count=len(images),
-            fallback_stage="visual_provider",
-        )
+    return _analysis_result(
+        status="fallback",
+        evidence_status="fallback",
+        reason="delegated_to_budgeted_vision_gateway",
+        fallback_stage="vision_gateway",
+    )
 
 
 _SUBJECT_SCHEMA: dict[str, Any] = {

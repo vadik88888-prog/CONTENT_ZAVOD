@@ -18,6 +18,7 @@ from app.doctor import collect_checks
 from app.errors import ClipEngineError
 from app.models import AI_FIELDS, Candidate
 from app.reporting import make_report
+from app.vision_intelligence import VISION_RESPONSE_SCHEMA, VisionProviderCallError
 
 
 def _candidate() -> Candidate:
@@ -108,6 +109,72 @@ def test_openai_provider_rejects_unknown_candidate_id() -> None:
     assert not scored[0].selected
     assert usage["api_errors"]
     assert "candidate_id" in usage["api_errors"][0]
+
+
+def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema() -> None:
+    frame = {
+        "keyframe_id": "keyframe-1",
+        "timestamp": 2.5,
+        "image_base64": "anBlZy1ieXRlcw==",
+    }
+    observation = {
+        "keyframe_id": "keyframe-1", "timestamp": 2.5,
+        "scene_type": "TALKING_HEAD", "primary_subject": "face",
+        "normalized_center_x": 0.5, "normalized_center_y": 0.4,
+        "visible_face_count": 1, "action": "speaking", "reaction": "none",
+        "payoff_signal": "none", "on_screen_text": "", "composition_risk": "none",
+        "confidence": 0.9, "missing_evidence": ["text"],
+    }
+    responses = _FakeResponses(SimpleNamespace(
+        output_text=json.dumps({"observations": [observation]}),
+        usage=SimpleNamespace(input_tokens=321, output_tokens=87),
+        request_id="request-vision-1",
+    ))
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(model="gpt-5-mini")),
+        "sk-test-secret",
+        SimpleNamespace(responses=responses),
+    )
+
+    payload, usage = provider.analyze_vision(
+        [frame], detail="low", pass_kind="pass1", max_output_tokens=500,
+    )
+
+    assert payload["observations"][0]["keyframe_id"] == "keyframe-1"
+    assert usage["input_tokens"] == 321
+    assert len(responses.calls) == 1
+    call = responses.calls[0]
+    assert call["max_output_tokens"] == 500
+    assert call["text"] == {
+        "format": {
+            "type": "json_schema", "name": "vision_pass1_observations",
+            "strict": True, "schema": VISION_RESPONSE_SCHEMA,
+        }
+    }
+    content = call["input"][0]["content"]
+    assert any(item.get("type") == "input_image" and item.get("detail") == "low" for item in content)
+
+
+def test_openai_vision_adapter_preserves_usage_when_output_json_is_empty() -> None:
+    responses = _FakeResponses(SimpleNamespace(
+        output_text="",
+        usage=SimpleNamespace(input_tokens=555, output_tokens=333),
+        request_id="request-empty-vision",
+    ))
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(model="gpt-5-mini")),
+        "sk-test-secret",
+        SimpleNamespace(responses=responses),
+    )
+
+    with pytest.raises(VisionProviderCallError) as captured:
+        provider.analyze_vision(
+            [{"keyframe_id": "keyframe-1", "timestamp": 2.5, "image_base64": "anBlZw=="}],
+            detail="low", pass_kind="pass1", max_output_tokens=500,
+        )
+
+    assert captured.value.usage["input_tokens"] == 555
+    assert captured.value.usage["output_tokens"] == 333
 
 
 def test_mock_mode_never_selects_openai_provider(monkeypatch: pytest.MonkeyPatch) -> None:

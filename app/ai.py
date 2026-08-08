@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -204,6 +205,38 @@ class MockProvider:
             ))
         return scored, _usage(self.name, self.config.ai.model)
 
+    def analyze_vision(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        detail: str,
+        pass_kind: str,
+        max_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Deterministic schema-valid fixture; it never performs external I/O."""
+
+        observations = []
+        for frame in frames:
+            observations.append({
+                "keyframe_id": str(frame["keyframe_id"]),
+                "timestamp": float(frame["timestamp"]),
+                "scene_type": "UNKNOWN",
+                "primary_subject": "scene",
+                "normalized_center_x": 0.5,
+                "normalized_center_y": 0.5,
+                "visible_face_count": 0,
+                "action": "unknown",
+                "reaction": "unknown",
+                "payoff_signal": "unknown",
+                "on_screen_text": "",
+                "composition_risk": "unknown",
+                "confidence": 0.25,
+                "missing_evidence": ["action", "payoff", "reaction", "text"],
+            })
+        return {"observations": observations}, _usage(
+            self.name, self.config.ai.model, response_status=200,
+        )
+
     def transform_compact(self, context: "SourceContext") -> tuple[dict[str, Any], dict[str, Any]]:
         """Deterministic transformation fixture used by --mock-ai and local tests."""
 
@@ -325,6 +358,66 @@ class OpenAIProvider:
             api_errors=errors,
             started=started,
         )
+
+    def analyze_vision(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        detail: str,
+        pass_kind: str,
+        max_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Make one budget-admitted Responses API request (no hidden retries)."""
+
+        from app.vision_intelligence import VISION_RESPONSE_SCHEMA, VisionProviderCallError, vision_prompt
+
+        client = self.client
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=self.api_key)
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": vision_prompt(pass_kind)}]
+        for frame in frames:
+            content.append({
+                "type": "input_text",
+                "text": f"keyframe_id={frame['keyframe_id']} timestamp={float(frame['timestamp']):.3f}",
+            })
+            content.append({
+                "type": "input_image",
+                "image_url": f"data:image/jpeg;base64,{frame['image_base64']}",
+                "detail": detail,
+            })
+        started = time.perf_counter()
+        response = client.responses.create(
+            model=self.config.ai.model,
+            input=[{"role": "user", "content": content}],
+            max_output_tokens=max_output_tokens,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": f"vision_{pass_kind}_observations",
+                    "strict": True,
+                    "schema": VISION_RESPONSE_SCHEMA,
+                }
+            },
+        )
+        usage = getattr(response, "usage", None)
+        request_id = getattr(response, "_request_id", None) or getattr(response, "request_id", None)
+        usage_data = _usage(
+            self.name, self.config.ai.model,
+            getattr(usage, "input_tokens", 0) or 0,
+            getattr(usage, "output_tokens", 0) or 0,
+            started=started,
+            request_id=str(request_id) if request_id else None,
+            response_status=200,
+        )
+        try:
+            parsed = json.loads(response.output_text)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise VisionProviderCallError("Vision provider returned invalid or empty JSON.", usage_data) from error
+        if not isinstance(parsed, dict):
+            raise VisionProviderCallError("Vision Structured Output returned a non-object payload.", usage_data)
+        return parsed, usage_data
 
     def transform_compact(self, context: "SourceContext") -> tuple[dict[str, Any], dict[str, Any]]:
         from app.errors import TransformationProviderError
@@ -463,6 +556,52 @@ class GeminiProvider:
             started=started,
         )
 
+    def analyze_vision(
+        self,
+        frames: list[dict[str, Any]],
+        *,
+        detail: str,
+        pass_kind: str,
+        max_output_tokens: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Make one budget-admitted Gemini request through the selected provider key."""
+
+        from app.vision_intelligence import VISION_RESPONSE_SCHEMA, VisionProviderCallError, vision_prompt
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key)
+        contents: list[Any] = [vision_prompt(pass_kind)]
+        for frame in frames:
+            contents.append(f"keyframe_id={frame['keyframe_id']} timestamp={float(frame['timestamp']):.3f}")
+            contents.append(types.Part.from_bytes(
+                data=base64.b64decode(str(frame["image_base64"])), mime_type="image/jpeg",
+            ))
+        started = time.perf_counter()
+        response = client.models.generate_content(
+            model=self.config.ai.model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_json_schema=VISION_RESPONSE_SCHEMA,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+        usage = getattr(response, "usage_metadata", None)
+        usage_data = _usage(
+            self.name, self.config.ai.model,
+            getattr(usage, "prompt_token_count", 0) or 0,
+            getattr(usage, "candidates_token_count", 0) or 0,
+            started=started, response_status=200,
+        )
+        try:
+            parsed = json.loads(response.text)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise VisionProviderCallError("Gemini vision returned invalid or empty JSON.", usage_data) from error
+        if not isinstance(parsed, dict):
+            raise VisionProviderCallError("Gemini vision returned a non-object payload.", usage_data)
+        return parsed, usage_data
+
     def transform_compact(self, context: "SourceContext") -> tuple[dict[str, Any], dict[str, Any]]:
         from app.errors import TransformationProviderError
         from app.transformation_prompts import (
@@ -579,6 +718,15 @@ def get_transformer(config: AppConfig, force_mock: bool = False) -> Any:
     provider = get_scorer(config, force_mock)
     if not hasattr(provider, "transform_compact"):
         raise ClipEngineError(f"AI provider {provider.name} не поддерживает content transformation.")
+    return provider
+
+
+def get_vision_provider(config: AppConfig, force_mock: bool = False) -> Any:
+    """Reuse the configured provider/key while exposing only the vision adapter."""
+
+    provider = get_scorer(config, force_mock)
+    if not hasattr(provider, "analyze_vision"):
+        raise ClipEngineError(f"AI provider {provider.name} не поддерживает Vision Gateway.")
     return provider
 
 

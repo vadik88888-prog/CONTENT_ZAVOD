@@ -65,6 +65,7 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert first.report_path.is_file()
     assert (first.work_directory / "transcript.json").is_file()
     assert (first.work_directory / "multimodal_timeline.json").is_file()
+    assert (first.work_directory / "vision-observations.json").is_file()
     assert (first.work_directory / "candidates.raw.json").is_file()
     assert (first.work_directory / "candidates.scored.json").is_file()
     assert calls == {"media": 1, "transcription": 1, "render": 1}
@@ -84,7 +85,11 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert timeline["diagnostics"]["external_vision_api_calls"] == 0
     assert story_units and story_units[0]["multimodal_evidence"]["analysis_run_id"] == timeline["analysis_run_id"]
     assert second_report["stages"]["multimodal_timeline"]["cache_hit"] is True
+    assert second_report["stages"]["vision_pass1"]["cache_hit"] is True
     assert second_report["content_understanding"]["multimodal_timeline_ref"].endswith("multimodal_timeline.json")
+    vision = second_report["content_understanding"]["vision"]
+    assert vision["status"] == "skipped"
+    assert vision["diagnostics"]["usage"]["calls"] == 0
 
 
 def test_pipeline_reports_video_without_audio_without_crashing(tmp_path, monkeypatch) -> None:

@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from app.ai import get_scorer, get_transformer, sanitize_api_error
+from app.ai import get_scorer, get_transformer, get_vision_provider, sanitize_api_error
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
@@ -83,16 +83,17 @@ from app.tts_service import TTSService, tts_report_section
 from app.utils import AtomicWriteError, read_json, safe_name, stable_file_hash, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
+from app.vision_intelligence import VisionGateway, validate_vision_artifact
 from app.virality import apply_virality_ranking, build_virality_assessments
 
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile",
+    "local_scoring", "shortlist", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
     "global_content_map", "story_units", "semantic_boundaries", "virality_profiles", "virality_ranking",
     "coverage_map", "clip_count_recommendation", "render", "report",
 )
-INTELLIGENCE_ENGINE_VERSION = "1.7.1"
+INTELLIGENCE_ENGINE_VERSION = "1.8.0"
 TRANSFORMATION_STAGES = (
     "transformation_source_context", "transformation_semantic_representation",
     "transformation_narrative_plan", "transformation_script_draft",
@@ -521,6 +522,43 @@ class Pipeline:
             ),
             cache_tracker=source_cache,
         )
+        vision_provider = None
+        if (
+            self.config.vision.enabled
+            and self.config.optional_visual_features
+            and self.config.product_flow.processing_mode != "fast"
+        ):
+            try:
+                vision_provider = get_vision_provider(self.config, self.mock_ai)
+            except ClipEngineError as error:
+                self.warnings.append(f"Vision Gateway uses local evidence fallback: {sanitize_api_error(error)}")
+        vision_analysis = self._cached(
+            tracker, "vision_pass1", work_directory / "vision-observations.json",
+            {
+                "source": source.id,
+                "timeline_analysis_run_id": multimodal_timeline["analysis_run_id"],
+                "timeline": _hash(multimodal_timeline),
+                "content_type": content_profile.get("detected_content_type", "unknown"),
+                "processing_mode": self.config.product_flow.processing_mode,
+                "vision": self.config.vision,
+                "provider": "mock" if self.mock_ai else self.config.ai.provider,
+                "model": self.config.ai.model,
+            },
+            lambda: _write(
+                work_directory / "vision-observations.json",
+                VisionGateway(
+                    config=self.config,
+                    cache_directory=self.root / "work" / "vision-cache",
+                    provider=vision_provider,
+                ).analyze_pass1(
+                    source=source.path,
+                    timeline=multimodal_timeline,
+                    content_type=str(content_profile.get("detected_content_type") or "unknown"),
+                ),
+            ),
+            cache_tracker=source_cache,
+            validator=lambda data: validate_vision_artifact(data, multimodal_timeline),
+        )
         content_map = self._cached(
             tracker, "global_content_map", work_directory / "global_content_map.json",
             {
@@ -755,6 +793,7 @@ class Pipeline:
                 scenes=scenes,
                 visual_analysis=visual_analysis,
                 multimodal_timeline=multimodal_timeline,
+                vision_analysis=vision_analysis,
                 content_profile=content_profile,
                 content_map=content_map,
                 story_units=story_units,
@@ -871,7 +910,7 @@ class Pipeline:
             str(ai_data.get("selection_mode", "local")), int(raw_candidates.get("candidates_generated", len(candidates))),
         )
         report_path = output_directory / "report.json"
-        tracker.start("report", _hash({"final": final_data, "coverage": coverage_map, "recommendation": clip_count_recommendation, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
+        tracker.start("report", _hash({"final": final_data, "coverage": coverage_map, "recommendation": clip_count_recommendation, "vision": vision_analysis, "render": render_data, "ai": ai_usage, "transformation": transformation, "production": production, "tts": tts, "audio": audio, "production_render": production_render}))
         tracker.finish("report")
         virality_report = (
             {
@@ -920,6 +959,8 @@ class Pipeline:
                 "content_map": content_map,
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
                 "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
+                "vision_observations_ref": str(work_directory / "vision-observations.json"),
+                "vision": vision_analysis,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
@@ -954,6 +995,7 @@ class Pipeline:
                 "content_map_ref": str(work_directory / "global_content_map.json"),
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
                 "multimodal_analysis_run_id": multimodal_timeline.get("analysis_run_id"),
+                "vision_observations_ref": str(work_directory / "vision-observations.json"),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundary_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
@@ -961,7 +1003,7 @@ class Pipeline:
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "analysis_fingerprint": _hash({
                     "profile": content_profile, "map": content_map,
-                    "multimodal_timeline": multimodal_timeline, "coverage": coverage_map,
+                    "multimodal_timeline": multimodal_timeline, "vision": vision_analysis, "coverage": coverage_map,
                 }),
             },
             virality={
@@ -1047,6 +1089,7 @@ class Pipeline:
         scenes: dict[str, Any],
         visual_analysis: dict[str, Any],
         multimodal_timeline: dict[str, Any],
+        vision_analysis: dict[str, Any],
         content_profile: dict[str, Any],
         content_map: dict[str, Any],
         story_units: dict[str, Any],
@@ -1079,6 +1122,7 @@ class Pipeline:
             "scene_boundaries": str(work_directory / "scene_boundaries.json"),
             "visual_analysis": str(work_directory / "visual_analysis.json"),
             "multimodal_timeline": str(work_directory / "multimodal_timeline.json"),
+            "vision_observations": str(work_directory / "vision-observations.json"),
             "content_profile": str(work_directory / "video_content_profile.json"),
             "content_map": str(work_directory / "global_content_map.json"),
             "story_units": str(work_directory / "story_units.json"),
@@ -1096,6 +1140,7 @@ class Pipeline:
             "profile": content_profile,
             "content_map": content_map,
             "multimodal_timeline": multimodal_timeline,
+            "vision": vision_analysis,
             "ranking": final_data,
             "coverage": coverage_map,
             "recommendation": clip_count_recommendation,
@@ -1187,6 +1232,8 @@ class Pipeline:
                 "content_map": content_map,
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
                 "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
+                "vision_observations_ref": str(work_directory / "vision-observations.json"),
+                "vision": vision_analysis,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),

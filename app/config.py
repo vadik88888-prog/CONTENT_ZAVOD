@@ -52,6 +52,71 @@ class AIConfig:
 
 
 @dataclass(slots=True)
+class VisionConfig:
+    """Paid vision limits shared by PASS 1 and the callable PASS 2 contract."""
+
+    enabled: bool = True
+    cache_enabled: bool = True
+    prompt_version: str = "6B.pass1.1"
+    pass2_prompt_version: str = "6B.pass2.1"
+    schema_version: str = "6B.1"
+    pass1_batch_size: int = 3
+    pass2_min_frames: int = 3
+    pass2_max_frames: int = 7
+    standard_max_frames: int = 12
+    standard_max_calls: int = 4
+    standard_max_tokens: int = 12000
+    standard_max_estimated_cost: float = 0.05
+    maximum_max_frames: int = 32
+    maximum_max_calls: int = 10
+    maximum_max_tokens: int = 32000
+    maximum_max_estimated_cost: float = 0.15
+    prompt_input_tokens: int = 700
+    low_detail_input_tokens_per_frame: int = 300
+    high_detail_input_tokens_per_frame: int = 900
+    max_output_tokens_per_call: int = 2400
+    frame_width: int = 512
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool):
+            raise ClipEngineError("vision.enabled и vision.cache_enabled должны быть true или false.")
+        for name, value in (
+            ("vision.prompt_version", self.prompt_version),
+            ("vision.pass2_prompt_version", self.pass2_prompt_version),
+            ("vision.schema_version", self.schema_version),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ClipEngineError(f"{name} не должен быть пустым.")
+        integers: tuple[tuple[str, int, int, int], ...] = (
+            ("vision.pass1_batch_size", self.pass1_batch_size, 2, 4),
+            ("vision.pass2_min_frames", self.pass2_min_frames, 3, 7),
+            ("vision.pass2_max_frames", self.pass2_max_frames, 3, 7),
+            ("vision.standard_max_frames", self.standard_max_frames, 0, 256),
+            ("vision.standard_max_calls", self.standard_max_calls, 0, 128),
+            ("vision.standard_max_tokens", self.standard_max_tokens, 0, 1_000_000),
+            ("vision.maximum_max_frames", self.maximum_max_frames, 0, 256),
+            ("vision.maximum_max_calls", self.maximum_max_calls, 0, 128),
+            ("vision.maximum_max_tokens", self.maximum_max_tokens, 0, 1_000_000),
+            ("vision.prompt_input_tokens", self.prompt_input_tokens, 1, 100_000),
+            ("vision.low_detail_input_tokens_per_frame", self.low_detail_input_tokens_per_frame, 1, 100_000),
+            ("vision.high_detail_input_tokens_per_frame", self.high_detail_input_tokens_per_frame, 1, 100_000),
+            ("vision.max_output_tokens_per_call", self.max_output_tokens_per_call, 1, 100_000),
+            ("vision.frame_width", self.frame_width, 128, 2048),
+        )
+        for integer_name, integer_value, minimum, maximum in integers:
+            if isinstance(integer_value, bool) or not isinstance(integer_value, int) or not minimum <= integer_value <= maximum:
+                raise ClipEngineError(f"{integer_name} должен быть целым числом от {minimum} до {maximum}.")
+        if self.pass2_min_frames > self.pass2_max_frames:
+            raise ClipEngineError("vision.pass2_min_frames не может быть больше pass2_max_frames.")
+        for cost_name, cost_value in (
+            ("vision.standard_max_estimated_cost", self.standard_max_estimated_cost),
+            ("vision.maximum_max_estimated_cost", self.maximum_max_estimated_cost),
+        ):
+            if isinstance(cost_value, bool) or not isinstance(cost_value, (int, float)) or cost_value < 0:
+                raise ClipEngineError(f"{cost_name} не может быть отрицательным.")
+
+
+@dataclass(slots=True)
 class TranscriptFeatureConfig:
     hook_patterns: list[str] = field(default_factory=lambda: [
         "почему", "как", "никогда", "главная ошибка", "вот что произошло",
@@ -731,6 +796,7 @@ class AppConfig:
     encoder_preference: str = "auto"
     delete_downloaded_source: bool = False
     ai: AIConfig = field(default_factory=AIConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     transcript_features: TranscriptFeatureConfig = field(default_factory=TranscriptFeatureConfig)
     audio_analysis: AudioAnalysisConfig = field(default_factory=AudioAnalysisConfig)
     scene_detection: SceneDetectionConfig = field(default_factory=SceneDetectionConfig)
@@ -770,6 +836,7 @@ class AppConfig:
         if self.encoder_preference not in {"auto", "nvenc", "cpu"}:
             raise ClipEngineError("encoder_preference: auto, nvenc или cpu.")
         self.ai.validate()
+        self.vision.validate()
         self.transcript_features.validate()
         self.audio_analysis.validate()
         self.scene_detection.validate()
@@ -815,6 +882,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         values = dict(loaded)
         nested = {
             "ai": AIConfig,
+            "vision": VisionConfig,
             "transcript_features": TranscriptFeatureConfig,
             "audio_analysis": AudioAnalysisConfig,
             "scene_detection": SceneDetectionConfig,

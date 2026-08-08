@@ -30,7 +30,8 @@ def test_visual_analysis_uses_safe_fallback_when_provider_is_not_available(tmp_p
     result = analyse_video_subjects(tmp_path / "missing.mp4", 120, config)
     assert result["status"] == "fallback"
     assert result["evidence_status"] == "fallback"
-    assert result["fallback_provenance"]["stage"] == "visual_provider"
+    assert result["fallback_provenance"]["stage"] == "vision_gateway"
+    assert result["reason"] == "delegated_to_budgeted_vision_gateway"
     assert result["subject_keyframes"] == []
 
 

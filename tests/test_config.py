@@ -29,6 +29,24 @@ def test_invalid_tts_provider_and_duration_limits_are_rejected() -> None:
         config.validate()
 
 
+def test_vision_budget_and_pass_contract_limits_are_validated() -> None:
+    config = AppConfig()
+    config.vision.pass1_batch_size = 5
+    with pytest.raises(ClipEngineError, match="vision.pass1_batch_size"):
+        config.validate()
+
+    config = AppConfig()
+    config.vision.pass2_min_frames = 7
+    config.vision.pass2_max_frames = 3
+    with pytest.raises(ClipEngineError, match="pass2_min_frames"):
+        config.validate()
+
+    config = AppConfig()
+    config.vision.standard_max_estimated_cost = -0.01
+    with pytest.raises(ClipEngineError, match="standard_max_estimated_cost"):
+        config.validate()
+
+
 def test_content_understanding_versions_are_validated() -> None:
     config = AppConfig()
     config.content_understanding.strategy_version = ""
