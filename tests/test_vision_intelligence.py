@@ -184,9 +184,14 @@ def test_pass1_schema_binding_and_frame_cache_prevent_repeat_charges(tmp_path: P
     assert all(item["keyframe_id"] in {frame["keyframe_id"] for frame in timeline["keyframes"]} for item in first["observations"])
     assert all(item["provenance"]["frame_hash"] and item["provenance"]["cache_key"] for item in first["observations"])
     assert len(provider.calls) == call_count
+    assert first["diagnostics"]["keyframes_found"]
+    assert first["diagnostics"]["selected_keyframes"]
+    assert first["diagnostics"]["projected_uncached_usage"]["within_hard_budget"] is True
+    assert first["diagnostics"]["analysis_stop_reason"]
     assert second["diagnostics"]["cache_hits"] == len(second["observations"])
     assert second["diagnostics"]["frames_sent"] == 0
     assert second["diagnostics"]["usage"]["estimated_cost"] == 0
+    assert second["diagnostics"]["analysis_stop_reason"] == "cache_satisfied_selected_frames"
 
 
 def test_cost_controller_stops_before_a_call_that_exceeds_any_hard_limit(tmp_path: Path) -> None:
@@ -280,3 +285,53 @@ def test_dynamic_budget_uses_mode_duration_density_motion_and_content() -> None:
 
     assert fast.dynamic_frame_limit == fast.max_calls == 0
     assert 0 < quiet.dynamic_frame_limit < dense.dynamic_frame_limit <= dense.max_frames
+
+
+def test_long_source_ceiling_scales_calls_and_tokens_but_not_hard_dollars() -> None:
+    config = AppConfig().vision
+    short = dynamic_frame_budget(
+        duration_seconds=300, scene_density=1, motion=1, content_type="gameplay",
+        processing_mode="maximum", config=config,
+    )
+    long_rich = dynamic_frame_budget(
+        duration_seconds=1800, scene_density=1, motion=1, content_type="gameplay",
+        processing_mode="maximum", config=config,
+    )
+    long_podcast = dynamic_frame_budget(
+        duration_seconds=7200, scene_density=0.4, motion=0, content_type="podcast",
+        processing_mode="standard", config=config,
+    )
+
+    assert short.dynamic_frame_limit <= config.maximum_max_frames
+    assert long_rich.configured_frame_limit == config.maximum_max_frames
+    assert long_rich.dynamic_frame_limit > config.maximum_max_frames
+    assert long_rich.max_calls > config.maximum_max_calls
+    assert long_rich.max_tokens > config.maximum_max_tokens
+    assert long_rich.max_estimated_cost == config.maximum_max_estimated_cost
+    assert long_rich.limit_reason == "duration_content_ceiling_reached"
+    assert long_podcast.dynamic_frame_limit > config.standard_max_frames
+    assert long_podcast.max_estimated_cost == config.standard_max_estimated_cost
+
+    app_config = AppConfig()
+    controller = CostController(long_rich, app_config)
+    remaining = long_rich.dynamic_frame_limit
+    while remaining:
+        batch = min(app_config.vision.pass1_batch_size, remaining)
+        assert controller.reserve(batch, "low") is not None
+        remaining -= batch
+    assert controller.estimated_cost <= long_rich.max_estimated_cost
+    assert controller.calls <= long_rich.max_calls
+    assert controller.reserved_input_tokens + controller.reserved_output_tokens <= long_rich.max_tokens
+
+
+def test_explicit_zero_budget_still_disables_long_sources() -> None:
+    config = AppConfig().vision
+    config.standard_max_calls = 0
+    budget = dynamic_frame_budget(
+        duration_seconds=7200, scene_density=1, motion=1, content_type="gameplay",
+        processing_mode="standard", config=config,
+    )
+
+    assert budget.disabled
+    assert budget.dynamic_frame_limit == 0
+    assert budget.limit_reason == "configured_budget_disabled"

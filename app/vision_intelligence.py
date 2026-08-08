@@ -121,6 +121,8 @@ class VisionBudget:
     max_tokens: int
     max_estimated_cost: float
     dynamic_frame_limit: int
+    configured_frame_limit: int = 0
+    limit_reason: str = "configured_frame_limit"
 
     @property
     def disabled(self) -> bool:
@@ -233,6 +235,40 @@ class CostController:
         }
 
 
+def _reservation_projection(
+    frame_count: int,
+    *,
+    batch_size: int,
+    prompt_tokens: int,
+    input_tokens_per_frame: int,
+    output_tokens_per_call: int,
+    input_token_price: float | None,
+    output_token_price: float | None,
+) -> dict[str, Any]:
+    """Project the same conservative reservations used before provider I/O."""
+
+    frames = max(0, int(frame_count))
+    size = max(1, int(batch_size))
+    calls = int(math.ceil(frames / size)) if frames else 0
+    input_tokens = 0
+    for offset in range(0, frames, size):
+        input_tokens += int(prompt_tokens) + min(size, frames - offset) * int(input_tokens_per_frame)
+    output_tokens = calls * int(output_tokens_per_call)
+    estimated_cost: float | None = None
+    if input_token_price is not None and output_token_price is not None:
+        estimated_cost = round(
+            input_tokens * float(input_token_price) + output_tokens * float(output_token_price), 8,
+        )
+    return {
+        "frames": frames,
+        "calls": calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "estimated_cost": estimated_cost,
+    }
+
+
 def dynamic_frame_budget(
     *,
     duration_seconds: float,
@@ -245,7 +281,7 @@ def dynamic_frame_budget(
     """Resolve a sparse frame allowance from source evidence and product mode."""
 
     if processing_mode == "fast":
-        return VisionBudget("fast", 0, 0, 0, 0.0, 0)
+        return VisionBudget("fast", 0, 0, 0, 0.0, 0, 0, "fast_mode_zero_calls")
     if processing_mode == "maximum":
         hard = (
             config.maximum_max_frames, config.maximum_max_calls,
@@ -259,6 +295,17 @@ def dynamic_frame_budget(
         )
         frames_per_minute = 2.5
         processing_mode = "standard"
+    if any(float(value) <= 0 for value in hard):
+        return VisionBudget(
+            processing_mode,
+            int(hard[0]),
+            int(hard[1]),
+            int(hard[2]),
+            float(hard[3]),
+            0,
+            int(hard[0]),
+            "configured_budget_disabled",
+        )
     minutes = max(0.25, max(0.0, duration_seconds) / 60.0)
     scene_factor = 0.75 + 0.75 * _clamp(scene_density)
     motion_factor = 0.75 + 0.75 * _clamp(motion)
@@ -272,8 +319,55 @@ def dynamic_frame_budget(
         "cinematic": 1.35,
     }.get(content_type.casefold(), 1.0)
     desired = max(2, int(math.ceil(minutes * frames_per_minute * scene_factor * motion_factor * content_factor)))
-    dynamic_limit = min(int(hard[0]), desired)
-    return VisionBudget(processing_mode, int(hard[0]), int(hard[1]), int(hard[2]), float(hard[3]), dynamic_limit)
+
+    # 12/32 are useful short-source defaults, not universal ceilings.  Long
+    # sources need more independent samples, especially formats where visual
+    # state changes carry editorial meaning.  The multiplier is deliberately
+    # bounded at 2x so the plan remains predictable before any provider I/O.
+    duration_multiplier = min(2.0, max(1.0, math.sqrt(minutes / 10.0)))
+    visual_bonus = {
+        "screen_demo": 0.10,
+        "product_demo": 0.15,
+        "gameplay": 0.25,
+        "cinematic": 0.25,
+    }.get(content_type.casefold(), 0.0)
+    long_source_weight = _clamp((minutes - 10.0) / 20.0)
+    ceiling_multiplier = min(2.0, duration_multiplier + visual_bonus * long_source_weight)
+    configured_frames = int(hard[0])
+    content_ceiling = max(configured_frames, int(math.ceil(configured_frames * ceiling_multiplier)))
+    evidence_limited = min(content_ceiling, desired)
+
+    # Calls and token reservations scale only as far as the selected frame
+    # plan requires.  The configured dollar ceiling never scales: it remains
+    # the final admission guard in CostController and bounds worst-case spend.
+    dynamic_limit = evidence_limited
+    projected = _reservation_projection(
+        dynamic_limit,
+        batch_size=config.pass1_batch_size,
+        prompt_tokens=config.prompt_input_tokens,
+        input_tokens_per_frame=config.low_detail_input_tokens_per_frame,
+        output_tokens_per_call=config.max_output_tokens_per_call,
+        input_token_price=None,
+        output_token_price=None,
+    )
+    max_calls = max(int(hard[1]), int(projected["calls"]))
+    max_tokens = max(int(hard[2]), int(projected["total_tokens"]))
+    if desired < content_ceiling:
+        limit_reason = "evidence_demand_satisfied"
+    elif content_ceiling > configured_frames:
+        limit_reason = "duration_content_ceiling_reached"
+    else:
+        limit_reason = "configured_frame_limit_reached"
+    return VisionBudget(
+        processing_mode,
+        content_ceiling,
+        max_calls,
+        max_tokens,
+        float(hard[3]),
+        dynamic_limit,
+        configured_frames,
+        limit_reason,
+    )
 
 
 def build_pass2_request(
@@ -414,7 +508,16 @@ class VisionGateway:
             self.config.vision.pass2_max_frames,
             base.max_frames,
         )
-        budget = VisionBudget(base.mode, base.max_frames, base.max_calls, base.max_tokens, base.max_estimated_cost, frame_limit)
+        budget = VisionBudget(
+            base.mode,
+            base.max_frames,
+            base.max_calls,
+            base.max_tokens,
+            base.max_estimated_cost,
+            frame_limit,
+            base.configured_frame_limit,
+            base.limit_reason,
+        )
         artifact = self._analyze(
             source=source, timeline=timeline, frame_refs=list(request["frames"]), budget=budget,
             detail="high", pass_kind="pass2", prompt_version=self.config.vision.pass2_prompt_version,
@@ -460,10 +563,23 @@ class VisionGateway:
             "budget": {
                 "dynamic_frame_limit": budget.dynamic_frame_limit,
                 "max_frames": budget.max_frames,
+                "configured_frame_limit": budget.configured_frame_limit,
                 "max_calls": budget.max_calls,
                 "max_tokens": budget.max_tokens,
                 "max_estimated_cost": budget.max_estimated_cost,
+                "limit_reason": budget.limit_reason,
             },
+            "keyframes_found": [
+                {"keyframe_id": str(item["keyframe_id"]), "timestamp": float(item["time_seconds"])}
+                for item in timeline["keyframes"]
+            ],
+            "selected_keyframes": [
+                {
+                    "keyframe_id": str(item["keyframe_id"]),
+                    "timestamp": float(item.get("timestamp", item.get("time_seconds", 0.0))),
+                }
+                for item in frame_refs
+            ],
             "frames_requested": len(frame_refs),
             "frames_extracted": 0,
             "frames_sent": 0,
@@ -471,7 +587,30 @@ class VisionGateway:
             "cache_misses": 0,
             "missing_evidence": [],
             "failure_reason": None,
+            "analysis_stop_reason": _selection_stop_reason(timeline, frame_refs, budget, pass_kind),
         }
+        batch_size = self.config.vision.pass1_batch_size if pass_kind == "pass1" else min(3, self.config.vision.pass2_max_frames)
+        projected_usage = _reservation_projection(
+            len(frame_refs),
+            batch_size=batch_size,
+            prompt_tokens=self.config.vision.prompt_input_tokens,
+            input_tokens_per_frame=(
+                self.config.vision.low_detail_input_tokens_per_frame
+                if detail == "low" else self.config.vision.high_detail_input_tokens_per_frame
+            ),
+            output_tokens_per_call=self.config.vision.max_output_tokens_per_call,
+            input_token_price=self.config.ai.input_token_price,
+            output_token_price=self.config.ai.output_token_price,
+        )
+        projected_cost = projected_usage["estimated_cost"]
+        projected_usage["within_hard_budget"] = (
+            projected_cost is not None
+            and float(projected_cost) <= budget.max_estimated_cost + 1e-12
+            and int(projected_usage["calls"]) <= budget.max_calls
+            and int(projected_usage["total_tokens"]) <= budget.max_tokens
+            and int(projected_usage["frames"]) <= min(budget.max_frames, budget.dynamic_frame_limit)
+        )
+        diagnostics["projected_uncached_usage"] = projected_usage
         if not self.config.vision.enabled or not self.config.optional_visual_features:
             return _empty_artifact(timeline, pass_kind, candidate_id, "skipped", "vision_not_opted_in", diagnostics, controller)
         if budget.disabled:
@@ -512,12 +651,12 @@ class VisionGateway:
                 "cache_key": cache_key,
             })
 
-        batch_size = self.config.vision.pass1_batch_size if pass_kind == "pass1" else min(3, self.config.vision.pass2_max_frames)
         for offset in range(0, len(prepared), batch_size):
             batch = prepared[offset:offset + batch_size]
             reservation = controller.reserve(len(batch), detail)
             if reservation is None:
                 diagnostics["failure_reason"] = controller.stop_reason
+                diagnostics["analysis_stop_reason"] = controller.stop_reason
                 for frame in batch:
                     observations.append(_local_fallback_observation(
                         timeline, str(frame["keyframe_id"]), float(frame["timestamp"]), controller.stop_reason or "budget_exhausted",
@@ -552,6 +691,7 @@ class VisionGateway:
 
                 secret = getattr(self.provider, "api_key", None)
                 diagnostics["failure_reason"] = f"provider_failure:{sanitize_api_error(error, secret)}"
+                diagnostics["analysis_stop_reason"] = "provider_failure"
                 for frame in batch:
                     observations.append(_local_fallback_observation(
                         timeline, str(frame["keyframe_id"]), float(frame["timestamp"]), "provider_failure",
@@ -577,6 +717,8 @@ class VisionGateway:
         if any(item["origin"] == "local_fallback" for item in observations):
             status = "partial" if any(item["origin"] != "local_fallback" for item in observations) else "fallback"
         diagnostics["usage"] = controller.diagnostics()
+        if diagnostics["cache_hits"] == len(frame_refs) and frame_refs:
+            diagnostics["analysis_stop_reason"] = "cache_satisfied_selected_frames"
         diagnostics["cache_savings_estimated_cost"] = round(
             _estimated_cache_savings(diagnostics["cache_hits"], detail, self.config), 8,
         )
@@ -611,6 +753,7 @@ class VisionGateway:
         controller: CostController,
     ) -> dict[str, Any]:
         diagnostics["failure_reason"] = reason
+        diagnostics["analysis_stop_reason"] = reason
         observations = [
             _local_fallback_observation(
                 timeline, str(item["keyframe_id"]),
@@ -820,6 +963,26 @@ def _select_pass1_frames(timeline: dict[str, Any], limit: int) -> list[dict[str,
     return selected
 
 
+def _selection_stop_reason(
+    timeline: dict[str, Any],
+    selected: list[dict[str, Any]],
+    budget: VisionBudget,
+    pass_kind: str,
+) -> str:
+    if budget.mode == "fast":
+        return "fast_mode_zero_calls"
+    if pass_kind == "pass2":
+        return "candidate_window_request_satisfied" if selected else "candidate_window_has_no_keyframes"
+    found = len(timeline["keyframes"])
+    if found == 0:
+        return "no_eligible_keyframes"
+    if len(selected) >= found:
+        return "all_eligible_keyframes_selected"
+    if len(selected) < min(found, budget.dynamic_frame_limit):
+        return "minimum_temporal_spacing_reached"
+    return budget.limit_reason
+
+
 def _empty_artifact(
     timeline: dict[str, Any],
     pass_kind: str,
@@ -830,6 +993,7 @@ def _empty_artifact(
     controller: CostController,
 ) -> dict[str, Any]:
     diagnostics["failure_reason"] = reason
+    diagnostics["analysis_stop_reason"] = reason
     diagnostics["usage"] = controller.diagnostics()
     diagnostics["cache_savings_estimated_cost"] = 0.0
     return {

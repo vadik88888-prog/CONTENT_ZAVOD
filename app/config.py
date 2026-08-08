@@ -53,7 +53,11 @@ class AIConfig:
 
 @dataclass(slots=True)
 class VisionConfig:
-    """Paid vision limits shared by PASS 1 and the callable PASS 2 contract."""
+    """Paid vision defaults and hard dollar limits shared by PASS 1/PASS 2.
+
+    Frame/call/token values are short-source defaults. PASS 1 may derive a
+    bounded long-source ceiling from them; max_estimated_cost never scales.
+    """
 
     enabled: bool = True
     cache_enabled: bool = True

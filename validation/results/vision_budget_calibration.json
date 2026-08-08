@@ -1,0 +1,1829 @@
+{
+  "schema_version": "6B.1-budget-calibration.1",
+  "dry_run": true,
+  "external_provider_calls": 0,
+  "cases": [
+    {
+      "label": "gameplay",
+      "content_type": "gameplay",
+      "source_path": "C:\\Users\\Вадим\\AppData\\Local\\ContentFactoryData\\projects\\008b98a7e70e42428a85c1e16d0e4828\\sources\\САМАЯ БЕЗУМНАЯ КАТКА ОТ ПЕРВОГО ЛИЦА! 30 КИЛЛОВ В PUBG 😳-vEUmQFrVnSY.webm",
+      "source_exists": true,
+      "source_id": "bc2ec91aded24860bf292f06",
+      "duration_seconds": 1259.421,
+      "found_keyframes": [
+        {
+          "keyframe_id": "keyframe-0001-847079d7",
+          "timestamp": 30.233
+        },
+        {
+          "keyframe_id": "keyframe-0002-9158e13c",
+          "timestamp": 31.317
+        },
+        {
+          "keyframe_id": "keyframe-0003-23eb48b7",
+          "timestamp": 34.2
+        },
+        {
+          "keyframe_id": "keyframe-0004-bce6451c",
+          "timestamp": 90.1
+        },
+        {
+          "keyframe_id": "keyframe-0005-d7d615f0",
+          "timestamp": 98.667
+        },
+        {
+          "keyframe_id": "keyframe-0006-c1b0e9c6",
+          "timestamp": 132.89
+        },
+        {
+          "keyframe_id": "keyframe-0007-e18b7d13",
+          "timestamp": 145.1
+        },
+        {
+          "keyframe_id": "keyframe-0008-1e18d8fa",
+          "timestamp": 191.5
+        },
+        {
+          "keyframe_id": "keyframe-0009-850f31a3",
+          "timestamp": 211.1
+        },
+        {
+          "keyframe_id": "keyframe-0010-9889c00d",
+          "timestamp": 213.267
+        },
+        {
+          "keyframe_id": "keyframe-0011-67f3b8b8",
+          "timestamp": 215.35
+        },
+        {
+          "keyframe_id": "keyframe-0012-203ff08a",
+          "timestamp": 221.5
+        },
+        {
+          "keyframe_id": "keyframe-0013-6625a70c",
+          "timestamp": 231.45
+        },
+        {
+          "keyframe_id": "keyframe-0014-d39b4d3c",
+          "timestamp": 236.683
+        },
+        {
+          "keyframe_id": "keyframe-0015-e86faa66",
+          "timestamp": 245.217
+        },
+        {
+          "keyframe_id": "keyframe-0016-4b9d8c16",
+          "timestamp": 247.783
+        },
+        {
+          "keyframe_id": "keyframe-0017-f9a33ece",
+          "timestamp": 266.45
+        },
+        {
+          "keyframe_id": "keyframe-0018-27d3423f",
+          "timestamp": 300.4
+        },
+        {
+          "keyframe_id": "keyframe-0019-9a1e7954",
+          "timestamp": 339.017
+        },
+        {
+          "keyframe_id": "keyframe-0020-5a243048",
+          "timestamp": 353.46
+        },
+        {
+          "keyframe_id": "keyframe-0021-007595b9",
+          "timestamp": 399.233
+        },
+        {
+          "keyframe_id": "keyframe-0022-ec2e8b17",
+          "timestamp": 401.717
+        },
+        {
+          "keyframe_id": "keyframe-0023-cf374584",
+          "timestamp": 404.9
+        },
+        {
+          "keyframe_id": "keyframe-0024-acb0de45",
+          "timestamp": 408.367
+        },
+        {
+          "keyframe_id": "keyframe-0025-65c99875",
+          "timestamp": 409.367
+        },
+        {
+          "keyframe_id": "keyframe-0026-bf371cca",
+          "timestamp": 440.1
+        },
+        {
+          "keyframe_id": "keyframe-0027-dd1192e4",
+          "timestamp": 460.367
+        },
+        {
+          "keyframe_id": "keyframe-0028-35d33f26",
+          "timestamp": 462.317
+        },
+        {
+          "keyframe_id": "keyframe-0029-4aad92af",
+          "timestamp": 465.633
+        },
+        {
+          "keyframe_id": "keyframe-0030-2a4cd09b",
+          "timestamp": 466.517
+        },
+        {
+          "keyframe_id": "keyframe-0031-1af3bbe8",
+          "timestamp": 468.65
+        },
+        {
+          "keyframe_id": "keyframe-0032-f0ae8f92",
+          "timestamp": 470.85
+        },
+        {
+          "keyframe_id": "keyframe-0033-f326f17f",
+          "timestamp": 475.767
+        },
+        {
+          "keyframe_id": "keyframe-0034-cd8ab0f2",
+          "timestamp": 484.167
+        },
+        {
+          "keyframe_id": "keyframe-0035-88414014",
+          "timestamp": 485.017
+        },
+        {
+          "keyframe_id": "keyframe-0036-38acbd99",
+          "timestamp": 502.65
+        },
+        {
+          "keyframe_id": "keyframe-0037-97415837",
+          "timestamp": 504.6
+        },
+        {
+          "keyframe_id": "keyframe-0038-a1ec63e1",
+          "timestamp": 526.6
+        },
+        {
+          "keyframe_id": "keyframe-0039-f80e10c2",
+          "timestamp": 528.317
+        },
+        {
+          "keyframe_id": "keyframe-0040-9cb5a9a5",
+          "timestamp": 531.05
+        },
+        {
+          "keyframe_id": "keyframe-0041-7e104e44",
+          "timestamp": 561.567
+        },
+        {
+          "keyframe_id": "keyframe-0042-0f2646e4",
+          "timestamp": 586.867
+        },
+        {
+          "keyframe_id": "keyframe-0043-03fdc208",
+          "timestamp": 648.717
+        },
+        {
+          "keyframe_id": "keyframe-0044-79d64362",
+          "timestamp": 664.35
+        },
+        {
+          "keyframe_id": "keyframe-0045-c51d29e5",
+          "timestamp": 677.833
+        },
+        {
+          "keyframe_id": "keyframe-0046-b03aca7c",
+          "timestamp": 681.167
+        },
+        {
+          "keyframe_id": "keyframe-0047-3d1f15dc",
+          "timestamp": 702.783
+        },
+        {
+          "keyframe_id": "keyframe-0048-1c8687b5",
+          "timestamp": 705.117
+        },
+        {
+          "keyframe_id": "keyframe-0049-af87c7ec",
+          "timestamp": 706.867
+        },
+        {
+          "keyframe_id": "keyframe-0050-c2796747",
+          "timestamp": 769.667
+        },
+        {
+          "keyframe_id": "keyframe-0051-c5c9ec59",
+          "timestamp": 867.933
+        },
+        {
+          "keyframe_id": "keyframe-0052-e0fded48",
+          "timestamp": 871.25
+        },
+        {
+          "keyframe_id": "keyframe-0053-7aad5aee",
+          "timestamp": 875.367
+        },
+        {
+          "keyframe_id": "keyframe-0054-762d728e",
+          "timestamp": 903.567
+        },
+        {
+          "keyframe_id": "keyframe-0055-fc064611",
+          "timestamp": 1022.8
+        },
+        {
+          "keyframe_id": "keyframe-0056-9fc489ce",
+          "timestamp": 1034.383
+        },
+        {
+          "keyframe_id": "keyframe-0057-027ea2a6",
+          "timestamp": 1111.083
+        },
+        {
+          "keyframe_id": "keyframe-0058-76ed5175",
+          "timestamp": 1132.667
+        },
+        {
+          "keyframe_id": "keyframe-0059-5245ddb5",
+          "timestamp": 1136.883
+        },
+        {
+          "keyframe_id": "keyframe-0060-75ac5e1c",
+          "timestamp": 1137.7
+        },
+        {
+          "keyframe_id": "keyframe-0061-a3633cea",
+          "timestamp": 1148.267
+        },
+        {
+          "keyframe_id": "keyframe-0062-a84867f7",
+          "timestamp": 1187.817
+        },
+        {
+          "keyframe_id": "keyframe-0063-84ccd06f",
+          "timestamp": 1243.617
+        },
+        {
+          "keyframe_id": "keyframe-0064-e8c2902f",
+          "timestamp": 1246.54
+        }
+      ],
+      "scene_total": 72,
+      "story_unit_total": 47,
+      "modes": {
+        "fast": {
+          "budget": {
+            "dynamic_frame_limit": 0,
+            "max_frames": 0,
+            "configured_frame_limit": 0,
+            "max_calls": 0,
+            "max_tokens": 0,
+            "max_estimated_cost": 0.0,
+            "limit_reason": "fast_mode_zero_calls"
+          },
+          "selected_keyframes": [],
+          "coverage": {
+            "scene_count": 0,
+            "scene_total": 72,
+            "scene_ids": [],
+            "story_unit_count": 0,
+            "story_unit_total": 47,
+            "story_unit_ids": [],
+            "temporal_deciles": []
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 0,
+            "selected_count": 0,
+            "coverage": {
+              "scene_count": 0,
+              "scene_total": 72,
+              "scene_ids": [],
+              "story_unit_count": 0,
+              "story_unit_total": 47,
+              "story_unit_ids": [],
+              "temporal_deciles": []
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 0,
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost": 0.0,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "second_run_cache": {
+            "hits": 0,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "fast_mode_zero_calls",
+          "second_run_stop_reason": "fast_mode_zero_calls",
+          "external_provider_calls": 0
+        },
+        "standard": {
+          "budget": {
+            "dynamic_frame_limit": 20,
+            "max_frames": 20,
+            "configured_frame_limit": 12,
+            "max_calls": 7,
+            "max_tokens": 27700,
+            "max_estimated_cost": 0.05,
+            "limit_reason": "duration_content_ceiling_reached"
+          },
+          "selected_keyframes": [
+            {
+              "keyframe_id": "keyframe-0002-9158e13c",
+              "timestamp": 31.317
+            },
+            {
+              "keyframe_id": "keyframe-0005-d7d615f0",
+              "timestamp": 98.667
+            },
+            {
+              "keyframe_id": "keyframe-0011-67f3b8b8",
+              "timestamp": 215.35
+            },
+            {
+              "keyframe_id": "keyframe-0014-d39b4d3c",
+              "timestamp": 236.683
+            },
+            {
+              "keyframe_id": "keyframe-0017-f9a33ece",
+              "timestamp": 266.45
+            },
+            {
+              "keyframe_id": "keyframe-0022-ec2e8b17",
+              "timestamp": 401.717
+            },
+            {
+              "keyframe_id": "keyframe-0028-35d33f26",
+              "timestamp": 462.317
+            },
+            {
+              "keyframe_id": "keyframe-0035-88414014",
+              "timestamp": 485.017
+            },
+            {
+              "keyframe_id": "keyframe-0036-38acbd99",
+              "timestamp": 502.65
+            },
+            {
+              "keyframe_id": "keyframe-0039-f80e10c2",
+              "timestamp": 528.317
+            },
+            {
+              "keyframe_id": "keyframe-0042-0f2646e4",
+              "timestamp": 586.867
+            },
+            {
+              "keyframe_id": "keyframe-0044-79d64362",
+              "timestamp": 664.35
+            },
+            {
+              "keyframe_id": "keyframe-0048-1c8687b5",
+              "timestamp": 705.117
+            },
+            {
+              "keyframe_id": "keyframe-0050-c2796747",
+              "timestamp": 769.667
+            },
+            {
+              "keyframe_id": "keyframe-0053-7aad5aee",
+              "timestamp": 875.367
+            },
+            {
+              "keyframe_id": "keyframe-0054-762d728e",
+              "timestamp": 903.567
+            },
+            {
+              "keyframe_id": "keyframe-0056-9fc489ce",
+              "timestamp": 1034.383
+            },
+            {
+              "keyframe_id": "keyframe-0057-027ea2a6",
+              "timestamp": 1111.083
+            },
+            {
+              "keyframe_id": "keyframe-0061-a3633cea",
+              "timestamp": 1148.267
+            },
+            {
+              "keyframe_id": "keyframe-0063-84ccd06f",
+              "timestamp": 1243.617
+            }
+          ],
+          "coverage": {
+            "scene_count": 20,
+            "scene_total": 72,
+            "scene_ids": [
+              "scene-0003",
+              "scene-0006",
+              "scene-0008",
+              "scene-0010",
+              "scene-0014",
+              "scene-0018",
+              "scene-0024",
+              "scene-0034",
+              "scene-0035",
+              "scene-0038",
+              "scene-0045",
+              "scene-0048",
+              "scene-0052",
+              "scene-0057",
+              "scene-0061",
+              "scene-0062",
+              "scene-0064",
+              "scene-0065",
+              "scene-0070",
+              "scene-0072"
+            ],
+            "story_unit_count": 15,
+            "story_unit_total": 47,
+            "story_unit_ids": [
+              "chapter-002-story-001",
+              "chapter-004-story-001",
+              "chapter-008-story-002",
+              "chapter-010-story-001",
+              "chapter-017-story-001",
+              "chapter-021-story-001",
+              "chapter-022-story-001",
+              "chapter-023-story-001",
+              "chapter-024-story-001",
+              "chapter-027-story-001",
+              "chapter-033-story-001",
+              "chapter-034-story-001",
+              "chapter-035-story-001",
+              "chapter-036-story-001",
+              "chapter-037-story-001"
+            ],
+            "temporal_deciles": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9
+            ]
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 12,
+            "selected_count": 12,
+            "coverage": {
+              "scene_count": 12,
+              "scene_total": 72,
+              "scene_ids": [
+                "scene-0008",
+                "scene-0013",
+                "scene-0018",
+                "scene-0034",
+                "scene-0038",
+                "scene-0045",
+                "scene-0048",
+                "scene-0052",
+                "scene-0061",
+                "scene-0062",
+                "scene-0070",
+                "scene-0072"
+              ],
+              "story_unit_count": 10,
+              "story_unit_total": 47,
+              "story_unit_ids": [
+                "chapter-008-story-002",
+                "chapter-010-story-001",
+                "chapter-017-story-001",
+                "chapter-022-story-001",
+                "chapter-024-story-001",
+                "chapter-027-story-001",
+                "chapter-033-story-001",
+                "chapter-034-story-001",
+                "chapter-036-story-001",
+                "chapter-037-story-001"
+              ],
+              "temporal_deciles": [
+                1,
+                3,
+                4,
+                5,
+                6,
+                7,
+                9
+              ]
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 20,
+            "calls": 7,
+            "input_tokens": 10900,
+            "output_tokens": 16800,
+            "total_tokens": 27700,
+            "estimated_cost": 0.036325,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 20,
+            "provider_calls": 7
+          },
+          "second_run_cache": {
+            "hits": 20,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "duration_content_ceiling_reached",
+          "second_run_stop_reason": "cache_satisfied_selected_frames",
+          "external_provider_calls": 0
+        },
+        "maximum": {
+          "budget": {
+            "dynamic_frame_limit": 51,
+            "max_frames": 51,
+            "configured_frame_limit": 32,
+            "max_calls": 17,
+            "max_tokens": 68000,
+            "max_estimated_cost": 0.15,
+            "limit_reason": "duration_content_ceiling_reached"
+          },
+          "selected_keyframes": [
+            {
+              "keyframe_id": "keyframe-0002-9158e13c",
+              "timestamp": 31.317
+            },
+            {
+              "keyframe_id": "keyframe-0004-bce6451c",
+              "timestamp": 90.1
+            },
+            {
+              "keyframe_id": "keyframe-0005-d7d615f0",
+              "timestamp": 98.667
+            },
+            {
+              "keyframe_id": "keyframe-0006-c1b0e9c6",
+              "timestamp": 132.89
+            },
+            {
+              "keyframe_id": "keyframe-0007-e18b7d13",
+              "timestamp": 145.1
+            },
+            {
+              "keyframe_id": "keyframe-0008-1e18d8fa",
+              "timestamp": 191.5
+            },
+            {
+              "keyframe_id": "keyframe-0011-67f3b8b8",
+              "timestamp": 215.35
+            },
+            {
+              "keyframe_id": "keyframe-0014-d39b4d3c",
+              "timestamp": 236.683
+            },
+            {
+              "keyframe_id": "keyframe-0016-4b9d8c16",
+              "timestamp": 247.783
+            },
+            {
+              "keyframe_id": "keyframe-0017-f9a33ece",
+              "timestamp": 266.45
+            },
+            {
+              "keyframe_id": "keyframe-0018-27d3423f",
+              "timestamp": 300.4
+            },
+            {
+              "keyframe_id": "keyframe-0019-9a1e7954",
+              "timestamp": 339.017
+            },
+            {
+              "keyframe_id": "keyframe-0020-5a243048",
+              "timestamp": 353.46
+            },
+            {
+              "keyframe_id": "keyframe-0022-ec2e8b17",
+              "timestamp": 401.717
+            },
+            {
+              "keyframe_id": "keyframe-0025-65c99875",
+              "timestamp": 409.367
+            },
+            {
+              "keyframe_id": "keyframe-0026-bf371cca",
+              "timestamp": 440.1
+            },
+            {
+              "keyframe_id": "keyframe-0028-35d33f26",
+              "timestamp": 462.317
+            },
+            {
+              "keyframe_id": "keyframe-0031-1af3bbe8",
+              "timestamp": 468.65
+            },
+            {
+              "keyframe_id": "keyframe-0033-f326f17f",
+              "timestamp": 475.767
+            },
+            {
+              "keyframe_id": "keyframe-0035-88414014",
+              "timestamp": 485.017
+            },
+            {
+              "keyframe_id": "keyframe-0036-38acbd99",
+              "timestamp": 502.65
+            },
+            {
+              "keyframe_id": "keyframe-0039-f80e10c2",
+              "timestamp": 528.317
+            },
+            {
+              "keyframe_id": "keyframe-0041-7e104e44",
+              "timestamp": 561.567
+            },
+            {
+              "keyframe_id": "keyframe-0042-0f2646e4",
+              "timestamp": 586.867
+            },
+            {
+              "keyframe_id": "keyframe-0043-03fdc208",
+              "timestamp": 648.717
+            },
+            {
+              "keyframe_id": "keyframe-0044-79d64362",
+              "timestamp": 664.35
+            },
+            {
+              "keyframe_id": "keyframe-0045-c51d29e5",
+              "timestamp": 677.833
+            },
+            {
+              "keyframe_id": "keyframe-0048-1c8687b5",
+              "timestamp": 705.117
+            },
+            {
+              "keyframe_id": "keyframe-0050-c2796747",
+              "timestamp": 769.667
+            },
+            {
+              "keyframe_id": "keyframe-0051-c5c9ec59",
+              "timestamp": 867.933
+            },
+            {
+              "keyframe_id": "keyframe-0053-7aad5aee",
+              "timestamp": 875.367
+            },
+            {
+              "keyframe_id": "keyframe-0054-762d728e",
+              "timestamp": 903.567
+            },
+            {
+              "keyframe_id": "keyframe-0055-fc064611",
+              "timestamp": 1022.8
+            },
+            {
+              "keyframe_id": "keyframe-0056-9fc489ce",
+              "timestamp": 1034.383
+            },
+            {
+              "keyframe_id": "keyframe-0057-027ea2a6",
+              "timestamp": 1111.083
+            },
+            {
+              "keyframe_id": "keyframe-0060-75ac5e1c",
+              "timestamp": 1137.7
+            },
+            {
+              "keyframe_id": "keyframe-0061-a3633cea",
+              "timestamp": 1148.267
+            },
+            {
+              "keyframe_id": "keyframe-0062-a84867f7",
+              "timestamp": 1187.817
+            },
+            {
+              "keyframe_id": "keyframe-0063-84ccd06f",
+              "timestamp": 1243.617
+            }
+          ],
+          "coverage": {
+            "scene_count": 35,
+            "scene_total": 72,
+            "scene_ids": [
+              "scene-0003",
+              "scene-0005",
+              "scene-0006",
+              "scene-0008",
+              "scene-0010",
+              "scene-0013",
+              "scene-0014",
+              "scene-0015",
+              "scene-0016",
+              "scene-0018",
+              "scene-0021",
+              "scene-0022",
+              "scene-0024",
+              "scene-0028",
+              "scene-0031",
+              "scene-0034",
+              "scene-0035",
+              "scene-0038",
+              "scene-0044",
+              "scene-0045",
+              "scene-0047",
+              "scene-0048",
+              "scene-0049",
+              "scene-0052",
+              "scene-0057",
+              "scene-0058",
+              "scene-0061",
+              "scene-0062",
+              "scene-0063",
+              "scene-0064",
+              "scene-0065",
+              "scene-0068",
+              "scene-0070",
+              "scene-0071",
+              "scene-0072"
+            ],
+            "story_unit_count": 25,
+            "story_unit_total": 47,
+            "story_unit_ids": [
+              "chapter-002-story-001",
+              "chapter-004-story-001",
+              "chapter-006-story-001",
+              "chapter-007-story-001",
+              "chapter-008-story-001",
+              "chapter-008-story-002",
+              "chapter-010-story-001",
+              "chapter-013-story-001",
+              "chapter-015-story-002",
+              "chapter-017-story-001",
+              "chapter-018-story-001",
+              "chapter-019-story-001",
+              "chapter-021-story-001",
+              "chapter-022-story-001",
+              "chapter-023-story-001",
+              "chapter-024-story-001",
+              "chapter-026-story-001",
+              "chapter-027-story-001",
+              "chapter-031-story-001",
+              "chapter-032-story-001",
+              "chapter-033-story-001",
+              "chapter-034-story-001",
+              "chapter-035-story-001",
+              "chapter-036-story-001",
+              "chapter-037-story-001"
+            ],
+            "temporal_deciles": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9
+            ]
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 32,
+            "selected_count": 32,
+            "coverage": {
+              "scene_count": 30,
+              "scene_total": 72,
+              "scene_ids": [
+                "scene-0003",
+                "scene-0006",
+                "scene-0008",
+                "scene-0010",
+                "scene-0013",
+                "scene-0014",
+                "scene-0015",
+                "scene-0016",
+                "scene-0018",
+                "scene-0022",
+                "scene-0024",
+                "scene-0034",
+                "scene-0035",
+                "scene-0038",
+                "scene-0044",
+                "scene-0045",
+                "scene-0047",
+                "scene-0048",
+                "scene-0049",
+                "scene-0052",
+                "scene-0057",
+                "scene-0061",
+                "scene-0062",
+                "scene-0063",
+                "scene-0064",
+                "scene-0065",
+                "scene-0068",
+                "scene-0070",
+                "scene-0071",
+                "scene-0072"
+              ],
+              "story_unit_count": 22,
+              "story_unit_total": 47,
+              "story_unit_ids": [
+                "chapter-002-story-001",
+                "chapter-004-story-001",
+                "chapter-007-story-001",
+                "chapter-008-story-001",
+                "chapter-008-story-002",
+                "chapter-010-story-001",
+                "chapter-013-story-001",
+                "chapter-017-story-001",
+                "chapter-019-story-001",
+                "chapter-021-story-001",
+                "chapter-022-story-001",
+                "chapter-023-story-001",
+                "chapter-024-story-001",
+                "chapter-026-story-001",
+                "chapter-027-story-001",
+                "chapter-031-story-001",
+                "chapter-032-story-001",
+                "chapter-033-story-001",
+                "chapter-034-story-001",
+                "chapter-035-story-001",
+                "chapter-036-story-001",
+                "chapter-037-story-001"
+              ],
+              "temporal_deciles": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9
+              ]
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 39,
+            "calls": 13,
+            "input_tokens": 20800,
+            "output_tokens": 31200,
+            "total_tokens": 52000,
+            "estimated_cost": 0.0676,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 39,
+            "provider_calls": 13
+          },
+          "second_run_cache": {
+            "hits": 39,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "minimum_temporal_spacing_reached",
+          "second_run_stop_reason": "cache_satisfied_selected_frames",
+          "external_provider_calls": 0
+        }
+      }
+    },
+    {
+      "label": "podcast_interview",
+      "content_type": "podcast",
+      "source_path": "C:\\Users\\Вадим\\AppData\\Local\\ContentFactoryData\\projects\\4ff8578b101f455b89c08de926342ccd\\sources\\«Большинство бизнесов провалит ИИ-трансформацию». Андрей Дорони-q7jH9N94mbM.webm",
+      "source_exists": true,
+      "source_id": "c0dcb7e71e9f7024963fee97",
+      "duration_seconds": 9821.821,
+      "found_keyframes": [
+        {
+          "keyframe_id": "keyframe-0001-48a3306b",
+          "timestamp": 378.64
+        },
+        {
+          "keyframe_id": "keyframe-0002-88184681",
+          "timestamp": 385.0
+        },
+        {
+          "keyframe_id": "keyframe-0003-c8528bf2",
+          "timestamp": 702.08
+        },
+        {
+          "keyframe_id": "keyframe-0004-1c6ab9ea",
+          "timestamp": 715.4
+        },
+        {
+          "keyframe_id": "keyframe-0005-37f35d2b",
+          "timestamp": 893.96
+        },
+        {
+          "keyframe_id": "keyframe-0006-b7e912e7",
+          "timestamp": 925.2
+        },
+        {
+          "keyframe_id": "keyframe-0007-32748dcb",
+          "timestamp": 1516.0
+        },
+        {
+          "keyframe_id": "keyframe-0008-d28b2db9",
+          "timestamp": 1643.48
+        },
+        {
+          "keyframe_id": "keyframe-0009-f7bbcc0d",
+          "timestamp": 1647.4
+        },
+        {
+          "keyframe_id": "keyframe-0010-0977caae",
+          "timestamp": 1655.28
+        },
+        {
+          "keyframe_id": "keyframe-0011-2a135979",
+          "timestamp": 1659.92
+        },
+        {
+          "keyframe_id": "keyframe-0012-53a1d30b",
+          "timestamp": 1663.16
+        },
+        {
+          "keyframe_id": "keyframe-0013-84d153da",
+          "timestamp": 1687.24
+        },
+        {
+          "keyframe_id": "keyframe-0014-ab6afca6",
+          "timestamp": 1739.28
+        },
+        {
+          "keyframe_id": "keyframe-0015-106a94b2",
+          "timestamp": 1768.0
+        },
+        {
+          "keyframe_id": "keyframe-0016-b74b5afb",
+          "timestamp": 1780.0
+        },
+        {
+          "keyframe_id": "keyframe-0017-e23b0186",
+          "timestamp": 1799.48
+        },
+        {
+          "keyframe_id": "keyframe-0018-b533e148",
+          "timestamp": 1860.48
+        },
+        {
+          "keyframe_id": "keyframe-0019-40f08be2",
+          "timestamp": 2240.32
+        },
+        {
+          "keyframe_id": "keyframe-0020-731a9f85",
+          "timestamp": 2251.56
+        },
+        {
+          "keyframe_id": "keyframe-0021-2fd69ca6",
+          "timestamp": 2314.48
+        },
+        {
+          "keyframe_id": "keyframe-0022-3ab0cac4",
+          "timestamp": 2351.16
+        },
+        {
+          "keyframe_id": "keyframe-0023-29684bfd",
+          "timestamp": 2465.96
+        },
+        {
+          "keyframe_id": "keyframe-0024-1e4daa79",
+          "timestamp": 2530.44
+        },
+        {
+          "keyframe_id": "keyframe-0025-9aba48e1",
+          "timestamp": 2704.44
+        },
+        {
+          "keyframe_id": "keyframe-0026-e2252e25",
+          "timestamp": 2706.56
+        },
+        {
+          "keyframe_id": "keyframe-0027-b934888a",
+          "timestamp": 2708.56
+        },
+        {
+          "keyframe_id": "keyframe-0028-f0c3f10d",
+          "timestamp": 2726.12
+        },
+        {
+          "keyframe_id": "keyframe-0029-62717191",
+          "timestamp": 2989.48
+        },
+        {
+          "keyframe_id": "keyframe-0030-d07f1592",
+          "timestamp": 3007.88
+        },
+        {
+          "keyframe_id": "keyframe-0031-cf0866e1",
+          "timestamp": 3010.2
+        },
+        {
+          "keyframe_id": "keyframe-0032-224de809",
+          "timestamp": 3058.0
+        },
+        {
+          "keyframe_id": "keyframe-0033-1fbcdccb",
+          "timestamp": 3059.72
+        },
+        {
+          "keyframe_id": "keyframe-0034-101aab20",
+          "timestamp": 3062.44
+        },
+        {
+          "keyframe_id": "keyframe-0035-f6c1640a",
+          "timestamp": 3070.48
+        },
+        {
+          "keyframe_id": "keyframe-0036-6890aab0",
+          "timestamp": 3072.48
+        },
+        {
+          "keyframe_id": "keyframe-0037-316f4c32",
+          "timestamp": 3074.44
+        },
+        {
+          "keyframe_id": "keyframe-0038-b5e723cf",
+          "timestamp": 3092.72
+        },
+        {
+          "keyframe_id": "keyframe-0039-4087ba08",
+          "timestamp": 3190.56
+        },
+        {
+          "keyframe_id": "keyframe-0040-bc98b94d",
+          "timestamp": 3223.04
+        },
+        {
+          "keyframe_id": "keyframe-0041-f7bb6aff",
+          "timestamp": 4056.2
+        },
+        {
+          "keyframe_id": "keyframe-0042-5606d64e",
+          "timestamp": 4668.52
+        },
+        {
+          "keyframe_id": "keyframe-0043-aabf5cd0",
+          "timestamp": 4818.6
+        },
+        {
+          "keyframe_id": "keyframe-0044-b3ee4989",
+          "timestamp": 6686.84
+        },
+        {
+          "keyframe_id": "keyframe-0045-7da6f2dd",
+          "timestamp": 7111.32
+        },
+        {
+          "keyframe_id": "keyframe-0046-51d3dbe1",
+          "timestamp": 7123.32
+        },
+        {
+          "keyframe_id": "keyframe-0047-74331793",
+          "timestamp": 7265.32
+        },
+        {
+          "keyframe_id": "keyframe-0048-d8857ea0",
+          "timestamp": 7405.6
+        },
+        {
+          "keyframe_id": "keyframe-0049-2c82a188",
+          "timestamp": 7565.2
+        },
+        {
+          "keyframe_id": "keyframe-0050-401b2ea5",
+          "timestamp": 7711.04
+        },
+        {
+          "keyframe_id": "keyframe-0051-6b033b25",
+          "timestamp": 7788.08
+        },
+        {
+          "keyframe_id": "keyframe-0052-fb0217a0",
+          "timestamp": 7852.56
+        },
+        {
+          "keyframe_id": "keyframe-0053-2a5c8b1e",
+          "timestamp": 7956.08
+        },
+        {
+          "keyframe_id": "keyframe-0054-33ac975e",
+          "timestamp": 7984.56
+        },
+        {
+          "keyframe_id": "keyframe-0055-de5e1e5b",
+          "timestamp": 8076.08
+        },
+        {
+          "keyframe_id": "keyframe-0056-d1342bfe",
+          "timestamp": 8108.08
+        },
+        {
+          "keyframe_id": "keyframe-0057-67b14161",
+          "timestamp": 8221.04
+        },
+        {
+          "keyframe_id": "keyframe-0058-dbfd93e6",
+          "timestamp": 8359.12
+        },
+        {
+          "keyframe_id": "keyframe-0059-93307486",
+          "timestamp": 9253.96
+        },
+        {
+          "keyframe_id": "keyframe-0060-75a53d26",
+          "timestamp": 9256.48
+        },
+        {
+          "keyframe_id": "keyframe-0061-de8e8bec",
+          "timestamp": 9625.2
+        },
+        {
+          "keyframe_id": "keyframe-0062-8397bdf2",
+          "timestamp": 9660.92
+        },
+        {
+          "keyframe_id": "keyframe-0063-0e1d2645",
+          "timestamp": 9767.44
+        },
+        {
+          "keyframe_id": "keyframe-0064-8c7684ba",
+          "timestamp": 9808.44
+        }
+      ],
+      "scene_total": 989,
+      "story_unit_total": 255,
+      "modes": {
+        "fast": {
+          "budget": {
+            "dynamic_frame_limit": 0,
+            "max_frames": 0,
+            "configured_frame_limit": 0,
+            "max_calls": 0,
+            "max_tokens": 0,
+            "max_estimated_cost": 0.0,
+            "limit_reason": "fast_mode_zero_calls"
+          },
+          "selected_keyframes": [],
+          "coverage": {
+            "scene_count": 0,
+            "scene_total": 989,
+            "scene_ids": [],
+            "story_unit_count": 0,
+            "story_unit_total": 255,
+            "story_unit_ids": [],
+            "temporal_deciles": []
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 0,
+            "selected_count": 0,
+            "coverage": {
+              "scene_count": 0,
+              "scene_total": 989,
+              "scene_ids": [],
+              "story_unit_count": 0,
+              "story_unit_total": 255,
+              "story_unit_ids": [],
+              "temporal_deciles": []
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 0,
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost": 0.0,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "second_run_cache": {
+            "hits": 0,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "fast_mode_zero_calls",
+          "second_run_stop_reason": "fast_mode_zero_calls",
+          "external_provider_calls": 0
+        },
+        "standard": {
+          "budget": {
+            "dynamic_frame_limit": 24,
+            "max_frames": 24,
+            "configured_frame_limit": 12,
+            "max_calls": 8,
+            "max_tokens": 32000,
+            "max_estimated_cost": 0.05,
+            "limit_reason": "duration_content_ceiling_reached"
+          },
+          "selected_keyframes": [
+            {
+              "keyframe_id": "keyframe-0001-48a3306b",
+              "timestamp": 378.64
+            },
+            {
+              "keyframe_id": "keyframe-0003-c8528bf2",
+              "timestamp": 702.08
+            },
+            {
+              "keyframe_id": "keyframe-0005-37f35d2b",
+              "timestamp": 893.96
+            },
+            {
+              "keyframe_id": "keyframe-0007-32748dcb",
+              "timestamp": 1516.0
+            },
+            {
+              "keyframe_id": "keyframe-0008-d28b2db9",
+              "timestamp": 1643.48
+            },
+            {
+              "keyframe_id": "keyframe-0017-e23b0186",
+              "timestamp": 1799.48
+            },
+            {
+              "keyframe_id": "keyframe-0021-2fd69ca6",
+              "timestamp": 2314.48
+            },
+            {
+              "keyframe_id": "keyframe-0024-1e4daa79",
+              "timestamp": 2530.44
+            },
+            {
+              "keyframe_id": "keyframe-0025-9aba48e1",
+              "timestamp": 2704.44
+            },
+            {
+              "keyframe_id": "keyframe-0030-d07f1592",
+              "timestamp": 3007.88
+            },
+            {
+              "keyframe_id": "keyframe-0041-f7bb6aff",
+              "timestamp": 4056.2
+            },
+            {
+              "keyframe_id": "keyframe-0043-aabf5cd0",
+              "timestamp": 4818.6
+            },
+            {
+              "keyframe_id": "keyframe-0044-b3ee4989",
+              "timestamp": 6686.84
+            },
+            {
+              "keyframe_id": "keyframe-0046-51d3dbe1",
+              "timestamp": 7123.32
+            },
+            {
+              "keyframe_id": "keyframe-0047-74331793",
+              "timestamp": 7265.32
+            },
+            {
+              "keyframe_id": "keyframe-0048-d8857ea0",
+              "timestamp": 7405.6
+            },
+            {
+              "keyframe_id": "keyframe-0049-2c82a188",
+              "timestamp": 7565.2
+            },
+            {
+              "keyframe_id": "keyframe-0050-401b2ea5",
+              "timestamp": 7711.04
+            },
+            {
+              "keyframe_id": "keyframe-0052-fb0217a0",
+              "timestamp": 7852.56
+            },
+            {
+              "keyframe_id": "keyframe-0053-2a5c8b1e",
+              "timestamp": 7956.08
+            },
+            {
+              "keyframe_id": "keyframe-0056-d1342bfe",
+              "timestamp": 8108.08
+            },
+            {
+              "keyframe_id": "keyframe-0059-93307486",
+              "timestamp": 9253.96
+            },
+            {
+              "keyframe_id": "keyframe-0062-8397bdf2",
+              "timestamp": 9660.92
+            },
+            {
+              "keyframe_id": "keyframe-0064-8c7684ba",
+              "timestamp": 9808.44
+            }
+          ],
+          "coverage": {
+            "scene_count": 24,
+            "scene_total": 989,
+            "scene_ids": [
+              "scene-0056",
+              "scene-0085",
+              "scene-0102",
+              "scene-0172",
+              "scene-0187",
+              "scene-0205",
+              "scene-0262",
+              "scene-0283",
+              "scene-0297",
+              "scene-0332",
+              "scene-0455",
+              "scene-0530",
+              "scene-0677",
+              "scene-0720",
+              "scene-0737",
+              "scene-0755",
+              "scene-0767",
+              "scene-0784",
+              "scene-0800",
+              "scene-0810",
+              "scene-0825",
+              "scene-0935",
+              "scene-0975",
+              "scene-0988"
+            ],
+            "story_unit_count": 24,
+            "story_unit_total": 255,
+            "story_unit_ids": [
+              "chapter-004-story-001",
+              "chapter-008-story-001",
+              "chapter-011-story-001",
+              "chapter-017-story-002",
+              "chapter-018-story-003",
+              "chapter-020-story-001",
+              "chapter-030-story-002",
+              "chapter-032-story-002",
+              "chapter-034-story-001",
+              "chapter-038-story-001",
+              "chapter-047-story-002",
+              "chapter-055-story-001",
+              "chapter-083-story-001",
+              "chapter-087-story-002",
+              "chapter-088-story-002",
+              "chapter-089-story-001",
+              "chapter-091-story-001",
+              "chapter-092-story-001",
+              "chapter-093-story-001",
+              "chapter-094-story-003",
+              "chapter-098-story-001",
+              "chapter-109-story-002",
+              "chapter-116-story-001",
+              "chapter-118-story-001"
+            ],
+            "temporal_deciles": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              6,
+              7,
+              8,
+              9
+            ]
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 12,
+            "selected_count": 12,
+            "coverage": {
+              "scene_count": 12,
+              "scene_total": 989,
+              "scene_ids": [
+                "scene-0056",
+                "scene-0085",
+                "scene-0187",
+                "scene-0262",
+                "scene-0332",
+                "scene-0530",
+                "scene-0677",
+                "scene-0737",
+                "scene-0784",
+                "scene-0810",
+                "scene-0935",
+                "scene-0975"
+              ],
+              "story_unit_count": 12,
+              "story_unit_total": 255,
+              "story_unit_ids": [
+                "chapter-004-story-001",
+                "chapter-008-story-001",
+                "chapter-018-story-003",
+                "chapter-030-story-002",
+                "chapter-038-story-001",
+                "chapter-055-story-001",
+                "chapter-083-story-001",
+                "chapter-088-story-002",
+                "chapter-092-story-001",
+                "chapter-094-story-003",
+                "chapter-109-story-002",
+                "chapter-116-story-001"
+              ],
+              "temporal_deciles": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                6,
+                7,
+                8,
+                9
+              ]
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 24,
+            "calls": 8,
+            "input_tokens": 12800,
+            "output_tokens": 19200,
+            "total_tokens": 32000,
+            "estimated_cost": 0.0416,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 24,
+            "provider_calls": 8
+          },
+          "second_run_cache": {
+            "hits": 24,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "duration_content_ceiling_reached",
+          "second_run_stop_reason": "cache_satisfied_selected_frames",
+          "external_provider_calls": 0
+        },
+        "maximum": {
+          "budget": {
+            "dynamic_frame_limit": 64,
+            "max_frames": 64,
+            "configured_frame_limit": 32,
+            "max_calls": 22,
+            "max_tokens": 87400,
+            "max_estimated_cost": 0.15,
+            "limit_reason": "duration_content_ceiling_reached"
+          },
+          "selected_keyframes": [
+            {
+              "keyframe_id": "keyframe-0001-48a3306b",
+              "timestamp": 378.64
+            },
+            {
+              "keyframe_id": "keyframe-0003-c8528bf2",
+              "timestamp": 702.08
+            },
+            {
+              "keyframe_id": "keyframe-0005-37f35d2b",
+              "timestamp": 893.96
+            },
+            {
+              "keyframe_id": "keyframe-0007-32748dcb",
+              "timestamp": 1516.0
+            },
+            {
+              "keyframe_id": "keyframe-0008-d28b2db9",
+              "timestamp": 1643.48
+            },
+            {
+              "keyframe_id": "keyframe-0013-84d153da",
+              "timestamp": 1687.24
+            },
+            {
+              "keyframe_id": "keyframe-0014-ab6afca6",
+              "timestamp": 1739.28
+            },
+            {
+              "keyframe_id": "keyframe-0017-e23b0186",
+              "timestamp": 1799.48
+            },
+            {
+              "keyframe_id": "keyframe-0018-b533e148",
+              "timestamp": 1860.48
+            },
+            {
+              "keyframe_id": "keyframe-0020-731a9f85",
+              "timestamp": 2251.56
+            },
+            {
+              "keyframe_id": "keyframe-0021-2fd69ca6",
+              "timestamp": 2314.48
+            },
+            {
+              "keyframe_id": "keyframe-0023-29684bfd",
+              "timestamp": 2465.96
+            },
+            {
+              "keyframe_id": "keyframe-0024-1e4daa79",
+              "timestamp": 2530.44
+            },
+            {
+              "keyframe_id": "keyframe-0025-9aba48e1",
+              "timestamp": 2704.44
+            },
+            {
+              "keyframe_id": "keyframe-0030-d07f1592",
+              "timestamp": 3007.88
+            },
+            {
+              "keyframe_id": "keyframe-0035-f6c1640a",
+              "timestamp": 3070.48
+            },
+            {
+              "keyframe_id": "keyframe-0040-bc98b94d",
+              "timestamp": 3223.04
+            },
+            {
+              "keyframe_id": "keyframe-0041-f7bb6aff",
+              "timestamp": 4056.2
+            },
+            {
+              "keyframe_id": "keyframe-0042-5606d64e",
+              "timestamp": 4668.52
+            },
+            {
+              "keyframe_id": "keyframe-0043-aabf5cd0",
+              "timestamp": 4818.6
+            },
+            {
+              "keyframe_id": "keyframe-0044-b3ee4989",
+              "timestamp": 6686.84
+            },
+            {
+              "keyframe_id": "keyframe-0046-51d3dbe1",
+              "timestamp": 7123.32
+            },
+            {
+              "keyframe_id": "keyframe-0047-74331793",
+              "timestamp": 7265.32
+            },
+            {
+              "keyframe_id": "keyframe-0048-d8857ea0",
+              "timestamp": 7405.6
+            },
+            {
+              "keyframe_id": "keyframe-0049-2c82a188",
+              "timestamp": 7565.2
+            },
+            {
+              "keyframe_id": "keyframe-0050-401b2ea5",
+              "timestamp": 7711.04
+            },
+            {
+              "keyframe_id": "keyframe-0051-6b033b25",
+              "timestamp": 7788.08
+            },
+            {
+              "keyframe_id": "keyframe-0052-fb0217a0",
+              "timestamp": 7852.56
+            },
+            {
+              "keyframe_id": "keyframe-0053-2a5c8b1e",
+              "timestamp": 7956.08
+            },
+            {
+              "keyframe_id": "keyframe-0056-d1342bfe",
+              "timestamp": 8108.08
+            },
+            {
+              "keyframe_id": "keyframe-0057-67b14161",
+              "timestamp": 8221.04
+            },
+            {
+              "keyframe_id": "keyframe-0058-dbfd93e6",
+              "timestamp": 8359.12
+            },
+            {
+              "keyframe_id": "keyframe-0059-93307486",
+              "timestamp": 9253.96
+            },
+            {
+              "keyframe_id": "keyframe-0062-8397bdf2",
+              "timestamp": 9660.92
+            },
+            {
+              "keyframe_id": "keyframe-0063-0e1d2645",
+              "timestamp": 9767.44
+            },
+            {
+              "keyframe_id": "keyframe-0064-8c7684ba",
+              "timestamp": 9808.44
+            }
+          ],
+          "coverage": {
+            "scene_count": 36,
+            "scene_total": 989,
+            "scene_ids": [
+              "scene-0056",
+              "scene-0085",
+              "scene-0102",
+              "scene-0172",
+              "scene-0187",
+              "scene-0193",
+              "scene-0199",
+              "scene-0205",
+              "scene-0215",
+              "scene-0260",
+              "scene-0262",
+              "scene-0276",
+              "scene-0283",
+              "scene-0297",
+              "scene-0332",
+              "scene-0349",
+              "scene-0373",
+              "scene-0455",
+              "scene-0513",
+              "scene-0530",
+              "scene-0677",
+              "scene-0720",
+              "scene-0737",
+              "scene-0755",
+              "scene-0767",
+              "scene-0784",
+              "scene-0792",
+              "scene-0800",
+              "scene-0810",
+              "scene-0825",
+              "scene-0839",
+              "scene-0855",
+              "scene-0935",
+              "scene-0975",
+              "scene-0986",
+              "scene-0988"
+            ],
+            "story_unit_count": 35,
+            "story_unit_total": 255,
+            "story_unit_ids": [
+              "chapter-004-story-001",
+              "chapter-008-story-001",
+              "chapter-011-story-001",
+              "chapter-017-story-002",
+              "chapter-018-story-003",
+              "chapter-019-story-001",
+              "chapter-019-story-003",
+              "chapter-020-story-001",
+              "chapter-020-story-002",
+              "chapter-030-story-001",
+              "chapter-030-story-002",
+              "chapter-032-story-001",
+              "chapter-032-story-002",
+              "chapter-034-story-001",
+              "chapter-038-story-001",
+              "chapter-038-story-002",
+              "chapter-040-story-001",
+              "chapter-047-story-002",
+              "chapter-053-story-001",
+              "chapter-055-story-001",
+              "chapter-083-story-001",
+              "chapter-087-story-002",
+              "chapter-088-story-002",
+              "chapter-089-story-001",
+              "chapter-091-story-001",
+              "chapter-092-story-001",
+              "chapter-093-story-001",
+              "chapter-094-story-003",
+              "chapter-098-story-001",
+              "chapter-099-story-001",
+              "chapter-100-story-002",
+              "chapter-109-story-002",
+              "chapter-116-story-001",
+              "chapter-117-story-002",
+              "chapter-118-story-001"
+            ],
+            "temporal_deciles": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              6,
+              7,
+              8,
+              9
+            ]
+          },
+          "legacy_fixed_cap_comparison": {
+            "cap": 32,
+            "selected_count": 29,
+            "coverage": {
+              "scene_count": 29,
+              "scene_total": 989,
+              "scene_ids": [
+                "scene-0056",
+                "scene-0085",
+                "scene-0102",
+                "scene-0172",
+                "scene-0187",
+                "scene-0205",
+                "scene-0262",
+                "scene-0283",
+                "scene-0297",
+                "scene-0332",
+                "scene-0356",
+                "scene-0373",
+                "scene-0455",
+                "scene-0513",
+                "scene-0530",
+                "scene-0677",
+                "scene-0720",
+                "scene-0737",
+                "scene-0755",
+                "scene-0767",
+                "scene-0784",
+                "scene-0800",
+                "scene-0810",
+                "scene-0825",
+                "scene-0839",
+                "scene-0855",
+                "scene-0935",
+                "scene-0975",
+                "scene-0988"
+              ],
+              "story_unit_count": 28,
+              "story_unit_total": 255,
+              "story_unit_ids": [
+                "chapter-004-story-001",
+                "chapter-008-story-001",
+                "chapter-011-story-001",
+                "chapter-017-story-002",
+                "chapter-018-story-003",
+                "chapter-020-story-001",
+                "chapter-030-story-002",
+                "chapter-032-story-002",
+                "chapter-034-story-001",
+                "chapter-038-story-001",
+                "chapter-040-story-001",
+                "chapter-047-story-002",
+                "chapter-053-story-001",
+                "chapter-055-story-001",
+                "chapter-083-story-001",
+                "chapter-087-story-002",
+                "chapter-088-story-002",
+                "chapter-089-story-001",
+                "chapter-091-story-001",
+                "chapter-092-story-001",
+                "chapter-093-story-001",
+                "chapter-094-story-003",
+                "chapter-098-story-001",
+                "chapter-099-story-001",
+                "chapter-100-story-002",
+                "chapter-109-story-002",
+                "chapter-116-story-001",
+                "chapter-118-story-001"
+              ],
+              "temporal_deciles": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                6,
+                7,
+                8,
+                9
+              ]
+            }
+          },
+          "projected_uncached_usage": {
+            "frames": 36,
+            "calls": 12,
+            "input_tokens": 19200,
+            "output_tokens": 28800,
+            "total_tokens": 48000,
+            "estimated_cost": 0.0624,
+            "within_hard_budget": true
+          },
+          "first_run_cache": {
+            "hits": 0,
+            "misses": 36,
+            "provider_calls": 12
+          },
+          "second_run_cache": {
+            "hits": 36,
+            "misses": 0,
+            "provider_calls": 0
+          },
+          "analysis_stop_reason": "minimum_temporal_spacing_reached",
+          "second_run_stop_reason": "cache_satisfied_selected_frames",
+          "external_provider_calls": 0
+        }
+      }
+    }
+  ]
+}

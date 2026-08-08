@@ -33,14 +33,16 @@ vision:
   pass1_batch_size: 3       # PASS 1 sends small low-detail batches (2..4)
   pass2_min_frames: 3
   pass2_max_frames: 7
+  # Short-source defaults. Long PASS 1 sources may scale frame/call/token
+  # ceilings up to a bounded content-aware plan; dollar ceilings never scale.
   standard_max_frames: 12
   standard_max_calls: 4
   standard_max_tokens: 12000
-  standard_max_estimated_cost: 0.05
+  standard_max_estimated_cost: 0.05  # hard USD ceiling
   maximum_max_frames: 32
   maximum_max_calls: 10
   maximum_max_tokens: 32000
-  maximum_max_estimated_cost: 0.15
+  maximum_max_estimated_cost: 0.15   # hard USD ceiling
   prompt_input_tokens: 700
   low_detail_input_tokens_per_frame: 300
   high_detail_input_tokens_per_frame: 900
