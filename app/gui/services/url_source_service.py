@@ -18,6 +18,11 @@ from app.source_download import (
     YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
 )
 from app.subprocess_utils import UTF8_REPLACE_TEXT
+from app.gui.services.windows_process_job import (
+    attach_windows_process_job,
+    close_windows_process_job,
+    terminate_windows_process_job,
+)
 
 
 class URLSourceService(QObject):
@@ -46,6 +51,7 @@ class URLSourceService(QObject):
         self._cancel_requested = False
         self._reported_process_error = False
         self._process_id = 0
+        self._job_handle: object | None = None
         self._cancel_kill_timer = QTimer(self)
         self._cancel_kill_timer.setSingleShot(True)
         self._cancel_kill_timer.timeout.connect(self._kill_if_cancelling)
@@ -105,6 +111,7 @@ class URLSourceService(QObject):
         self._cancel_requested = False
         self._reported_process_error = False
         self._process_id = 0
+        self._release_process_job()
         self.process.setProgram(executable)
         self.busy_changed.emit(True)
         return safe_url
@@ -129,6 +136,7 @@ class URLSourceService(QObject):
             return
         self._reported_process_error = True
         if _error == QProcess.ProcessError.FailedToStart:
+            self._release_process_job()
             self._mode = self._url = None
             self.busy_changed.emit(False)
             self.failed.emit("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.")
@@ -136,11 +144,16 @@ class URLSourceService(QObject):
     def _state_changed(self, state: QProcess.ProcessState) -> None:
         if state == QProcess.ProcessState.Running:
             self._process_id = int(self.process.processId())
+            self._bind_process_tree()
         elif state == QProcess.ProcessState.NotRunning:
             self._process_id = 0
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._read_output()
+        # If yt-dlp exited before one of its helpers, closing this final GUI
+        # Job handle stops that helper instead of letting it keep writing to a
+        # source directory after the operation has reached a terminal state.
+        self._release_process_job()
         mode, url, directory = self._mode, self._url, self._target_directory
         if mode is None:
             return
@@ -189,6 +202,10 @@ class URLSourceService(QObject):
         # yt-dlp can launch a media helper. On Windows stop its exact process
         # tree so cancellation never leaves a background download writing into
         # this project while the UI claims it has stopped.
+        if self._terminate_process_job():
+            if self.process.state() != QProcess.ProcessState.NotRunning:
+                self.process.kill()
+            return
         if sys.platform == "win32" and self._process_id:
             try:
                 subprocess.run(
@@ -199,6 +216,28 @@ class URLSourceService(QObject):
                 pass
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.kill()
+
+    def _bind_process_tree(self) -> None:
+        if sys.platform != "win32" or not self._process_id:
+            return
+        job, _problem = attach_windows_process_job(self._process_id)
+        if job is not None:
+            self._job_handle = job
+
+    def _terminate_process_job(self) -> bool:
+        if self._job_handle is None:
+            return False
+        try:
+            terminated, _error = terminate_windows_process_job(self._job_handle)
+            return terminated
+        finally:
+            self._release_process_job()
+
+    def _release_process_job(self) -> None:
+        if self._job_handle is None:
+            return
+        job, self._job_handle = self._job_handle, None
+        close_windows_process_job(job)
 
 
 def _project_child(path: Path, directory: Path) -> bool:

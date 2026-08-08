@@ -133,6 +133,7 @@ class ProjectScreen(QWidget):
         self._root_layout = root
         root.setContentsMargins(34, 26, 34, 30)
         header = QHBoxLayout()
+        self._header_layout = header
         back = QPushButton("← Проекты")
         back.clicked.connect(self.back_requested)
         self.title = _ElidedLabel("Проект")
@@ -157,7 +158,9 @@ class ProjectScreen(QWidget):
         flow_layout = QVBoxLayout(self.flow_card)
         flow_layout.setContentsMargins(14, 10, 14, 10)
         self._global_step_labels: dict[str, QLabel] = {}
+        self._global_step_dividers: list[QLabel] = []
         stepper_row = QHBoxLayout()
+        self._stepper_layout = stepper_row
         stepper_row.setSpacing(0)
         for index, (step, label) in enumerate(_GLOBAL_FLOW_STEPS):
             item = QLabel(f"{index + 1}  {label}")
@@ -170,6 +173,7 @@ class ProjectScreen(QWidget):
                 divider = QLabel("›")
                 divider.setObjectName("workflowDivider")
                 divider.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._global_step_dividers.append(divider)
                 stepper_row.addWidget(divider)
         flow_layout.addLayout(stepper_row)
         self.flow_position = QLabel("Источник")
@@ -314,7 +318,10 @@ class ProjectScreen(QWidget):
         self.draft_button.clicked.connect(self._draft_action)
         self.production_button = QPushButton("Создать готовые ролики")
         self.production_button.setObjectName("primary")
-        self.production_button.clicked.connect(self._confirm_production_render)
+        # QPushButton.clicked carries a ``bool`` checked argument.  Keep it
+        # out of the candidate-id API: the delivery set is always derived
+        # from the durable approved-draft state below.
+        self.production_button.clicked.connect(lambda _checked=False: self._confirm_production_render())
         left.addWidget(self.candidate_review)
         self.final_results = FinalResultsWorkspace()
         self.final_results.output_selected.connect(self._final_output_selected)
@@ -465,6 +472,10 @@ class ProjectScreen(QWidget):
         # visual reference.
         compact = self.width() < 1600
         compact_actions = self.width() < 900
+        cards_need_reflow = (
+            self._compact_action_layout is not None
+            and compact_actions != self._compact_action_layout
+        )
         if (
             not force
             and compact == self._compact_stage_layout
@@ -476,6 +487,11 @@ class ProjectScreen(QWidget):
         direction = (
             QBoxLayout.Direction.TopToBottom
             if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        action_direction = (
+            QBoxLayout.Direction.TopToBottom
+            if compact_actions
             else QBoxLayout.Direction.LeftToRight
         )
         spacing = 12 if compact else 18
@@ -493,11 +509,16 @@ class ProjectScreen(QWidget):
         self._processing_workspace_layout.setSpacing(spacing)
         self._review_body_layout.setDirection(direction)
         self._review_body_layout.setSpacing(12 if compact else 14)
-        self._review_action_layout.setDirection(
-            QBoxLayout.Direction.TopToBottom
-            if compact_actions
-            else QBoxLayout.Direction.LeftToRight
-        )
+        self._header_layout.setDirection(action_direction)
+        self._header_layout.setSpacing(6 if compact_actions else 8)
+        self._stepper_layout.setDirection(action_direction)
+        self._stepper_layout.setSpacing(4 if compact_actions else 0)
+        for divider in self._global_step_dividers:
+            divider.setVisible(not compact_actions)
+        self._setup_action_layout.setDirection(action_direction)
+        self._processing_actions_layout.setDirection(action_direction)
+        self._review_header_layout.setDirection(action_direction)
+        self._review_action_layout.setDirection(action_direction)
         self._review_action_layout.setSpacing(8 if compact_actions else 6)
         self.content_host.setMinimumWidth(0)
         if compact:
@@ -520,6 +541,11 @@ class ProjectScreen(QWidget):
         self.setup_summary.setMaximumWidth(16_777_215)
         self.processing_summary.setMaximumWidth(16_777_215)
         self.updateGeometry()
+        # Candidate cards own an action rail.  Rebuild them only when the
+        # breakpoint changes so that the rail can become a full-width block
+        # instead of being horizontally squeezed or clipped.
+        if cards_need_reflow and self.project:
+            self._update_candidate_review(self.project)
 
     def _compose_stage_workspaces(self, legacy_layout: QVBoxLayout, body: QHBoxLayout) -> None:
         """Arrange the durable widgets into one focused workspace per stage.
@@ -599,6 +625,7 @@ class ProjectScreen(QWidget):
         self.setup_action_bar = QFrame()
         self.setup_action_bar.setObjectName("stickyActionBar")
         setup_action_layout = QHBoxLayout(self.setup_action_bar)
+        self._setup_action_layout = setup_action_layout
         setup_action_layout.setContentsMargins(14, 10, 14, 10)
         self.setup_back_button = QPushButton("← К источнику")
         self.setup_back_button.clicked.connect(self.back_requested)
@@ -663,6 +690,7 @@ class ProjectScreen(QWidget):
         self.processing_actions = QFrame()
         self.processing_actions.setObjectName("secondaryActionBar")
         processing_actions_layout = QHBoxLayout(self.processing_actions)
+        self._processing_actions_layout = processing_actions_layout
         processing_actions_layout.setContentsMargins(12, 10, 12, 10)
         processing_projects = QPushButton("К проектам")
         processing_projects.clicked.connect(self.back_requested)
@@ -696,6 +724,7 @@ class ProjectScreen(QWidget):
         review_layout.setContentsMargins(0, 0, 0, 0)
         review_layout.setSpacing(12)
         review_header = QHBoxLayout()
+        self._review_header_layout = review_header
         self.results_subflow = QLabel("Моменты")
         self.results_subflow.setObjectName("screenTitle")
         self.results_subflow_hint = QLabel()
@@ -829,7 +858,10 @@ class ProjectScreen(QWidget):
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
         self.run_button.setText("Начать поиск моментов")
         if project.source_spec.is_ready and (is_new_project or self.preview.active_media_path is None):
-            self.preview.show_source(str(project.source))
+            self.preview.show_source(
+                str(project.source),
+                source_codec=str(project.source_metadata.get("video_codec") or ""),
+            )
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source else "н/д"
         resolution = f"{source.get('width', '—')} × {source.get('height', '—')}" if source else "н/д"
@@ -978,19 +1010,20 @@ class ProjectScreen(QWidget):
         }.get(status, "ожидает")
 
     def _selection_limit(self, project: DesktopProject) -> int:
-        """Use the persisted product choice, never a visual hard-coded cap."""
+        """Return only the persisted selection allowance for this project.
+
+        A post-analysis recommendation describes how many moments look strong;
+        it is not permission to lower a creator's explicit 3/5 selection.
+        Auto remains the established five-item review allowance used by the
+        service layer, while the render configuration can still resolve its
+        own mode-specific default later.
+        """
 
         try:
-            requested = int(str(project.settings.clip_count))
+            requested = project.settings.processing_intent().requested_clip_count
         except (TypeError, ValueError):
-            requested = 0
-        if requested > 0:
-            return requested
-        try:
-            _resolved, estimate = self.viewmodel.setup_preflight()
-            return max(1, int(estimate.estimated_clips_max))
-        except Exception:
-            return 5
+            requested = None
+        return requested if requested is not None and requested > 0 else 5
 
     def _latest_run(self, project: DesktopProject) -> ProjectRun | None:
         runs = self._runs_for_project(project)
@@ -1304,15 +1337,22 @@ class ProjectScreen(QWidget):
             # Moment selection belongs to the source-moment phase.  Drafts
             # have their own decisions (watch/approve/reject/retry), so do not
             # leak recommendation filters and draft-selection controls there.
+            compact_actions = bool(self._compact_action_layout)
+            action_direction = (
+                QBoxLayout.Direction.TopToBottom
+                if compact_actions
+                else QBoxLayout.Direction.LeftToRight
+            )
             selection_toolbar = QFrame()
             toolbar_layout = QHBoxLayout(selection_toolbar)
+            toolbar_layout.setDirection(action_direction)
             toolbar_layout.setContentsMargins(0, 0, 0, 0)
             summary = QLabel(
                 f"Найдено моментов: {len(candidates)} · рекомендуем: {recommended_count} · "
                 f"выбрано: {len(project.review_selected_candidate_ids)}/{selection_limit}"
             )
             summary.setWordWrap(True)
-            toolbar_layout.addWidget(summary, 1)
+            toolbar_layout.addWidget(summary, 0 if compact_actions else 1)
             recommended_button = QPushButton("Выбрать рекомендованные")
             recommended_button.clicked.connect(self._select_recommended)
             clear_button = QPushButton("Снять выбор")
@@ -1323,6 +1363,7 @@ class ProjectScreen(QWidget):
             filters = QFrame()
             filters.setObjectName("reviewFilters")
             filters_layout = QHBoxLayout(filters)
+            filters_layout.setDirection(action_direction)
             filters_layout.setContentsMargins(0, 0, 0, 0)
             filters_layout.setSpacing(6)
             filter_combo = QComboBox()
@@ -1339,8 +1380,8 @@ class ProjectScreen(QWidget):
             sort_combo.addItem("По потенциалу", "potential")
             self._set_combo_data(sort_combo, self._candidate_sort)
             sort_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_sort(str(sort_combo.currentData())))
-            filters_layout.addWidget(filter_combo, 1)
-            filters_layout.addWidget(sort_combo, 1)
+            filters_layout.addWidget(filter_combo, 0 if compact_actions else 1)
+            filters_layout.addWidget(sort_combo, 0 if compact_actions else 1)
             layout.addWidget(filters)
         self._configure_workflow_action(project, draftable_ids, ready_count, rendered_count, processing_count)
         final_outputs = self._final_outputs_by_candidate()
@@ -1390,15 +1431,19 @@ class ProjectScreen(QWidget):
                 status_label = "Черновик не создан. Его можно повторить отдельно."
             elif export_status == "failed":
                 status_label = "Готовый ролик не создан. Черновик сохранён и остаётся подтверждённым."
+            compact_actions = bool(self._compact_action_layout)
             frame = QFrame(); frame.setObjectName("card")
+            frame.setMinimumWidth(0)
+            frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             self._candidate_cards[candidate_id] = frame
-            row = QHBoxLayout(frame); row.setContentsMargins(10, 8, 10, 8)
+            row = QVBoxLayout(frame) if compact_actions else QHBoxLayout(frame)
+            row.setContentsMargins(10, 8, 10, 8)
+            row.setSpacing(8)
             thumbnail = QLabel("Кадр\nзагружается")
             thumbnail.setObjectName("muted")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
             thumbnail.setFixedSize(112, 64)
             thumbnail.setStyleSheet("border: 1px solid #303640; border-radius: 4px;")
-            row.addWidget(thumbnail)
             self._candidate_thumbnail_labels.setdefault(candidate_id, []).append(thumbnail)
             try:
                 start_seconds = float(start_value)
@@ -1443,11 +1488,32 @@ class ProjectScreen(QWidget):
                 reason.setObjectName("muted")
                 reason.setWordWrap(True)
                 information.addWidget(reason)
-            row.addLayout(information, 1)
-            actions = QVBoxLayout()
+            if compact_actions:
+                summary_row = QHBoxLayout()
+                summary_row.setContentsMargins(0, 0, 0, 0)
+                summary_row.setSpacing(8)
+                summary_row.addWidget(thumbnail)
+                summary_row.addLayout(information, 1)
+                row.addLayout(summary_row)
+            else:
+                row.addWidget(thumbnail)
+                row.addLayout(information, 1)
+            actions_host = QWidget()
+            actions_host.setMinimumWidth(0)
+            actions_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            if not compact_actions:
+                # The longest normal action label needs roughly 266 logical
+                # pixels with the current Windows font.  Keep the rail wide
+                # enough for its text at Full HD; narrow layouts stack it
+                # below the card summary instead.
+                actions_host.setMaximumWidth(320)
+            actions = QVBoxLayout(actions_host)
+            actions.setContentsMargins(0, 0, 0, 0)
+            actions.setSpacing(6)
             status = QLabel(status_label)
             status.setObjectName("muted")
-            status.setMaximumWidth(258)
+            status.setMaximumWidth(16_777_215 if compact_actions else 320)
+            status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             candidate_error = project.candidate_errors.get(candidate_id)
             if candidate_error:
                 # The service stores an item/stage message for the log.  Card
@@ -1530,7 +1596,9 @@ class ProjectScreen(QWidget):
                 open_log.setObjectName(f"candidate-log-{candidate_id}")
                 open_log.clicked.connect(self._open_latest_run_log_folder)
                 actions.addWidget(open_log)
-            row.addLayout(actions)
+            for button in actions_host.findChildren(QPushButton):
+                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            row.addWidget(actions_host)
             layout.addWidget(frame)
         if len(filtered_candidates) > len(visible_candidates):
             show_more = QPushButton(f"Показать ещё {min(12, len(filtered_candidates) - len(visible_candidates))} моментов")
@@ -1813,7 +1881,10 @@ class ProjectScreen(QWidget):
             )
             return
         self._results_subflow_override = "candidates"
-        self.preview.show_source(self.project.source)
+        self.preview.show_source(
+            self.project.source,
+            source_codec=str(self.project.source_metadata.get("video_codec") or ""),
+        )
         self._update_candidate_review(self.project)
         self._apply_flow_visibility(self.project)
 
@@ -2074,6 +2145,7 @@ class ProjectScreen(QWidget):
                 autoplay=autoplay,
                 cache_directory=self.project.directory / "preview-proxies",
                 candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
+                source_codec=str(self.project.source_metadata.get("video_codec") or ""),
             )
         self._persist_active_preview_candidate(candidate_id)
 
@@ -2160,6 +2232,9 @@ class ProjectScreen(QWidget):
         controls = QWidget()
         grid = QGridLayout(controls)
         grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        columns = 2
         for index, (text, boundary, delta) in enumerate((
             ("Начало −1 с", "start", -1.0), ("Начало −0.5 с", "start", -0.5),
             ("Начало +0.5 с", "start", 0.5), ("Начало +1 с", "start", 1.0),
@@ -2171,7 +2246,10 @@ class ProjectScreen(QWidget):
             button.clicked.connect(
                 lambda _checked=False, cid=candidate_id, name=boundary, value=delta: self._adjust_candidate_boundary(cid, name, value)
             )
-            grid.addWidget(button, index // 4, index % 4)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            grid.addWidget(button, index // columns, index % columns)
+        for column in range(columns):
+            grid.setColumnStretch(column, 1)
         self.candidate_detail.layout().addWidget(controls)
 
     @staticmethod
@@ -2225,7 +2303,10 @@ class ProjectScreen(QWidget):
             if had_active_candidate:
                 self._persist_active_preview_candidate(None)
             if project.source_spec.is_ready and self.preview.source_range_seconds is not None:
-                self.preview.show_source(project.source)
+                self.preview.show_source(
+                    project.source,
+                    source_codec=str(project.source_metadata.get("video_codec") or ""),
+                )
             return
         try:
             start, end = self._candidate_range(candidate)
@@ -2286,16 +2367,35 @@ class ProjectScreen(QWidget):
                 continue
 
     def _confirm_production_render(self, candidate_ids: list[str] | None = None) -> None:
+        """Ask for delivery using only the currently approved project state.
+
+        ``candidate_ids`` is a narrow retry allow-list, never a source of
+        truth.  In particular, a Qt ``clicked(bool)`` value cannot become an
+        iterable here or start a delivery for a stale candidate.
+        """
+
         if not self.project:
+            QMessageBox.information(
+                self,
+                "Проект не открыт",
+                "Сначала откройте проект с подтверждёнными черновиками.",
+            )
             return
-        selected_ids = list(dict.fromkeys(
-            self.project.selected_candidate_ids if candidate_ids is None else candidate_ids
+        approved_ids = list(dict.fromkeys(
+            str(candidate_id) for candidate_id in self.project.selected_candidate_ids if str(candidate_id)
         ))
+        retry_ids: set[str] | None = None
+        if isinstance(candidate_ids, (list, tuple, set, frozenset)):
+            retry_ids = {str(candidate_id) for candidate_id in candidate_ids if str(candidate_id)}
+        selected_ids = [candidate_id for candidate_id in approved_ids if retry_ids is None or candidate_id in retry_ids]
         if not selected_ids:
+            if retry_ids:
+                message = "Этот черновик больше не подтверждён для финального экспорта. Подтвердите его снова в списке черновиков."
+            else:
+                message = "Сначала подтвердите хотя бы один готовый черновик. После этого здесь появится запуск финального экспорта."
+            QMessageBox.information(self, "Нет подтверждённых черновиков", message)
             return
-        if any(candidate_id not in self.project.selected_candidate_ids for candidate_id in selected_ids):
-            return
-        singular_retry = len(selected_ids) == 1 and candidate_ids is not None
+        singular_retry = len(selected_ids) == 1 and retry_ids is not None
         prompt = (
             "Повторить экспорт только этого подтверждённого черновика?"
             if singular_retry

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QSizePolicy
 
 
 class VideoDropZone(QFrame):
@@ -26,6 +26,12 @@ class VideoDropZone(QFrame):
         formats = QLabel("Поддерживаются MP4, MOV, MKV, AVI и WebM")
         formats.setObjectName("muted")
         formats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Do not make the full one-line copy a minimum page width. On a
+        # scaled laptop it must wrap inside the source card, not be clipped by
+        # a deliberately hidden horizontal scrollbar.
+        for label in (title, detail, formats):
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(icon)
         layout.addWidget(title)
         layout.addWidget(detail)

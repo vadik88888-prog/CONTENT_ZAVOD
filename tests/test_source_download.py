@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QProcess
 
 import app.source_download as download_module
+from app.gui.services import url_source_service
 from app.errors import SourceError
 from app.source_download import (
     DownloadCancelled,
@@ -217,3 +218,21 @@ def test_qt_url_download_recovers_direct_media_without_after_move_output(tmp_pat
     service._finished(0, QProcess.ExitStatus.NormalExit)
 
     assert received == [str(completed.resolve())]
+
+
+def test_qt_url_service_releases_its_windows_job_on_terminal_state(monkeypatch) -> None:
+    """A completed yt-dlp parent must not leave an FFmpeg helper behind."""
+
+    QCoreApplication.instance() or QCoreApplication([])
+    service = URLSourceService()
+    job = object()
+    released: list[object] = []
+    monkeypatch.setattr(url_source_service, "close_windows_process_job", released.append)
+    service._job_handle = job
+    service._mode = "metadata"
+    service._url = "https://example.test/video"
+
+    service._finished(1, QProcess.ExitStatus.NormalExit)
+
+    assert released == [job]
+    assert service._job_handle is None

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.gui.services import pipeline_runner as pipeline_runner_module
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -365,6 +366,32 @@ def test_successful_run_does_not_trigger_watchdog(tmp_path: Path) -> None:
 
     assert completed == [0]
     assert failures == []
+
+
+def test_runner_uses_close_kills_tree_windows_job_policy(monkeypatch) -> None:
+    """Pipeline cleanup must retain the close-time orphan-process guarantee."""
+
+    _application()
+    runner = QtPipelineRunner()
+    job = object()
+    logs: list[str] = []
+    released: list[object] = []
+    runner._process_id = 4242
+    runner.log_received.connect(logs.append)
+    monkeypatch.setattr(pipeline_runner_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        pipeline_runner_module,
+        "attach_windows_process_job",
+        lambda process_id: (job, None) if process_id == 4242 else (None, "unexpected PID"),
+    )
+    monkeypatch.setattr(pipeline_runner_module, "close_windows_process_job", released.append)
+
+    runner._bind_process_tree()
+    runner._release_process_job()
+
+    assert runner._job_handle is None
+    assert released == [job]
+    assert any("final GUI handle closes" in line for line in logs)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process-tree cleanup is a desktop contract")

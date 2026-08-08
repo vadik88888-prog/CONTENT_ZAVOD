@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -54,6 +55,7 @@ class ProjectsScreen(QWidget):
         self._projects: list[DesktopProject] = []
         self._rendered_columns = 0
         self._reflow_pending = False
+        self._compact_source_layout: bool | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 22, 26, 22)
@@ -64,13 +66,16 @@ class ProjectsScreen(QWidget):
         self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # ``scroll`` used to name the projects list. Keep the public attribute
         # while making the whole compact workspace vertically scrollable.
-        self.scroll = self.content_scroll
+        # QWidget already exposes a ``scroll`` method.  Preserve the legacy
+        # instance attribute without shadowing that method in static typing.
+        setattr(self, "scroll", self.content_scroll)
         host = QWidget()
         content = QVBoxLayout(host)
         content.setContentsMargins(0, 0, 0, 4)
         content.setSpacing(16)
 
         top = QHBoxLayout()
+        self._top_layout = top
         titles = QVBoxLayout()
         titles.setSpacing(3)
         eyebrow = QLabel("CONTENT FACTORY")
@@ -87,6 +92,7 @@ class ProjectsScreen(QWidget):
         top.addLayout(titles, 1)
         local_note = QLabel("●  Локальная работа")
         local_note.setObjectName("status")
+        self.local_note = local_note
         top.addWidget(local_note, 0, Qt.AlignmentFlag.AlignTop)
         content.addLayout(top)
 
@@ -136,6 +142,7 @@ class ProjectsScreen(QWidget):
         source_layout.addLayout(divider)
 
         url_row = QHBoxLayout()
+        self._url_row_layout = url_row
         url_row.setSpacing(8)
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Вставьте ссылку на открытое видео")
@@ -180,6 +187,7 @@ class ProjectsScreen(QWidget):
         self.viewmodel.project_created.connect(self.project_opened)
         self.viewmodel.error_occurred.connect(self._show_error)
         self.viewmodel.url_busy_changed.connect(self._url_busy_changed)
+        self._apply_responsive_layout(force=True)
 
     def refresh(self) -> None:
         self.viewmodel.refresh()
@@ -217,8 +225,10 @@ class ProjectsScreen(QWidget):
     def _render_cards(self) -> None:
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item is not None:
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
         columns = self._recent_columns()
         self._rendered_columns = columns
         for index, project in enumerate(self._projects):
@@ -304,6 +314,7 @@ class ProjectsScreen(QWidget):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._apply_responsive_layout()
         if not self._projects or self._recent_columns() == self._rendered_columns or self._reflow_pending:
             return
         self._reflow_pending = True
@@ -312,6 +323,41 @@ class ProjectsScreen(QWidget):
     def _finish_reflow(self) -> None:
         self._reflow_pending = False
         self._render_cards()
+
+    def _apply_responsive_layout(self, *, force: bool = False) -> None:
+        """Reflow source onboarding before a scaled laptop viewport clips it.
+
+        A 1280 px display at 150% scaling leaves this screen with roughly
+        600 logical pixels after the shell sidebar. Keeping the local-work
+        status beside the title makes the scroll host claim a wider minimum
+        than its viewport, which only hides the horizontal scrollbar. The
+        compact composition keeps the approved content, stacked in order.
+        """
+
+        compact = self.width() < 720
+        if not force and compact == self._compact_source_layout:
+            return
+        self._compact_source_layout = compact
+        self._top_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._top_layout.setSpacing(6 if compact else 0)
+        self._top_layout.setAlignment(
+            self.local_note,
+            Qt.AlignmentFlag.AlignLeft if compact else Qt.AlignmentFlag.AlignTop,
+        )
+        # Give the URL field and its CTA independent full rows in the same
+        # compact profile. This avoids relying on a few spare pixels that can
+        # disappear with Windows font scaling.
+        self._url_row_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._url_row_layout.setSpacing(8)
+        self.updateGeometry()
 
     def _show_error(self, error) -> None:
         QMessageBox.warning(self, error.title, dialog_message(error))

@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.gui.models import DesktopProject, ProcessingPhase, ProcessingSnapshot, ProjectRun, RunKind, RunStatus
 from app.gui.services.desktop_services import DesktopServices
-from app.gui.services.error_mapping import map_error
+from app.gui.services.error_mapping import UserFacingError, map_error
 from app.gui.services.pipeline_facade import PreparedPipelineRun
 from app.gui.services.pipeline_runner import QtPipelineRunner
 from app.gui.services.url_source_service import URLSourceService
@@ -219,7 +219,23 @@ class ProjectViewModel(QObject):
         self.project_changed.emit(self.project)
 
     def render_selected(self, candidate_ids: list[str] | None = None) -> None:
-        if not self.project or self.active:
+        if not self.project:
+            self.error_occurred.emit(UserFacingError(
+                "Проект не открыт",
+                "Не удалось запустить финальный экспорт: проект не открыт.",
+                "Откройте проект, подтвердите черновики и повторите запуск.",
+                "render_selected called without an open project",
+                "project_not_open",
+            ))
+            return
+        if self.active:
+            self.error_occurred.emit(UserFacingError(
+                "Экспорт уже запускается",
+                "Нельзя начать второй тяжёлый экспорт, пока текущая обработка не завершена.",
+                "Дождитесь завершения текущего запуска или остановите его перед повторной попыткой.",
+                "render_selected called while another run is active",
+                "render_already_active",
+            ))
             return
         self._launching = True
         try:

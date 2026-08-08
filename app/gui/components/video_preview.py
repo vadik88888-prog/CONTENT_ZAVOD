@@ -15,7 +15,10 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLayout, QLabel, QPushButton,
 from app.utils import safe_name, stable_text_hash
 
 
-PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-v2"
+# v3 changes proxy writes to an atomic temporary path.  Keeping the cache key
+# versioned ensures that a non-empty partial v2 file is never treated as a
+# usable preview after an interrupted FFmpeg process.
+PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-v3"
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +29,7 @@ class _ProxyRequest:
     start_seconds: float
     end_seconds: float
     destination: Path
+    temporary: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,18 @@ def preview_proxy_path(
     return cache_directory / f"{safe_name(source_path.stem, 'source')}-{digest}.mp4"
 
 
+def preview_proxy_temporary_path(destination: Path) -> Path:
+    """Return the same-directory FFmpeg temporary output for one proxy.
+
+    FFmpeg infers the muxer from the final suffix, therefore ``.part`` must
+    precede ``.mp4`` rather than replace it.  The output is promoted only when
+    FFmpeg exits successfully, so a killed preview process cannot poison the
+    durable cache with a non-empty truncated MP4.
+    """
+
+    return destination.with_name(f"{destination.stem}.part{destination.suffix}")
+
+
 def preview_poster_path(cache_directory: Path, source_path: Path) -> Path:
     """Return a source-revision-bound first-frame image path."""
 
@@ -84,6 +100,9 @@ def preview_poster_path(cache_directory: Path, source_path: Path) -> Path:
 class VideoPreview(QFrame):
     """Bounded candidate preview with a compatible local-proxy fallback."""
 
+    MEDIA_LOAD_TIMEOUT_MS = 15_000
+    PROXY_RENDER_TIMEOUT_MS = 120_000
+
     preview_error = Signal(str)
     preview_ready = Signal(str)
 
@@ -94,6 +113,11 @@ class VideoPreview(QFrame):
         self._path: Path | None = None
         self._source_path: Path | None = None
         self._source_range_seconds: tuple[float, float] | None = None
+        # Source codec comes from the one-time project ffprobe metadata.  It
+        # lets the review click avoid waking Qt Multimedia's D3D11 decoder for
+        # AV1 sources which cannot be decoded in hardware on this Windows host.
+        self._source_codec: str | None = None
+        self._force_compatible_proxy: bool | None = None
         self._active_candidate_title: str | None = None
         self._range_start_ms: int | None = None
         self._range_end_ms: int | None = None
@@ -116,6 +140,7 @@ class VideoPreview(QFrame):
         self._selection_token = 0
         self._expected_source = QUrl()
         self._media_loading = False
+        self._media_load_token: int | None = None
         self._last_audible_volume = 100
         self._proxy_cache_directory = Path(tempfile.gettempdir()) / "content-factory-preview-proxies"
         self._active_proxy: _ProxyRequest | None = None
@@ -126,6 +151,10 @@ class VideoPreview(QFrame):
         self._proxy_process = QProcess(self)
         self._proxy_process.finished.connect(self._proxy_finished)
         self._proxy_process.errorOccurred.connect(self._proxy_process_error)
+        self._proxy_timeout_timer = QTimer(self)
+        self._proxy_timeout_timer.setSingleShot(True)
+        self._proxy_timeout_timer.timeout.connect(self._proxy_timed_out)
+        self._proxy_timed_out_request: _ProxyRequest | None = None
         self._poster_process = QProcess(self)
         self._poster_process.finished.connect(self._poster_finished)
         self._poster_process.errorOccurred.connect(self._poster_process_error)
@@ -145,6 +174,9 @@ class VideoPreview(QFrame):
         self.player.playbackStateChanged.connect(self._playback_state_changed)
         self.video.installEventFilter(self)
         self.video.videoSink().videoSizeChanged.connect(self._video_size_changed)
+        self._media_load_timer = QTimer(self)
+        self._media_load_timer.setSingleShot(True)
+        self._media_load_timer.timeout.connect(self._media_load_timed_out)
 
         layout = QVBoxLayout(self)
         # Do not let a loaded stream's native frame size become a hard
@@ -277,10 +309,12 @@ class VideoPreview(QFrame):
         # outer player must still be allowed to fit a normal desktop window.
         return QSize(0, 0)
 
-    def show_source(self, path: str | Path | None) -> None:
+    def show_source(self, path: str | Path | None, *, source_codec: str | None = None) -> None:
         """Show the original landscape source in a normal wide player."""
 
-        self.set_file(path, presentation="source", title="Исходное видео")
+        self.set_file(
+            path, presentation="source", title="Исходное видео", source_codec=source_codec,
+        )
 
     def show_draft(self, path: str | Path | None, candidate_title: str | None = None) -> None:
         """Show a draft in a phone-sized 9:16 player."""
@@ -295,12 +329,20 @@ class VideoPreview(QFrame):
         self.set_file(path, presentation="vertical", title=f"Готовый ролик{suffix}")
 
     def set_file(
-        self, path: str | Path | None, *, presentation: str = "auto", title: str | None = None,
+        self,
+        path: str | Path | None,
+        *,
+        presentation: str = "auto",
+        title: str | None = None,
+        source_codec: str | None = None,
     ) -> None:
         self._selection_token += 1
         self._cancel_proxy()
         self._cancel_poster()
+        self._stop_media_load_watchdog()
         self._source_range_seconds = None
+        self._source_codec = self._normalise_source_codec(source_codec)
+        self._force_compatible_proxy = None
         self._active_candidate_title = title
         self._range_start_ms = None
         self._range_end_ms = None
@@ -329,7 +371,21 @@ class VideoPreview(QFrame):
             self._reset_timeline()
             self._show_placeholder("Готовим первый кадр…")
             self._request_poster(self._path)
-            self._queue_source_load()
+            if self._requires_compatible_proxy():
+                # Never ask the Windows Qt/FFmpeg backend to initialise a
+                # full-size AV1 decoder when the one-time source probe has
+                # already classified it as a compatibility-only source.  A
+                # selected range will make a tiny H.264 proxy instead.
+                self._release_player_source()
+                self._show_placeholder(
+                    "Для AV1-исходника выберите момент: его короткий preview будет подготовлен отдельно."
+                )
+                self._show_status(
+                    "Исходник AV1 не открываем во встроенном плеере, чтобы не запускать неподдерживаемый декодер."
+                )
+                self._set_available(False)
+            else:
+                self._queue_source_load()
         else:
             self._clear_media()
         if self._path is None:
@@ -344,6 +400,8 @@ class VideoPreview(QFrame):
         autoplay: bool = True,
         cache_directory: Path | None = None,
         candidate_title: str | None = None,
+        source_codec: str | None = None,
+        force_compatible_proxy: bool | None = None,
     ) -> None:
         """Bind the player to one candidate's source interval.
 
@@ -357,8 +415,11 @@ class VideoPreview(QFrame):
         self._selection_token += 1
         self._cancel_proxy()
         self._cancel_poster()
+        self._stop_media_load_watchdog()
         self._source_range_seconds = (start, end)
         self._source_path = Path(path)
+        self._source_codec = self._normalise_source_codec(source_codec)
+        self._force_compatible_proxy = force_compatible_proxy
         self._set_presentation("source")
         self._active_candidate_title = candidate_title or "Выбранный кандидат"
         self.active_candidate.setText(
@@ -378,10 +439,16 @@ class VideoPreview(QFrame):
             return
         cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
         self._proxy_cache_directory = cache
-        # Do not run ffprobe here.  This method runs from a card click, and a
-        # synchronous probe can freeze the UI on a large or remote source.
-        # QMediaPlayer reports an unsupported source asynchronously; that path
-        # still creates the existing compatible short proxy when needed.
+        # Codec metadata was obtained once while the project source was
+        # registered.  Do not run ffprobe from this click path.  In
+        # particular, AV1 must bypass QMediaPlayer entirely on a host that
+        # cannot initialise its D3D11 AV1 decoder.
+        if self._requires_compatible_proxy():
+            self._request_proxy(
+                self._proxy_cache_directory,
+                "Для этого исходника сразу готовим совместимый preview.",
+            )
+            return
         self._activate_direct_source()
 
     def _activate_direct_source(self) -> None:
@@ -409,6 +476,7 @@ class VideoPreview(QFrame):
         if self._player_has_loaded_source(self._expected_source):
             self._range_requires_seek = True
             self._media_loading = False
+            self._stop_media_load_watchdog()
             self._set_available(True)
             self._activate_range_ready(self._selection_token)
             return
@@ -427,6 +495,8 @@ class VideoPreview(QFrame):
             return
         token = self._selection_token
         self._media_loading = True
+        self._media_load_token = token
+        self._media_load_timer.start(self.MEDIA_LOAD_TIMEOUT_MS)
         self._set_available(False)
         QTimer.singleShot(0, lambda value=token: self._load_selected_source(value))
 
@@ -440,6 +510,7 @@ class VideoPreview(QFrame):
         if self._range_start_ms is not None and self._player_has_loaded_source(source):
             self._range_requires_seek = True
             self._media_loading = False
+            self._stop_media_load_watchdog(token)
             self._set_available(True)
             self._activate_range_ready(token)
             return
@@ -497,6 +568,73 @@ class VideoPreview(QFrame):
             logger.info("media playback stopped before source switch")
             stop()
 
+    @staticmethod
+    def _normalise_source_codec(value: str | None) -> str | None:
+        codec = value.strip().casefold() if isinstance(value, str) else ""
+        return codec or None
+
+    def _requires_compatible_proxy(self) -> bool:
+        """Whether this source must not enter the Qt multimedia decoder.
+
+        ``force_compatible_proxy`` is intentionally an explicit integration
+        hook for a capability probe.  The safe default for an AV1 source is a
+        short local proxy: codec support in the external FFmpeg binary does
+        not guarantee matching D3D11 support in Qt's bundled backend.
+        """
+
+        if self._force_compatible_proxy is not None:
+            return bool(self._force_compatible_proxy)
+        return self._source_codec in {"av1", "av01"}
+
+    def _stop_media_load_watchdog(self, token: int | None = None) -> None:
+        if token is not None and token != self._media_load_token:
+            return
+        self._media_load_timer.stop()
+        self._media_load_token = None
+
+    def _media_load_timed_out(self) -> None:
+        """End a source handoff that produced neither ready nor error events."""
+
+        token = self._media_load_token
+        if (
+            token is None
+            or token != self._selection_token
+            or not self._media_loading
+        ):
+            return
+        self._media_load_token = None
+        self._media_loading = False
+        logger.warning("media source load timed out token=%s source=%s", token, self._path)
+        if self._source_path and self._source_range_seconds and not self._using_proxy:
+            self._request_proxy(
+                self._proxy_cache_directory,
+                "Исходный фрагмент не открылся вовремя; готовим совместимый preview.",
+            )
+            return
+        self._show_error(
+            "Не удалось подготовить preview вовремя. Выберите момент ещё раз или откройте журнал проекта."
+        )
+
+    def _release_player_source(self) -> None:
+        """Stop and detach the backend only for an error/fallback teardown.
+
+        Normal candidate switches intentionally keep their source attached to
+        avoid a Windows renderer stall.  An invalid source or a compatibility
+        fallback is different: retaining it can leave its decoder alive and
+        continue emitting stale callbacks after the UI has moved on.
+        """
+
+        self._expected_source = QUrl()
+        self._stop_current_playback()
+        clear_source = getattr(self.player, "setSource", None)
+        if callable(clear_source):
+            try:
+                clear_source(QUrl())
+            except RuntimeError:
+                # A closing Qt object can reject the final handoff; it is
+                # already being torn down and must not create a second error.
+                pass
+
     def _ensure_video_output(self) -> None:
         """Recover a detached output without rebinding a healthy live sink."""
 
@@ -531,8 +669,9 @@ class VideoPreview(QFrame):
         self._active_poster = request
         self._poster_process.setProgram(executable)
         self._poster_process.setArguments([
-            "-y", "-hide_banner", "-loglevel", "error", "-ss", "0.05", "-i", str(request.source_path),
-            "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "3", str(request.destination),
+            "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", "0.05",
+            "-i", str(request.source_path), "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "3",
+            str(request.destination),
         ])
         self._poster_process.start()
 
@@ -664,15 +803,17 @@ class VideoPreview(QFrame):
     def _request_proxy(self, cache_directory: Path, reason: str) -> None:
         assert self._source_path is not None and self._source_range_seconds is not None
         start, end = self._source_range_seconds
+        destination = preview_proxy_path(cache_directory, self._source_path, start, end)
         request = _ProxyRequest(
             token=self._selection_token,
             source_path=self._source_path,
             start_seconds=start,
             end_seconds=end,
-            destination=preview_proxy_path(cache_directory, self._source_path, start, end),
+            destination=destination,
+            temporary=preview_proxy_temporary_path(destination),
         )
-        self._expected_source = QUrl()
-        self._stop_current_playback()
+        self._stop_media_load_watchdog()
+        self._release_player_source()
         self._path = None
         self._media_loading = True
         self._using_proxy = True
@@ -700,27 +841,48 @@ class VideoPreview(QFrame):
             self._show_error("Не найден FFmpeg: совместимый предпросмотр создать нельзя.")
             return
         request.destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            request.temporary.unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning("could not remove stale preview temporary %s: %s", request.temporary, error)
         self._active_proxy = request
+        self._proxy_timed_out_request = None
         duration = max(0.05, request.end_seconds - request.start_seconds)
         self._proxy_process.setProgram(executable)
         self._proxy_process.setArguments([
             "-y", "-hide_banner", "-loglevel", "error",
             # Input seek avoids decoding the full source before a late PUBG
             # candidate.  Transcoding keeps FFmpeg's accurate-seek discard.
-            "-ss", f"{request.start_seconds:.3f}", "-i", str(request.source_path), "-t", f"{duration:.3f}",
+            # This is UI-only work, so do not let a 4K AV1 source consume all
+            # host cores while the production pipeline remains available.
+            "-threads", "2", "-ss", f"{request.start_seconds:.3f}", "-i", str(request.source_path),
+            "-t", f"{duration:.3f}",
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale=-2:480,fps=30,setsar=1", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-vf", "scale=-2:480,fps=30,setsar=1", "-c:v", "libx264", "-threads", "2",
+            "-preset", "ultrafast", "-crf", "28",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(request.destination),
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(request.temporary),
         ])
         self._proxy_process.start()
+        self._proxy_timeout_timer.start(self.PROXY_RENDER_TIMEOUT_MS)
 
     def _proxy_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         request = self._active_proxy
         if request is None:
             return
-        success = exit_code == 0 and self.usable_media_path(request.destination)
-        self._complete_proxy(request, success, self._ffmpeg_error_text())
+        self._proxy_timeout_timer.stop()
+        details = self._ffmpeg_error_text()
+        success = False
+        if exit_code == 0 and self.usable_media_path(request.temporary):
+            try:
+                request.temporary.replace(request.destination)
+                success = self.usable_media_path(request.destination)
+            except OSError as error:
+                details = f"Could not finalise compatible preview: {error}"
+        if self._proxy_timed_out_request is request:
+            success = False
+            details = details or "Compatible preview exceeded its time limit and was stopped."
+        self._complete_proxy(request, success, details)
 
     def _proxy_process_error(self, _error: QProcess.ProcessError) -> None:
         request = self._active_proxy
@@ -734,6 +896,13 @@ class VideoPreview(QFrame):
     def _complete_proxy(self, request: _ProxyRequest, success: bool, details: str) -> None:
         if self._active_proxy is not request:
             return
+        self._proxy_timeout_timer.stop()
+        if self._proxy_timed_out_request is request:
+            self._proxy_timed_out_request = None
+        try:
+            request.temporary.unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning("could not clean preview temporary %s: %s", request.temporary, error)
         self._active_proxy = None
         pending = self._pending_proxy
         self._pending_proxy = None
@@ -753,6 +922,20 @@ class VideoPreview(QFrame):
         self._show_error(
             "Предпросмотр недоступен: не удалось создать совместимую локальную копию. "
             "Проверьте исходное видео или откройте журнал проекта."
+        )
+
+    def _proxy_timed_out(self) -> None:
+        request = self._active_proxy
+        if request is None:
+            return
+        self._proxy_timed_out_request = request
+        logger.error("compatible preview timed out source=%s", request.source_path)
+        self._show_status("Создание совместимого preview заняло слишком много времени; останавливаем его.")
+        if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
+            self._proxy_process.kill()
+            return
+        self._complete_proxy(
+            request, False, "Compatible preview exceeded its time limit and was stopped.",
         )
 
     def _activate_proxy(self, request: _ProxyRequest) -> None:
@@ -794,6 +977,7 @@ class VideoPreview(QFrame):
             return
         if status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._media_loading = False
+            self._stop_media_load_watchdog()
             if self._source_path and self._source_range_seconds and not self._using_proxy:
                 self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не смог открыть исходный формат; создаём совместимый preview.")
             else:
@@ -801,6 +985,7 @@ class VideoPreview(QFrame):
             return
         if status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
             self._media_loading = False
+            self._stop_media_load_watchdog()
             self._set_available(True)
             if self._range_start_ms is None:
                 # Decode/present frame zero while the poster is still merely an
@@ -1045,6 +1230,7 @@ class VideoPreview(QFrame):
         if not self._is_current_player_source():
             return
         self._media_loading = False
+        self._stop_media_load_watchdog()
         logger.error("media error source=%s details=%s", self._path, self.player.errorString().strip())
         if self._source_path and self._source_range_seconds and not self._using_proxy:
             self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не поддержал исходный формат; создаём совместимый preview.")
@@ -1056,6 +1242,8 @@ class VideoPreview(QFrame):
 
     def _cancel_proxy(self) -> None:
         self._pending_proxy = None
+        self._proxy_timeout_timer.stop()
+        self._proxy_timed_out_request = None
         if self._active_proxy is not None and self._proxy_process.state() != QProcess.ProcessState.NotRunning:
             self._proxy_process.kill()
 
@@ -1065,8 +1253,8 @@ class VideoPreview(QFrame):
             self._poster_process.kill()
 
     def _clear_media(self) -> None:
-        self._expected_source = QUrl()
-        self._stop_current_playback()
+        self._stop_media_load_watchdog()
+        self._release_player_source()
         self._path = None
         self._media_loading = False
         self._range_media_ready = False
@@ -1092,8 +1280,8 @@ class VideoPreview(QFrame):
         self.preview_status.hide()
 
     def _show_error(self, message: str) -> None:
-        self._expected_source = QUrl()
-        self._stop_current_playback()
+        self._stop_media_load_watchdog()
+        self._release_player_source()
         self._path = None
         self._media_loading = False
         self._range_media_ready = False
@@ -1137,8 +1325,8 @@ class VideoPreview(QFrame):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.video.isFullScreen():
             self.video.setFullScreen(False)
-        self._expected_source = QUrl()
-        self._stop_current_playback()
+        self._stop_media_load_watchdog()
+        self._release_player_source()
         self._cancel_proxy()
         self._cancel_poster()
         super().closeEvent(event)

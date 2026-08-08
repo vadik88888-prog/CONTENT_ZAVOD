@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QBoxLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -79,6 +79,7 @@ class FinalResultsWorkspace(QWidget):
         self._thumbnail_size = (72, 128)
         self._responsive_profile: str | None = None
         self._body_layout_mode: str | None = None
+        self._bottom_actions_stacked: bool | None = None
         self._observed_window: QWidget | None = None
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
@@ -222,6 +223,8 @@ class FinalResultsWorkspace(QWidget):
         warning_layout.setContentsMargins(10, 10, 10, 10)
         warning_heading = QLabel("Готово с предупреждениями")
         warning_heading.setObjectName("warning")
+        warning_heading.setWordWrap(True)
+        warning_heading.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         warning_layout.addWidget(warning_heading)
         warning_scroll = QScrollArea()
         warning_scroll.setWidgetResizable(True)
@@ -234,6 +237,7 @@ class FinalResultsWorkspace(QWidget):
         self.warning_text = QLabel()
         self.warning_text.setWordWrap(True)
         self.warning_text.setObjectName("muted")
+        self.warning_text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         warning_host_layout.addWidget(self.warning_text)
         warning_host_layout.addStretch()
         warning_scroll.setWidget(warning_host)
@@ -324,13 +328,20 @@ class FinalResultsWorkspace(QWidget):
         compact = dense or width < 1260 or (0 < window_height <= 860)
         profile = "dense" if dense else "compact" if compact else "standard"
         body_mode = "stacked" if width < 760 else "two_row" if profile != "standard" else "columns"
-        if not force and profile == self._responsive_profile and body_mode == self._body_layout_mode:
+        bottom_actions_stacked = width < 620
+        if (
+            not force
+            and profile == self._responsive_profile
+            and body_mode == self._body_layout_mode
+            and bottom_actions_stacked == self._bottom_actions_stacked
+        ):
             return
         self._responsive_profile = profile
         self._body_layout_mode = body_mode
+        self._bottom_actions_stacked = bottom_actions_stacked
 
         if profile == "dense":
-            list_width = (185, 235)
+            list_width = (344, 362)
             info_width = (200, 250)
             frame_size = (172, 306)
             body_height = 920 if body_mode == "stacked" else 690
@@ -342,7 +353,7 @@ class FinalResultsWorkspace(QWidget):
             self.heading.setStyleSheet("font-size: 22px; font-weight: 700;")
             summary_value_style = "font-size: 17px; font-weight: 700;"
         elif profile == "compact":
-            list_width = (210, 270)
+            list_width = (344, 362)
             info_width = (220, 285)
             frame_size = (196, 348)
             body_height = 720
@@ -354,8 +365,11 @@ class FinalResultsWorkspace(QWidget):
             self.heading.setStyleSheet("font-size: 24px; font-weight: 700;")
             summary_value_style = "font-size: 19px; font-weight: 700;"
         else:
-            list_width = (270, 350)
-            info_width = (370, 420)
+            list_width = (352, 380)
+            # Keep the metadata grid's two readable columns inside its own
+            # viewport.  The old 420 px cap left a five-pixel hidden range at
+            # full-HD once the scroll frame and its vertical bar were present.
+            info_width = (425, 440)
             frame_size = (220, 392)
             body_height = 492
             thumbnail_size = (72, 128)
@@ -369,6 +383,12 @@ class FinalResultsWorkspace(QWidget):
         self._thumbnail_size = thumbnail_size
         self._root_layout.setSpacing(spacing)
         self._body_layout.setSpacing(spacing)
+        self._bottom_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if bottom_actions_stacked
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._bottom_layout.setSpacing(8 if bottom_actions_stacked else 6)
         self._place_body_panels(body_mode)
         self._stepper_layout.setContentsMargins(
             summary_margins[0], summary_margins[1] - 2,

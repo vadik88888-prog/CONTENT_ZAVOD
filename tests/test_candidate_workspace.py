@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton
 
 from app.gui.components import VideoPreview
 from app.gui.main_window import MainWindow
@@ -69,18 +69,23 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
     app = QApplication.instance() or QApplication([])
     services, project = _workspace(tmp_path)
+    project.source_metadata["video_codec"] = "av1"
+    services.projects.save(project)
     viewmodel = ProjectViewModel(services)
-    preview_ranges: list[tuple[Path, float, float, Path | None, str | None]] = []
+    preview_ranges: list[tuple[Path, float, float, Path | None, str | None, str | None]] = []
 
     def capture_preview_range(
         _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None, candidate_title=None,
+        source_codec=None,
     ) -> None:
         # The real set_range invalidates the source request before binding its
         # new range. Keep that lifecycle invariant in this lightweight UI
         # wiring stub as well.
         _preview._expected_source = QUrl()
         _preview.play_button.setEnabled(True)
-        preview_ranges.append((Path(path), float(start_seconds), float(end_seconds), cache_directory, candidate_title))
+        preview_ranges.append((
+            Path(path), float(start_seconds), float(end_seconds), cache_directory, candidate_title, source_codec,
+        ))
 
     monkeypatch.setattr(VideoPreview, "set_range", capture_preview_range)
     screen = ProjectScreen(viewmodel)
@@ -115,8 +120,8 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         QTest.mouseClick(second_preview, Qt.MouseButton.LeftButton)
         app.processEvents()
         assert preview_ranges == [
-            (project.source, 1.0, 18.0, project.directory / "preview-proxies", "Сильное начало"),
-            (project.source, 19.0, 29.0, project.directory / "preview-proxies", "Другой момент"),
+            (project.source, 1.0, 18.0, project.directory / "preview-proxies", "Сильное начало", "av1"),
+            (project.source, 19.0, 29.0, project.directory / "preview-proxies", "Другой момент", "av1"),
         ]
         assert screen._active_candidate_id and screen._active_candidate_id.endswith("other")
         assert screen._candidate_cards[screen._active_candidate_id].property("activeCandidate") is True
@@ -752,6 +757,118 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         app.processEvents()
 
 
+def test_final_export_cta_uses_approved_project_state_not_clicked_bool(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    candidate_id = "candidate-recommended"
+    draft_preview = tmp_path / "approved-preview.mp4"
+    draft_preview.write_bytes(b"preview")
+    draft_artifact = tmp_path / "approved-draft.json"
+    write_json(draft_artifact, {
+        "candidates": [{
+            "candidate_id": candidate_id,
+            "preview": {"output_file": str(draft_preview)},
+        }],
+    })
+    project.review_selected_candidate_ids = [candidate_id]
+    project.selected_candidate_ids = [candidate_id]
+    project.candidate_states[candidate_id] = "selected"
+    project.candidate_draft_statuses[candidate_id] = "ready"
+    project.candidate_approval_states[candidate_id] = "approved"
+    project.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+    project.status = ProjectStatus.REVIEWING_CANDIDATES
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    dispatches: list[list[str]] = []
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        viewmodel,
+        "render_selected",
+        lambda candidate_ids=None: dispatches.append(list(candidate_ids or [])),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        assert screen.production_button.isVisible() and screen.production_button.isEnabled()
+        QTest.mouseClick(screen.production_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert dispatches == [[candidate_id]]
+
+        # An accidental bool reaching the method is harmless as well: it
+        # still resolves the durable approved state, never ``dict.fromkeys``.
+        screen._confirm_production_render(True)  # type: ignore[arg-type]
+        assert dispatches == [[candidate_id], [candidate_id]]
+
+        screen.project.selected_candidate_ids = []
+        notices: list[str] = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda _parent, _title, message, *_args, **_kwargs: notices.append(message),
+        )
+        screen._confirm_production_render()
+        assert notices and "подтвердите" in notices[0].lower()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_final_export_viewmodel_reports_unavailable_dispatch(tmp_path: Path) -> None:
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    errors: list[object] = []
+    viewmodel.error_occurred.connect(errors.append)
+
+    viewmodel.render_selected()
+    assert getattr(errors[-1], "error_code") == "project_not_open"
+
+    viewmodel.project = project
+    viewmodel._launching = True
+    viewmodel.render_selected()
+    assert getattr(errors[-1], "error_code") == "render_already_active"
+
+
+def test_review_selection_limit_uses_only_persisted_clip_count(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(
+        viewmodel,
+        "setup_preflight",
+        lambda: (_ for _ in ()).throw(AssertionError("recommendation must not cap review selection")),
+    )
+
+    try:
+        project.settings.clip_count = "3"
+        assert screen._selection_limit(project) == 3
+        project.settings.clip_count = "5"
+        assert screen._selection_limit(project) == 5
+        project.settings.clip_count = "auto"
+        assert screen._selection_limit(project) == 5
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("width", "height", "compact"),
     # 760×480 is the desktop shell's logical minimum, covering 1280×720 at
@@ -785,6 +902,72 @@ def test_review_workspace_stacks_before_laptop_cards_can_overflow(
             assert screen.review_preview_panel.y() == screen.review_list_panel.y()
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
         assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    analysis["candidates"][0]["title"] = "Очень длинное название момента для проверки адаптивной карточки " * 12
+    analysis["candidates"][0]["reasons"] = ["Подробное объяснение выбора должно переноситься без скрытого горизонтального переполнения."]
+    write_json(analysis_path, analysis)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(VideoPreview, "set_range", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.resize(760, 480)
+        screen.show()
+        app.processEvents()
+
+        assert screen._header_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert screen._stepper_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert screen._processing_actions_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
+        assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        card = screen._candidate_cards["candidate-recommended"]
+        assert card.width() <= screen.review_list_scroll.viewport().width()
+        for button in card.findChildren(QPushButton):
+            assert button.width() >= button.minimumSizeHint().width()
+
+        preview = screen.findChild(QPushButton, "preview-candidate-candidate-recommended")
+        assert preview is not None
+        QTest.mouseClick(preview, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        boundary_buttons = [
+            button for button in screen.candidate_detail.findChildren(QPushButton)
+            if button.text().startswith(("Начало", "Конец"))
+        ]
+        assert len(boundary_buttons) == 8
+        assert all(button.width() >= button.minimumSizeHint().width() for button in boundary_buttons)
+        grids = screen.candidate_detail.findChildren(QGridLayout)
+        assert grids and grids[-1].columnCount() == 2
+        assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
+
+        # The same long card also fits the three-column Full HD review
+        # workspace; its normal action rail never forces a hidden scrollbar.
+        screen.resize(1920, 1080)
+        app.processEvents()
+        assert screen._header_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
+        assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        card = screen._candidate_cards["candidate-recommended"]
+        assert card.width() <= screen.review_list_scroll.viewport().width()
+        for button in card.findChildren(QPushButton):
+            assert button.width() >= button.minimumSizeHint().width()
     finally:
         screen.close()
         screen.deleteLater()

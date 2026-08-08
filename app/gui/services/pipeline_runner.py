@@ -13,6 +13,11 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 from app.gui.models.processing_state import STAGE_LABELS
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import PreparedPipelineRun
+from app.gui.services.windows_process_job import (
+    attach_windows_process_job,
+    close_windows_process_job,
+    terminate_windows_process_job,
+)
 from app.run_artifacts import find_run_artifact_metadata
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import utc_now
@@ -620,81 +625,36 @@ class QtPipelineRunner(QObject):
         )
 
     def _bind_process_tree(self) -> None:
-        """Put the CLI and its future ffmpeg children into one Windows job object."""
+        """Put the CLI and its future ffmpeg children into a close-kills-tree job."""
 
         if sys.platform != "win32" or not self._process_id:
             return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
-            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-            kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
-            kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            job = kernel32.CreateJobObjectW(None, None)
-            process = kernel32.OpenProcess(0x0100 | 0x0001, False, self._process_id)
-            if not job or not process:
-                error = ctypes.get_last_error()
-                if process:
-                    kernel32.CloseHandle(process)
-                if job:
-                    kernel32.CloseHandle(job)
-                self._record(f"Windows job object unavailable for PID {self._process_id}; error={error}.")
-                return
-            assigned = kernel32.AssignProcessToJobObject(job, process)
-            kernel32.CloseHandle(process)
-            if not assigned:
-                error = ctypes.get_last_error()
-                kernel32.CloseHandle(job)
-                self._record(f"Windows job object assignment failed for PID {self._process_id}; error={error}.")
-                return
-            self._job_handle = job
-            self._record(f"Windows job object attached to PID {self._process_id} for child-tree cleanup.")
-        except (AttributeError, OSError) as error:
-            self._record(f"Windows job object setup failed: {redact_secrets(error)}")
+        job, problem = attach_windows_process_job(self._process_id)
+        if job is None:
+            if problem:
+                self._record(redact_secrets(problem))
+            return
+        self._job_handle = job
+        self._record(
+            f"Windows job object attached to PID {self._process_id}; "
+            "child tree will be killed when its final GUI handle closes."
+        )
 
     def _terminate_process_job(self) -> bool:
         if sys.platform != "win32" or self._job_handle is None:
             return False
         try:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
-            kernel32.TerminateJobObject.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            terminated = bool(kernel32.TerminateJobObject(self._job_handle, 1))
-            error = ctypes.get_last_error() if not terminated else 0
+            terminated, error = terminate_windows_process_job(self._job_handle)
             self._record(f"Windows job tree termination requested; success={terminated}; error={error}.")
             return terminated
-        except (AttributeError, OSError) as error:
-            self._record(f"Windows job tree termination failed: {redact_secrets(error)}")
-            return False
         finally:
             self._release_process_job()
 
     def _release_process_job(self) -> None:
         if self._job_handle is None:
             return
-        try:
-            if sys.platform == "win32":
-                import ctypes
-                from ctypes import wintypes
-
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-                kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-                kernel32.CloseHandle.restype = wintypes.BOOL
-                kernel32.CloseHandle(self._job_handle)
-        finally:
-            self._job_handle = None
+        job, self._job_handle = self._job_handle, None
+        close_windows_process_job(job)
 
     def _finish_completed(self, code: int) -> None:
         if self._terminal_emitted:
