@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from app.ai import get_scorer, get_transformer, sanitize_api_error
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
@@ -1209,7 +1209,14 @@ class Pipeline:
         coverage_map = load_reference("coverage_map")
         clip_count_recommendation = load_reference("clip_count_recommendation")
         story_units = load_reference("story_units")
-        selected = self._apply_boundary_overrides(selected, metadata, transcript_features, scenes)
+        # A saved review override belongs to one candidate.  Do not let one
+        # stale/invalid edit discard the otherwise independent draft batch.
+        # Keep the original range for a rejected edit so the durable progress
+        # contract remains well-formed, then run transformation only for the
+        # candidates whose override is usable.
+        selected, boundary_failures = self._apply_boundary_overrides(
+            selected, metadata, transcript_features, scenes, tracker,
+        )
         self._write_draft_progress(
             output_directory=output_directory,
             analysis=analysis,
@@ -1219,10 +1226,36 @@ class Pipeline:
 
         tracker.start("analysis_handoff", analysis.analysis_fingerprint, cache_hit=True)
         tracker.finish("analysis_handoff")
+        transformable = [
+            item for item in selected if item.candidate.id not in boundary_failures
+        ]
         transformation = self._transform_selected(
-            tracker, source_data, metadata, selected, transcript, transcript_features,
+            tracker, source_data, metadata, transformable, transcript, transcript_features,
             audio_features, scenes, work_directory, output_directory,
         )
+        if boundary_failures:
+            # ``_finish_draft_preview`` owns the item-level draft report.  Give
+            # it an ordinary failed transformation outcome for every rejected
+            # boundary so it writes the same retryable record/progress shape as
+            # any other candidate failure.
+            by_candidate = {
+                str(item.get("candidate_id") or ""): item
+                for item in transformation.get("items", []) if isinstance(item, dict)
+            }
+            transformed_items: list[dict[str, Any]] = []
+            for item in selected:
+                candidate_id = item.candidate.id
+                if candidate_id in boundary_failures:
+                    transformed_items.append({
+                        "candidate_id": candidate_id,
+                        "status": "failed",
+                        "error": boundary_failures[candidate_id],
+                        "stage": f"boundary_override:{candidate_id}",
+                    })
+                elif candidate_id in by_candidate:
+                    transformed_items.append(by_candidate[candidate_id])
+            transformation = dict(transformation)
+            transformation["items"] = transformed_items
         self.warnings.extend(transformation.get("warnings", []))
         production = self._build_production_plans(
             tracker,
@@ -1256,23 +1289,47 @@ class Pipeline:
             output_directory=output_directory,
         )
     def _apply_boundary_overrides(
-        self, selected: list[Any], metadata: dict[str, Any], transcript_features: dict[str, Any], scenes: dict[str, Any],
-    ) -> list[Any]:
-        """Apply persisted review edits using cached boundary evidence only."""
+        self,
+        selected: list[Any],
+        metadata: dict[str, Any],
+        transcript_features: dict[str, Any],
+        scenes: dict[str, Any],
+        tracker: StageTracker,
+    ) -> tuple[list[Any], dict[str, str]]:
+        """Apply cached review edits without turning one invalid edit into a batch failure.
+
+        The returned selection keeps its original IDs/order.  An invalid
+        override deliberately leaves that item's original source range in
+        place; the caller excludes it from transformation and records a
+        candidate-owned failure, while every valid neighbour continues.
+        """
 
         if not self.candidate_boundary_overrides:
-            return selected
+            return selected, {}
         adjusted: list[Any] = []
+        failures: dict[str, str] = {}
         for scored in selected:
             candidate_id = scored.candidate.id
             override = self.candidate_boundary_overrides.get(candidate_id)
             if not override:
                 adjusted.append(scored)
                 continue
+            stage_name = f"boundary_override:{candidate_id}"
+
+            def reject(message: str) -> None:
+                tracker.start(stage_name, _hash({"candidate_id": candidate_id, "override": override}))
+                tracker.finish(stage_name, "failed", message)
+                failures[candidate_id] = message
+                # Keep the pre-edit source range in draft-progress.json.  A
+                # reversed/bounds-invalid override must never corrupt the
+                # recovery binding for the rest of this batch.
+                adjusted.append(scored)
+
             try:
                 start, end = float(override["start"]), float(override["end"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ClipEngineError(f"Boundary override is invalid for {candidate_id}.") from error
+            except (KeyError, TypeError, ValueError):
+                reject(f"Boundary override for {candidate_id} is invalid.")
+                continue
             validation = validate_boundary_override(
                 start, end,
                 source_duration=float(metadata["duration"]) if metadata.get("duration") is not None else None,
@@ -1282,9 +1339,11 @@ class Pipeline:
                 scenes=scenes,
             )
             if not validation["valid"]:
-                raise ClipEngineError(
-                    f"Boundary override for {candidate_id} needs correction: {' '.join(validation['errors'])}"
+                reject(
+                    f"Boundary override for {candidate_id} needs correction: "
+                    f"{' '.join(validation['errors'])}"
                 )
+                continue
             copy = scored_from_dict(scored.to_dict())
             copy.candidate.start = start
             copy.candidate.end = end
@@ -1302,7 +1361,7 @@ class Pipeline:
                 f"Boundary override {candidate_id}: {warning}" for warning in validation["warnings"]
             )
             adjusted.append(copy)
-        return adjusted
+        return adjusted, failures
 
     def _finish_draft_preview(
         self,
@@ -1359,9 +1418,11 @@ class Pipeline:
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
             }
             if transformation_item.get("status") not in {"completed", "fallback"}:
+                stage = str(transformation_item.get("stage") or f"transformation_result:{candidate_id}")
                 reviewed.append({
                     **base, "state": "draft_failed",
                     "error": str(transformation_item.get("error") or "Draft FinalScript was not created."),
+                    "stage": stage,
                 })
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
@@ -1369,9 +1430,11 @@ class Pipeline:
                 )
                 continue
             if plan_item.get("status") != "completed":
+                stage = str(plan_item.get("stage") or f"production_plan:{candidate_id}")
                 reviewed.append({
                     **base, "state": "draft_failed",
                     "error": str(plan_item.get("error") or plan_item.get("reason") or "Draft ProductionPlan was not created."),
+                    "stage": stage,
                 })
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
@@ -1389,7 +1452,12 @@ class Pipeline:
             except Exception as error:
                 safe = sanitize_api_error(error)
                 tracker.finish(f"draft_preview:{candidate_id}", "failed", safe)
-                reviewed.append({**base, "state": "draft_failed", "error": safe})
+                reviewed.append({
+                    **base,
+                    "state": "draft_failed",
+                    "error": safe,
+                    "stage": f"draft_preview:{candidate_id}",
+                })
                 self.warnings.append(f"Draft preview {candidate_id} failed: {safe}")
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
@@ -1420,6 +1488,12 @@ class Pipeline:
                 selected=selected, completed=reviewed, base_candidates=progress_candidates,
             )
         ready_count = sum(item.get("state") == "draft_ready" for item in reviewed)
+        failed_count = len(reviewed) - ready_count
+        if ready_count and failed_count:
+            self.warnings.append(
+                f"Draft preview partial success: {ready_count} of {len(reviewed)} selected candidates are ready; "
+                f"{failed_count} can be retried individually."
+            )
         artifact_status = "draft_ready" if ready_count == len(reviewed) and ready_count else "draft_partial"
         draft_fingerprint = _hash({
             "analysis": analysis.analysis_fingerprint,
@@ -1452,8 +1526,10 @@ class Pipeline:
             "message": "Draft previews are ready for user review." if ready_count else "No candidate draft could be assembled.",
             "draft_id": draft_id,
         }
+        terminal_status = str(terminal["status"])
+        terminal_message = str(terminal.get("message") or "")
         tracker.start("terminal")
-        tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)
+        tracker.finish("terminal", terminal_status, terminal_message if terminal_status == "failed" else None)
         report_path = output_directory / "report.json"
         tracker.start("report", _hash({"draft": draft_fingerprint, "terminal": terminal}))
         tracker.finish("report")
@@ -1469,7 +1545,15 @@ class Pipeline:
             content_transformation=transformation,
             production_plan=production,
             production_render={"enabled": False, "status": "skipped", "reason": "awaiting_user_review"},
-            candidate_flow={"draft_candidates": reviewed, "production_allowed": False},
+            candidate_flow={
+                "draft_candidates": reviewed,
+                "production_allowed": False,
+                "draft_summary": {
+                    "requested": len(reviewed),
+                    "ready": ready_count,
+                    "failed": failed_count,
+                },
+            },
             terminal=terminal,
             content_understanding={
                 "enabled": True, "profile": content_profile, "content_map": content_map,
@@ -1490,7 +1574,7 @@ class Pipeline:
         return PipelineResult(
             work_directory=work_directory, output_directory=output_directory, report_path=report_path,
             selected_clips=ready_count, output_files=preview_outputs, warnings=self.warnings,
-            terminal_status=terminal["status"], error_code=terminal.get("error_code"),
+            terminal_status=terminal_status, error_code=terminal.get("error_code"),
             analysis_path=self.analysis_artifact_path, analysis_id=analysis.analysis_id,
             draft_path=draft_path, draft_id=draft_id,
         )
@@ -1576,28 +1660,70 @@ class Pipeline:
         if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
             raise ClipEngineError("Approved candidate IDs must not contain duplicates.")
         by_id = {str(item.get("candidate_id") or ""): item for item in draft.candidates}
-        missing = [candidate_id for candidate_id in self.selected_candidate_ids if candidate_id not in by_id]
-        if missing:
-            raise ClipEngineError(f"Candidates are not present in the selected draft: {', '.join(missing)}.")
-        not_ready = [
-            candidate_id for candidate_id in self.selected_candidate_ids
-            if by_id[candidate_id].get("state") not in {"draft_ready", "selected"}
-        ]
-        if not_ready:
-            raise ClipEngineError(f"Production render requires draft_ready candidates: {', '.join(not_ready)}.")
+        requested_count = len(self.selected_candidate_ids)
         plans: list[dict[str, Any]] = []
+        plan_outcomes: list[dict[str, Any]] = []
+
+        def fail_approved_plan(
+            *, candidate_id: str, index: int, stage_name: str, reason: str, error: BaseException | str,
+        ) -> None:
+            safe = sanitize_api_error(error)
+            tracker.finish(stage_name, "failed", safe)
+            plan_outcomes.append({
+                "candidate_id": candidate_id,
+                "status": "failed",
+                "reason": reason,
+                "error": safe,
+                "stage": stage_name,
+                "requested_index": index,
+            })
+            self.errors.append(f"{stage_name}: {safe}")
+
         for index, candidate_id in enumerate(self.selected_candidate_ids, start=1):
-            record = by_id[candidate_id]
+            stage_name = f"approved_draft_plan:{candidate_id}"
+            tracker.start(stage_name, _hash({"draft": draft.draft_id, "candidate_id": candidate_id}), cache_hit=True)
+            record = by_id.get(candidate_id)
+            if not isinstance(record, dict):
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_draft_candidate_missing",
+                    error=f"Candidate is not present in the selected draft: {candidate_id}.",
+                )
+                continue
+            if record.get("state") not in {"draft_ready", "selected"}:
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_draft_not_ready",
+                    error=f"Production render requires a draft_ready candidate: {candidate_id}.",
+                )
+                continue
             plan = record.get("draft_production_plan")
             if not isinstance(plan, dict):
-                raise ClipEngineError(f"Draft ProductionPlan is missing for {candidate_id}.")
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_draft_plan_missing",
+                    error=f"Draft ProductionPlan is missing for {candidate_id}.",
+                )
+                continue
             try:
                 parsed = ProductionPlan.model_validate(plan)
             except Exception as error:
-                raise ClipEngineError(f"Draft ProductionPlan is invalid for {candidate_id}: {sanitize_api_error(error)}") from error
-            self._assert_draft_plan_identity(parsed, draft, analysis, source, candidate_id)
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_draft_plan_invalid",
+                    error=f"Draft ProductionPlan is invalid for {candidate_id}: {sanitize_api_error(error)}",
+                )
+                continue
+            try:
+                self._assert_draft_plan_identity(parsed, draft, analysis, source, candidate_id)
+            except ClipEngineError as error:
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_draft_plan_stale", error=error,
+                )
+                continue
             source_range = _plan_source_range(parsed)
-            plans.append({
+            outcome = {
                 "candidate_id": candidate_id,
                 "status": "completed",
                 "plan": parsed.model_dump(mode="json"),
@@ -1605,22 +1731,28 @@ class Pipeline:
                 "production_plan_id": parsed.plan_id,
                 "source_start_seconds": source_range[0] if source_range else None,
                 "source_end_seconds": source_range[1] if source_range else None,
-            })
-        first_plan = plans[0]["plan"]
-        timeline = first_plan["timeline"]
-        production = {
+            }
+            tracker.finish(stage_name)
+            plans.append(outcome)
+            plan_outcomes.append(outcome)
+        production: dict[str, Any] = {
             "enabled": True,
-            "status": "completed",
-            "items": plans,
-            "production_plan": first_plan,
-            "segments": first_plan["segments"],
-            "estimated_duration": timeline["estimated_duration_seconds"],
-            "dialogue_count": timeline["dialogue_count"],
-            "narration_count": timeline["narration_count"],
-            "pause_count": timeline["pause_count"],
-            "timeline_version": timeline["timeline_version"],
+            "status": "completed" if len(plans) == len(plan_outcomes) else "partial" if plans else "failed",
+            "items": plan_outcomes,
             "production_note": "Approved Draft ProductionPlan reused without analysis or draft reassembly.",
         }
+        if plans:
+            first_plan = plans[0]["plan"]
+            timeline = first_plan["timeline"]
+            production.update({
+                "production_plan": first_plan,
+                "segments": first_plan["segments"],
+                "estimated_duration": timeline["estimated_duration_seconds"],
+                "dialogue_count": timeline["dialogue_count"],
+                "narration_count": timeline["narration_count"],
+                "pause_count": timeline["pause_count"],
+                "timeline_version": timeline["timeline_version"],
+            })
         analysis_work = Path(analysis.work_directory).resolve()
         root_work = (self.root / "work").resolve()
         if not analysis_work.is_relative_to(root_work):
@@ -1697,7 +1829,7 @@ class Pipeline:
             final_scored, selected_ids, approved_transformation, production, production_render,
         )
         terminal = build_terminal_state(
-            len(plans), outputs, candidate_flow, delivery_required=True, quality_reports=quality_reports,
+            requested_count, outputs, candidate_flow, delivery_required=True, quality_reports=quality_reports,
         )
         tracker.start("terminal")
         tracker.finish("terminal", terminal["status"], terminal.get("message") if terminal["status"] == "failed" else None)
@@ -1709,7 +1841,7 @@ class Pipeline:
         tracker.start("report", _hash({"draft": draft.draft_id, "selected": self.selected_candidate_ids, "terminal": terminal}))
         tracker.finish("report")
         report = make_report(
-            report_path, source_data, metadata, self.config, tracker.data, len(plans), len(final_scored),
+            report_path, source_data, metadata, self.config, tracker.data, requested_count, len(final_scored),
             [str(path) for path in outputs], self.warnings, self.errors,
             candidate_data.get("ai", {}) if isinstance(candidate_data, dict) else {},
             gpu_used=transcript.get("runtime", {}).get("device") == "cuda", nvenc_used=False,
@@ -1741,7 +1873,7 @@ class Pipeline:
         )
         manifest = write_run_manifest(
             output_directory / "manifest.json", run_id=self.run_id, source=source_data,
-            started_at=self.started_at, requested_clip_count=len(plans), production_render=production_render,
+            started_at=self.started_at, requested_clip_count=requested_count, production_render=production_render,
             results=registry, run_directory=output_directory, project_id=self.project_id,
             content_understanding={
                 "analysis_id": analysis.analysis_id, "draft_id": draft.draft_id,
@@ -1754,7 +1886,7 @@ class Pipeline:
         write_json(report_path, report)
         return PipelineResult(
             work_directory=work_directory, output_directory=output_directory, report_path=report_path,
-            selected_clips=len(plans), output_files=outputs, warnings=self.warnings,
+            selected_clips=requested_count, output_files=outputs, warnings=self.warnings,
             terminal_status=terminal["status"], error_code=terminal.get("error_code"),
             analysis_id=analysis.analysis_id, draft_path=self.draft_artifact_path, draft_id=draft.draft_id,
         )
@@ -1823,7 +1955,11 @@ class Pipeline:
             work_directory = self.root / "work" / run_key
             old = read_json(work_directory / "source.json", {})
             old_path = Path(str(old.get("path", ""))) if old else None
-            source = Source(str(old["id"]), old_path, str(old["display_name"]), str(old["origin"]), bool(old.get("downloaded"))) if old and old_path.is_file() else url_source(url, work_directory / "download")
+            source = (
+                Source(str(old["id"]), old_path, str(old["display_name"]), str(old["origin"]), bool(old.get("downloaded")))
+                if old and old_path is not None and old_path.is_file()
+                else url_source(url, work_directory / "download")
+            )
         output_root = self.root / "output" / run_key
         output_directory = output_root / "runs" / self.run_id
         self.run_work_directory = work_directory / "runs" / self.run_id
@@ -1872,7 +2008,7 @@ class Pipeline:
     def _ai_rerank(self, candidates: list[Candidate], short_candidates: list[Candidate], transcript: dict[str, Any], path: Path) -> dict[str, Any]:
         if self.no_ai_rerank or not self.config.ai_reranking.enabled or self.config.virality.enabled:
             reason = "virality_code_owned" if self.config.virality.enabled else "disabled"
-            data = {"candidates": [item.to_dict() for item in local_rank(candidates)], "ai": _local_ai_usage("disabled"), "ai_reranking_used": False, "ai_fallback_used": False, "selection_mode": "local"}
+            data: dict[str, Any] = {"candidates": [item.to_dict() for item in local_rank(candidates)], "ai": _local_ai_usage("disabled"), "ai_reranking_used": False, "ai_fallback_used": False, "selection_mode": "local"}
             data["ai"]["reason"] = reason
             write_json(path, data)
             return data
@@ -2900,7 +3036,7 @@ class Pipeline:
 def _hash(value: Any) -> str:
     def default(item: Any) -> Any:
         if is_dataclass(item):
-            return asdict(item)
+            return asdict(cast(Any, item))
         return str(item)
     return stable_text_hash(json.dumps(value, sort_keys=True, ensure_ascii=False, default=default))
 
@@ -2972,6 +3108,8 @@ def _outcome_source_range(outcome: dict[str, Any]) -> tuple[float, float] | None
         (outcome.get("source_start_seconds"), outcome.get("source_end_seconds")),
     )
     for start, end in candidates:
+        if start is None or end is None:
+            continue
         try:
             start_value, end_value = float(start), float(end)
         except (TypeError, ValueError):
@@ -3096,12 +3234,15 @@ def build_candidate_flow(
             continue
         plan_item = production_items.get(candidate_id)
         if not plan_item or str(plan_item.get("status") or "failed") != "completed":
-            items.append({
+            item = {
                 "candidate_id": candidate_id,
                 "outcome": "failed",
                 "reason": "production_plan_failed",
                 "message": _outcome_detail(plan_item) if plan_item else "ProductionPlan не был создан.",
-            })
+            }
+            if isinstance(plan_item, dict) and plan_item.get("stage"):
+                item["stage"] = str(plan_item["stage"])
+            items.append(item)
             continue
         rendered = render_items.get(candidate_id)
         if rendered and str(rendered.get("status") or "failed") in {"completed", "warning"}:

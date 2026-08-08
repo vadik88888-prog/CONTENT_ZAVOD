@@ -182,6 +182,18 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def set_active_preview_candidate(self, candidate_id: str | None) -> None:
+        """Persist the card whose source/draft preview is currently in focus."""
+
+        if not self.project or self.active:
+            return
+        try:
+            self.project = self.services.set_active_preview_candidate(self.project, candidate_id)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return
+        self.project_changed.emit(self.project)
+
     def adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
         if not self.project or self.active:
             return
@@ -206,12 +218,12 @@ class ProjectViewModel(QObject):
             return
         self.project_changed.emit(self.project)
 
-    def render_selected(self) -> None:
+    def render_selected(self, candidate_ids: list[str] | None = None) -> None:
         if not self.project or self.active:
             return
         self._launching = True
         try:
-            self.run, self.prepared = self.services.prepare_selected_render(self.project)
+            self.run, self.prepared = self.services.prepare_selected_render(self.project, candidate_ids)
             self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Создаём итоговые ролики")
             self.project_changed.emit(self.project)
             self.runs_changed.emit(self.services.runs_for(self.project))
@@ -414,6 +426,15 @@ class ProjectViewModel(QObject):
                     "Ролики созданы, но не удалось сохранить служебное состояние",
                     recovered,
                 )
+                return
+            reported = self.services.recover_reported_failure(self.project, self.run, self.prepared)
+            if reported:
+                self._finish(
+                    ProcessingPhase.FAILED,
+                    reported.error_summary or "Не удалось завершить выбранный этап",
+                    reported,
+                )
+                self.error_occurred.emit(map_error(reported.error_summary or message))
                 return
         run = self.services.finish_failure(self.project, self.run, message, self.runner.failure_details or message)
         final_message = (

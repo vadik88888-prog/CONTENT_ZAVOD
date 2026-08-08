@@ -44,11 +44,15 @@ class CandidateThumbnailLoader(QObject):
 
     thumbnail_ready = Signal(str, str)
     thumbnail_unavailable = Signal(str)
+    # Keep the original one-argument signal for the final-results workspace,
+    # while review cards use the destination to reject late work from an old
+    # analysis/boundary revision that happens to reuse a candidate id.
+    thumbnail_unavailable_with_path = Signal(str, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._queue: deque[CandidateThumbnailRequest] = deque()
-        self._requested: set[str] = set()
+        self._requested: set[Path] = set()
         self._active: CandidateThumbnailRequest | None = None
         self._process = QProcess(self)
         self._process.finished.connect(self._finished)
@@ -62,8 +66,9 @@ class CandidateThumbnailLoader(QObject):
         if destination.is_file() and destination.stat().st_size > 0:
             QTimer.singleShot(0, lambda cid=candidate_id, path=destination: self.thumbnail_ready.emit(cid, str(path)))
             return destination
-        if candidate_id not in self._requested:
-            self._requested.add(candidate_id)
+        request_key = self._request_key(destination)
+        if request_key not in self._requested:
+            self._requested.add(request_key)
             self._queue.append(CandidateThumbnailRequest(
                 candidate_id=candidate_id,
                 source_path=source_path,
@@ -73,13 +78,27 @@ class CandidateThumbnailLoader(QObject):
             self._start_next()
         return destination
 
+    @staticmethod
+    def _request_key(destination: Path) -> Path:
+        """Use the generated asset identity, not a project-local candidate id.
+
+        Candidate ids can recur after a new analysis and a boundary adjustment
+        intentionally produces a new timestamp.  De-duplicating by id dropped
+        that second request and left the current card waiting forever.
+        """
+
+        return destination.resolve(strict=False)
+
     def _start_next(self) -> None:
         if self._active is not None or not self._queue:
             return
         self._active = self._queue.popleft()
         executable = shutil.which("ffmpeg")
         if not executable:
-            self._complete_active(False)
+            # ``request`` returns the destination to the card immediately;
+            # complete on the next event-loop turn so the card has registered
+            # that destination before the unavailable signal is delivered.
+            QTimer.singleShot(0, lambda: self._complete_active(False))
             return
         request = self._active
         request.destination.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +131,10 @@ class CandidateThumbnailLoader(QObject):
         if request is None:
             return
         self._active = None
+        self._requested.discard(self._request_key(request.destination))
         if success:
             self.thumbnail_ready.emit(request.candidate_id, str(request.destination))
         else:
             self.thumbnail_unavailable.emit(request.candidate_id)
+            self.thumbnail_unavailable_with_path.emit(request.candidate_id, str(request.destination))
         self._start_next()

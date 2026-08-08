@@ -101,6 +101,54 @@ def test_engine_publishes_absolute_paths_in_index_and_state(tmp_path: Path) -> N
     assert state["run"]["paths"] == metadata["paths"]
 
 
+def test_new_desktop_run_does_not_scan_unrelated_legacy_reports(tmp_path: Path, monkeypatch) -> None:
+    """Pending indexed runs must stay cheap while the child engine starts."""
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    facade = PipelineFacade(tmp_path)
+    prepared = facade._pending_prepared(
+        [], source, tmp_path / "runtime.yaml", "fresh-run", "fresh-project", {},
+    )
+
+    def unexpected_legacy_scan(*_args, **_kwargs):
+        raise AssertionError("a fresh indexed run must not scan old reports")
+
+    monkeypatch.setattr("app.run_artifacts._iter_run_files", unexpected_legacy_scan)
+
+    assert prepared.allow_legacy_artifact_scan is False
+    assert facade.resolve_engine_paths(prepared) is prepared
+
+
+def test_legacy_lookup_still_scans_for_a_report_by_identity(tmp_path: Path, monkeypatch) -> None:
+    """Old desktop records retain the report/analysis fallback when opted in."""
+
+    run_id = "legacy-run"
+    project_id = "legacy-project"
+    output = tmp_path / "output" / "old-layout" / "runs" / run_id
+    report = output / "report.json"
+    write_json(report, {
+        "run": {"run_id": run_id, "project_id": project_id, "run_directory": str(output)},
+    })
+    calls: list[Path] = []
+
+    from app.run_artifacts import _iter_run_files as original_iter_run_files
+
+    def observed_iter_run_files(root: Path, requested_run_id: str, name: str):
+        calls.append(root)
+        return original_iter_run_files(root, requested_run_id, name)
+
+    monkeypatch.setattr("app.run_artifacts._iter_run_files", observed_iter_run_files)
+
+    metadata = find_run_artifact_metadata(
+        tmp_path, run_id=run_id, project_id=project_id, allow_legacy_scan=True,
+    )
+
+    assert metadata is not None
+    assert metadata["paths"]["report_path"] == str(report.resolve())
+    assert calls
+
+
 def test_recovery_restores_ready_legacy_analysis_without_relaunching(tmp_path: Path) -> None:
     source = tmp_path / "ролик с URL title и «кавычками».mp4"
     source.write_bytes(b"source")

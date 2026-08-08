@@ -146,12 +146,23 @@ class DesktopProject:
     candidate_draft_artifacts: dict[str, str] = field(default_factory=dict)
     candidate_states: dict[str, str] = field(default_factory=dict)
     candidate_errors: dict[str, str] = field(default_factory=dict)
+    # The compact ``candidate_states`` field above remains the compatibility
+    # projection used by older screens and project files.  Keep the three
+    # independently recoverable user-facing states as well: a draft can fail
+    # without changing an approval decision, and an export can fail without
+    # invalidating its ready draft.
+    candidate_draft_statuses: dict[str, str] = field(default_factory=dict)
+    candidate_approval_states: dict[str, str] = field(default_factory=dict)
+    candidate_export_statuses: dict[str, str] = field(default_factory=dict)
     # Explicit pre-production choice.  It survives restart and is distinct
     # from selected_candidate_ids, which means a user has approved a ready
     # draft for the expensive production render.
     review_selected_candidate_ids: list[str] = field(default_factory=list)
     selected_candidate_ids: list[str] = field(default_factory=list)
     candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Selection is part of the review workspace rather than a widget-local
+    # detail.  Persist it so a reopened project restores the same preview.
+    active_preview_candidate_id: str | None = None
     # The result viewer is part of the durable project workspace.  Store the
     # stable result identity rather than a list index or filename, so a
     # reopened project returns to the exact output the person last reviewed.
@@ -174,6 +185,15 @@ class DesktopProject:
         }
         if any(not key or value not in supported_candidate_states for key, value in self.candidate_states.items()):
             raise ValueError("Unsupported candidate review state.")
+        supported_draft_statuses = {"pending", "running", "ready", "failed"}
+        supported_approval_states = {"pending", "approved", "rejected"}
+        supported_export_statuses = {"pending", "running", "ready", "failed"}
+        if any(not key or value not in supported_draft_statuses for key, value in self.candidate_draft_statuses.items()):
+            raise ValueError("Unsupported candidate draft status.")
+        if any(not key or value not in supported_approval_states for key, value in self.candidate_approval_states.items()):
+            raise ValueError("Unsupported candidate approval status.")
+        if any(not key or value not in supported_export_statuses for key, value in self.candidate_export_statuses.items()):
+            raise ValueError("Unsupported candidate export status.")
         if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
             raise ValueError("Selected candidate ids must be unique.")
         if len(self.review_selected_candidate_ids) != len(set(self.review_selected_candidate_ids)) or any(
@@ -188,6 +208,8 @@ class DesktopProject:
             raise ValueError("Candidate error is invalid.")
         if self.last_final_result_id is not None and not self.last_final_result_id.strip():
             raise ValueError("Last final result identity is invalid.")
+        if self.active_preview_candidate_id is not None and not self.active_preview_candidate_id.strip():
+            raise ValueError("Active preview candidate identity is invalid.")
         for candidate_id, override in self.candidate_boundary_overrides.items():
             if not candidate_id or not isinstance(override, dict):
                 raise ValueError("Candidate boundary override is invalid.")
@@ -241,6 +263,37 @@ class DesktopProject:
         review_selected_candidate_ids = [str(item) for item in value.get("review_selected_candidate_ids", [])]
         if not review_selected_candidate_ids:
             review_selected_candidate_ids = list(selected_candidate_ids)
+        draft_statuses = {
+            str(key): str(item)
+            for key, item in dict(value.get("candidate_draft_statuses") or {}).items()
+        }
+        approval_states = {
+            str(key): str(item)
+            for key, item in dict(value.get("candidate_approval_states") or {}).items()
+        }
+        export_statuses = {
+            str(key): str(item)
+            for key, item in dict(value.get("candidate_export_statuses") or {}).items()
+        }
+        # Existing schema-v3 projects used one combined review state.  Infer
+        # the independent axes without mutating their source representation.
+        for candidate_id, state in candidate_states.items():
+            draft_statuses.setdefault(
+                candidate_id,
+                "running" if state == "draft_planning" else
+                "failed" if state == "draft_failed" else
+                "ready" if state in {"draft_ready", "selected", "production_rendering", "rendered"} else
+                "pending",
+            )
+            approval_states.setdefault(
+                candidate_id,
+                "approved" if state in {"selected", "production_rendering", "rendered"} else "pending",
+            )
+            export_statuses.setdefault(
+                candidate_id,
+                "running" if state == "production_rendering" else
+                "ready" if state == "rendered" else "pending",
+            )
         project = cls(
             project_id=str(value["project_id"]),
             name=str(value["name"]),
@@ -265,6 +318,9 @@ class DesktopProject:
             candidate_draft_artifacts=candidate_draft_artifacts,
             candidate_states=candidate_states,
             candidate_errors={str(key): str(item) for key, item in dict(value.get("candidate_errors") or {}).items()},
+            candidate_draft_statuses=draft_statuses,
+            candidate_approval_states=approval_states,
+            candidate_export_statuses=export_statuses,
             review_selected_candidate_ids=review_selected_candidate_ids,
             selected_candidate_ids=selected_candidate_ids,
             candidate_boundary_overrides={
@@ -273,6 +329,10 @@ class DesktopProject:
             },
             last_final_result_id=(
                 str(value["last_final_result_id"]) if value.get("last_final_result_id") else None
+            ),
+            active_preview_candidate_id=(
+                str(value["active_preview_candidate_id"])
+                if value.get("active_preview_candidate_id") else None
             ),
             # Older projects had only ``source_path``.  They are migrated in memory
             # to an explicit local source and written as v3 on the next save.

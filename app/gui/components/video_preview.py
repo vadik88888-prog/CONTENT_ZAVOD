@@ -99,6 +99,16 @@ class VideoPreview(QFrame):
         self._range_end_ms: int | None = None
         self._range_autoplay = False
         self._range_media_ready = False
+        # QMediaPlayer callbacks only contain a source URL.  Two candidate
+        # ranges from the same source therefore need an additional binding
+        # token and a confirmed seek position before they may update the UI.
+        self._range_ready_token: int | None = None
+        self._range_seek_pending_token: int | None = None
+        self._range_seek_target_ms: int | None = None
+        # A freshly loaded source naturally starts at frame zero.  Retargeting
+        # an already-loaded source does not, so only the latter needs an
+        # explicit zero seek when the next candidate begins at 0:00.
+        self._range_requires_seek = False
         self._media_ready = False
         self._using_proxy = False
         self._presentation = "source"
@@ -296,6 +306,10 @@ class VideoPreview(QFrame):
         self._range_end_ms = None
         self._range_autoplay = False
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
+        self._range_requires_seek = False
         self._media_ready = False
         self._using_proxy = False
         candidate = Path(path) if path else None
@@ -353,6 +367,9 @@ class VideoPreview(QFrame):
         self.active_candidate.show()
         self._range_autoplay = autoplay
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
         self._media_ready = False
         self._clear_status()
         if not self.usable_media_path(self._source_path):
@@ -375,14 +392,27 @@ class VideoPreview(QFrame):
         self._range_start_ms = int(round(start * 1000))
         self._range_end_ms = int(round(end * 1000))
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
+        self._range_requires_seek = False
         self._media_ready = False
         self._expected_source = QUrl.fromLocalFile(str(self._path))
         self._stop_current_playback()
         self.poster.hide()
         self.video.show()
         self._show_placeholder("Загружаем исходный фрагмент…")
-        self._queue_source_load()
         self._show_status("Загружаем исходный фрагмент…")
+        # Re-selecting a different interval from the same source must not
+        # depend on QMediaPlayer emitting a second LoadedMedia notification.
+        # Windows often treats ``setSource(the_same_url)`` as a no-op.
+        if self._player_has_loaded_source(self._expected_source):
+            self._range_requires_seek = True
+            self._media_loading = False
+            self._set_available(True)
+            self._activate_range_ready(self._selection_token)
+            return
+        self._queue_source_load()
 
     def _queue_source_load(self) -> None:
         """Schedule the inexpensive Qt source handoff after the card repaint.
@@ -407,11 +437,58 @@ class VideoPreview(QFrame):
         source = QUrl.fromLocalFile(str(self._path))
         if source != self._expected_source:
             return
+        if self._range_start_ms is not None and self._player_has_loaded_source(source):
+            self._range_requires_seek = True
+            self._media_loading = False
+            self._set_available(True)
+            self._activate_range_ready(token)
+            return
         logger.info("media source load requested token=%s source=%s", token, self._path)
         # Do not set an empty source between selections. With the Windows Qt
         # multimedia backend that forces renderer teardown and was the source
         # of multi-second UI stalls on rapid card switches.
         self.player.setSource(source)
+
+    def _player_has_loaded_source(self, source: QUrl) -> bool:
+        """Whether the live player can be retargeted without another load."""
+
+        source_getter = getattr(self.player, "source", None)
+        status_getter = getattr(self.player, "mediaStatus", None)
+        if not callable(source_getter) or not callable(status_getter) or source_getter() != source:
+            return False
+        return status_getter() in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+            # EndOfMedia retains the same decoded source.  Reuse it for a
+            # new range selection instead of asking the Windows backend to
+            # set the same URL again (which it may silently ignore).
+            QMediaPlayer.MediaStatus.EndOfMedia,
+        }
+
+    def _activate_range_ready(self, token: int) -> None:
+        if token != self._selection_token or self._range_start_ms is None:
+            return
+        if self._range_ready_token == token and self._range_media_ready:
+            return
+        # The Qt backend updates QVideoWidget's native size after the source
+        # is loaded. Reapply the bounded presentation afterwards so a 1440p
+        # landscape source cannot widen the review page.
+        self._set_presentation(self._presentation)
+        self._range_media_ready = True
+        self._range_ready_token = token
+        if self._range_autoplay:
+            self._range_autoplay = False
+            self._start_range_playback()
+        elif self._range_start_ms > 0 or self._range_requires_seek:
+            self._seek_range_start(token)
+
+    def _seek_range_start(self, token: int) -> None:
+        if token != self._selection_token or self._range_start_ms is None:
+            return
+        target = self._range_start_ms
+        self._range_seek_pending_token = token
+        self._range_seek_target_ms = target
+        self.player.setPosition(target)
 
     def _stop_current_playback(self) -> None:
         state_getter = getattr(self.player, "playbackState", None)
@@ -668,9 +745,14 @@ class VideoPreview(QFrame):
         if success:
             self._activate_proxy(request)
             return
+        if details:
+            # FFmpeg's stderr can contain codec internals and local paths.  It
+            # is useful in the application log, but is not recovery guidance
+            # for the person reviewing a moment.
+            logger.error("compatible preview proxy failed: %s", details[-1200:])
         self._show_error(
-            "Предпросмотр недоступен: не удалось создать совместимую H.264/AAC копию. "
-            + (details[-300:] if details else "")
+            "Предпросмотр недоступен: не удалось создать совместимую локальную копию. "
+            "Проверьте исходное видео или откройте журнал проекта."
         )
 
     def _activate_proxy(self, request: _ProxyRequest) -> None:
@@ -681,6 +763,10 @@ class VideoPreview(QFrame):
         self._range_start_ms = 0
         self._range_end_ms = int(round((request.end_seconds - request.start_seconds) * 1000))
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
+        self._range_requires_seek = False
         self._media_ready = False
         self._expected_source = QUrl.fromLocalFile(str(self._path))
         self._stop_current_playback()
@@ -728,20 +814,23 @@ class VideoPreview(QFrame):
                 return
             if self._range_media_ready:
                 return
-            # The Qt backend updates QVideoWidget's native size after the
-            # source is loaded.  Reapply the bounded presentation afterwards
-            # so a 1440p landscape source cannot widen the review page.
-            self._set_presentation(self._presentation)
-            self._range_media_ready = True
-            if self._range_start_ms > 0:
-                self.player.setPosition(self._range_start_ms)
-            if self._range_autoplay:
-                self._range_autoplay = False
-                self._start_range_playback()
+            self._activate_range_ready(self._selection_token)
 
     def _position_changed(self, position: int) -> None:
         if not self._is_current_player_source():
             return
+        if self._range_start_ms is not None:
+            if not self._range_media_ready or self._range_ready_token != self._selection_token:
+                return
+            if self._range_seek_pending_token == self._selection_token:
+                target = self._range_seek_target_ms
+                # A notification queued by the previous interval carries the
+                # same URL.  Ignore it until the player acknowledges the
+                # current interval's explicit seek.
+                if target is not None and abs(position - target) > 500:
+                    return
+                self._range_seek_pending_token = None
+                self._range_seek_target_ms = None
         self._update_timeline(position)
         if not self._range_media_ready or self._range_end_ms is None:
             return
@@ -756,6 +845,15 @@ class VideoPreview(QFrame):
 
     def _duration_changed(self, _duration: int) -> None:
         if not self._is_current_player_source():
+            return
+        if (
+            self._range_start_ms is not None
+            and (
+                not self._range_media_ready
+                or self._range_ready_token != self._selection_token
+                or self._range_seek_pending_token == self._selection_token
+            )
+        ):
             return
         self._update_timeline(self.player.position())
 
@@ -792,6 +890,9 @@ class VideoPreview(QFrame):
         else:
             target = relative
         self._show_video()
+        if self._range_start_ms is not None:
+            self._range_seek_pending_token = self._selection_token
+            self._range_seek_target_ms = target
         self.player.setPosition(target)
 
     def _timeline_duration(self) -> int:
@@ -848,9 +949,8 @@ class VideoPreview(QFrame):
     def _start_range_playback(self) -> None:
         if self._range_start_ms is None:
             return
-        if self._range_start_ms > 0:
-            self.player.setPosition(self._range_start_ms)
         token = self._selection_token
+        self._seek_range_start(token)
         QTimer.singleShot(0, lambda value=token: self._play_if_current(value))
         self._show_status("Воспроизведение выбранного фрагмента…")
 
@@ -949,8 +1049,10 @@ class VideoPreview(QFrame):
         if self._source_path and self._source_range_seconds and not self._using_proxy:
             self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не поддержал исходный формат; создаём совместимый preview.")
             return
-        details = self.player.errorString().strip()
-        self._show_error("Встроенное воспроизведение недоступно." + (f" {details}" if details else ""))
+        self._show_error(
+            "Встроенное воспроизведение недоступно. "
+            "Попробуйте открыть видео во внешнем проигрывателе или откройте журнал проекта."
+        )
 
     def _cancel_proxy(self) -> None:
         self._pending_proxy = None
@@ -968,6 +1070,9 @@ class VideoPreview(QFrame):
         self._path = None
         self._media_loading = False
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
         self._media_ready = False
         self.poster.hide()
         self.video.show()
@@ -992,6 +1097,9 @@ class VideoPreview(QFrame):
         self._path = None
         self._media_loading = False
         self._range_media_ready = False
+        self._range_ready_token = None
+        self._range_seek_pending_token = None
+        self._range_seek_target_ms = None
         self._media_ready = False
         self.poster.hide()
         self.placeholder.setText(message)

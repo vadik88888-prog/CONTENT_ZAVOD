@@ -210,21 +210,104 @@ class DesktopServices:
         if reused_stages is not None:
             project.setup_state.reused_stages = list(reused_stages)
 
+    @staticmethod
+    def _ensure_candidate_lifecycle(project: DesktopProject, candidate_id: str) -> None:
+        """Populate independent lifecycle axes for legacy combined states."""
+
+        state = project.candidate_states.get(candidate_id, "analyzed")
+        project.candidate_draft_statuses.setdefault(
+            candidate_id,
+            "running" if state == "draft_planning" else
+            "failed" if state == "draft_failed" else
+            "ready" if state in {"draft_ready", "selected", "production_rendering", "rendered"} else "pending",
+        )
+        project.candidate_approval_states.setdefault(
+            candidate_id,
+            "approved" if state in {"selected", "production_rendering", "rendered"} else "pending",
+        )
+        project.candidate_export_statuses.setdefault(
+            candidate_id,
+            "running" if state == "production_rendering" else
+            "ready" if state == "rendered" else "pending",
+        )
+
+    @classmethod
+    def _set_candidate_lifecycle(
+        cls,
+        project: DesktopProject,
+        candidate_id: str,
+        *,
+        draft: str | None = None,
+        approval: str | None = None,
+        export: str | None = None,
+    ) -> None:
+        """Update an item atomically and keep the old screen projection honest."""
+
+        cls._ensure_candidate_lifecycle(project, candidate_id)
+        if draft is not None:
+            project.candidate_draft_statuses[candidate_id] = draft
+        if approval is not None:
+            project.candidate_approval_states[candidate_id] = approval
+        if export is not None:
+            project.candidate_export_statuses[candidate_id] = export
+        draft_state = project.candidate_draft_statuses[candidate_id]
+        approval_state = project.candidate_approval_states[candidate_id]
+        export_state = project.candidate_export_statuses[candidate_id]
+        if draft_state == "failed":
+            project.candidate_states[candidate_id] = "draft_failed"
+        elif export_state == "ready":
+            project.candidate_states[candidate_id] = "rendered"
+        elif export_state == "running":
+            project.candidate_states[candidate_id] = "production_rendering"
+        elif draft_state == "running":
+            project.candidate_states[candidate_id] = "draft_planning"
+        elif draft_state == "ready" and approval_state == "approved":
+            project.candidate_states[candidate_id] = "selected"
+        elif draft_state == "ready":
+            project.candidate_states[candidate_id] = "draft_ready"
+        else:
+            project.candidate_states[candidate_id] = "analyzed"
+
+    @staticmethod
+    def _review_selection_limit(project: DesktopProject) -> int:
+        requested = project.settings.processing_intent().requested_clip_count
+        # Auto mode can resolve to up to five clips in the supported creator
+        # flow.  Do not silently impose the former hard-coded three-item cap.
+        return requested if requested is not None else 5
+
+    def set_active_preview_candidate(
+        self, project: DesktopProject, candidate_id: str | None,
+    ) -> DesktopProject:
+        """Persist a deliberate review-card selection for stable reopen/navigation."""
+
+        value = str(candidate_id).strip() if candidate_id else None
+        if value is not None and value not in project.candidate_states:
+            raise InputValidationError("Выбранный фрагмент отсутствует в сохранённом анализе.")
+        project.active_preview_candidate_id = value
+        self.projects.save(project)
+        return project
+
     def set_review_selection(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
         """Persist the user's candidate choice before any draft or render starts."""
 
         unique = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
-        if len(unique) > 3:
-            raise InputValidationError("Для одного прохода выберите от одного до трёх моментов.")
+        selection_limit = self._review_selection_limit(project)
+        if len(unique) > selection_limit:
+            raise InputValidationError(
+                f"Для одного прохода выберите не больше {selection_limit} моментов."
+            )
         unknown = [item for item in unique if item not in project.candidate_states]
         if unknown:
             raise InputValidationError("Один из выбранных моментов отсутствует в сохранённом анализе.")
         project.review_selected_candidate_ids = unique
+        for candidate_id in unique:
+            self._ensure_candidate_lifecycle(project, candidate_id)
         removed = set(project.selected_candidate_ids) - set(unique)
         for candidate_id in removed:
-            if project.candidate_states.get(candidate_id) == "selected":
-                project.candidate_states[candidate_id] = "draft_ready"
+            self._set_candidate_lifecycle(project, candidate_id, approval="rejected", export="pending")
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item in unique]
+        if project.active_preview_candidate_id and project.active_preview_candidate_id not in project.candidate_states:
+            project.active_preview_candidate_id = None
         if project.status not in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else project.status
         self.projects.save(project)
@@ -363,9 +446,46 @@ class DesktopServices:
             raise RuntimeError("Этот проект уже обрабатывается.")
         if not project.analysis_artifact_path:
             raise InputValidationError("Сначала выполните анализ видео.")
-        outside_selection = [item for item in candidate_ids if item not in project.review_selected_candidate_ids]
+        requested_ids = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
+        if not requested_ids:
+            raise InputValidationError("Выберите хотя бы один момент для подготовки черновика.")
+        outside_selection = [item for item in requested_ids if item not in project.review_selected_candidate_ids]
         if outside_selection:
             raise InputValidationError("Сначала выберите моменты для подготовки черновика.")
+        candidate_ids = []
+        stale_ready_ids: list[str] = []
+        for candidate_id in requested_ids:
+            self._ensure_candidate_lifecycle(project, candidate_id)
+            # A completed immutable preview is already the retry boundary.  A
+            # batch retry must not recreate it merely because a neighbour failed.
+            if project.candidate_draft_statuses.get(candidate_id) == "ready":
+                artifact_path = Path(project.candidate_draft_artifacts.get(candidate_id, ""))
+                if artifact_path.is_file():
+                    continue
+                # A persisted "ready" marker is only trustworthy while its
+                # candidate-owned artifact is available.  Do not let a
+                # deleted preview become an un-retryable phantom: invalidate
+                # just this item and rebuild it in the current request.
+                self._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_draft_artifacts.pop(candidate_id, None)
+                project.selected_candidate_ids = [
+                    item for item in project.selected_candidate_ids if item != candidate_id
+                ]
+                project.candidate_errors[candidate_id] = (
+                    "Этап проверки черновика: сохранённый Draft Preview больше недоступен; "
+                    "будет создан заново."
+                )
+                stale_ready_ids.append(candidate_id)
+            candidate_ids.append(candidate_id)
+        if not candidate_ids:
+            raise InputValidationError("Для выбранных моментов уже есть готовые черновики.")
+        if stale_ready_ids:
+            # Persist the invalidation before process preparation.  If that
+            # preparation itself fails, a restart still offers exactly the
+            # missing candidates for retry instead of claiming they are ready.
+            self.projects.save(project)
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
@@ -383,7 +503,9 @@ class DesktopServices:
             self.runs.save(run)
             raise
         for candidate_id in candidate_ids:
-            project.candidate_states[candidate_id] = "draft_planning"
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="running", approval="pending", export="pending",
+            )
             project.candidate_errors.pop(candidate_id, None)
         self.record_launch_context(run, prepared)
         project.status = ProjectStatus.PROCESSING; project.latest_run_id = run.run_id
@@ -395,19 +517,30 @@ class DesktopServices:
             raise InputValidationError("Сначала соберите Draft Preview.")
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один готовый черновик.")
-        unavailable = [item for item in candidate_ids if project.candidate_states.get(item) not in {"draft_ready", "selected"}]
-        if unavailable:
-            raise InputValidationError("В production можно отправлять только готовые черновики.")
-        missing_artifacts = [item for item in candidate_ids if not Path(project.candidate_draft_artifacts.get(item, "")).is_file()]
-        if missing_artifacts:
-            raise InputValidationError("Черновик для выбранного момента больше не доступен.")
+        eligible: list[str] = []
+        for candidate_id in dict.fromkeys(str(item) for item in candidate_ids if str(item)):
+            self._ensure_candidate_lifecycle(project, candidate_id)
+            if project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}:
+                project.candidate_errors[candidate_id] = "Этап подтверждения: черновик ещё не готов к экспорту."
+                continue
+            if not Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file():
+                self._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                continue
+            eligible.append(candidate_id)
+        if not eligible:
+            self.projects.save(project)
+            raise InputValidationError("Нет готовых черновиков, которые можно отправить в production.")
         for candidate_id, state in list(project.candidate_states.items()):
-            if state == "selected" and candidate_id not in candidate_ids:
-                project.candidate_states[candidate_id] = "draft_ready"
-        for candidate_id in candidate_ids:
-            project.candidate_states[candidate_id] = "selected"
-        project.selected_candidate_ids = list(candidate_ids)
-        project.review_selected_candidate_ids = list(candidate_ids)
+            if state == "selected" and candidate_id not in eligible:
+                self._set_candidate_lifecycle(project, candidate_id, approval="rejected", export="pending")
+        for candidate_id in eligible:
+            self._set_candidate_lifecycle(project, candidate_id, draft="ready", approval="approved", export="pending")
+            project.candidate_errors.pop(candidate_id, None)
+        project.selected_candidate_ids = list(eligible)
+        project.review_selected_candidate_ids = list(eligible)
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
         return project
@@ -430,18 +563,26 @@ class DesktopServices:
             if project.candidate_states.get(candidate_id) not in {"draft_ready", "selected"}:
                 raise InputValidationError("Подтвердить можно только готовый черновик.")
             if not Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file():
-                raise InputValidationError("Не удалось найти сохранённый черновик для этого момента.")
+                self._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                project.selected_candidate_ids = [
+                    item for item in project.selected_candidate_ids if item != candidate_id
+                ]
+                self.projects.save(project)
+                return project
             if candidate_id not in project.selected_candidate_ids:
                 project.selected_candidate_ids.append(candidate_id)
             if candidate_id not in project.review_selected_candidate_ids:
                 project.review_selected_candidate_ids.append(candidate_id)
-            project.candidate_states[candidate_id] = "selected"
+            self._set_candidate_lifecycle(project, candidate_id, draft="ready", approval="approved", export="pending")
+            project.candidate_errors.pop(candidate_id, None)
         else:
             project.selected_candidate_ids = [
                 item for item in project.selected_candidate_ids if item != candidate_id
             ]
-            if project.candidate_states.get(candidate_id) == "selected":
-                project.candidate_states[candidate_id] = "draft_ready"
+            self._set_candidate_lifecycle(project, candidate_id, approval="rejected", export="pending")
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
         return project
@@ -460,8 +601,15 @@ class DesktopServices:
         if not candidate:
             raise InputValidationError("Кандидат не найден в сохранённом анализе.")
         current = dict(project.candidate_boundary_overrides.get(candidate_id) or {})
-        start = float(current.get("start", candidate.get("start", 0)))
-        end = float(current.get("end", candidate.get("end", 0)))
+        start_value = current.get("start", candidate.get("start", 0))
+        end_value = current.get("end", candidate.get("end", 0))
+        if start_value is None or end_value is None:
+            raise InputValidationError("Не удалось прочитать сохранённые границы момента.")
+        try:
+            start = float(start_value)
+            end = float(end_value)
+        except (TypeError, ValueError) as error:
+            raise InputValidationError("Не удалось прочитать сохранённые границы момента.") from error
         if boundary == "start":
             start += delta_seconds
         else:
@@ -485,23 +633,56 @@ class DesktopServices:
                 f"{project.analysis_fingerprint or ''}:{candidate_id}:{validation['start']:.3f}:{validation['end']:.3f}"
             ),
         }
-        if project.candidate_states.get(candidate_id) in {"draft_ready", "selected", "draft_failed"}:
-            project.candidate_states[candidate_id] = "analyzed"
+        self._set_candidate_lifecycle(
+            project, candidate_id, draft="pending", approval="pending", export="pending",
+        )
         project.candidate_draft_artifacts.pop(candidate_id, None)
         project.candidate_errors.pop(candidate_id, None)
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
         self.projects.save(project)
         return project, validation
 
-    def prepare_selected_render(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+    def prepare_selected_render(
+        self, project: DesktopProject, candidate_ids: list[str] | None = None,
+    ) -> tuple[ProjectRun, PreparedPipelineRun]:
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
-        candidate_ids = list(project.selected_candidate_ids)
+        approved_ids = list(dict.fromkeys(project.selected_candidate_ids))
+        if candidate_ids is None:
+            candidate_ids = approved_ids
+        else:
+            candidate_ids = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
+            outside_approval = [item for item in candidate_ids if item not in approved_ids]
+            if outside_approval:
+                raise InputValidationError("Экспортировать можно только подтверждённые черновики.")
         if not candidate_ids:
             raise InputValidationError("Сначала подтвердите черновики для production render.")
-        missing_artifacts = [item for item in candidate_ids if not Path(project.candidate_draft_artifacts.get(item, "")).is_file()]
-        if missing_artifacts:
-            raise InputValidationError("Не удалось найти сохранённый черновик для выбранного момента.")
+        inspection = self.pipeline.inspect_approved_drafts(project, candidate_ids)
+        for candidate_id, message in inspection.errors.items():
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="failed", approval="pending", export="pending",
+            )
+            project.candidate_draft_artifacts.pop(candidate_id, None)
+            project.candidate_errors[candidate_id] = message
+        candidate_ids = inspection.candidate_ids
+        # A one-item retry must not discard neighbouring approved/failed
+        # exports.  Keep the project-wide approved set intact, only removing
+        # items whose immutable draft inspection proved invalid above.
+        if inspection.errors:
+            invalid_ids = set(inspection.errors)
+            project.selected_candidate_ids = [
+                item for item in project.selected_candidate_ids if item not in invalid_ids
+            ]
+        # Artifact validation can itself rule out a subset.  Persist that
+        # decision before any later source/config preparation raises, so a
+        # restart keeps the per-item retry state rather than reviving a stale
+        # approved choice.
+        if inspection.errors:
+            self.projects.save(project)
+        if not candidate_ids:
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+            self.projects.save(project)
+            raise InputValidationError("Нет проверенных черновиков для production render. Повторите только отмеченные элементы.")
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
@@ -519,7 +700,7 @@ class DesktopServices:
             self.runs.save(run)
             raise
         for candidate_id in candidate_ids:
-            project.candidate_states[candidate_id] = "production_rendering"
+            self._set_candidate_lifecycle(project, candidate_id, draft="ready", approval="approved", export="running")
             project.candidate_errors.pop(candidate_id, None)
         self.record_launch_context(run, prepared)
         project.status = ProjectStatus.RENDERING_SELECTED; project.latest_run_id = run.run_id
@@ -595,6 +776,7 @@ class DesktopServices:
             "run_id": prepared.run_id,
             "project_id": prepared.project_id or run.project_id,
             "artifact_metadata_path": str(prepared.artifact_metadata_path) if prepared.artifact_metadata_path else None,
+            "allow_legacy_artifact_scan": prepared.allow_legacy_artifact_scan,
             "source_path": str(prepared.source_path) if prepared.source_path else None,
             "runtime_flags": dict(prepared.runtime_flags),
         }
@@ -644,6 +826,9 @@ class DesktopServices:
     def finish_success(self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun) -> ProjectRun:
         completion = self.pipeline.completion(prepared)
         if completion.error_summary:
+            reported = self.recover_reported_failure(project, run, prepared)
+            if reported is not None:
+                return reported
             return self.finish_failure(project, run, completion.error_summary, completion.technical_details)
         return self._finish_completion(project, run, completion)
 
@@ -656,6 +841,208 @@ class DesktopServices:
         if completion is None:
             return None
         return self._finish_completion(project, run, completion, state_persistence_degraded=True)
+
+    @staticmethod
+    def _candidate_report_message(item: dict, fallback: str) -> str:
+        """Keep actionable item/stage context without exposing process diagnostics."""
+
+        stage = str(item.get("stage") or "").strip()
+        message = str(
+            item.get("message") or item.get("error") or item.get("reason") or fallback
+        ).strip()
+        message = redact_secrets(message or fallback)
+        return f"Этап {stage}: {message}" if stage else message
+
+    @classmethod
+    def _apply_draft_report(
+        cls, project: DesktopProject, report: dict, expected_candidate_ids: list[str],
+        *, fallback: str,
+    ) -> None:
+        run_info = report.get("run", {}) if isinstance(report, dict) else {}
+        if not isinstance(run_info, dict):
+            run_info = {}
+        artifact_path = str(run_info.get("draft_artifact_path") or "").strip()
+        if artifact_path:
+            project.draft_artifact_path = artifact_path
+        draft_id = str(run_info.get("draft_id") or "").strip()
+        if draft_id:
+            project.draft_id = draft_id
+        flow = report.get("candidate_flow", {}) if isinstance(report, dict) else {}
+        candidates = flow.get("draft_candidates", []) if isinstance(flow, dict) else []
+        allowed = set(expected_candidate_ids) or set(project.candidate_states)
+        reported_ids: set[str] = set()
+        for item in candidates:
+            if not isinstance(item, dict) or not item.get("candidate_id"):
+                continue
+            candidate_id = str(item["candidate_id"])
+            if candidate_id not in allowed:
+                continue
+            reported_ids.add(candidate_id)
+            state = str(item.get("state") or "")
+            if state == "draft_ready" and artifact_path and Path(artifact_path).is_file():
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="ready", approval="pending", export="pending",
+                )
+                project.candidate_draft_artifacts[candidate_id] = artifact_path
+                project.candidate_errors.pop(candidate_id, None)
+            else:
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_draft_artifacts.pop(candidate_id, None)
+                project.candidate_errors[candidate_id] = cls._candidate_report_message(item, fallback)
+        for candidate_id in expected_candidate_ids:
+            if candidate_id in reported_ids:
+                continue
+            if project.candidate_draft_statuses.get(candidate_id) == "running" or project.candidate_states.get(candidate_id) == "draft_planning":
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_draft_artifacts.pop(candidate_id, None)
+                project.candidate_errors[candidate_id] = fallback
+
+    @classmethod
+    def _apply_selected_render_report(
+        cls, project: DesktopProject, report: dict, expected_candidate_ids: list[str],
+        *, fallback: str,
+    ) -> tuple[set[str], set[str]]:
+        """Apply individual final-export outcomes and return completed/failed IDs."""
+
+        production = report.get("production_render", {}) if isinstance(report, dict) else {}
+        production_items = production.get("items", []) if isinstance(production, dict) else []
+        allowed = set(expected_candidate_ids) or set(project.selected_candidate_ids)
+        completed_ids = {
+            str(item.get("candidate_id")) for item in production_items
+            if isinstance(item, dict) and str(item.get("candidate_id") or "") in allowed
+            and item.get("status") in {"completed", "warning"}
+        }
+        flow = report.get("candidate_flow", {}) if isinstance(report, dict) else {}
+        flow_items = flow.get("items", []) if isinstance(flow, dict) else []
+        failures: dict[str, dict] = {}
+        for item in [*production_items, *flow_items]:
+            if not isinstance(item, dict) or not item.get("candidate_id"):
+                continue
+            candidate_id = str(item["candidate_id"])
+            if candidate_id not in allowed:
+                continue
+            if item.get("outcome") == "failed" or item.get("status") == "failed":
+                failures[candidate_id] = item
+
+        failed_ids: set[str] = set()
+        for candidate_id in expected_candidate_ids:
+            if candidate_id in completed_ids:
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="ready", approval="approved", export="ready",
+                )
+                project.candidate_errors.pop(candidate_id, None)
+                project.selected_candidate_ids = [
+                    item_id for item_id in project.selected_candidate_ids if item_id != candidate_id
+                ]
+                continue
+            failed_ids.add(candidate_id)
+            item = failures.get(candidate_id, {})
+            stage = str(item.get("stage") or "")
+            # A malformed/stale plan cannot be fixed by re-running the costly
+            # export.  Return only that candidate to Draft Preview generation.
+            if stage.startswith("approved_draft_plan") or item.get("reason") == "production_plan_failed":
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="failed", approval="pending", export="pending",
+                )
+                project.candidate_draft_artifacts.pop(candidate_id, None)
+                project.selected_candidate_ids = [
+                    item_id for item_id in project.selected_candidate_ids if item_id != candidate_id
+                ]
+            else:
+                cls._set_candidate_lifecycle(
+                    project, candidate_id, draft="ready", approval="approved", export="failed",
+                )
+                if candidate_id not in project.selected_candidate_ids:
+                    project.selected_candidate_ids.append(candidate_id)
+            project.candidate_errors[candidate_id] = cls._candidate_report_message(item, fallback)
+        return completed_ids, failed_ids
+
+    def recover_reported_failure(
+        self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun,
+    ) -> ProjectRun | None:
+        """Persist a terminal engine report even when QProcess exits with code 2."""
+
+        reported = self.pipeline.reported_failure(prepared, run.started_at)
+        if reported is None:
+            return None
+        # A process can finish after its engine report is written but between
+        # the two durable writes below.  A terminal run snapshot must never
+        # prevent the project projection from being reconciled on restart.
+        # We only skip the *duplicate snapshot*, not the item-level recovery.
+        already_snapshotted = self._reported_failure_is_already_snapshotted(
+            run, reported.report, reported.terminal,
+        )
+        terminal = reported.terminal
+        code = str(terminal.get("error_code") or "PIPELINE_FAILED")
+        message = redact_secrets(str(terminal.get("message") or "Обработка завершилась с ошибкой."))
+        stage = str(terminal.get("stage") or "").strip()
+        if not already_snapshotted:
+            # ``snapshot_report_and_outputs`` writes the run itself.  Keep the
+            # saved status active until the project has its matching durable
+            # candidate states, so a crash remains recoverable on the next
+            # launch instead of stranding a project in "running".
+            run.status = RunStatus.RUNNING
+            self._snapshot_engine_paths(run)
+            self.runs.snapshot_report_and_outputs(run, reported.prepared.report_path, [])
+            run.status = RunStatus.FAILED
+            run.finished_at = utc_now()
+            run.error_summary = message
+            run.technical_details = redact_secrets(
+                f"terminal error_code={code}" + (f"; stage={stage}" if stage else "") + f"; message={message}"
+            )
+            self.append_log(run, run.technical_details)
+        expected = [
+            str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
+            if str(candidate_id)
+        ] or list(project.selected_candidate_ids)
+        if run.run_kind == RunKind.DRAFT:
+            self._apply_draft_report(project, reported.report, expected, fallback=message)
+            project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
+        elif run.run_kind == RunKind.SELECTED_RENDER:
+            completed_ids, _failed_ids = self._apply_selected_render_report(
+                project, reported.report, expected, fallback=message,
+            )
+            project.status = ProjectStatus.PARTIALLY_RENDERED if completed_ids else ProjectStatus.REVIEWING_CANDIDATES
+        elif run.run_kind == RunKind.ANALYSIS:
+            project.status = ProjectStatus.SOURCE_READY
+        else:
+            project.status = ProjectStatus.FAILED
+        project.latest_run_id = run.run_id
+        # Project state is the user-facing source of truth.  Save it first;
+        # an interrupted second write can then be safely replayed from the
+        # active/snapshotted run above.
+        self.projects.save(project)
+        if not already_snapshotted:
+            self.runs.save(run)
+        # A valid terminal engine report is handled even when its run snapshot
+        # already existed.  Callers must not fall through to a generic process
+        # error and replace its per-item recovery state.
+        return run
+
+    @staticmethod
+    def _reported_failure_is_already_snapshotted(
+        run: ProjectRun, report: dict, terminal: dict,
+    ) -> bool:
+        """Avoid rewriting a completed recovery on every application start."""
+
+        if run.status != RunStatus.FAILED or not run.finished_at or not run.report_path:
+            return False
+        try:
+            stored = read_json(Path(run.report_path), {})
+        except (OSError, ValueError):
+            return False
+        stored_terminal = stored.get("terminal") if isinstance(stored, dict) else None
+        if not isinstance(stored_terminal, dict):
+            return False
+        return (
+            stored_terminal.get("status") == "failed"
+            and str(stored_terminal.get("error_code") or "") == str(terminal.get("error_code") or "")
+            and stored.get("run") == report.get("run")
+        )
 
     def _finish_completion(
         self,
@@ -670,20 +1057,23 @@ class DesktopServices:
         if state_persistence_degraded and STATE_PERSISTENCE_WARNING not in warnings:
             warnings.append(STATE_PERSISTENCE_WARNING)
         report = read_json(completion.report_path, {})
-        run.status = (
+        completion_status = (
             RunStatus.COMPLETED_WITH_WARNINGS
             if quality_driven and completion.quality_status == "PASS_WITH_WARNINGS"
             else RunStatus.COMPLETED_WITH_WARNINGS if not quality_driven and warnings else RunStatus.COMPLETED
+        )
+        # Snapshot while the record remains active.  See
+        # ``recover_reported_failure`` for why the final terminal status is
+        # written only after its matching project projection is durable.
+        run.status = RunStatus.RUNNING
+        self._snapshot_engine_paths(run)
+        self.runs.snapshot_report_and_outputs(
+            run, completion.report_path, completion.output_files, completion.quality_report_paths,
         )
         run.finished_at = utc_now()
         run.warnings = warnings
         run.cost_estimate = completion.cost_estimate
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
-        self._snapshot_engine_paths(run)
-        self.runs.snapshot_report_and_outputs(
-            run, completion.report_path, completion.output_files, completion.quality_report_paths,
-        )
-        self.runs.save(run)
         run_info = report.get("run", {}) if isinstance(report, dict) else {}
         if run.run_kind == RunKind.ANALYSIS:
             run.status = RunStatus.ANALYSIS_READY
@@ -695,74 +1085,66 @@ class DesktopServices:
                 str(item.get("id")): "analyzed" for item in candidates
                 if isinstance(item, dict) and item.get("id")
             }
+            project.candidate_draft_statuses = {
+                candidate_id: "pending" for candidate_id in project.candidate_states
+            }
+            project.candidate_approval_states = {
+                candidate_id: "pending" for candidate_id in project.candidate_states
+            }
+            project.candidate_export_statuses = {
+                candidate_id: "pending" for candidate_id in project.candidate_states
+            }
             project.selected_candidate_ids = []
             project.review_selected_candidate_ids = []
             project.candidate_draft_artifacts = {}
             project.candidate_errors = {}
             project.draft_artifact_path = None
             project.draft_id = None
+            project.active_preview_candidate_id = None
             project.status = ProjectStatus.ANALYSIS_READY
         elif run.run_kind == RunKind.DRAFT:
             run.status = RunStatus.DRAFT_READY
-            project.draft_artifact_path = str(run_info.get("draft_artifact_path") or "") or None
-            project.draft_id = str(run_info.get("draft_id") or "") or None
-            draft_candidates = report.get("candidate_flow", {}).get("draft_candidates", []) if isinstance(report.get("candidate_flow"), dict) else []
-            for item in draft_candidates:
-                if isinstance(item, dict) and item.get("candidate_id") and item.get("state"):
-                    candidate_id = str(item["candidate_id"])
-                    state = str(item["state"])
-                    project.candidate_states[candidate_id] = state
-                    if state == "draft_ready" and project.draft_artifact_path:
-                        project.candidate_draft_artifacts[candidate_id] = project.draft_artifact_path
-                        project.candidate_errors.pop(candidate_id, None)
-                    elif state == "draft_failed":
-                        project.candidate_draft_artifacts.pop(candidate_id, None)
-                        message = str(item.get("error") or "Не удалось подготовить черновик.").strip()
-                        if message:
-                            project.candidate_errors[candidate_id] = message
+            expected = [
+                str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
+                if str(candidate_id)
+            ] or list(project.review_selected_candidate_ids)
+            self._apply_draft_report(project, report, expected, fallback="Не удалось подготовить черновик.")
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.SELECTED_RENDER:
-            completed_ids = {
-                str(item.get("candidate_id")) for item in report.get("production_render", {}).get("items", [])
-                if isinstance(item, dict) and item.get("status") in {"completed", "warning"}
-            } if isinstance(report.get("production_render"), dict) else set()
-            flow_items = report.get("candidate_flow", {}).get("items", []) if isinstance(report.get("candidate_flow"), dict) else []
-            failures = {
-                str(item.get("candidate_id")): str(item.get("message") or item.get("reason") or "Не удалось создать ролик.")
-                for item in flow_items if isinstance(item, dict) and item.get("outcome") == "failed" and item.get("candidate_id")
-            }
-            for candidate_id in project.selected_candidate_ids:
-                if candidate_id in completed_ids:
-                    project.candidate_states[candidate_id] = "rendered"
-                    project.candidate_errors.pop(candidate_id, None)
-                else:
-                    project.candidate_states[candidate_id] = "draft_ready"
-                    if candidate_id in failures:
-                        project.candidate_errors[candidate_id] = failures[candidate_id]
-            render_incomplete = len(completed_ids) < len(project.selected_candidate_ids)
-            if render_incomplete:
+            expected = [
+                str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
+                if str(candidate_id)
+            ] or list(project.selected_candidate_ids)
+            completed_ids, failed_ids = self._apply_selected_render_report(
+                project, report, expected, fallback="Не удалось создать ролик.",
+            )
+            # The current run may finish a one-item retry while other
+            # independently approved exports are still failed/pending.  Those
+            # neighbours stay in the durable hand-off queue and must not be
+            # cleared just because this one report completed successfully.
+            project.selected_candidate_ids = [
+                candidate_id for candidate_id in project.selected_candidate_ids
+                if project.candidate_export_statuses.get(candidate_id) != "ready"
+            ]
+            has_remaining_exports = bool(project.selected_candidate_ids)
+            if failed_ids:
                 run.status = RunStatus.PARTIALLY_RENDERED
-                project.status = ProjectStatus.PARTIALLY_RENDERED
-                project.selected_candidate_ids = [
-                    candidate_id for candidate_id in project.selected_candidate_ids if candidate_id not in completed_ids
-                ]
             elif quality_driven and completion.quality_status == "PASS_WITH_WARNINGS":
                 run.status = RunStatus.COMPLETED_WITH_WARNINGS
-                project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
-                project.selected_candidate_ids = []
             elif quality_driven:
                 run.status = RunStatus.COMPLETED
-                project.status = ProjectStatus.COMPLETED
-                project.selected_candidate_ids = []
             elif warnings:
                 run.status = RunStatus.COMPLETED_WITH_WARNINGS
-                project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
-                project.selected_candidate_ids = []
             else:
                 run.status = RunStatus.COMPLETED
+            if failed_ids or has_remaining_exports:
+                project.status = ProjectStatus.PARTIALLY_RENDERED
+            elif run.status == RunStatus.COMPLETED_WITH_WARNINGS:
+                project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
+            else:
                 project.status = ProjectStatus.COMPLETED
-                project.selected_candidate_ids = []
         else:
+            run.status = completion_status
             project.status = (
                 ProjectStatus.COMPLETED_WITH_WARNINGS
                 if quality_driven and completion.quality_status == "PASS_WITH_WARNINGS"
@@ -770,9 +1152,10 @@ class DesktopServices:
             )
         project.latest_run_id = run.run_id
         # Run-kind-specific terminal states (analysis_ready/draft_ready) are
-        # assigned after snapshots are copied; persist the final value too.
-        self.runs.save(run)
+        # assigned after snapshots are copied.  Project first keeps restart
+        # recovery deterministic if the process stops between these writes.
         self.projects.save(project)
+        self.runs.save(run)
         return run
 
     def _snapshot_engine_paths(self, run: ProjectRun) -> None:
@@ -804,52 +1187,65 @@ class DesktopServices:
         run.error_summary = redact_secrets(message)
         run.technical_details = redact_secrets(technical_details or message)
         self.append_log(run, run.technical_details)
-        self.runs.save(run)
         if run.run_kind == RunKind.SELECTED_RENDER:
             for candidate_id in project.selected_candidate_ids:
                 if project.candidate_states.get(candidate_id) == "production_rendering":
-                    project.candidate_states[candidate_id] = "selected"
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="ready", approval="approved", export="failed",
+                    )
                     project.candidate_errors[candidate_id] = run.error_summary
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.DRAFT:
             for candidate_id, state in list(project.candidate_states.items()):
                 if state == "draft_planning":
-                    project.candidate_states[candidate_id] = "analyzed"
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="failed", approval="pending", export="pending",
+                    )
                     project.candidate_errors[candidate_id] = run.error_summary
-            project.status = ProjectStatus.ANALYSIS_READY if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
+            project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
         elif run.run_kind == RunKind.ANALYSIS:
             project.status = ProjectStatus.SOURCE_READY
         else:
             project.status = ProjectStatus.FAILED
         self.projects.save(project)
+        self.runs.save(run)
         return run
 
     def finish_cancelled(self, project: DesktopProject, run: ProjectRun) -> ProjectRun:
         run.status = RunStatus.CANCELLED
         run.finished_at = utc_now()
         run.error_summary = "Создание ролика отменено пользователем."
-        self.runs.save(run)
         if run.run_kind == RunKind.SELECTED_RENDER:
             for candidate_id in project.selected_candidate_ids:
                 if project.candidate_states.get(candidate_id) == "production_rendering":
-                    project.candidate_states[candidate_id] = "selected"
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="ready", approval="approved", export="pending",
+                    )
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.DRAFT:
             for candidate_id, state in list(project.candidate_states.items()):
                 if state == "draft_planning":
-                    project.candidate_states[candidate_id] = "analyzed"
-            project.status = ProjectStatus.ANALYSIS_READY if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="pending", approval="pending", export="pending",
+                    )
+            project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
         elif run.run_kind == RunKind.ANALYSIS:
             project.status = ProjectStatus.SOURCE_READY
         else:
             project.status = ProjectStatus.CANCELLED
         self.projects.save(project)
+        self.runs.save(run)
         return run
 
     def recover_interrupted_runs(self) -> int:
         recovered_or_interrupted = 0
         for project in self.projects.list():
-            changed = False
+            # Older v3 project files recorded only a combined candidate state.
+            # A partial draft artifact could therefore retain a failed third
+            # item while the project reopened as if it had never been chosen.
+            # Reconcile only the project-owned latest artifact, never an
+            # output-directory scan, before considering active processes.
+            changed = self._reconcile_legacy_draft_artifact(project)
             for run in self.runs.list(project.project_id):
                 is_active = run.status in RunStatus.ACTIVE
                 is_draft_reconciliation = (
@@ -857,15 +1253,40 @@ class DesktopServices:
                     and run.run_kind == RunKind.DRAFT
                     and project.latest_run_id == run.run_id
                 )
-                if not is_active and not is_draft_reconciliation:
+                is_terminal_report_reconciliation = (
+                    run.status in {RunStatus.FAILED, RunStatus.INTERRUPTED}
+                    and run.run_kind in {RunKind.DRAFT, RunKind.SELECTED_RENDER}
+                    and project.latest_run_id == run.run_id
+                )
+                if not is_active and not is_draft_reconciliation and not is_terminal_report_reconciliation:
                     continue
                 prepared = self.pipeline.prepared_from_execution(run)
                 if is_active and prepared and self.recover_failed_process(project, run, prepared):
                     recovered_or_interrupted += 1
                     changed = True
                     continue
+                was_terminal_failure = run.status == RunStatus.FAILED
+                if prepared and self.recover_reported_failure(project, run, prepared):
+                    # An already-terminal run may be replaying only the second
+                    # (project) write after a crash.  It is useful recovery,
+                    # but not a newly interrupted process to count again.
+                    if not was_terminal_failure:
+                        recovered_or_interrupted += 1
+                        changed = True
+                    continue
+                # A previously persisted terminal item failure is already in
+                # review state.  Never reinterpret it as an abandoned draft
+                # and overwrite its per-item error on the next startup.
+                if is_terminal_report_reconciliation and run.status == RunStatus.FAILED:
+                    continue
                 if run.run_kind == RunKind.DRAFT:
                     reconciled = self._recover_interrupted_draft(project, run, prepared)
+                    if reconciled or is_active:
+                        recovered_or_interrupted += int(is_active)
+                        changed = True
+                    continue
+                if run.run_kind == RunKind.SELECTED_RENDER:
+                    reconciled = self._recover_interrupted_selected_render(project, run)
                     if reconciled or is_active:
                         recovered_or_interrupted += int(is_active)
                         changed = True
@@ -874,6 +1295,8 @@ class DesktopServices:
                     run.status = RunStatus.INTERRUPTED
                     run.finished_at = utc_now()
                     run.error_summary = "Предыдущий запуск был прерван при закрытии приложения."
+                    project.status = ProjectStatus.INTERRUPTED
+                    self.projects.save(project)
                     self.runs.save(run)
                     recovered_or_interrupted += 1
                     changed = True
@@ -883,10 +1306,131 @@ class DesktopServices:
                     project.status = ProjectStatus.COMPLETED_WITH_WARNINGS
                 elif latest and latest.status == RunStatus.COMPLETED:
                     project.status = ProjectStatus.COMPLETED
-                elif latest and latest.status == RunStatus.INTERRUPTED:
+                elif (
+                    latest
+                    and latest.status == RunStatus.INTERRUPTED
+                    and project.status not in {
+                        ProjectStatus.REVIEWING_CANDIDATES,
+                        ProjectStatus.PARTIALLY_RENDERED,
+                    }
+                ):
                     project.status = ProjectStatus.INTERRUPTED
                 self.projects.save(project)
         return recovered_or_interrupted
+
+    def _reconcile_legacy_draft_artifact(self, project: DesktopProject) -> bool:
+        """Recover item failure metadata from one legacy project draft artifact.
+
+        This is intentionally a narrow, one-way migration.  It only promotes
+        a still-``analyzed`` candidate from the project's own matching draft
+        artifact to ``draft_failed``.  Once persisted, a person can skip that
+        candidate and later restarts will respect the choice rather than add
+        it back.  Newer lifecycle state and unrelated artifact folders are
+        never touched.
+        """
+
+        artifact_path = Path(str(project.draft_artifact_path or ""))
+        if not artifact_path.is_file():
+            return False
+        try:
+            artifact = read_json(artifact_path, {})
+        except (OSError, ValueError):
+            return False
+        if not isinstance(artifact, dict):
+            return False
+        if str(artifact.get("project_id") or "") != project.project_id:
+            return False
+        artifact_analysis_id = str(artifact.get("analysis_id") or "")
+        artifact_fingerprint = str(artifact.get("analysis_fingerprint") or "")
+        if project.analysis_id and artifact_analysis_id and artifact_analysis_id != project.analysis_id:
+            return False
+        if project.analysis_fingerprint and artifact_fingerprint and artifact_fingerprint != project.analysis_fingerprint:
+            return False
+        candidates = artifact.get("candidates")
+        if not isinstance(candidates, list):
+            return False
+
+        changed = False
+        for record in candidates:
+            if not isinstance(record, dict) or str(record.get("state") or "") != "draft_failed":
+                continue
+            candidate_id = str(record.get("candidate_id") or "")
+            if not candidate_id or project.candidate_states.get(candidate_id) != "analyzed":
+                continue
+            # A candidate can have an independent draft artifact from a later
+            # retry; that is already authoritative even if the aggregate
+            # legacy artifact still contains its original failure.
+            if project.candidate_draft_artifacts.get(candidate_id):
+                continue
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="failed", approval="pending", export="pending",
+            )
+            if candidate_id not in project.review_selected_candidate_ids:
+                project.review_selected_candidate_ids.append(candidate_id)
+            project.candidate_errors[candidate_id] = (
+                "Этап подготовки черновика: план ролика не прошёл проверку границ. "
+                "Повторите только этот черновик или продолжите с готовыми."
+            )
+            changed = True
+        if changed and project.analysis_artifact_path:
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+        return changed
+
+    def _recover_interrupted_selected_render(
+        self, project: DesktopProject, run: ProjectRun,
+    ) -> bool:
+        """Return an abandoned final export to its retained draft boundary.
+
+        This path is deliberately narrower than ``recover_failed_process``:
+        that method runs first and may recover a verified engine report/output.
+        When no such evidence exists we never scan arbitrary media files; each
+        candidate remains approved with its immutable Draft Preview and can be
+        retried independently from the review workspace.
+        """
+
+        expected = [
+            str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
+            if str(candidate_id)
+        ] or list(project.selected_candidate_ids)
+        changed = False
+        interruption_message = (
+            "Экспорт этого ролика был прерван. Черновик сохранён: можно повторить только экспорт."
+        )
+        for candidate_id in expected:
+            self._ensure_candidate_lifecycle(project, candidate_id)
+            state = project.candidate_states.get(candidate_id)
+            export_state = project.candidate_export_statuses.get(candidate_id)
+            if state != "production_rendering" and export_state != "running":
+                continue
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="ready", approval="approved", export="failed",
+            )
+            if candidate_id not in project.selected_candidate_ids:
+                project.selected_candidate_ids.append(candidate_id)
+            if candidate_id not in project.review_selected_candidate_ids:
+                project.review_selected_candidate_ids.append(candidate_id)
+            if project.candidate_errors.get(candidate_id) != interruption_message:
+                project.candidate_errors[candidate_id] = interruption_message
+            changed = True
+
+        if project.status == ProjectStatus.RENDERING_SELECTED:
+            project.status = ProjectStatus.REVIEWING_CANDIDATES
+            changed = True
+        if run.status != RunStatus.INTERRUPTED:
+            run.status = RunStatus.INTERRUPTED
+            changed = True
+        if run.finished_at is None:
+            run.finished_at = utc_now()
+            changed = True
+        if run.error_summary != interruption_message:
+            run.error_summary = interruption_message
+            changed = True
+        if changed:
+            # Save the user-visible retry state first.  If the second write is
+            # interrupted, this same routine is idempotent on the next start.
+            self.projects.save(project)
+            self.runs.save(run)
+        return changed
 
     def _recover_interrupted_draft(
         self,
@@ -919,7 +1463,9 @@ class DesktopServices:
             }
             for candidate_id in ready_ids:
                 if project.candidate_states.get(candidate_id) != "draft_ready":
-                    project.candidate_states[candidate_id] = "draft_ready"
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="ready", approval="pending", export="pending",
+                    )
                     changed = True
                 if project.candidate_draft_artifacts.get(candidate_id) != artifact_path:
                     project.candidate_draft_artifacts[candidate_id] = artifact_path
@@ -930,8 +1476,10 @@ class DesktopServices:
             for candidate_id in invalid_ids:
                 if project.candidate_draft_artifacts.pop(candidate_id, None) is not None:
                     changed = True
-                if project.candidate_states.get(candidate_id) != "analyzed":
-                    project.candidate_states[candidate_id] = "analyzed"
+                if project.candidate_states.get(candidate_id) != "draft_failed":
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="failed", approval="pending", export="pending",
+                    )
                     changed = True
                 message = "Неполный файл черновика не был принят после перезапуска."
                 if project.candidate_errors.get(candidate_id) != message:
@@ -948,8 +1496,10 @@ class DesktopServices:
                     if project.candidate_errors.get(candidate_id) != message:
                         project.candidate_errors[candidate_id] = message
                         changed = True
-                if project.candidate_states.get(candidate_id) != "analyzed":
-                    project.candidate_states[candidate_id] = "analyzed"
+                if project.candidate_states.get(candidate_id) != "draft_failed":
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="failed", approval="pending", export="pending",
+                    )
                     changed = True
                 if project.candidate_draft_artifacts.pop(candidate_id, None) is not None:
                     changed = True
@@ -959,7 +1509,9 @@ class DesktopServices:
             # guessed from a directory listing.
             for candidate_id in expected:
                 if project.candidate_states.get(candidate_id) == "draft_planning":
-                    project.candidate_states[candidate_id] = "analyzed"
+                    self._set_candidate_lifecycle(
+                        project, candidate_id, draft="pending", approval="pending", export="pending",
+                    )
                     changed = True
 
         interruption_message = "Предыдущий запуск черновиков был прерван при закрытии приложения."
@@ -982,8 +1534,8 @@ class DesktopServices:
             changed = True
         if changed:
             self._snapshot_engine_paths(run)
-            self.runs.save(run)
             self.projects.save(project)
+            self.runs.save(run)
         return changed
 
     def recover_ready_analysis_runs(self) -> int:

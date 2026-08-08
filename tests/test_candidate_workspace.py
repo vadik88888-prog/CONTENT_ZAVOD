@@ -10,9 +10,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QLabel, QMessageBox, QPushButton
 
 from app.gui.components import VideoPreview
+from app.gui.main_window import MainWindow
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind, RunStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -249,8 +250,13 @@ def test_draft_button_mouse_click_surfaces_prepare_failure(tmp_path: Path, monke
         "prepare_draft",
         lambda *_args: (_ for _ in ()).throw(RuntimeError("draft preparation failed")),
     )
-    errors: list[tuple[str, str]] = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, title, message: errors.append((title, message)))
+    errors: list[tuple[str, str, str]] = []
+
+    def capture_dialog(box: QMessageBox) -> int:
+        errors.append((box.windowTitle(), box.text(), box.informativeText()))
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", capture_dialog)
     viewmodel = ProjectViewModel(services)
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
@@ -264,7 +270,8 @@ def test_draft_button_mouse_click_surfaces_prepare_failure(tmp_path: Path, monke
 
         assert errors
         assert errors[0][0] == "Не удалось создать ролик"
-        assert "draft preparation failed" in errors[0][1]
+        assert "draft preparation failed" not in "\n".join(errors[0])
+        assert "Проверьте" in errors[0][2]
         assert not viewmodel.active
         assert screen._flow_step == "candidates"
         assert screen.progress.isHidden()
@@ -560,6 +567,127 @@ def test_workflow_explains_when_only_some_selected_candidates_need_new_drafts(tm
         app.processEvents()
 
 
+def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    candidate_id = "candidate-other"
+    raw_error = "1 validation error for ProductionPlan: BOUNDARY_PAYOFF_LOST"
+    project.review_selected_candidate_ids = [candidate_id]
+    project.candidate_states[candidate_id] = "draft_failed"
+    project.candidate_draft_statuses[candidate_id] = "failed"
+    project.candidate_errors[candidate_id] = raw_error
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        button_texts = [button.text() for button in screen.findChildren(QPushButton)]
+        assert "Повторить черновик" in button_texts
+        assert "Продолжить без этого" in button_texts
+        assert "Открыть журнал" in button_texts
+        visible_copy = "\n".join(label.text() for label in screen.findChildren(QLabel))
+        assert raw_error not in visible_copy
+
+        skip = next(button for button in screen.findChildren(QPushButton) if button.text() == "Продолжить без этого")
+        QTest.mouseClick(skip, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert candidate_id not in viewmodel.project.review_selected_candidate_ids
+        button_texts = [button.text() for button in screen.findChildren(QPushButton)]
+        assert "Вернуть в набор" in button_texts
+        assert "Повторить черновик" not in button_texts
+
+        restore = next(button for button in screen.findChildren(QPushButton) if button.text() == "Вернуть в набор")
+        QTest.mouseClick(restore, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert candidate_id in viewmodel.project.review_selected_candidate_ids
+        assert "Повторить черновик" in [button.text() for button in screen.findChildren(QPushButton)]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_missing_ready_draft_artifact_is_offered_for_individual_rebuild(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    candidate_id = "candidate-recommended"
+    project.review_selected_candidate_ids = [candidate_id]
+    project.candidate_states[candidate_id] = "draft_ready"
+    project.candidate_draft_statuses[candidate_id] = "ready"
+    project.candidate_draft_artifacts[candidate_id] = str(tmp_path / "missing-draft.json")
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    requested: list[list[str]] = []
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda candidate_ids: requested.append(list(candidate_ids)))
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        assert screen.draft_button.isVisible()
+        assert screen.draft_button.isEnabled()
+        QTest.mouseClick(screen.draft_button, Qt.MouseButton.LeftButton)
+        assert requested == [[candidate_id]]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_completed_single_retry_keeps_other_failed_export_in_drafts(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    ready_id = "candidate-recommended"
+    failed_id = "candidate-other"
+    project.review_selected_candidate_ids = [ready_id, failed_id]
+    project.selected_candidate_ids = [failed_id]
+    project.candidate_states = {ready_id: "rendered", failed_id: "selected"}
+    project.candidate_draft_statuses = {ready_id: "ready", failed_id: "ready"}
+    project.candidate_approval_states = {ready_id: "approved", failed_id: "approved"}
+    project.candidate_export_statuses = {ready_id: "ready", failed_id: "failed"}
+    project.status = ProjectStatus.PARTIALLY_RENDERED
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+    requested: list[list[str] | None] = []
+    monkeypatch.setattr(screen, "_final_output_records", lambda _project: [object()])
+    monkeypatch.setattr(
+        screen, "_confirm_production_render", lambda candidate_ids=None: requested.append(candidate_ids),
+    )
+
+    try:
+        # A result from the successful retry exists, but the remaining item
+        # must still reopen the Drafts workspace rather than disappear behind
+        # the final-output screen.
+        assert screen._derive_flow_step(project) == "drafts"
+        screen.project = project
+        screen._retry_final_export(failed_id)
+        assert requested == [[failed_id]]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
 def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
@@ -618,6 +746,368 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         assert viewmodel.project.selected_candidate_ids == []
         assert viewmodel.project.review_selected_candidate_ids == []
         assert viewmodel.project.candidate_states["candidate-recommended"] == "draft_ready"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "compact"),
+    # 760×480 is the desktop shell's logical minimum, covering 1280×720 at
+    # 150% Windows scaling as well as the requested 100% desktop sizes.
+    ((760, 480, True), (1280, 720, True), (1440, 900, True), (1920, 1080, False)),
+)
+def test_review_workspace_stacks_before_laptop_cards_can_overflow(
+    tmp_path: Path, monkeypatch, width: int, height: int, compact: bool,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.resize(width, height)
+        screen.show()
+        app.processEvents()
+
+        assert screen._compact_stage_layout is compact
+        if compact:
+            assert screen.review_preview_panel.y() > screen.review_list_panel.y()
+            assert screen.review_inspector_panel.y() > screen.review_preview_panel.y()
+        else:
+            assert screen.review_preview_panel.y() == screen.review_list_panel.y()
+        assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_long_candidate_title_is_elided_with_its_full_tooltip(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    long_title = "Очень длинное название момента " * 24
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    analysis["candidates"][0]["title"] = long_title
+    write_json(analysis_path, analysis)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.resize(1280, 720)
+        screen.show()
+        app.processEvents()
+
+        title = screen.findChild(QLabel, "candidateTitle")
+        assert title is not None
+        assert title.toolTip() == long_title
+        assert title.text().endswith("…")
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize(("width", "height"), ((760, 480), (1280, 720), (1440, 900), (1920, 1080)))
+def test_desktop_shell_keeps_navigation_controls_and_project_header_unclipped(
+    tmp_path: Path, monkeypatch, width: int, height: int,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.name = "Очень длинное имя проекта для проверки адаптивного заголовка " * 12
+    services.projects.save(project)
+    services.settings.onboarding_completed = True
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    window = MainWindow(services)
+
+    try:
+        window.show_project(project)
+        window.resize(width, height)
+        window.show()
+        app.processEvents()
+
+        for button in (
+            window.new_button,
+            window.projects_button,
+            window.settings_button,
+            window.help_button,
+        ):
+            assert button.toolTip()
+            assert button.contentsRect().width() >= button.minimumSizeHint().width()
+        title = window.project_screen.title
+        assert title.toolTip() == project.name
+        assert title.text().endswith("…")
+        assert window.project_screen.content_scroll.horizontalScrollBar().maximum() == 0
+        if width == 760:
+            assert window.project_screen._review_action_layout.direction() == QBoxLayout.Direction.TopToBottom
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_drafts_hide_moment_selection_toolbar_and_filters(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    draft_preview = tmp_path / "draft-preview.mp4"
+    draft_preview.write_bytes(b"preview")
+    draft_artifact = tmp_path / "draft.json"
+    write_json(draft_artifact, {"candidates": [{
+        "candidate_id": "candidate-recommended",
+        "preview": {"output_file": str(draft_preview)},
+    }]})
+    project.candidate_states["candidate-recommended"] = "draft_ready"
+    project.candidate_draft_artifacts["candidate-recommended"] = str(draft_artifact)
+    project.review_selected_candidate_ids = ["candidate-recommended"]
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_draft", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        assert screen._flow_step == "drafts"
+        assert not any(button.text() == "Выбрать рекомендованные" for button in screen.findChildren(QPushButton))
+        assert not any(button.text() == "Снять выбор" for button in screen.findChildren(QPushButton))
+        assert not screen.findChildren(QFrame, "reviewFilters")
+        assert any(button.text() == "Исходный фрагмент" for button in screen.findChildren(QPushButton))
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_selection_update_does_not_reload_unchanged_active_preview(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    set_ranges: list[tuple[float, float]] = []
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        VideoPreview,
+        "set_range",
+        lambda _preview, _path, start, end, **_kwargs: set_ranges.append((float(start), float(end))),
+    )
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        candidate = screen._review_candidates_by_id["candidate-recommended"]
+        screen._preview_candidate(candidate)
+        assert set_ranges == [(1.0, 18.0)]
+
+        viewmodel.set_review_selection(["candidate-recommended"])
+        app.processEvents()
+        assert set_ranges == [(1.0, 18.0)]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_reopened_project_restores_the_persisted_candidate_preview(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.active_preview_candidate_id = "candidate-other"
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    set_ranges: list[tuple[float, float, bool]] = []
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        VideoPreview,
+        "set_range",
+        lambda _preview, _path, start, end, *, autoplay=True, **_kwargs:
+        set_ranges.append((float(start), float(end), autoplay)),
+    )
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        app.processEvents()
+        assert screen._active_candidate_id == "candidate-other"
+        assert set_ranges == [(19.0, 29.0, False)]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_boundary_change_replaces_a_stale_draft_preview_with_source_range(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    draft_preview = tmp_path / "draft-preview.mp4"
+    draft_preview.write_bytes(b"preview")
+    draft_artifact = tmp_path / "draft.json"
+    write_json(draft_artifact, {"candidates": [{
+        "candidate_id": "candidate-recommended",
+        "preview": {"output_file": str(draft_preview)},
+    }]})
+    candidate_id = "candidate-recommended"
+    project.candidate_states[candidate_id] = "draft_ready"
+    project.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+    project.review_selected_candidate_ids = [candidate_id]
+    project.active_preview_candidate_id = candidate_id
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    ranges: list[tuple[float, float, bool]] = []
+    monkeypatch.setattr(VideoPreview, "show_draft", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        VideoPreview,
+        "set_range",
+        lambda _preview, _path, start, end, *, autoplay=True, **_kwargs:
+        ranges.append((float(start), float(end), autoplay)),
+    )
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        assert ranges == []
+        project.candidate_boundary_overrides[candidate_id] = {"start": 2.0, "end": 19.0}
+        screen._project_changed(project)
+        assert ranges == [(2.0, 19.0, False)]
+        assert screen._active_preview_kind == "source-range"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_late_thumbnail_failure_for_old_request_does_not_replace_current_card(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    current_thumbnail = tmp_path / "current-thumbnail.jpg"
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: current_thumbnail)
+
+    try:
+        screen.open(project)
+        candidate_id = "candidate-recommended"
+        label = screen._candidate_thumbnail_labels[candidate_id][0]
+        assert "загружается" in label.text()
+
+        screen._thumbnail_unavailable(candidate_id, str(tmp_path / "old-thumbnail.jpg"))
+        assert "загружается" in label.text()
+
+        screen._thumbnail_unavailable(candidate_id, str(current_thumbnail))
+        assert label.text() == "Кадр\nнедоступен"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_processing_stage_rows_follow_the_active_job_kind(tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, _project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+
+    try:
+        viewmodel.run = type("DraftRun", (), {"run_kind": "draft"})()  # type: ignore[assignment]
+        screen._update_processing_stages(ProcessingSnapshot(
+            phase=ProcessingPhase.RUNNING, stage="draft_render",
+        ))
+        draft_rows = [label.text() for label in screen.processing_stage_labels.values()]
+        assert any("черновики" in row.lower() for row in draft_rows)
+        assert not any("речь и структуру" in row.lower() for row in draft_rows)
+        assert not any("сильные моменты" in row.lower() for row in draft_rows)
+
+        viewmodel.run = type("ExportRun", (), {"run_kind": "selected_render"})()  # type: ignore[assignment]
+        screen._update_processing_stages(ProcessingSnapshot(
+            phase=ProcessingPhase.RUNNING, stage="production_export",
+        ))
+        export_rows = [label.text() for label in screen.processing_stage_labels.values()]
+        assert any("готовые ролики" in row.lower() for row in export_rows)
+        assert not any("речь и структуру" in row.lower() for row in export_rows)
+        assert not any("сильные моменты" in row.lower() for row in export_rows)
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_failed_final_export_keeps_draft_actionable_without_raw_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    draft_preview = tmp_path / "draft-preview.mp4"
+    draft_preview.write_bytes(b"preview")
+    draft_artifact = tmp_path / "draft.json"
+    write_json(draft_artifact, {"candidates": [{
+        "candidate_id": "candidate-recommended",
+        "preview": {"output_file": str(draft_preview)},
+    }]})
+    candidate_id = "candidate-recommended"
+    project.candidate_states[candidate_id] = "selected"
+    project.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+    project.review_selected_candidate_ids = [candidate_id]
+    project.selected_candidate_ids = [candidate_id]
+    project.candidate_draft_statuses[candidate_id] = "ready"
+    project.candidate_approval_states[candidate_id] = "approved"
+    project.candidate_export_statuses[candidate_id] = "failed"
+    project.candidate_errors[candidate_id] = "ffmpeg command C:/secret-args failed"
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_draft", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        app.processEvents()
+        texts = [label.text() for label in screen.findChildren(QLabel)]
+        assert any("Готовый ролик не создан" in text for text in texts)
+        assert not any("secret-args" in text for text in texts)
+        assert any(button.text() == "Повторить экспорт" for button in screen.findChildren(QPushButton))
+        assert any(button.text() == "Открыть журнал" for button in screen.findChildren(QPushButton))
     finally:
         screen.close()
         screen.deleteLater()

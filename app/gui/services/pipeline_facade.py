@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from app.clip_results import ClipResult, result_paths, unique_primary_results
+from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError
 from app.run_manifest import is_run_scoped_path
 from app.run_artifacts import find_run_artifact_metadata, run_metadata_path
 from app.config import load_config
@@ -65,6 +66,10 @@ class PreparedPipelineRun:
     # it, state/report/output paths are replaced with the engine's real values.
     artifact_metadata_path: Path | None = None
     project_id: str | None = None
+    # New launches require the engine's indexed metadata contract.  Legacy
+    # records may opt into the expensive identity scan when that index was not
+    # available in the engine version that created them.
+    allow_legacy_artifact_scan: bool = True
 
     def command_line(self) -> str:
         """Return the Windows-safe command line used by the desktop runner."""
@@ -94,6 +99,23 @@ class RecoveredDraftProgress:
     artifact: DraftArtifact
     ready_candidate_ids: list[str]
     invalid_candidate_ids: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedDraftSelection:
+    """The independently usable subset of a user's approved draft choices."""
+
+    candidate_ids: list[str]
+    errors: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ReportedPipelineFailure:
+    """A current engine report whose terminal state is a real item failure."""
+
+    prepared: PreparedPipelineRun
+    report: dict[str, Any]
+    terminal: dict[str, Any]
 
 
 class PipelineFacade:
@@ -262,6 +284,97 @@ class PipelineFacade:
         )
 
     @staticmethod
+    def inspect_approved_drafts(
+        project: DesktopProject, candidate_ids: list[str],
+    ) -> ApprovedDraftSelection:
+        """Return every independently composable approved draft.
+
+        This is deliberately a non-writing preflight.  A stale or corrupted
+        artifact is an item failure, not a reason to throw away another
+        candidate's immutable draft.  Detailed ProductionPlan validation stays
+        in the engine hand-off, where it is reported per candidate with the
+        relevant validation stage.
+        """
+
+        artifacts: dict[Path, DraftArtifact] = {}
+        analyses: dict[Path, AnalysisArtifact] = {}
+        baseline: DraftArtifact | None = None
+        valid: list[str] = []
+        errors: dict[str, str] = {}
+        for candidate_id in dict.fromkeys(str(item) for item in candidate_ids if str(item)):
+            raw_path = project.candidate_draft_artifacts.get(candidate_id)
+            if not raw_path:
+                errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview не найден."
+                continue
+            try:
+                path = Path(str(raw_path)).resolve()
+            except OSError:
+                errors[candidate_id] = "Этап проверки черновика: путь к Draft Preview недоступен."
+                continue
+            if not path.is_file():
+                errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                continue
+            try:
+                artifact = artifacts.setdefault(path, DraftArtifact.read(path))
+            except (DraftArtifactError, OSError, ValueError):
+                errors[candidate_id] = "Этап проверки черновика: файл Draft Preview повреждён."
+                continue
+            if (
+                artifact.project_id and artifact.project_id != project.project_id
+            ) or (
+                project.analysis_id and artifact.analysis_id != project.analysis_id
+            ) or (
+                project.analysis_fingerprint and artifact.analysis_fingerprint != project.analysis_fingerprint
+            ):
+                errors[candidate_id] = "Этап проверки черновика: Draft Preview относится к другому анализу."
+                continue
+            try:
+                analysis_path = Path(artifact.analysis_artifact_path).resolve()
+            except OSError:
+                errors[candidate_id] = "Этап проверки черновика: путь к анализу недоступен."
+                continue
+            if not analysis_path.is_file():
+                errors[candidate_id] = "Этап проверки черновика: исходный анализ для Draft Preview больше недоступен."
+                continue
+            try:
+                analysis = analyses.setdefault(analysis_path, AnalysisArtifact.read(analysis_path))
+            except (AnalysisArtifactError, OSError, ValueError):
+                errors[candidate_id] = "Этап проверки черновика: исходный анализ повреждён."
+                continue
+            if (
+                analysis.analysis_id != artifact.analysis_id
+                or analysis.analysis_fingerprint != artifact.analysis_fingerprint
+                or analysis.source_fingerprint != artifact.source_fingerprint
+                or (analysis.project_id and analysis.project_id != project.project_id)
+            ):
+                errors[candidate_id] = "Этап проверки черновика: Draft Preview не совпадает с исходным анализом."
+                continue
+            record = next(
+                (item for item in artifact.candidates if str(item.get("candidate_id") or "") == candidate_id),
+                None,
+            )
+            if not isinstance(record, dict) or record.get("state") not in {"draft_ready", "selected"}:
+                errors[candidate_id] = "Этап проверки черновика: выбранный черновик ещё не готов к экспорту."
+                continue
+            if baseline is None:
+                baseline = artifact
+            elif not PipelineFacade._same_draft_context(baseline, artifact):
+                errors[candidate_id] = "Этап проверки черновика: черновик относится к другому анализу."
+                continue
+            valid.append(candidate_id)
+        return ApprovedDraftSelection(valid, errors)
+
+    @staticmethod
+    def _same_draft_context(left: DraftArtifact, right: DraftArtifact) -> bool:
+        return (
+            left.analysis_id == right.analysis_id
+            and left.analysis_fingerprint == right.analysis_fingerprint
+            and left.analysis_artifact_path == right.analysis_artifact_path
+            and left.source_fingerprint == right.source_fingerprint
+            and left.project_id == right.project_id
+        )
+
+    @staticmethod
     def _compose_approved_draft(project: DesktopProject, candidate_ids: list[str], run_directory: Path) -> Path:
         """Combine ready candidate drafts in the user's explicit output order.
 
@@ -353,6 +466,7 @@ class PipelineFacade:
             run_id=run_id, runtime_flags=runtime_flags,
             source_duration_seconds=source_duration_seconds,
             artifact_metadata_path=metadata_path, project_id=project_id,
+            allow_legacy_artifact_scan=False,
         )
 
     def prepare_render_revision(
@@ -395,7 +509,14 @@ class PipelineFacade:
         )
 
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
-        prepared = self.resolve_engine_paths(prepared)
+        resolved = self.resolve_engine_paths(prepared)
+        if resolved is None:
+            return self._failed_completion(
+                prepared,
+                "Итоговый отчёт обработки не найден.",
+                "Pipeline launch metadata could not be resolved.",
+            )
+        prepared = resolved
         if not prepared.report_path.is_file():
             return self._failed_completion(
                 prepared, "Итоговый отчёт обработки не найден.",
@@ -563,7 +684,10 @@ class PipelineFacade:
         still validate every primary MP4.
         """
 
-        prepared = self.resolve_engine_paths(prepared)
+        resolved = self.resolve_engine_paths(prepared)
+        if resolved is None:
+            return None
+        prepared = resolved
         if not prepared.run_id and not self._report_is_current(prepared.report_path, started_at):
             return None
         completion = self.completion(prepared)
@@ -571,6 +695,61 @@ class PipelineFacade:
         if completion.error_summary or (not completion.canonical_results and not recoverable_mode):
             return None
         return completion
+
+    def reported_failure(
+        self, prepared: PreparedPipelineRun, started_at: str,
+    ) -> ReportedPipelineFailure | None:
+        """Read a current terminal failure without treating it as a generic crash.
+
+        Draft and selected-render modes deliberately write a terminal report
+        when every requested item is invalid.  The report owns the actionable
+        candidate states; losing it because Qt reports exit code 2 would turn a
+        recoverable per-item failure into a misleading batch failure.
+        """
+
+        resolved = self.resolve_engine_paths(prepared)
+        if resolved is None or not resolved.report_path.is_file():
+            return None
+        if not resolved.run_id and not self._report_is_current(resolved.report_path, started_at):
+            return None
+        try:
+            report = read_json(resolved.report_path, {})
+        except (OSError, ValueError):
+            return None
+        if not isinstance(report, dict):
+            return None
+        terminal = report.get("terminal")
+        if not isinstance(terminal, dict) or terminal.get("status") != "failed":
+            return None
+        mode = resolved.runtime_flags.get("mode")
+        code = str(terminal.get("error_code") or "")
+        # Only the two known item-level hand-off terminals are safe to
+        # rehydrate as retryable review state.  Quality-gate failures can own
+        # canonical output files and must continue through normal completion
+        # validation instead of being mistaken for an empty batch.
+        if (mode == "draft" and code != "NO_DRAFT_PREVIEWS") or (
+            mode == "selected_render" and code != "NO_RENDERABLE_CLIPS"
+        ):
+            return None
+        if mode not in {"draft", "selected_render"}:
+            return None
+        run_info = report.get("run")
+        if not isinstance(run_info, dict):
+            if resolved.run_id or resolved.project_id:
+                return None
+            run_info = {}
+        report_run_id = str(run_info.get("run_id") or "")
+        report_project_id = str(run_info.get("project_id") or "")
+        legacy_current = resolved.allow_legacy_artifact_scan and self._report_is_current(
+            resolved.report_path, started_at,
+        )
+        if resolved.run_id and report_run_id != resolved.run_id:
+            if report_run_id or not legacy_current:
+                return None
+        if resolved.project_id and report_project_id != resolved.project_id:
+            if report_project_id or not legacy_current:
+                return None
+        return ReportedPipelineFailure(resolved, report, terminal)
 
     def recover_draft_progress(
         self,
@@ -584,15 +763,16 @@ class PipelineFacade:
         reviewed source range, deterministic preview path, and completed state.
         """
 
-        prepared = self.resolve_engine_paths(prepared)
+        resolved = self.resolve_engine_paths(prepared)
         if (
-            prepared is None
-            or not prepared.run_id
-            or prepared.runtime_flags.get("mode") != "draft"
+            resolved is None
+            or not resolved.run_id
+            or resolved.runtime_flags.get("mode") != "draft"
             or not expected_candidate_ids
             or len(expected_candidate_ids) != len(set(expected_candidate_ids))
         ):
             return None
+        prepared = resolved
         progress_path = prepared.output_directory / "draft-progress.json"
         try:
             artifact = DraftArtifact.read(progress_path)
@@ -712,6 +892,11 @@ class PipelineFacade:
         runtime_flags = execution.get("runtime_flags", {})
         source = execution.get("source_path")
         metadata_value = str(execution.get("artifact_metadata_path") or "").strip()
+        allow_legacy_artifact_scan = execution.get("allow_legacy_artifact_scan")
+        if not isinstance(allow_legacy_artifact_scan, bool):
+            # Records written before the indexed-launch contract retain their
+            # conservative compatibility scan.
+            allow_legacy_artifact_scan = True
         if run_id and metadata_value:
             metadata_path = Path(metadata_value)
             return PreparedPipelineRun(
@@ -721,6 +906,7 @@ class PipelineFacade:
                 source_path=Path(str(source)) if source else None,
                 runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
                 run_id=run_id, artifact_metadata_path=metadata_path, project_id=project_id,
+                allow_legacy_artifact_scan=allow_legacy_artifact_scan,
             )
         engine_paths = execution.get("engine_paths")
         if isinstance(engine_paths, dict) and all(
@@ -779,6 +965,7 @@ class PipelineFacade:
             run_id=prepared.run_id,
             project_id=prepared.project_id,
             preferred_path=prepared.artifact_metadata_path,
+            allow_legacy_scan=prepared.allow_legacy_artifact_scan,
         )
         if metadata is None:
             return prepared

@@ -27,6 +27,7 @@ class MainWindow(QMainWindow):
         self.projects_viewmodel = ProjectsViewModel(services, self)
         self.project_viewmodel = ProjectViewModel(services, self)
         self.settings_viewmodel = SettingsViewModel(services, self)
+        self._onboarding_dialog: OnboardingDialog | None = None
         self.setWindowTitle("Content Factory")
         # A smaller, practical lower bound lets Windows use the application at
         # 1280×720 and elevated scaling without making the shell itself clip.
@@ -107,6 +108,18 @@ class MainWindow(QMainWindow):
         self.version.setObjectName("muted")
         nav.addWidget(self.version)
 
+        # A narrow shell should not truncate a primary navigation action.
+        # Retain the descriptive name as a tooltip and use progressively
+        # shorter labels before Windows scaling can squeeze button contents.
+        self._sidebar_full_labels = {
+            self.new_button: "＋  Новый проект",
+            self.projects_button: "▣  Проекты",
+            self.settings_button: "⚙  Настройки",
+            self.help_button: "?  Помощь и поддержка",
+        }
+        for button, label in self._sidebar_full_labels.items():
+            button.setToolTip(label)
+
         layout.addWidget(self.sidebar)
         self.stack = QStackedWidget()
         self.stack.setObjectName("contentStack")
@@ -120,6 +133,7 @@ class MainWindow(QMainWindow):
         self.project_screen.back_requested.connect(self.show_projects)
         layout.addWidget(self.stack, 1)
         self._restore_last_screen()
+        self._apply_sidebar_layout()
         QTimer.singleShot(0, self._maybe_onboard)
 
     def show_projects(self, *, remember: bool = True) -> None:
@@ -166,9 +180,24 @@ class MainWindow(QMainWindow):
         self.show_projects(remember=False)
 
     def _maybe_onboard(self) -> None:
-        if not self.services.settings.onboarding_completed:
-            OnboardingDialog(self.settings_viewmodel, self).exec()
-            self.show_projects()
+        if self.services.settings.onboarding_completed:
+            return
+        # This callback may be queued more than once while a window is being
+        # restored.  Keep one parented dialog instead of stacking modal
+        # onboarding windows behind each other.
+        if self._onboarding_dialog is not None:
+            try:
+                if self._onboarding_dialog.isVisible():
+                    return
+            except RuntimeError:
+                self._onboarding_dialog = None
+        dialog = OnboardingDialog(self.settings_viewmodel, self)
+        self._onboarding_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._onboarding_dialog = None
+        self.show_projects()
 
     def _set_selected(self, button: QPushButton | None) -> None:
         for item in (self.projects_button, self.new_button, self.settings_button):
@@ -188,9 +217,37 @@ class MainWindow(QMainWindow):
         # recognisable creator-tool sidebar at normal desktop widths.
         if not hasattr(self, "sidebar"):
             return
-        target_width = 156 if self.width() < 920 else 184 if self.width() < 1120 else 208
+        self._apply_sidebar_layout()
+
+    def _apply_sidebar_layout(self) -> None:
+        """Use compact, tooltip-backed navigation before labels can clip."""
+
+        if not hasattr(self, "sidebar"):
+            return
+        width = self.width()
+        target_width = 156 if width < 920 else 184 if width < 1120 else 208
         if self.sidebar.width() != target_width:
             self.sidebar.setFixedWidth(target_width)
+        if width < 920:
+            labels = {
+                self.new_button: "＋",
+                self.projects_button: "▣",
+                self.settings_button: "⚙",
+                self.help_button: "?",
+            }
+        else:
+            labels = {
+                self.new_button: "＋  Новый",
+                self.projects_button: "▣  Проекты",
+                self.settings_button: "⚙  Настройки",
+                self.help_button: "?  Помощь",
+            }
+        for button, label in labels.items():
+            if button.text() != label:
+                button.setText(label)
+        compact = width < 920
+        self.system_status.setVisible(not compact)
+        self.version.setVisible(not compact)
 
     @staticmethod
     def _nav_button(text: str) -> QPushButton:

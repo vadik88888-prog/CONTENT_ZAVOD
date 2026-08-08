@@ -30,8 +30,58 @@ class QtPipelineRunner(QObject):
     LONG_SOURCE_DURATION_SECONDS = 90 * 60
     LONG_RUNNING_STAGES = frozenset({
         "transcription", "audio_features", "scene_detection", "visual_analysis",
-        "production_render", "render", "tts", "audio",
+        "draft", "production_render", "render", "tts", "audio",
     })
+    # A focused desktop job must not revive an actively-running stage from a
+    # prior analysis. Completed analysis entries intentionally remain in the
+    # engine state file, so this filters only the current running stage.
+    ANALYSIS_STAGE_PREFIXES = frozenset({
+        "source", "media", "metadata", "transcription", "transcript_features",
+        "audio_features", "scene_detection", "visual_analysis", "content_profile",
+        "content_map", "semantic_boundaries", "story_units", "coverage_map",
+        "clip_count_recommendation", "candidate_generation", "ai_reranking",
+        "virality_profiles", "virality_ranking", "analysis_artifact", "report", "terminal",
+        # Current engine names, plus the legacy aliases above retained for
+        # existing persisted state files.
+        "candidates_v2", "local_scoring", "shortlist", "ai_ranking", "final_selection",
+        "video_content_profile", "global_content_map",
+    })
+    DRAFT_STAGE_PREFIXES = frozenset({
+        "analysis_handoff", "content_transformation", "production_plan", "draft_preview",
+        "draft_artifact",
+        "transformation_source_context", "transformation_semantic_representation",
+        "transformation_narrative_plan", "transformation_script_draft",
+        "transformation_script_validation", "transformation_final_script", "transformation_result",
+    })
+    FINAL_STAGE_PREFIXES = frozenset({
+        "approved_draft_plan", "approved_draft_handoff", "tts_generation", "tts",
+        "audio_composition", "audio", "production_render", "render",
+    })
+    DELIVERY_STAGE_PREFIXES = DRAFT_STAGE_PREFIXES | FINAL_STAGE_PREFIXES
+    STAGE_LABEL_OVERRIDES = {
+        "video_content_profile": "Анализируем содержание",
+        "global_content_map": "Анализируем содержание",
+        "story_units": "Анализируем содержание",
+        "semantic_boundaries": "Ищем сильные моменты",
+        "candidates_v2": "Ищем сильные моменты",
+        "local_scoring": "Ищем сильные моменты",
+        "shortlist": "Ищем сильные моменты",
+        "ai_ranking": "Ищем сильные моменты",
+        "final_selection": "Ищем сильные моменты",
+        "analysis_artifact": "Сохраняем анализ",
+        "analysis_handoff": "Используем готовый анализ",
+        "content_transformation": "Готовим сценарий",
+        "transformation_result": "Готовим сценарий",
+        "draft_preview": "Собираем черновик",
+        "draft_artifact": "Сохраняем черновики",
+        "approved_draft_plan": "Проверяем утверждённый черновик",
+        "approved_draft_handoff": "Готовим утверждённые черновики",
+        "tts_generation": "Готовим озвучку",
+        "audio_composition": "Собираем звук",
+        "production_render": "Экспортируем итоговый ролик",
+        "report": "Проверяем результат",
+        "terminal": "Завершаем этап",
+    }
 
     run_started = Signal()
     stage_changed = Signal(str, str)
@@ -83,6 +133,7 @@ class QtPipelineRunner(QObject):
         self._stall_timeout_ms = stall_timeout_ms
         self._long_stage_timeout_ms = max(stall_timeout_ms, long_stage_timeout_ms)
         self._last_stage: str | None = None
+        self._last_ignored_engine_stage: str | None = None
         self._state_fingerprint: tuple[int, int] | None = None
         self._activity_fingerprints: dict[str, object] = {}
         self._launch_wall_time = 0.0
@@ -117,6 +168,7 @@ class QtPipelineRunner(QObject):
             raise RuntimeError("Обработка уже выполняется.")
         self._prepared = prepared
         self._last_stage = None
+        self._last_ignored_engine_stage = None
         self._state_fingerprint = None
         self._activity_fingerprints = {}
         self._launch_wall_time = time.time()
@@ -237,25 +289,107 @@ class QtPipelineRunner(QObject):
                 for name, value in stages.items()
                 if isinstance(value, dict) and value.get("status") == "running"
             ]
-            stage = (
-                max(active_stages, key=lambda item: str(item[1].get("started_at", "")))[0]
-                if active_stages
-                else None
-            )
         except (OSError, ValueError, TypeError):
             return
-        if stage and stage != self._last_stage:
+        presentations = [
+            (name, value, self._present_stage(prepared, name))
+            for name, value in active_stages
+        ]
+        eligible = [item for item in presentations if item[2] is not None]
+        if not eligible:
+            if active_stages:
+                stale_stage = max(active_stages, key=lambda item: str(item[1].get("started_at", "")))[0]
+                if stale_stage != self._last_ignored_engine_stage:
+                    self._last_ignored_engine_stage = stale_stage
+                    self._record(
+                        f"Ignoring stale pipeline stage for {self._job_mode(prepared)} job: {stale_stage}."
+                    )
+            else:
+                self._last_ignored_engine_stage = None
+            return
+
+        engine_stage, _value, presentation = max(
+            eligible, key=lambda item: str(item[1].get("started_at", "")),
+        )
+        assert presentation is not None
+        stage, label = presentation
+        self._last_ignored_engine_stage = None
+        if stage != self._last_stage:
             self._last_stage = stage
             self._stage_started_monotonic = time.monotonic()
             self._warned_stage = None
             self._next_stage_warning_monotonic = (
                 self._stage_started_monotonic + self._current_timeout_seconds()
             )
-            label = STAGE_LABELS.get(stage.split(":", 1)[0], "Обрабатываем видео")
-            self._note_activity(f"stage changed to {stage}")
-            self._record(f"Pipeline stage: {stage} ({label})")
+            self._note_activity(f"stage changed to {engine_stage}")
+            self._record(f"Pipeline stage: {engine_stage} -> {stage} ({label})")
             self.stage_changed.emit(stage, label)
             self.progress_changed.emit(label)
+
+    @classmethod
+    def _job_mode(cls, prepared: PreparedPipelineRun) -> str:
+        """Classify the focused desktop job without depending on source titles."""
+
+        flags = prepared.runtime_flags
+        mode = str(flags.get("mode") or "").strip().lower()
+        if mode == "analysis":
+            return "analysis"
+        if mode == "draft":
+            return "draft"
+        if mode == "selected_render" or str(flags.get("render_only") or "").lower() == "true":
+            return "final"
+        # Older reconstructed records can lack runtime flags. Infer only from
+        # an explicit CLI subcommand, never from a source path or filename.
+        arguments = {str(argument).strip().lower() for argument in prepared.arguments}
+        if "draft" in arguments:
+            return "draft"
+        if "analyze" in arguments:
+            return "analysis"
+        if "render" in arguments or "--production-render-only" in arguments:
+            return "final"
+        return "full"
+
+    @classmethod
+    def _present_stage(cls, prepared: PreparedPipelineRun, engine_stage: str) -> tuple[str, str] | None:
+        """Translate an engine stage into the current job's visible stage.
+
+        A draft is represented as draft generation and a selected render as
+        final export. This leaves the existing generic progress component in
+        place while preventing analysis rows from appearing during export.
+        """
+
+        parent, separator, suffix = engine_stage.partition(":")
+        mode = cls._job_mode(prepared)
+        if mode == "analysis":
+            if parent not in cls.ANALYSIS_STAGE_PREFIXES:
+                return None
+            return engine_stage, cls._stage_label(parent)
+        if mode == "draft":
+            if parent not in cls.DRAFT_STAGE_PREFIXES:
+                return None
+            return cls._scoped_stage("draft", parent, separator, suffix), cls._stage_label(parent)
+        if mode == "final":
+            if parent not in cls.FINAL_STAGE_PREFIXES:
+                return None
+            return cls._scoped_stage("production_render", parent, separator, suffix), cls._stage_label(parent)
+
+        # A legacy full process really does include its own analysis. Keep it
+        # visible, then scope only the delivery portion as final export.
+        if parent in cls.DELIVERY_STAGE_PREFIXES:
+            return cls._scoped_stage("production_render", parent, separator, suffix), cls._stage_label(parent)
+        return engine_stage, cls._stage_label(parent)
+
+    @staticmethod
+    def _scoped_stage(scope: str, parent: str, separator: str, suffix: str) -> str:
+        detail = f"{parent}{separator}{suffix}" if separator else parent
+        return f"{scope}:{detail}"
+
+    @classmethod
+    def _stage_label(cls, parent: str) -> str:
+        return cls.STAGE_LABEL_OVERRIDES.get(
+            parent,
+            STAGE_LABELS.get(parent, "Обрабатываем видео"),
+        )
 
     def _startup_timed_out(self) -> None:
         if self._terminal_emitted or self._running_seen:
@@ -325,6 +459,7 @@ class QtPipelineRunner(QObject):
             run_id=prepared.run_id,
             project_id=prepared.project_id,
             preferred_path=prepared.artifact_metadata_path,
+            allow_legacy_scan=prepared.allow_legacy_artifact_scan,
         )
         if metadata is None:
             return

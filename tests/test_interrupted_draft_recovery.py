@@ -104,7 +104,10 @@ def test_interrupted_draft_restores_only_bound_preview_and_resumes_missing(tmp_p
     assert restored_run.status == RunStatus.INTERRUPTED
     assert restored.review_selected_candidate_ids == candidate_ids
     assert restored.candidate_states == {
-        "candidate-a": "draft_ready", "candidate-b": "analyzed", "candidate-c": "analyzed",
+        "candidate-a": "draft_ready", "candidate-b": "draft_failed", "candidate-c": "draft_failed",
+    }
+    assert restored.candidate_draft_statuses == {
+        "candidate-a": "ready", "candidate-b": "failed", "candidate-c": "failed",
     }
     assert restored.candidate_draft_artifacts == {"candidate-a": str((prepared.output_directory / "draft-progress.json").resolve())}
 
@@ -159,6 +162,43 @@ def test_interrupted_draft_rejects_random_or_partial_mp4(
 
     restored = services.projects.load(project.project_id)
     assert restored.status == ProjectStatus.INTERRUPTED
-    assert restored.candidate_states["candidate-a"] == "analyzed"
+    assert restored.candidate_states["candidate-a"] == "draft_failed"
+    assert restored.candidate_draft_statuses["candidate-a"] == "failed"
     assert restored.candidate_draft_artifacts == {}
     assert "Неполный файл" in restored.candidate_errors["candidate-a"]
+
+
+def test_interrupted_selected_render_keeps_each_approved_draft_retryable(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    candidate_ids = ["candidate-a", "candidate-b"]
+    project.review_selected_candidate_ids = list(candidate_ids)
+    project.selected_candidate_ids = list(candidate_ids)
+    project.candidate_states = {candidate_id: "production_rendering" for candidate_id in candidate_ids}
+    project.candidate_draft_statuses = {candidate_id: "ready" for candidate_id in candidate_ids}
+    project.candidate_approval_states = {candidate_id: "approved" for candidate_id in candidate_ids}
+    project.candidate_export_statuses = {candidate_id: "running" for candidate_id in candidate_ids}
+    project.status = ProjectStatus.RENDERING_SELECTED
+    run = services.runs.create(
+        project,
+        {"candidate_ids": list(candidate_ids)},
+        {"path": project.source_path},
+        "test",
+        run_kind=RunKind.SELECTED_RENDER,
+    )
+    run.status = RunStatus.RUNNING
+    services.runs.save(run)
+    services.projects.save(project)
+
+    assert services.recover_interrupted_runs() == 1
+
+    restored = services.projects.load(project.project_id)
+    restored_run = services.runs.load(project.project_id, run.run_id)
+    assert restored_run.status == RunStatus.INTERRUPTED
+    assert restored.status == ProjectStatus.REVIEWING_CANDIDATES
+    assert restored.review_selected_candidate_ids == candidate_ids
+    assert restored.selected_candidate_ids == candidate_ids
+    assert restored.candidate_states == {candidate_id: "selected" for candidate_id in candidate_ids}
+    assert restored.candidate_draft_statuses == {candidate_id: "ready" for candidate_id in candidate_ids}
+    assert restored.candidate_approval_states == {candidate_id: "approved" for candidate_id in candidate_ids}
+    assert restored.candidate_export_statuses == {candidate_id: "failed" for candidate_id in candidate_ids}
+    assert all("прерван" in restored.candidate_errors[candidate_id] for candidate_id in candidate_ids)

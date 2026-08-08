@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from PySide6.QtCore import (
     Qt,
+    QTimer,
     QUrl,
     Signal,
 )
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.clip_results import ClipResult, primary_clip_results, unique_primary_results
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
-from app.gui.services.error_mapping import dialog_message
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
 
@@ -62,6 +63,39 @@ _GLOBAL_STEP_FOR_FLOW = {
 }
 
 
+class _ElidedLabel(QLabel):
+    """One-line card text that preserves the complete value in its tooltip."""
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        """Keep the source value when callers refresh a project title."""
+
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self._refresh_elision()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh_elision()
+
+    def _refresh_elision(self) -> None:
+        width = self.contentsRect().width()
+        if width <= 0:
+            super().setText(self._full_text)
+            return
+        super().setText(self.fontMetrics().elidedText(
+            self._full_text,
+            Qt.TextElideMode.ElideRight,
+            width,
+        ))
+
+
 class ProjectScreen(QWidget):
     back_requested = Signal()
 
@@ -72,7 +106,19 @@ class ProjectScreen(QWidget):
         self.project: DesktopProject | None = None
         self.runs: list[ProjectRun] = []
         self._active_candidate_id: str | None = None
+        # The player is shared by Moments and Drafts.  Keep its review binding
+        # separate from the user choices persisted in the project: a project
+        # refresh must not replay an unchanged fragment, while a boundary edit
+        # must replace an obsolete draft/source preview with the exact new
+        # source range.
+        self._active_candidate_range: tuple[str, float, float] | None = None
+        self._active_preview_kind = "source"
+        self._persisting_active_preview = False
+        self._review_candidates_by_id: dict[str, dict] = {}
+        self._review_visible_candidate_ids: list[str] = []
+        self._draft_preview_paths: dict[str, Path] = {}
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
+        self._candidate_thumbnail_paths: dict[str, Path] = {}
         self._candidate_cards: dict[str, QFrame] = {}
         self._flow_step = "settings"
         self._results_subflow_override: str | None = None
@@ -82,24 +128,23 @@ class ProjectScreen(QWidget):
         self._candidate_visible_limit = 12
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
-        self._thumbnail_loader.thumbnail_unavailable.connect(self._thumbnail_unavailable)
+        self._thumbnail_loader.thumbnail_unavailable_with_path.connect(self._thumbnail_unavailable)
         root = QVBoxLayout(self)
         self._root_layout = root
         root.setContentsMargins(34, 26, 34, 30)
         header = QHBoxLayout()
         back = QPushButton("← Проекты")
         back.clicked.connect(self.back_requested)
-        self.title = QLabel("Проект")
+        self.title = _ElidedLabel("Проект")
         self.title.setObjectName("title")
-        self.status = QLabel("")
+        self.status = _ElidedLabel("")
         self.status.setObjectName("status")
         self.settings_toggle = QPushButton("Дополнительно")
         self.settings_toggle.setCheckable(True)
         self.folder = QPushButton("Открыть папку")
         self.folder.clicked.connect(self._open_project_folder)
         header.addWidget(back)
-        header.addWidget(self.title)
-        header.addStretch()
+        header.addWidget(self.title, 1)
         header.addWidget(self.status)
         header.addWidget(self.settings_toggle)
         header.addWidget(self.folder)
@@ -395,6 +440,7 @@ class ProjectScreen(QWidget):
         self.viewmodel.processing_changed.connect(self._processing_changed)
         self.viewmodel.error_occurred.connect(self._error)
         self._compact_stage_layout: bool | None = None
+        self._compact_action_layout: bool | None = None
         self._apply_stage_responsive_layout(force=True)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -412,10 +458,21 @@ class ProjectScreen(QWidget):
         scrollable.
         """
 
-        compact = self.width() < 820
-        if not force and compact == self._compact_stage_layout:
+        # The review workspace contains a readable candidate card, a bounded
+        # player and an inspector.  Stacking it at laptop widths is preferable
+        # to squeezing the card actions into hidden horizontal overflow.  A
+        # full-HD desktop keeps the three-column composition from the approved
+        # visual reference.
+        compact = self.width() < 1600
+        compact_actions = self.width() < 900
+        if (
+            not force
+            and compact == self._compact_stage_layout
+            and compact_actions == self._compact_action_layout
+        ):
             return
         self._compact_stage_layout = compact
+        self._compact_action_layout = compact_actions
         direction = (
             QBoxLayout.Direction.TopToBottom
             if compact
@@ -436,7 +493,29 @@ class ProjectScreen(QWidget):
         self._processing_workspace_layout.setSpacing(spacing)
         self._review_body_layout.setDirection(direction)
         self._review_body_layout.setSpacing(12 if compact else 14)
+        self._review_action_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact_actions
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._review_action_layout.setSpacing(8 if compact_actions else 6)
         self.content_host.setMinimumWidth(0)
+        if compact:
+            for panel in (self.review_list_panel, self.review_preview_panel, self.review_inspector_panel):
+                panel.setMinimumWidth(0)
+                panel.setMaximumWidth(16_777_215)
+        else:
+            # These are content minima rather than fixed columns; the preview
+            # still receives the extra room through its stretch factor.
+            # The candidate card's layout needs a few pixels beyond its raw
+            # size hint for the scroll-frame border; otherwise a hidden two
+            # pixel horizontal scrollbar remains even at full HD.
+            self.review_list_panel.setMinimumWidth(704)
+            self.review_list_panel.setMaximumWidth(720)
+            self.review_preview_panel.setMinimumWidth(460)
+            self.review_preview_panel.setMaximumWidth(16_777_215)
+            self.review_inspector_panel.setMinimumWidth(300)
+            self.review_inspector_panel.setMaximumWidth(390)
         self.settings_panel.setMaximumWidth(16_777_215 if compact else 300)
         self.setup_summary.setMaximumWidth(16_777_215)
         self.processing_summary.setMaximumWidth(16_777_215)
@@ -566,6 +645,7 @@ class ProjectScreen(QWidget):
         stages_heading = QLabel("Ход работы")
         stages_heading.setStyleSheet("font-size: 16px; font-weight: 600;")
         stages_layout.addWidget(stages_heading)
+        self._processing_stages_layout = stages_layout
         self.processing_stage_labels: dict[str, QLabel] = {}
         for stage, label in (
             ("prepare", "Подготавливаем видео"),
@@ -578,6 +658,7 @@ class ProjectScreen(QWidget):
             row.setProperty("stageState", "pending")
             stages_layout.addWidget(row)
             self.processing_stage_labels[stage] = row
+        self._processing_stage_rows: tuple[str, ...] = ("prepare", "transcribe", "analyze", "render")
         processing_main_layout.addWidget(self.processing_stages)
         self.processing_actions = QFrame()
         self.processing_actions.setObjectName("secondaryActionBar")
@@ -635,6 +716,7 @@ class ProjectScreen(QWidget):
         self._review_body_layout = review_body
         review_body.setSpacing(14)
         list_panel = QFrame()
+        self.review_list_panel = list_panel
         list_panel.setObjectName("reviewListPanel")
         list_panel_layout = QVBoxLayout(list_panel)
         list_panel_layout.setContentsMargins(0, 0, 0, 0)
@@ -645,12 +727,14 @@ class ProjectScreen(QWidget):
         list_panel_layout.addWidget(self.review_list_scroll)
         review_body.addWidget(list_panel, 2)
         preview_panel = QFrame()
+        self.review_preview_panel = preview_panel
         preview_panel.setObjectName("reviewPreviewPanel")
         preview_layout = QVBoxLayout(preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         review_body.addWidget(preview_panel, 3)
         inspector_panel = QFrame()
+        self.review_inspector_panel = inspector_panel
         inspector_panel.setObjectName("reviewInspectorPanel")
         inspector_layout = QVBoxLayout(inspector_panel)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
@@ -664,6 +748,7 @@ class ProjectScreen(QWidget):
         self.review_action_bar = QFrame()
         self.review_action_bar.setObjectName("stickyActionBar")
         review_action_layout = QHBoxLayout(self.review_action_bar)
+        self._review_action_layout = review_action_layout
         review_action_layout.setContentsMargins(14, 10, 14, 10)
         self.review_back_button = QPushButton("← Назад к обработке")
         self.review_back_button.clicked.connect(self.back_requested)
@@ -723,6 +808,13 @@ class ProjectScreen(QWidget):
         self.viewmodel.open(project)
 
     def _project_changed(self, project: DesktopProject) -> None:
+        if self._persisting_active_preview and self.project and self.project.project_id == project.project_id:
+            # The only mutation was the durable preview id.  Rebuilding every
+            # card during its click steals focus from the shared player and can
+            # make a selected fragment appear to restart.
+            self.project = project
+            return
+        previous_step = self._flow_step
         is_new_project = self.project is None or self.project.project_id != project.project_id
         self.project = project
         if is_new_project:
@@ -730,6 +822,9 @@ class ProjectScreen(QWidget):
             self._candidate_visible_limit = 12
             self._candidate_filter = "all"
             self._candidate_sort = "recommendation"
+            self._active_candidate_id = getattr(project, "active_preview_candidate_id", None)
+            self._active_candidate_range = None
+            self._active_preview_kind = "source"
         self.title.setText(project.name)
         self.status.setText(_STATUS.get(project.status, "Неизвестно"))
         self.run_button.setText("Начать поиск моментов")
@@ -766,7 +861,7 @@ class ProjectScreen(QWidget):
         self._update_candidate_review(project)
         self._update_final_results(project)
         self._update_next_step(project)
-        self._refresh_active_candidate_detail(project)
+        self._reconcile_active_candidate_preview(project, previous_step=previous_step)
         self._apply_flow_visibility(project)
 
     def _set_advanced_visible(self, visible: bool) -> None:
@@ -925,6 +1020,16 @@ class ProjectScreen(QWidget):
                 return "drafts" if project.candidate_draft_artifacts else "processing"
             if latest.run_kind in {"analysis", "full"} and not project.analysis_artifact_path:
                 return "processing"
+        # A completed retry must not hide other ready/failed drafts or
+        # approved exports that remain in the project queue.  Those items are
+        # reviewed before the final-result viewer, even if an earlier or
+        # neighbouring output is already available.
+        review_ids = set(project.review_selected_candidate_ids) | set(project.selected_candidate_ids)
+        if any(
+            project.candidate_states.get(candidate_id) in {"draft_ready", "draft_failed", "selected", "production_rendering"}
+            for candidate_id in review_ids
+        ):
+            return "drafts"
         # A successful delivery remains available, but it must not mask a
         # later failed, interrupted, or partial render batch. That batch is
         # recoverable from Drafts and retains all existing artifacts.
@@ -1068,7 +1173,7 @@ class ProjectScreen(QWidget):
     @staticmethod
     def _format_cost_range(minimum: object, maximum: object) -> str:
         try:
-            low, high = float(minimum), float(maximum)
+            low, high = float(cast(Any, minimum)), float(cast(Any, maximum))
         except (TypeError, ValueError):
             return "неизвестна до проверки тарифов"
         if high < 0.01:
@@ -1104,15 +1209,18 @@ class ProjectScreen(QWidget):
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
+        workflow_step = self._derive_flow_step(project)
+        self._review_candidates_by_id = {}
+        self._review_visible_candidate_ids = []
+        self._draft_preview_paths = {}
         heading = layout.itemAt(0).widget()
         if isinstance(heading, QLabel):
-            step = self._derive_flow_step(project)
             heading.setText({
                 "candidates": "Выберите моменты",
                 "drafts": "Проверьте черновики",
                 "finished": "Готовые ролики",
-            }.get(step, "Моменты"))
-        if self._derive_flow_step(project) == "finished" and self._final_output_records(project):
+            }.get(workflow_step, "Моменты"))
+        if workflow_step == "finished" and self._final_output_records(project):
             return
         while layout.count() > 1:
             item = layout.takeAt(1)
@@ -1122,6 +1230,7 @@ class ProjectScreen(QWidget):
                 widget.deleteLater()
         self._candidate_selection_buttons = {}
         self._candidate_thumbnail_labels = {}
+        self._candidate_thumbnail_paths = {}
         self._candidate_cards = {}
         analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
         analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
@@ -1139,7 +1248,6 @@ class ProjectScreen(QWidget):
             )
             if isinstance(candidate, dict):
                 previews[candidate_id] = candidate
-        workflow_step = self._derive_flow_step(project)
         if workflow_step == "drafts":
             # Draft review is deliberately not a second copy of the full
             # moments catalogue.  Keep pending/ready/approved draft items and
@@ -1153,6 +1261,16 @@ class ProjectScreen(QWidget):
                     in {"draft_planning", "draft_ready", "draft_failed", "selected", "production_rendering"}
                 )
             ]
+        self._review_candidates_by_id = {
+            str(item["candidate_id"]): dict(item)
+            for item in candidates
+            if isinstance(item, dict) and item.get("candidate_id")
+        }
+        for candidate_id, record in previews.items():
+            preview = record.get("preview", {}) if isinstance(record, dict) else {}
+            preview_file = Path(str(preview.get("output_file") or "")) if isinstance(preview, dict) else None
+            if preview_file and preview_file.is_file():
+                self._draft_preview_paths[candidate_id] = preview_file
         if not candidates:
             self.workflow_hint.setText(
                 f"После поиска здесь появятся моменты, из которых можно выбрать до {self._selection_limit(project)} черновиков."
@@ -1164,7 +1282,7 @@ class ProjectScreen(QWidget):
         selection_limit = self._selection_limit(project)
         draftable_ids = [
             candidate_id for candidate_id in project.review_selected_candidate_ids
-            if project.candidate_states.get(candidate_id) not in {"draft_ready", "selected", "rendered", "production_rendering"}
+            if self._candidate_needs_draft(project, candidate_id)
         ]
         recommended_count = sum(
             bool(item.get("recommended", item.get("selected_by_recommendation")))
@@ -1182,48 +1300,68 @@ class ProjectScreen(QWidget):
                 f"Найдено: {len(candidates)} · рекомендуем: {recommended_count} · "
                 f"можно выбрать: до {selection_limit}"
             )
-        selection_toolbar = QFrame()
-        toolbar_layout = QHBoxLayout(selection_toolbar)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        summary = QLabel(
-            f"Найдено моментов: {len(candidates)} · рекомендуем: {recommended_count} · "
-            f"выбрано: {len(project.review_selected_candidate_ids)}/{selection_limit}"
-        )
-        summary.setWordWrap(True)
-        toolbar_layout.addWidget(summary, 1)
-        recommended_button = QPushButton("Выбрать рекомендованные")
-        recommended_button.clicked.connect(self._select_recommended)
-        clear_button = QPushButton("Снять выбор")
-        clear_button.clicked.connect(self._clear_review_selection)
-        toolbar_layout.addWidget(recommended_button)
-        toolbar_layout.addWidget(clear_button)
-        layout.addWidget(selection_toolbar)
-        filters = QFrame()
-        filters.setObjectName("reviewFilters")
-        filters_layout = QHBoxLayout(filters)
-        filters_layout.setContentsMargins(0, 0, 0, 0)
-        filters_layout.setSpacing(6)
-        filter_combo = QComboBox()
-        filter_combo.addItem("Рекомендованные", "recommended")
-        filter_combo.addItem("Все моменты", "all")
-        filter_combo.addItem("Не выбраны", "unselected")
-        filter_combo.addItem("Высокий потенциал", "high")
-        filter_combo.addItem("Средний потенциал", "medium")
-        self._set_combo_data(filter_combo, self._candidate_filter)
-        filter_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_filter(str(filter_combo.currentData())))
-        sort_combo = QComboBox()
-        sort_combo.addItem("Сначала сильные", "recommendation")
-        sort_combo.addItem("По времени", "time")
-        sort_combo.addItem("По потенциалу", "potential")
-        self._set_combo_data(sort_combo, self._candidate_sort)
-        sort_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_sort(str(sort_combo.currentData())))
-        filters_layout.addWidget(filter_combo, 1)
-        filters_layout.addWidget(sort_combo, 1)
-        layout.addWidget(filters)
+        if workflow_step == "candidates":
+            # Moment selection belongs to the source-moment phase.  Drafts
+            # have their own decisions (watch/approve/reject/retry), so do not
+            # leak recommendation filters and draft-selection controls there.
+            selection_toolbar = QFrame()
+            toolbar_layout = QHBoxLayout(selection_toolbar)
+            toolbar_layout.setContentsMargins(0, 0, 0, 0)
+            summary = QLabel(
+                f"Найдено моментов: {len(candidates)} · рекомендуем: {recommended_count} · "
+                f"выбрано: {len(project.review_selected_candidate_ids)}/{selection_limit}"
+            )
+            summary.setWordWrap(True)
+            toolbar_layout.addWidget(summary, 1)
+            recommended_button = QPushButton("Выбрать рекомендованные")
+            recommended_button.clicked.connect(self._select_recommended)
+            clear_button = QPushButton("Снять выбор")
+            clear_button.clicked.connect(self._clear_review_selection)
+            toolbar_layout.addWidget(recommended_button)
+            toolbar_layout.addWidget(clear_button)
+            layout.addWidget(selection_toolbar)
+            filters = QFrame()
+            filters.setObjectName("reviewFilters")
+            filters_layout = QHBoxLayout(filters)
+            filters_layout.setContentsMargins(0, 0, 0, 0)
+            filters_layout.setSpacing(6)
+            filter_combo = QComboBox()
+            filter_combo.addItem("Рекомендованные", "recommended")
+            filter_combo.addItem("Все моменты", "all")
+            filter_combo.addItem("Не выбраны", "unselected")
+            filter_combo.addItem("Высокий потенциал", "high")
+            filter_combo.addItem("Средний потенциал", "medium")
+            self._set_combo_data(filter_combo, self._candidate_filter)
+            filter_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_filter(str(filter_combo.currentData())))
+            sort_combo = QComboBox()
+            sort_combo.addItem("Сначала сильные", "recommendation")
+            sort_combo.addItem("По времени", "time")
+            sort_combo.addItem("По потенциалу", "potential")
+            self._set_combo_data(sort_combo, self._candidate_sort)
+            sort_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_sort(str(sort_combo.currentData())))
+            filters_layout.addWidget(filter_combo, 1)
+            filters_layout.addWidget(sort_combo, 1)
+            layout.addWidget(filters)
         self._configure_workflow_action(project, draftable_ids, ready_count, rendered_count, processing_count)
         final_outputs = self._final_outputs_by_candidate()
-        filtered_candidates = self._filtered_candidates(candidates, project)
-        visible_candidates = filtered_candidates[:self._candidate_visible_limit]
+        if workflow_step == "drafts":
+            review_order = {candidate_id: index for index, candidate_id in enumerate(project.review_selected_candidate_ids)}
+            filtered_candidates = sorted(
+                (dict(item) for item in candidates if isinstance(item, dict)),
+                key=lambda item: (
+                    str(item.get("candidate_id") or "") not in review_order,
+                    review_order.get(str(item.get("candidate_id") or ""), len(review_order)),
+                    float(item.get("start_seconds", item.get("start", 0)) or 0),
+                ),
+            )
+            visible_candidates = filtered_candidates
+        else:
+            filtered_candidates = self._filtered_candidates(candidates, project)
+            visible_candidates = filtered_candidates[:self._candidate_visible_limit]
+        self._review_visible_candidate_ids = [
+            str(item.get("candidate_id") or "") for item in visible_candidates
+            if isinstance(item, dict) and item.get("candidate_id")
+        ]
         for item in visible_candidates:
             if not isinstance(item, dict) or not item.get("candidate_id"):
                 continue
@@ -1239,6 +1377,8 @@ class ProjectScreen(QWidget):
                 str(item.get("potential") or "low"), "Предварительная оценка",
             )
             confidence = float(item.get("confidence") or 0)
+            draft_status = project.candidate_draft_statuses.get(candidate_id)
+            export_status = project.candidate_export_statuses.get(candidate_id)
             status_label = {
                 "analyzed": "можно посмотреть и добавить к черновикам", "draft_planning": "готовим черновик",
                 "draft_ready": "черновик готов к проверке", "draft_failed": "черновик не готов",
@@ -1246,6 +1386,10 @@ class ProjectScreen(QWidget):
             }.get(state, "можно посмотреть")
             if state == "draft_ready" and candidate_id not in project.review_selected_candidate_ids:
                 status_label = "черновик не выбран для готового ролика"
+            if draft_status == "failed" or state == "draft_failed":
+                status_label = "Черновик не создан. Его можно повторить отдельно."
+            elif export_status == "failed":
+                status_label = "Готовый ролик не создан. Черновик сохранён и остаётся подтверждённым."
             frame = QFrame(); frame.setObjectName("card")
             self._candidate_cards[candidate_id] = frame
             row = QHBoxLayout(frame); row.setContentsMargins(10, 8, 10, 8)
@@ -1261,25 +1405,32 @@ class ProjectScreen(QWidget):
                 end_seconds = float(end_value)
             except (TypeError, ValueError):
                 start_seconds, end_seconds = 0.0, 0.0
-            preview_contract = item.get("preview") if isinstance(item.get("preview"), dict) else {}
-            thumbnail_contract = preview_contract.get("thumbnail") if isinstance(preview_contract.get("thumbnail"), dict) else {}
+            preview_file = self._draft_preview_paths.get(candidate_id)
+            raw_preview_contract = item.get("preview")
+            preview_contract = raw_preview_contract if isinstance(raw_preview_contract, dict) else {}
+            raw_thumbnail_contract = preview_contract.get("thumbnail")
+            thumbnail_contract = raw_thumbnail_contract if isinstance(raw_thumbnail_contract, dict) else {}
             thumbnail_time = thumbnail_contract.get("timestamp_seconds", start_seconds + max(0.0, min(1.0, (end_seconds - start_seconds) / 2)))
             try:
                 thumbnail_seconds = float(thumbnail_time)
             except (TypeError, ValueError):
                 thumbnail_seconds = start_seconds
-            if project.source.is_file():
-                self._thumbnail_loader.request(
-                    cache_directory=project.directory / "candidate-thumbnails",
-                    analysis_id=project.analysis_id or "analysis",
+            thumbnail_source = preview_file if workflow_step == "drafts" and preview_file else project.source
+            if thumbnail_source.is_file():
+                if preview_file and workflow_step == "drafts":
+                    thumbnail_seconds = 0.05
+                thumbnail_path = self._thumbnail_loader.request(
+                    cache_directory=project.directory / ("draft-thumbnails" if preview_file and workflow_step == "drafts" else "candidate-thumbnails"),
+                    analysis_id=(project.analysis_id or "analysis") + ("-draft" if preview_file and workflow_step == "drafts" else ""),
                     candidate_id=candidate_id,
-                    source_path=project.source,
+                    source_path=thumbnail_source,
                     timestamp_seconds=thumbnail_seconds,
                 )
+                self._candidate_thumbnail_paths[candidate_id] = thumbnail_path
             information = QVBoxLayout()
-            title = QLabel(str(item.get("title") or item.get("core_idea") or "Момент из видео"))
+            title = _ElidedLabel(str(item.get("title") or item.get("core_idea") or "Момент из видео"))
+            title.setObjectName("candidateTitle")
             title.setStyleSheet("font-weight: 600;")
-            title.setWordWrap(True)
             information.addWidget(title)
             recommended = " · рекомендуем" if item.get("recommended", item.get("selected_by_recommendation")) else ""
             details = QLabel(f"{start}–{end} · {potential} · уверенность {confidence * 100:.0f}%{recommended}")
@@ -1299,21 +1450,22 @@ class ProjectScreen(QWidget):
             status.setMaximumWidth(258)
             candidate_error = project.candidate_errors.get(candidate_id)
             if candidate_error:
-                status.setText("Черновик не создан. Попробуйте ещё раз или выберите другой момент.")
-                status.setToolTip(candidate_error)
+                # The service stores an item/stage message for the log.  Card
+                # copy stays short and non-technical, with the lifecycle state
+                # above explaining exactly which retry is safe.
+                status.setText(status_label)
+                status.setToolTip("Подробности сохранены в журнале проекта.")
             status.setWordWrap(True)
             actions.addWidget(status)
-            source_preview = QPushButton("Просмотреть")
+            source_preview = QPushButton("Исходный фрагмент" if workflow_step == "drafts" else "Просмотреть")
             source_preview.setObjectName(f"preview-candidate-{candidate_id}")
             source_preview.clicked.connect(lambda _checked=False, value=dict(item): self._preview_candidate(value))
             actions.addWidget(source_preview)
-            preview = previews.get(candidate_id, {}).get("preview", {}) if isinstance(previews.get(candidate_id), dict) else {}
-            preview_file = Path(str(preview.get("output_file") or "")) if isinstance(preview, dict) else None
             if preview_file and preview_file.is_file():
                 button = QPushButton("Смотреть черновик")
                 button.clicked.connect(
-                    lambda _checked=False, path=preview_file, title=str(item.get("title") or item.get("core_idea") or "момент"):
-                    self._show_draft_preview(path, title)
+                    lambda _checked=False, path=preview_file, title=str(item.get("title") or item.get("core_idea") or "момент"), value=candidate_id:
+                    self._show_draft_preview(path, title, value)
                 )
                 actions.addWidget(button)
             if state == "draft_ready":
@@ -1331,28 +1483,53 @@ class ProjectScreen(QWidget):
                     restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
                     actions.addWidget(restore)
             elif state == "selected":
+                if export_status == "failed":
+                    retry_export = QPushButton("Повторить экспорт")
+                    retry_export.setToolTip("Повторно создаст готовый ролик из сохранённого черновика; анализ и Draft Preview не повторяются.")
+                    retry_export.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_final_export(value))
+                    actions.addWidget(retry_export)
                 reject = QPushButton("Отклонить")
                 reject.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
                 actions.addWidget(reject)
+            elif state == "draft_failed" and workflow_step == "drafts":
+                if candidate_id in project.review_selected_candidate_ids:
+                    retry = QPushButton("Повторить черновик")
+                    retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
+                    retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
+                    actions.addWidget(retry)
+                    skip = QPushButton("Продолжить без этого")
+                    skip.setToolTip("Уберёт этот неготовый черновик из текущего набора, не затрагивая готовые ролики.")
+                    skip.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
+                    actions.addWidget(skip)
+                else:
+                    restore = QPushButton("Вернуть в набор")
+                    restore.setToolTip("Вернёт этот черновик в текущий набор, после чего его можно повторить отдельно.")
+                    restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
+                    actions.addWidget(restore)
             elif state == "rendered":
                 final_file = final_outputs.get(candidate_id)
                 if final_file:
                     watch_final = QPushButton("Смотреть готовый ролик")
                     watch_final.clicked.connect(
-                        lambda _checked=False, path=final_file, title=str(item.get("title") or item.get("core_idea") or "момент"):
-                        self._show_final_preview(path, title)
+                        lambda _checked=False, path=final_file, title=str(item.get("title") or item.get("core_idea") or "момент"), value=candidate_id:
+                        self._show_final_preview(path, title, value)
                     )
                     actions.addWidget(watch_final)
                     open_final = QPushButton("Открыть готовый ролик")
                     open_final.clicked.connect(lambda _checked=False, path=final_file: self._open_file(path))
                     actions.addWidget(open_final)
-            elif state not in {"draft_planning", "production_rendering"}:
+            elif workflow_step == "candidates" and state not in {"draft_planning", "production_rendering"}:
                 selected_for_draft = candidate_id in project.review_selected_candidate_ids
                 select = QPushButton("Убрать из черновиков" if selected_for_draft else "Добавить к черновикам")
                 select.setObjectName(f"select-candidate-{candidate_id}")
                 select.clicked.connect(lambda _checked=False, value=candidate_id: self._toggle_candidate_selection(value))
                 self._candidate_selection_buttons[candidate_id] = select
                 actions.addWidget(select)
+            if candidate_error:
+                open_log = QPushButton("Открыть журнал")
+                open_log.setObjectName(f"candidate-log-{candidate_id}")
+                open_log.clicked.connect(self._open_latest_run_log_folder)
+                actions.addWidget(open_log)
             row.addLayout(actions)
             layout.addWidget(frame)
         if len(filtered_candidates) > len(visible_candidates):
@@ -1658,14 +1835,14 @@ class ProjectScreen(QWidget):
     @staticmethod
     def _float_or_none(value: object) -> float | None:
         try:
-            return float(value) if value is not None else None
+            return float(cast(Any, value)) if value is not None else None
         except (TypeError, ValueError):
             return None
 
     @staticmethod
     def _int_or_none(value: object) -> int | None:
         try:
-            return int(value) if value is not None else None
+            return int(cast(Any, value)) if value is not None else None
         except (TypeError, ValueError):
             return None
 
@@ -1677,10 +1854,43 @@ class ProjectScreen(QWidget):
             return
         needs_draft = [
             candidate_id for candidate_id in candidate_ids
-            if self.project.candidate_states.get(candidate_id) not in {"draft_ready", "selected", "rendered", "production_rendering"}
+            if self._candidate_needs_draft(self.project, candidate_id)
         ]
         if needs_draft:
             self.viewmodel.build_drafts(needs_draft)
+
+    @staticmethod
+    def _candidate_needs_draft(project: DesktopProject, candidate_id: str) -> bool:
+        """Return whether one review item lacks a usable immutable draft."""
+
+        state = project.candidate_states.get(candidate_id)
+        if state in {"rendered", "production_rendering", "draft_planning"}:
+            return False
+        if state in {"draft_ready", "selected"}:
+            return not Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
+        return True
+
+    def _retry_draft(self, candidate_id: str) -> None:
+        """Retry one failed draft without broadening the existing selection."""
+
+        if not self.project or candidate_id not in self.project.review_selected_candidate_ids:
+            return
+        if self.project.candidate_states.get(candidate_id) == "draft_failed":
+            self.viewmodel.build_drafts([candidate_id])
+
+    def _retry_final_export(self, candidate_id: str) -> None:
+        """Retry production only for the already-confirmed draft set."""
+
+        if not self.project or candidate_id not in self.project.selected_candidate_ids:
+            return
+        if self.project.candidate_export_statuses.get(candidate_id) == "failed":
+            self._confirm_production_render([candidate_id])
+
+    def _open_latest_run_log_folder(self, *_: object) -> None:
+        if not self.project:
+            return
+        latest = self._latest_run(self.project)
+        self._open_folder(Path(latest.log_path).parent if latest and latest.log_path else None)
 
     def _toggle_candidate_selection(self, candidate_id: str) -> None:
         if not self.project:
@@ -1781,23 +1991,109 @@ class ProjectScreen(QWidget):
             start, end = self._candidate_range(candidate)
         except (TypeError, ValueError):
             return
-        self.preview.set_range(
-            self.project.source, start, end,
-            cache_directory=self.project.directory / "preview-proxies",
-            candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
-        )
-        self._active_candidate_id = str(candidate.get("candidate_id") or "") or None
-        self._mark_active_candidate()
+        self._bind_source_candidate(candidate, start, end, autoplay=True, force=True)
         self._focus_preview_player()
         self._show_candidate_detail(candidate, start, end)
 
-    def _show_draft_preview(self, path: Path, title: str) -> None:
-        self.preview.show_draft(str(path), title)
+    def _show_draft_preview(self, path: Path, title: str, candidate_id: str | None = None) -> None:
+        candidate = self._review_candidates_by_id.get(candidate_id or "")
+        if isinstance(candidate, dict):
+            try:
+                start, end = self._candidate_range(candidate)
+            except (TypeError, ValueError):
+                start, end = 0.0, 0.0
+            self._bind_draft_candidate(candidate, path, start, end, title=title, force=True)
+        else:
+            self._active_preview_kind = "draft"
+            self.preview.show_draft(str(path), title)
         self._focus_preview_player()
 
-    def _show_final_preview(self, path: Path, title: str | None = None) -> None:
+    def _show_final_preview(self, path: Path, title: str | None = None, candidate_id: str | None = None) -> None:
+        if candidate_id:
+            candidate = self._review_candidates_by_id.get(candidate_id)
+            if isinstance(candidate, dict):
+                try:
+                    start, end = self._candidate_range(candidate)
+                except (TypeError, ValueError):
+                    start, end = 0.0, 0.0
+                self._set_active_candidate_binding(candidate_id, start, end, kind="final")
+            else:
+                self._active_candidate_id = candidate_id
+                self._active_preview_kind = "final"
         self.preview.show_final(str(path), title)
+        if candidate_id:
+            self._persist_active_preview_candidate(candidate_id)
         self._focus_preview_player()
+
+    def _set_active_candidate_binding(
+        self, candidate_id: str, start: float, end: float, *, kind: str,
+    ) -> None:
+        self._active_candidate_id = candidate_id
+        self._active_candidate_range = (candidate_id, start, end)
+        self._active_preview_kind = kind
+        self._mark_active_candidate()
+
+    def _persist_active_preview_candidate(self, candidate_id: str | None) -> None:
+        """Save a deliberate preview choice without coupling it to approvals.
+
+        The setter is intentionally optional while older in-memory view models
+        are still supported by tests and migration paths.
+        """
+
+        if not self.project or getattr(self.project, "active_preview_candidate_id", None) == candidate_id:
+            return
+        if candidate_id is not None and candidate_id not in self.project.candidate_states:
+            return
+        setter = getattr(self.viewmodel, "set_active_preview_candidate", None)
+        if callable(setter):
+            self._persisting_active_preview = True
+            try:
+                setter(candidate_id)
+            finally:
+                self._persisting_active_preview = False
+
+    def _bind_source_candidate(
+        self, candidate: dict, start: float, end: float, *, autoplay: bool, force: bool = False,
+    ) -> None:
+        if not self.project:
+            return
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            return
+        binding = (candidate_id, start, end)
+        reload_needed = (
+            force
+            or self._active_preview_kind != "source-range"
+            or self._active_candidate_range != binding
+            or self.preview.source_range_seconds != (start, end)
+        )
+        self._set_active_candidate_binding(candidate_id, start, end, kind="source-range")
+        if reload_needed:
+            self.preview.set_range(
+                self.project.source, start, end,
+                autoplay=autoplay,
+                cache_directory=self.project.directory / "preview-proxies",
+                candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
+            )
+        self._persist_active_preview_candidate(candidate_id)
+
+    def _bind_draft_candidate(
+        self, candidate: dict, path: Path, start: float, end: float, *, title: str | None = None, force: bool = False,
+    ) -> None:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            return
+        binding = (candidate_id, start, end)
+        reload_needed = (
+            force
+            or self._active_preview_kind != "draft"
+            or self._active_candidate_range != binding
+            or self.preview.active_media_path != path
+        )
+        self._set_active_candidate_binding(candidate_id, start, end, kind="draft")
+        if reload_needed:
+            self.preview.show_draft(str(path), title or str(candidate.get("title") or candidate.get("core_idea") or "момент"))
+        self._persist_active_preview_candidate(candidate_id)
 
     def _mark_active_candidate(self) -> None:
         for candidate_id, card in self._candidate_cards.items():
@@ -1812,6 +2108,14 @@ class ProjectScreen(QWidget):
     def _focus_preview_player(self, *_: object) -> None:
         self.content_scroll.ensureWidgetVisible(self.preview, 0, 16)
         self.preview.play_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        # A persisted preview selection rebuilds the card list synchronously.
+        # Queue one last focus hand-off after the originating card click has
+        # completed, otherwise Qt restores focus to that now-stale button.
+        QTimer.singleShot(0, self._restore_preview_focus)
+
+    def _restore_preview_focus(self) -> None:
+        if self.preview.isVisible():
+            self.preview.play_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _candidate_range(self, candidate: dict) -> tuple[float, float]:
         candidate_id = str(candidate.get("candidate_id") or "")
@@ -1848,7 +2152,10 @@ class ProjectScreen(QWidget):
             lines.append("Риск: " + " ".join(risks[:2]))
         candidate_id = str(candidate.get("candidate_id") or "")
         if candidate_id and self.project.candidate_errors.get(candidate_id):
-            lines.append("Причина ошибки: " + self.project.candidate_errors[candidate_id])
+            if self.project.candidate_export_statuses.get(candidate_id) == "failed":
+                lines.append("Готовый ролик для этого момента не создан. Сохранённый черновик остаётся подтверждённым: повторите только экспорт или снимите подтверждение.")
+            else:
+                lines.append("Черновик для этого момента не создан. Его можно повторить отдельно; подробности сохранены в журнале проекта.")
         self._replace_card_text(self.candidate_detail, lines)
         controls = QWidget()
         grid = QGridLayout(controls)
@@ -1870,7 +2177,7 @@ class ProjectScreen(QWidget):
     @staticmethod
     def _score_text(value: object) -> str:
         try:
-            return f"{float(value):.0f}/100"
+            return f"{float(cast(Any, value)):.0f}/100"
         except (TypeError, ValueError):
             return "—"
 
@@ -1879,35 +2186,83 @@ class ProjectScreen(QWidget):
             self.viewmodel.adjust_candidate_boundary(candidate_id, boundary, delta_seconds)
 
     def _refresh_active_candidate_detail(self, project: DesktopProject) -> None:
-        if not self._active_candidate_id or not project.analysis_artifact_path:
+        self._reconcile_active_candidate_preview(project, previous_step=self._flow_step)
+
+    def _reconcile_active_candidate_preview(self, project: DesktopProject, *, previous_step: str) -> None:
+        """Keep the visible player bound to a current, durable candidate.
+
+        Project changes happen for selection, approval and run-state updates.
+        They must not restart an unchanged source interval.  Conversely, an
+        edited boundary makes an existing draft preview stale, so the player
+        deliberately returns to that exact source range until a new draft is
+        rendered.
+        """
+
+        workflow_step = self._derive_flow_step(project)
+        if workflow_step not in {"candidates", "drafts"}:
             return
-        # A project update (for example, confirming a draft) must not replace
-        # the draft/final the person is currently watching with the source
-        # candidate again.  Refresh ranges only while the source-range player
-        # itself is active, e.g. after a boundary adjustment.
-        if self.preview.source_range_seconds is None:
+        persisted_id = getattr(project, "active_preview_candidate_id", None)
+        candidate_id = self._active_candidate_id or persisted_id
+        candidate = self._review_candidates_by_id.get(candidate_id or "")
+        if not isinstance(candidate, dict) and workflow_step == "drafts":
+            ordered_ids = [
+                *project.review_selected_candidate_ids,
+                *self._review_visible_candidate_ids,
+                *self._review_candidates_by_id.keys(),
+            ]
+            for possible_id in dict.fromkeys(ordered_ids):
+                possible = self._review_candidates_by_id.get(possible_id)
+                if isinstance(possible, dict):
+                    candidate = possible
+                    candidate_id = possible_id
+                    break
+        if not isinstance(candidate, dict):
+            had_active_candidate = bool(self._active_candidate_id or persisted_id)
+            self._active_candidate_id = None
+            self._active_candidate_range = None
+            self._active_preview_kind = "source"
             self._mark_active_candidate()
+            if had_active_candidate:
+                self._persist_active_preview_candidate(None)
+            if project.source_spec.is_ready and self.preview.source_range_seconds is not None:
+                self.preview.show_source(project.source)
             return
-        analysis = read_json(Path(project.analysis_artifact_path), {})
-        candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
-        candidate = next(
-            (item for item in candidates if isinstance(item, dict) and item.get("candidate_id") == self._active_candidate_id),
-            None,
+        try:
+            start, end = self._candidate_range(candidate)
+        except (TypeError, ValueError):
+            return
+        candidate_id = str(candidate.get("candidate_id") or candidate_id or "")
+        if not candidate_id:
+            return
+        binding = (candidate_id, start, end)
+        draft_path = self._draft_preview_paths.get(candidate_id)
+        previous_binding = self._active_candidate_range
+        boundary_changed = (
+            previous_binding is not None
+            and previous_binding[0] == candidate_id
+            and previous_binding != binding
         )
-        if isinstance(candidate, dict):
-            try:
-                start, end = self._candidate_range(candidate)
-            except (TypeError, ValueError):
-                return
-            self.preview.set_range(
-                project.source, start, end,
-                cache_directory=project.directory / "preview-proxies",
-                candidate_title=str(candidate.get("title") or candidate.get("core_idea") or "Выбранный кандидат"),
-            )
-            self._mark_active_candidate()
+        if previous_binding != binding:
+            if workflow_step == "drafts" and draft_path and not boundary_changed:
+                self._bind_draft_candidate(candidate, draft_path, start, end)
+            else:
+                self._bind_source_candidate(candidate, start, end, autoplay=False)
             self._show_candidate_detail(candidate, start, end)
+            return
+        if workflow_step == "drafts":
+            if self._active_preview_kind == "draft" and not draft_path:
+                self._bind_source_candidate(candidate, start, end, autoplay=False, force=True)
+            elif previous_step != "drafts" and draft_path:
+                self._bind_draft_candidate(candidate, draft_path, start, end)
+        elif previous_step != "candidates" and self._active_preview_kind != "source-range":
+            self._bind_source_candidate(candidate, start, end, autoplay=False)
+        self._mark_active_candidate()
+        self._show_candidate_detail(candidate, start, end)
 
     def _thumbnail_ready(self, candidate_id: str, path: str) -> None:
+        expected = self._candidate_thumbnail_paths.get(candidate_id)
+        if expected is None or expected.resolve(strict=False) != Path(path).resolve(strict=False):
+            return
         pixmap = QPixmap(path)
         if pixmap.isNull():
             return
@@ -1920,24 +2275,40 @@ class ProjectScreen(QWidget):
             except RuntimeError:
                 continue
 
-    def _thumbnail_unavailable(self, candidate_id: str) -> None:
+    def _thumbnail_unavailable(self, candidate_id: str, path: str) -> None:
+        expected = self._candidate_thumbnail_paths.get(candidate_id)
+        if expected is None or expected.resolve(strict=False) != Path(path).resolve(strict=False):
+            return
         for label in self._candidate_thumbnail_labels.get(candidate_id, []):
             try:
                 label.setText("Кадр\nнедоступен")
             except RuntimeError:
                 continue
 
-    def _confirm_production_render(self) -> None:
-        if not self.project or not self.project.selected_candidate_ids:
+    def _confirm_production_render(self, candidate_ids: list[str] | None = None) -> None:
+        if not self.project:
             return
+        selected_ids = list(dict.fromkeys(
+            self.project.selected_candidate_ids if candidate_ids is None else candidate_ids
+        ))
+        if not selected_ids:
+            return
+        if any(candidate_id not in self.project.selected_candidate_ids for candidate_id in selected_ids):
+            return
+        singular_retry = len(selected_ids) == 1 and candidate_ids is not None
+        prompt = (
+            "Повторить экспорт только этого подтверждённого черновика?"
+            if singular_retry
+            else "Создать готовые вертикальные ролики только для подтверждённых черновиков?"
+        )
         answer = QMessageBox.question(
             self, "Создать итоговые ролики",
-            "Создать готовые вертикальные ролики только для подтверждённых черновиков?",
+            prompt,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self.viewmodel.render_selected()
+            self.viewmodel.render_selected(selected_ids)
 
     def _runs_changed(self, runs: list[ProjectRun]) -> None:
         self.runs = runs
@@ -1987,9 +2358,16 @@ class ProjectScreen(QWidget):
             content_map = understanding.get("content_map", {})
             recommendation = understanding.get("clip_count_recommendation", {})
             coverage = understanding.get("coverage_map", understanding.get("coverage", {}))
-            if not all(isinstance(item, dict) for item in (profile, content_map, recommendation, coverage)):
+            if (
+                not isinstance(profile, dict)
+                or not isinstance(content_map, dict)
+                or not isinstance(recommendation, dict)
+                or not isinstance(coverage, dict)
+            ):
                 continue
             clip_range = recommendation.get("estimated_publishable_clip_range", {})
+            if not isinstance(clip_range, dict):
+                clip_range = {}
             lower = clip_range.get("min", "—")
             upper = clip_range.get("max", "—")
             selected_chapters = coverage.get("selected_chapters", [])
@@ -2121,24 +2499,27 @@ class ProjectScreen(QWidget):
             self._apply_flow_visibility(self.project)
 
     def _update_processing_stages(self, snapshot: ProcessingSnapshot) -> None:
-        """Reflect the real current stage without manufacturing completion."""
+        """Show stages for the current job, never a stale analysis template."""
+
+        rows = self._processing_stage_plan(snapshot)
+        names = tuple(name for name, _label in rows)
+        if names != self._processing_stage_rows:
+            while self._processing_stages_layout.count() > 1:
+                item = self._processing_stages_layout.takeAt(1)
+                if widget := item.widget():
+                    widget.deleteLater()
+            self.processing_stage_labels = {}
+            for name, label in rows:
+                row = QLabel(f"○  {label}")
+                row.setObjectName("processingStage")
+                row.setProperty("stageState", "pending")
+                self._processing_stages_layout.addWidget(row)
+                self.processing_stage_labels[name] = row
+            self._processing_stage_rows = names
 
         raw = str(snapshot.stage or "").lower()
-        target = 0
-        if any(token in raw for token in ("transcrib", "speech", "audio")):
-            target = 1
-        elif any(token in raw for token in ("analy", "candidate", "intelligence", "select")):
-            target = 2
-        elif any(token in raw for token in ("draft", "render", "production", "subtitle", "compose")):
-            target = 3
-        names = ("prepare", "transcribe", "analyze", "render")
-        labels = (
-            "Подготавливаем видео",
-            "Разбираем речь и структуру",
-            "Ищем сильные моменты",
-            "Собираем ролики",
-        )
-        for index, (name, label) in enumerate(zip(names, labels)):
+        target = self._processing_stage_target(raw, self._processing_run_kind(), len(rows))
+        for index, (name, label) in enumerate(rows):
             state = "active" if index == target else ("done" if index < target else "pending")
             if snapshot.phase not in {"preparing", "running", "cancelling"} and state == "active":
                 state = "pending"
@@ -2148,6 +2529,66 @@ class ProjectScreen(QWidget):
             widget.setProperty("stageState", state)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def _processing_run_kind(self) -> str:
+        run = self.viewmodel.run
+        if run is not None:
+            return str(run.run_kind or "")
+        if self.project:
+            latest = self._latest_run(self.project)
+            if latest:
+                return str(latest.run_kind or "")
+        return ""
+
+    def _processing_stage_plan(self, snapshot: ProcessingSnapshot) -> tuple[tuple[str, str], ...]:
+        if str(snapshot.stage or "").lower() == "download":
+            return (
+                ("download", "Загружаем исходное видео"),
+                ("verify", "Проверяем локальный файл"),
+            )
+        kind = self._processing_run_kind()
+        if kind == "draft":
+            return (
+                ("prepare", "Подготавливаем выбранные моменты"),
+                ("draft", "Создаём черновики"),
+                ("verify", "Проверяем черновики"),
+            )
+        if kind in {"selected_render", "render_revision"}:
+            return (
+                ("prepare", "Подготавливаем подтверждённые черновики"),
+                ("render", "Создаём готовые ролики"),
+                ("verify", "Проверяем готовые файлы"),
+            )
+        if kind == "full":
+            return (
+                ("prepare", "Подготавливаем видео"),
+                ("transcribe", "Разбираем речь и структуру"),
+                ("analyze", "Ищем сильные моменты"),
+                ("render", "Собираем ролики"),
+            )
+        return (
+            ("prepare", "Подготавливаем видео"),
+            ("transcribe", "Разбираем речь и структуру"),
+            ("analyze", "Ищем сильные моменты"),
+        )
+
+    @staticmethod
+    def _processing_stage_target(raw: str, run_kind: str, row_count: int) -> int:
+        if row_count <= 1:
+            return 0
+        if any(token in raw for token in ("verify", "valid", "finaliz", "manifest")):
+            return row_count - 1
+        if run_kind == "draft":
+            return 1 if any(token in raw for token in ("draft", "script", "subtitle", "compose", "render")) else 0
+        if run_kind in {"selected_render", "render_revision"}:
+            return 1 if any(token in raw for token in ("render", "production", "export", "encode", "subtitle", "compose")) else 0
+        if any(token in raw for token in ("transcrib", "speech", "audio")):
+            return min(1, row_count - 1)
+        if any(token in raw for token in ("analy", "candidate", "intelligence", "select")):
+            return min(2, row_count - 1)
+        if any(token in raw for token in ("render", "production", "export", "subtitle", "compose")):
+            return row_count - 1
+        return 0
 
     @staticmethod
     def _recovery_message(run: ProjectRun) -> str:
@@ -2249,7 +2690,7 @@ class ProjectScreen(QWidget):
     @staticmethod
     def _format_file_size(value: object) -> str:
         try:
-            size = float(value)
+            size = float(cast(Any, value))
         except (TypeError, ValueError):
             return "н/д"
         for unit in ("Б", "КБ", "МБ", "ГБ"):
@@ -2259,4 +2700,22 @@ class ProjectScreen(QWidget):
         return "н/д"
 
     def _error(self, error) -> None:
-        QMessageBox.warning(self, error.title, dialog_message(error))
+        # Error dialogs are an action surface, not a dump of subprocess
+        # diagnostics.  The redacted technical detail stays in the persisted
+        # run log, where it can be inspected without exposing it in cards or
+        # ordinary recovery dialogs.
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(error.title)
+        box.setText(error.user_message)
+        box.setInformativeText(error.suggested_action)
+        log_button = None
+        if self.project:
+            latest = self._latest_run(self.project)
+            if latest and latest.log_path:
+                log_button = box.addButton("Открыть папку журнала", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if log_button is not None and box.clickedButton() is log_button and self.project:
+            latest = self._latest_run(self.project)
+            self._open_folder(Path(latest.log_path).parent if latest and latest.log_path else None)

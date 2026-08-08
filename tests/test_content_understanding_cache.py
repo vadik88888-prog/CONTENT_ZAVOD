@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.cli import main
 from app.config import AppConfig
-from app.pipeline import Pipeline
+from app.pipeline import Pipeline, PipelineResult
+from app.run_artifacts import run_metadata_path
 from app.utils import read_json, write_json
 
 
@@ -53,6 +55,138 @@ def _wire_pipeline(monkeypatch, calls: dict[str, int]) -> None:
     monkeypatch.setattr(pipeline_module, "build_video_content_profile", profile)
     monkeypatch.setattr(pipeline_module, "build_global_content_map", content_map)
     monkeypatch.setattr(pipeline_module, "generate_semantic_candidates", boundaries)
+
+
+def _wire_two_candidate_pipeline(monkeypatch, calls: dict[str, int]) -> None:
+    """Keep two independently valid candidates available for approved-draft tests."""
+
+    _wire_pipeline(monkeypatch, calls)
+    import app.pipeline as pipeline_module
+
+    def prepare(_source: Path, work: Path) -> dict:
+        audio = work / "audio.wav"; audio.write_bytes(b"wav")
+        result = {"duration": 50.0, "width": 1920, "height": 1080, "fps": 30, "audio_streams": 1, "audio_path": str(audio)}
+        write_json(work / "metadata.json", result)
+        return result
+
+    def transcribe(_audio, source_id, duration, config, destination):
+        result = {
+            "source_id": source_id, "language": "en", "duration": duration,
+            "segments": [
+                {"start": 1.0, "end": 19.0, "text": "The first independent story reaches a clear conclusion."},
+                {"start": 25.0, "end": 43.0, "text": "A separate second story ends with a different conclusion."},
+            ],
+            "words": [], "model": config.whisper_model, "runtime": {"device": "cpu"},
+        }
+        write_json(destination, result)
+        destination.with_suffix(".txt").write_text(
+            "\n".join(item["text"] for item in result["segments"]), encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(pipeline_module, "prepare_media", prepare)
+    monkeypatch.setattr(pipeline_module, "transcribe", transcribe)
+
+
+def _wire_three_candidate_pipeline(monkeypatch, calls: dict[str, int]) -> None:
+    """Provide three independent stories for the partial-success draft flow."""
+
+    _wire_pipeline(monkeypatch, calls)
+    import app.pipeline as pipeline_module
+
+    def prepare(_source: Path, work: Path) -> dict:
+        audio = work / "audio.wav"; audio.write_bytes(b"wav")
+        result = {"duration": 80.0, "width": 1920, "height": 1080, "fps": 30, "audio_streams": 1, "audio_path": str(audio)}
+        write_json(work / "metadata.json", result)
+        return result
+
+    def transcribe(_audio, source_id, duration, config, destination):
+        result = {
+            "source_id": source_id, "language": "en", "duration": duration,
+            "segments": [
+                {"start": 1.0, "end": 19.0, "text": "The first independent story reaches a clear conclusion."},
+                {"start": 27.0, "end": 45.0, "text": "The second independent story reaches another clear conclusion."},
+                {"start": 53.0, "end": 71.0, "text": "The third independent story reaches its own clear conclusion."},
+            ],
+            "words": [], "model": config.whisper_model, "runtime": {"device": "cpu"},
+        }
+        write_json(destination, result)
+        destination.with_suffix(".txt").write_text(
+            "\n".join(item["text"] for item in result["segments"]), encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(pipeline_module, "prepare_media", prepare)
+    monkeypatch.setattr(pipeline_module, "transcribe", transcribe)
+
+
+def _two_candidate_draft(tmp_path: Path, monkeypatch) -> tuple[Path, PipelineResult, list[str]]:
+    """Produce a trusted two-candidate draft artifact, then let tests corrupt one hand-off."""
+
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_two_candidate_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+        run_id="analysis-run", project_id="project",
+    ).run(input_path=str(source))
+    candidate_ids = [item["candidate_id"] for item in read_json(analysis.analysis_path, {})["candidates"][:2]]
+    assert len(candidate_ids) == 2
+
+    import app.pipeline as pipeline_module
+
+    def preview(_self, _plan, _source, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
+        return SimpleNamespace(
+            output_file=output,
+            to_dict=lambda: {
+                "status": "draft_ready", "output_file": str(output),
+                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
+            },
+        )
+
+    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    draft = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=candidate_ids, draft_only=True, run_id="draft-run", project_id="project",
+    ).run(input_path=str(source))
+    return source, draft, candidate_ids
+
+
+def _fake_approved_delivery(monkeypatch) -> None:
+    """Make the expensive post-approval stages deterministic while retaining their inputs."""
+
+    def tts(_self, _tracker, _production, _work, _output):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def render(self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None):
+        outcomes = []
+        for item in production["items"]:
+            if item.get("status") != "completed":
+                continue
+            index = int(item["requested_index"])
+            result = output / "results" / f"final-short-{index:02d}.mp4"
+            result.parent.mkdir(parents=True, exist_ok=True); result.write_bytes(b"mp4")
+            outcomes.append({
+                "candidate_id": item["candidate_id"], "status": "completed", "output_file": str(result),
+                "production_plan_id": item["production_plan_id"],
+                "clip_result_id": f"approved-result-{index}", "run_id": self.run_id,
+                "revision_id": f"{self.run_id}:render-{index:02d}", "primary": True,
+                "source_start_seconds": item.get("source_start_seconds"),
+                "source_end_seconds": item.get("source_end_seconds"),
+            })
+        return {"enabled": True, "status": "completed", "items": outcomes}
+
+    monkeypatch.setattr(Pipeline, "_run_tts", tts)
+    monkeypatch.setattr(Pipeline, "_run_audio", audio)
+    monkeypatch.setattr(Pipeline, "_run_production_render", render)
 
 
 def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_path: Path, monkeypatch) -> None:
@@ -196,6 +330,57 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert report["run"]["analysis_id"] == analysis.analysis_id
 
 
+def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_invalid(tmp_path: Path, monkeypatch) -> None:
+    """One bad review edit must be a candidate retry, never a batch code-2 loss."""
+
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_three_candidate_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+        run_id="analysis-run", project_id="project",
+    ).run(input_path=str(source))
+    candidate_ids = [item["candidate_id"] for item in read_json(analysis.analysis_path, {})["candidates"][:3]]
+    assert len(candidate_ids) == 3
+
+    import app.pipeline as pipeline_module
+
+    def preview(_self, _plan, _source, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
+        return SimpleNamespace(
+            output_file=output,
+            to_dict=lambda: {
+                "status": "draft_ready", "output_file": str(output),
+                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
+            },
+        )
+
+    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    rejected_id = candidate_ids[1]
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=candidate_ids, draft_only=True, run_id="draft-run", project_id="project",
+        candidate_boundary_overrides={rejected_id: {"start": -1.0, "end": 20.0}},
+    ).run(input_path=str(source))
+
+    report = read_json(result.report_path, {})
+    drafts = {
+        item["candidate_id"]: item
+        for item in report["candidate_flow"]["draft_candidates"]
+    }
+    assert report["terminal"]["status"] == "draft_ready"
+    assert report["candidate_flow"]["draft_summary"] == {"requested": 3, "ready": 2, "failed": 1}
+    assert len(result.output_files) == 2
+    assert drafts[rejected_id]["state"] == "draft_failed"
+    assert drafts[rejected_id]["stage"] == f"boundary_override:{rejected_id}"
+    assert all(drafts[candidate_id]["state"] == "draft_ready" for candidate_id in candidate_ids if candidate_id != rejected_id)
+    assert any("partial success" in warning for warning in report["warnings"])
+
+
 def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
     calls = {"profile": 0, "map": 0, "boundaries": 0}
@@ -302,6 +487,88 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     }]
     assert report["run"]["render_settings_fingerprint"]
     assert report["production_render"]["render_settings_fingerprint"] == report["run"]["render_settings_fingerprint"]
+
+
+def test_approved_draft_render_keeps_valid_candidate_when_another_plan_is_malformed(tmp_path: Path, monkeypatch) -> None:
+    source, draft, candidate_ids = _two_candidate_draft(tmp_path, monkeypatch)
+    invalid_id, valid_id = candidate_ids
+    artifact = read_json(draft.draft_path, {})
+    invalid = next(item for item in artifact["candidates"] if item["candidate_id"] == invalid_id)
+    invalid["draft_production_plan"] = {"plan_id": "malformed"}
+    write_json(draft.draft_path, artifact)
+    _fake_approved_delivery(monkeypatch)
+
+    result = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True,
+        draft_artifact_path=draft.draft_path, selected_candidate_ids=candidate_ids,
+        run_id="partial-approved-render", project_id="project",
+    ).run(input_path=str(source))
+
+    report = read_json(result.report_path, {})
+    outcomes = {item["candidate_id"]: item for item in report["production_plan"]["items"]}
+    flow = {item["candidate_id"]: item for item in report["candidate_flow"]["items"]}
+    manifest = read_json(result.output_directory / "manifest.json", {})
+
+    assert result.terminal_status == "completed_with_warnings"
+    assert result.selected_clips == 2
+    assert [path.name for path in result.output_files] == ["final-short-02.mp4"]
+    assert outcomes[invalid_id]["status"] == "failed"
+    assert outcomes[invalid_id]["reason"] == "approved_draft_plan_invalid"
+    assert outcomes[invalid_id]["stage"] == f"approved_draft_plan:{invalid_id}"
+    assert outcomes[valid_id]["status"] == "completed"
+    assert flow[invalid_id] == {
+        "candidate_id": invalid_id,
+        "outcome": "failed",
+        "reason": "production_plan_failed",
+        "message": outcomes[invalid_id]["error"],
+        "stage": f"approved_draft_plan:{invalid_id}",
+    }
+    assert flow[valid_id]["outcome"] == "selected"
+    assert manifest["requested_clip_count"] == 2
+    assert manifest["completed_clip_count"] == 1
+    assert manifest["terminal"]["status"] == "completed_with_warnings"
+
+
+def test_all_invalid_approved_plans_persist_terminal_report_before_render_cli_exits_two(tmp_path: Path, monkeypatch, capsys) -> None:
+    source, draft, candidate_ids = _two_candidate_draft(tmp_path, monkeypatch)
+    missing_id, stale_id = candidate_ids
+    artifact = read_json(draft.draft_path, {})
+    missing = next(item for item in artifact["candidates"] if item["candidate_id"] == missing_id)
+    stale = next(item for item in artifact["candidates"] if item["candidate_id"] == stale_id)
+    missing.pop("draft_production_plan")
+    stale["draft_production_plan"]["envelope"]["input_fingerprints"]["analysis_sha256"] = "0" * 64
+    write_json(draft.draft_path, artifact)
+    monkeypatch.setattr("app.cli.load_config", lambda _path: AppConfig(score_threshold=0))
+    monkeypatch.chdir(tmp_path)
+
+    run_id = "all-invalid-approved-render"
+    assert main([
+        "render", "--input", str(source), "--draft", str(draft.draft_path),
+        "--run-id", run_id, "--project-id", "project", "--confirm-production",
+        "--candidate-id", missing_id, "--candidate-id", stale_id,
+    ]) == 2
+
+    metadata = read_json(run_metadata_path(tmp_path, run_id), {})
+    report_path = Path(metadata["paths"]["report_path"])
+    report = read_json(report_path, {})
+    manifest = read_json(report_path.with_name("manifest.json"), {})
+    outcomes = {item["candidate_id"]: item for item in report["production_plan"]["items"]}
+    flow = {item["candidate_id"]: item for item in report["candidate_flow"]["items"]}
+
+    assert "Error:" in capsys.readouterr().err
+    assert report["terminal"]["status"] == "failed"
+    assert report["terminal"]["error_code"] == "NO_RENDERABLE_CLIPS"
+    assert report["selected_clips_count"] == 2
+    assert outcomes[missing_id]["reason"] == "approved_draft_plan_missing"
+    assert outcomes[stale_id]["reason"] == "approved_draft_plan_stale"
+    for candidate_id in candidate_ids:
+        assert flow[candidate_id]["outcome"] == "failed"
+        assert flow[candidate_id]["reason"] == "production_plan_failed"
+        assert flow[candidate_id]["stage"] == f"approved_draft_plan:{candidate_id}"
+    assert manifest["requested_clip_count"] == 2
+    assert manifest["completed_clip_count"] == 0
+    assert manifest["terminal"]["status"] == "failed"
+    assert manifest["terminal"]["error_code"] == "NO_RENDERABLE_CLIPS"
 
 
 def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypatch) -> None:

@@ -112,13 +112,16 @@ def find_run_artifact_metadata(
     run_id: str,
     project_id: str | None,
     preferred_path: Path | None = None,
+    allow_legacy_scan: bool = True,
 ) -> dict[str, Any] | None:
     """Find one run by identity, without calculating any source-derived slug.
 
     The indexed metadata is the normal contract.  The scan is intentionally a
     fallback for versions that only wrote ``report.json``/``analysis.json``.
     It searches files by their embedded run/project identifiers, never by the
-    source title or a guessed output directory.
+    source title or a guessed output directory.  New desktop launches opt out
+    while they wait for the engine to publish its index: scanning every old
+    report on each liveness poll can otherwise block the UI for minutes.
     """
 
     root = Path(engine_root).resolve()
@@ -130,7 +133,10 @@ def find_run_artifact_metadata(
         if value is not None:
             return value
 
-    for state_path in _iter_files(root / "work", "state.json"):
+    if not allow_legacy_scan:
+        return None
+
+    for state_path in _iter_run_files(root / "work", run_id, "state.json"):
         state = _read_object(state_path)
         run = state.get("run") if isinstance(state, dict) else None
         if not isinstance(run, dict) or not _matches_identity(run, run_id, project_id):
@@ -149,7 +155,7 @@ def find_run_artifact_metadata(
             if read_run_artifact_metadata_value(metadata, run_id=run_id, project_id=project_id):
                 return metadata
 
-    for report_path in _iter_files(root / "output", "report.json"):
+    for report_path in _iter_run_files(root / "output", run_id, "report.json"):
         report = _read_object(report_path)
         run = report.get("run") if isinstance(report, dict) else None
         if isinstance(run, dict) and _matches_identity(run, run_id, project_id):
@@ -159,9 +165,7 @@ def find_run_artifact_metadata(
     # snapshot was successfully copied to desktop history.  The folder name is
     # only used to associate a discovered artifact with its own run ID; no
     # source slug is constructed or inferred.
-    for analysis_path in _iter_files(root / "output", "analysis.json"):
-        if analysis_path.parent.name != run_id:
-            continue
+    for analysis_path in _iter_run_files(root / "output", run_id, "analysis.json"):
         analysis = _read_object(analysis_path)
         if not isinstance(analysis, dict) or not _matches_project(analysis.get("project_id"), project_id):
             continue
@@ -218,9 +222,8 @@ def _legacy_report_metadata(
 
 
 def _legacy_work_directory(root: Path, run_id: str) -> Path | None:
-    for state_path in _iter_files(root / "work", "state.json"):
-        if state_path.parent.name == run_id:
-            return state_path.parent
+    for state_path in _iter_run_files(root / "work", run_id, "state.json"):
+        return state_path.parent
     return None
 
 
@@ -229,6 +232,17 @@ def _iter_files(root: Path, name: str):
         return ()
     try:
         return root.rglob(name)
+    except OSError:
+        return ()
+
+
+def _iter_run_files(root: Path, run_id: str, name: str):
+    """Find legacy artifacts under their stable run-ID directory without reading every report."""
+
+    if not root.is_dir() or not run_id or Path(run_id).name != run_id:
+        return ()
+    try:
+        return root.rglob(str(Path(run_id) / name))
     except OSError:
         return ()
 

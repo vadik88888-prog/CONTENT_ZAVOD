@@ -17,13 +17,13 @@ class UserFacingError:
 
 
 def dialog_message(error: UserFacingError) -> str:
-    """Keep the friendly explanation while exposing the redacted root cause."""
+    """Show a friendly next step; technical detail belongs in the run log."""
 
     message = error.user_message.strip()
-    detail = redact_secrets(error.technical_details).strip()
-    if not detail or detail == message:
+    action = error.suggested_action.strip()
+    if not action or action == message:
         return message
-    return f"{message}\n\nПодробности: {detail[-1200:]}"
+    return f"{message}\n\n{action}"
 
 
 def redact_secrets(value: object) -> str:
@@ -33,6 +33,22 @@ def redact_secrets(value: object) -> str:
 def map_error(error: object) -> UserFacingError:
     detail = redact_secrets(error)
     lowered = detail.lower()
+    if "no_draft_previews" in lowered or "no candidate draft could be assembled" in lowered:
+        return UserFacingError(
+            "Не удалось подготовить выбранные черновики",
+            "Ни один из выбранных моментов не прошёл проверку для Draft Preview.",
+            "Откройте отмеченные карточки, скорректируйте границы при необходимости и повторите только неуспешные моменты.",
+            detail,
+            "draft_candidates_failed",
+        )
+    if "no_renderable_clips" in lowered or "no approved draft could be rendered" in lowered:
+        return UserFacingError(
+            "Нет готовых черновиков для финального экспорта",
+            "Подтверждённые черновики не прошли проверку ProductionPlan.",
+            "Повторите только отмеченные Draft Preview, затем снова подтвердите готовые черновики.",
+            detail,
+            "approved_drafts_invalid",
+        )
     if "обработка остановилась и не отвечает" in lowered:
         return UserFacingError(
             "Обработка не отвечает",
