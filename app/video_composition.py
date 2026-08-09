@@ -7,12 +7,23 @@ import tempfile
 from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal, cast
 
 from app.audio_models import AudioProject
+from app.caption_planning import write_caption_plan_ass
+from app.composition_planning import TargetObservation
 from app.config import AppConfig, ProductionRenderConfig
+from app.creative_execution import (
+    apply_native_visual_plan,
+    caption_plan_with_motion,
+    compile_native_creative_plan,
+    default_native_creative_intent,
+    validate_native_handoff,
+)
 from app.creative_contracts import (
     CompiledRenderPlan,
+    CreativeIntent,
+    MotionDomain,
     RenderParityManifest,
     RenderProfile,
     assert_preview_final_parity,
@@ -27,6 +38,7 @@ from app.production_subtitles import build_subtitle_project, write_production_as
 from app.rendering import nvenc_available
 from app.render_cache import CacheArtifact, GranularRenderCache, runtime_cache_key
 from app.sources import Source
+from app.source_broll_planning import SourceSceneEvidence
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, write_bytes_atomic, write_json
 from app.video_models import (
@@ -55,11 +67,11 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "7G.0"
+PRODUCTION_RENDER_ENGINE_VERSION = "7G.1"
 
 
 class VideoCompositionService:
-    """Goal 3D executor. It only consumes existing production artifacts and source media."""
+    """Execute one immutable creative plan against approved production media."""
 
     def __init__(self, root: Path, config: AppConfig) -> None:
         self.root = root.resolve()
@@ -71,6 +83,9 @@ class VideoCompositionService:
         force_recompute: bool = False, visual_analysis: dict[str, Any] | None = None,
         render_profile: RenderProfile | Literal["creative_preview", "final"] = "final",
         compiled_plan: CompiledRenderPlan | None = None,
+        creative_intent: CreativeIntent | None = None,
+        target_observations: Iterable[TargetObservation] = (),
+        source_scenes: Iterable[SourceSceneEvidence] = (),
     ) -> VideoProject:
         render_config = self.config.production_render
         if not source.path.is_file():
@@ -116,7 +131,6 @@ class VideoCompositionService:
         reframe_plan = build_reframe_plan(source_info, planning_canvas, render_config, timeline).model_copy(update={
             "plan_reference": plan_reference,
         })
-        timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
         composition_fallbacks = [
             f"{segment.segment_id}: {segment.fallback_reason}"
             for segment in reframe_plan.composition_segments
@@ -135,20 +149,46 @@ class VideoCompositionService:
         ).model_copy(update={
             "plan_reference": plan_reference,
         })
-        generated_plan = compile_legacy_render_plan(
-            plan,
-            source_output_map_from_legacy_timeline(timeline),
-            subtitle_project=subtitle_project,
-            reframe_plan=reframe_plan,
-        )
-        if compiled_plan is not None and (
-            compiled_plan.plan_hash != generated_plan.plan_hash
-            or compiled_plan.parity_signature != generated_plan.parity_signature
-        ):
-            raise ProductionRenderError(
-                "PREVIEW_FINAL_PARITY_MISMATCH: supplied CompiledRenderPlan does not match resolved render inputs."
+        mapping = source_output_map_from_legacy_timeline(timeline)
+        if compiled_plan is not None and creative_intent is not None:
+            raise ProductionRenderError("Provide either CreativeIntent or CompiledRenderPlan, not both.")
+        try:
+            if compiled_plan is not None:
+                validate_native_handoff(plan, mapping, compiled_plan)
+            elif creative_intent is not None or (
+                plan.envelope is not None and plan.envelope.compatibility_mode == "native"
+            ):
+                intent = creative_intent or default_native_creative_intent(plan, mapping, self.config)
+                if intent.source_output_mapping != mapping:
+                    raise ValueError("NATIVE_CREATIVE_INTENT_EDIT_MAPPING_MISMATCH")
+                compiled_plan = compile_native_creative_plan(
+                    intent,
+                    transcript,
+                    self.config,
+                    source_width=int(source_info["display_width"]),
+                    source_height=int(source_info["display_height"]),
+                    target_observations=target_observations,
+                    source_scenes=source_scenes,
+                )
+            else:
+                timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
+                compiled_plan = compile_legacy_render_plan(
+                    plan,
+                    mapping,
+                    subtitle_project=subtitle_project,
+                    reframe_plan=reframe_plan,
+                )
+            validate_native_handoff(plan, mapping, compiled_plan)
+        except ValueError as error:
+            raise ProductionRenderError(f"NATIVE_CREATIVE_PLAN_REJECTED: {_safe_error(error)}") from error
+        if compiled_plan.compatibility_mode == "native":
+            timeline = apply_native_visual_plan(
+                timeline,
+                compiled_plan,
+                source_width=int(source_info["display_width"]),
+                source_height=int(source_info["display_height"]),
+                rotation=cast(Literal[0, 90, 180, 270], int(source_info.get("rotation", 0))),
             )
-        compiled_plan = compiled_plan or generated_plan
         profile = _resolve_render_profile(compiled_plan, render_profile, render_config)
         canvas = CanvasConfig(
             width=profile.width, height=profile.height, fps=profile.fps,
@@ -287,13 +327,32 @@ class VideoCompositionService:
         cache_hits: dict[str, bool] = {}
         bypass_cache = force_recompute or not self.config.production_render.cache_enabled
 
-        captions_key = runtime_cache_key(nodes["captions"].cache_key)
+        caption_motion = [
+            item.model_dump(mode="json")
+            for item in compiled_plan.motion_plan.events
+            if item.domain == MotionDomain.CAPTION
+        ]
+        captions_key = runtime_cache_key(
+            nodes["captions"].cache_key,
+            inputs={"caption_motion": caption_motion},
+        )
         captions = None if bypass_cache else cache.load("captions", captions_key, suffix=".ass")
         cache_hits["captions"] = captions is not None
         if captions is None:
             generated_ass = _temporary_path(temp_root, ".ass")
             try:
-                if project.subtitle_project is not None:
+                if compiled_plan.compatibility_mode == "native":
+                    effective_captions = caption_plan_with_motion(
+                        compiled_plan.caption_plan,
+                        compiled_plan.motion_plan,
+                    )
+                    write_caption_plan_ass(
+                        effective_captions,
+                        generated_ass,
+                        compiled_plan.canvas.width,
+                        compiled_plan.canvas.height,
+                    )
+                elif project.subtitle_project is not None:
                     # Keep the plan canvas as ASS PlayRes. libass scales the same
                     # resolved lines/font geometry into either quality profile.
                     write_production_ass(
@@ -418,6 +477,7 @@ class VideoCompositionService:
                     base.path, Path(project.mixed_audio_path),
                     captions.path if project.render_request.subtitles_enabled else None,
                     temporary, project.canvas, render_profile.video_bitrate, render_profile.encoder,
+                    compiled_plan.motion_plan if compiled_plan.compatibility_mode == "native" else None,
                 )
                 validation = validate_final_video(
                     temporary, project.canvas, Path(project.mixed_audio_path), self.config.production_render,
@@ -506,7 +566,10 @@ class VideoCompositionService:
             "metadata": project.metadata.model_copy(update={
                 "updated_at": utc_now(),
                 "cache_node_hits": cache_hits,
-                "single_pass_encode": not project.render_request.subtitles_enabled,
+                "single_pass_encode": (
+                    not project.render_request.subtitles_enabled
+                    and _native_motion_filter(compiled_plan.motion_plan, project.canvas) is None
+                ),
             }),
         })
         _write_project_artifacts(complete, render_root)
@@ -570,9 +633,7 @@ class VideoCompositionService:
             ])
             filters.append(_visual_filter(clip, canvas, input_label=f"[{index}:v]", output_label=label))
         transition_plan: str | list[VideoTransition] = self.config.production_render.transitions
-        if self.config.production_render.transitions == "short_crossfade" and any(
-            item.transition_type == "cut" for item in transitions
-        ):
+        if transitions and any(item.transition_type == "short_crossfade" for item in transitions):
             transition_plan = transitions
         timeline_graph, video_label = _timeline_filter(
             [clip.duration_seconds for clip in clips], transition_plan, input_labels=labels,
@@ -597,11 +658,13 @@ class VideoCompositionService:
         canvas: CanvasConfig,
         video_bitrate: str,
         encoder_preference: Literal["auto", "nvenc", "cpu"],
+        motion_plan=None,
     ) -> tuple[str, bool, str | None]:
         """Composite captions when needed; otherwise mux without a second video encode."""
 
         ffmpeg = _ffmpeg()
-        if ass_path is None:
+        motion_filter = _native_motion_filter(motion_plan, canvas) if motion_plan is not None else None
+        if ass_path is None and motion_filter is None:
             _run_ffmpeg([
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-i", str(base_visual), "-i", str(mixed_audio),
@@ -611,7 +674,16 @@ class VideoCompositionService:
             ], "single-pass production mux")
             return "copy", False, None
 
-        graph = f"[0:v]ass='{_filter_path(ass_path)}'[vout]"
+        filters: list[str] = []
+        video_label = "[0:v]"
+        if motion_filter is not None:
+            filters.append(f"{video_label}{motion_filter}[vmotion]")
+            video_label = "[vmotion]"
+        if ass_path is not None:
+            filters.append(f"{video_label}ass='{_filter_path(ass_path)}'[vout]")
+        else:
+            filters.append(f"{video_label}null[vout]")
+        graph = ";".join(filters)
         requested = encoder_preference
 
         def command(encoder: str) -> list[str]:
@@ -2437,6 +2509,35 @@ def _resolve_render_profile(
     # This validates fps, aspect ratio and final-canvas identity up front.
     build_render_parity_manifest(plan, profile)
     return profile
+
+
+def _native_motion_filter(motion_plan: Any, canvas: CanvasConfig) -> str | None:
+    """Compile bounded 7F FFmpeg motion events without accepting filter syntax."""
+
+    events = [
+        item for item in motion_plan.events
+        if item.backend_id == "ffmpeg"
+        and item.domain == MotionDomain.COMPOSITION
+        and item.primitive_id == "punch_in"
+        and item.duration_frames > 0
+        and item.scale_to > item.scale_from
+    ]
+    if not events:
+        return None
+    pulses = []
+    for event in events:
+        start = event.output.start_frame
+        duration = max(1, event.duration_frames)
+        end = min(event.output.end_frame, start + duration)
+        delta = max(0.0, min(0.12, event.scale_to - event.scale_from))
+        pulses.append(
+            f"if(between(on,{start},{end}),{delta:.6f}*(1-cos(2*PI*(on-{start})/{duration}))/2,0)"
+        )
+    zoom = "1+" + "+".join(pulses)
+    return (
+        f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"d=1:s={canvas.width}x{canvas.height}:fps={canvas.fps}"
+    )
 
 
 def _write_project_artifacts(project: VideoProject, root: Path) -> None:

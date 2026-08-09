@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+"""Native Phase 7 creative-plan assembly and typed renderer adaptation."""
+
+from typing import Any, Iterable, Literal, Sequence
+
+from app.caption_planning import build_caption_plan
+from app.composition_planning import TargetObservation, build_composition_plan
+from app.config import AppConfig
+from app.creative_contracts import (
+    AssetManifestEntry,
+    BackendAssignment,
+    CanvasPlan,
+    CaptionPlan,
+    CompiledRenderPlan,
+    CompositionCropKeyframe,
+    CreativeIntent,
+    CreativePolicy,
+    ImmutableProductionPlanLink,
+    Intensity,
+    LayoutFamily,
+    MotionDomain,
+    MotionPlan,
+    NormalizedRect,
+    SourceOutputTimeMap,
+    canonical_hash,
+    compile_render_plan,
+)
+from app.motion_planning import build_motion_plan
+from app.production_models import ProductionPlan
+from app.source_broll_planning import SourceSceneEvidence, build_source_broll_plan
+from app.video_models import (
+    CropPlan,
+    ReframeKeyframe,
+    SourceVideoClip,
+    VideoClipModel,
+    VideoTimeline,
+    VideoTransition,
+)
+
+
+NATIVE_CREATIVE_EXECUTION_VERSION = "7G.1"
+
+
+def default_native_creative_intent(
+    plan: ProductionPlan,
+    mapping: SourceOutputTimeMap,
+    config: AppConfig,
+) -> CreativeIntent:
+    """Create the conservative native intent used when no revised intent was supplied.
+
+    This does not infer editorial events. It carries the approved production
+    identity and existing product policy into the native planners; evidence-free
+    optional decisions safely resolve to A-roll/static composition.
+    """
+
+    envelope = plan.envelope
+    assert envelope is not None
+    style = {
+        "minimal": "minimal",
+        "documentary": "editorial",
+        "dynamic": "emphasis",
+        "clean": "clean",
+    }[config.product_flow.subtitle_preset]
+    intensity = {
+        "minimal": Intensity.LOW,
+        "documentary": Intensity.BALANCED,
+        "dynamic": Intensity.HIGH,
+        "clean": Intensity.LOW,
+    }[config.product_flow.subtitle_preset]
+    policy = CreativePolicy(
+        preset_id=envelope.preset.preset_id,
+        preset_version=envelope.preset.preset_version,
+        platform=envelope.preset.platform,
+        caption_style_family=style,
+        caption_density="balanced",
+        intensity=intensity,
+        reduced_motion=False,
+        source_broll_enabled=False,
+    )
+    identity = {
+        "production_plan": plan.reference().model_dump(mode="json"),
+        "mapping": mapping.model_dump(mode="json"),
+        "policy": policy.model_dump(mode="json"),
+        "version": NATIVE_CREATIVE_EXECUTION_VERSION,
+    }
+    digest = canonical_hash(identity)
+    return CreativeIntent(
+        intent_id=f"intent-native-{digest[:18]}",
+        revision=1,
+        production_plan=ImmutableProductionPlanLink.from_reference(plan.reference()),
+        source_output_mapping=mapping,
+        evidence_fingerprint=envelope.input_fingerprints.analysis_sha256,
+        proposal_hash=digest,
+        policy=policy,
+        confidence=0,
+        provenance=("native_production_default",),
+    )
+
+
+def compile_native_creative_plan(
+    intent: CreativeIntent,
+    transcript: dict[str, Any],
+    config: AppConfig,
+    *,
+    source_width: int,
+    source_height: int,
+    target_observations: Iterable[TargetObservation] = (),
+    source_scenes: Iterable[SourceSceneEvidence] = (),
+) -> CompiledRenderPlan:
+    """Run the production 7C -> 7D -> 7E -> 7F -> 7G compiler chain."""
+
+    captions = build_caption_plan(intent, transcript, config.production_render)
+    composition = build_composition_plan(
+        intent,
+        target_observations,
+        source_width=source_width,
+        source_height=source_height,
+    )
+    broll = build_source_broll_plan(intent, source_scenes, composition)
+    motion = build_motion_plan(intent, captions, composition, broll)
+    assets: tuple[AssetManifestEntry, ...] = ()
+    if captions.font_manifest is not None and captions.font_manifest.file_sha256 is not None:
+        assets = (AssetManifestEntry(
+            asset_id=captions.font_manifest.font_id,
+            asset_type="font",
+            checksum=captions.font_manifest.file_sha256,
+        ),)
+    return compile_render_plan(
+        intent,
+        captions,
+        composition,
+        motion,
+        broll,
+        CanvasPlan(
+            width=config.production_render.output_width,
+            height=config.production_render.output_height,
+            fps=30,
+        ),
+        assets=assets,
+        backends=(
+            BackendAssignment(
+                domain="base_video", backend_id="ffmpeg",
+                backend_version=NATIVE_CREATIVE_EXECUTION_VERSION,
+            ),
+            BackendAssignment(
+                domain="caption", backend_id="libass",
+                backend_version="7C.libass-tier1.1",
+            ),
+            BackendAssignment(
+                domain="composition", backend_id="ffmpeg",
+                backend_version="7D.ffmpeg-composition.1",
+            ),
+            BackendAssignment(
+                domain="broll", backend_id="ffmpeg",
+                backend_version="7E.ffmpeg-source-broll.1",
+            ),
+            BackendAssignment(
+                domain="motion", backend_id="ffmpeg",
+                backend_version="7F.ffmpeg-motion.1",
+            ),
+        ),
+    )
+
+
+def validate_native_handoff(
+    plan: ProductionPlan,
+    mapping: SourceOutputTimeMap,
+    compiled_plan: CompiledRenderPlan,
+) -> None:
+    reference = plan.reference()
+    if compiled_plan.production_plan.model_dump(mode="json") != reference.model_dump(mode="json"):
+        raise ValueError("NATIVE_COMPILED_PLAN_PRODUCTION_IDENTITY_MISMATCH")
+    if compiled_plan.source_output_mapping != mapping:
+        raise ValueError("NATIVE_COMPILED_PLAN_EDIT_MAPPING_MISMATCH")
+
+
+def caption_plan_with_motion(captions: CaptionPlan, motion: MotionPlan) -> CaptionPlan:
+    """Resolve assessed 7F caption events into the Tier 1 ASS primitives."""
+
+    events = {
+        target_id: event
+        for event in motion.events
+        if event.domain == MotionDomain.CAPTION
+        for target_id in event.target_plan_ids
+    }
+    if not events:
+        return captions
+    cues = []
+    for cue in captions.cues:
+        event = events.get(cue.cue_id)
+        if event is None:
+            cues.append(cue)
+            continue
+        primitive = event.primitive_id if event.primitive_id in {"static", "fade", "scale", "slide"} else "static"
+        cues.append(cue.model_copy(update={
+            "primitive_id": primitive,
+            "easing_id": event.easing_id if primitive != "static" else "none",
+            "motion_duration_frames": event.duration_frames if primitive != "static" else 0,
+            "scale_percent": max(94, min(108, round(event.scale_from * 100))) if primitive == "scale" else 100,
+            "slide_distance_ratio": min(0.05, abs(event.translate_y_ratio)) if primitive == "slide" else 0,
+        }))
+    return captions.model_copy(update={"cues": tuple(cues)})
+
+
+def apply_native_visual_plan(
+    timeline: VideoTimeline,
+    compiled_plan: CompiledRenderPlan,
+    *,
+    source_width: int,
+    source_height: int,
+    rotation: Literal[0, 90, 180, 270] = 0,
+) -> VideoTimeline:
+    """Execute normalized 7D geometry and 7E source cutaways on the visual track."""
+
+    boundaries = {
+        frame / 30
+        for segment in (
+            *compiled_plan.composition_plan.segments,
+            *compiled_plan.source_broll_plan.segments,
+        )
+        for frame in (
+            segment.output.start_frame if hasattr(segment, "output") else segment.destination.start_frame,
+            segment.output.end_frame if hasattr(segment, "output") else segment.destination.end_frame,
+        )
+    }
+    expanded: list[VideoClipModel] = []
+    for clip in timeline.clips:
+        cuts = sorted(
+            point for point in boundaries
+            if clip.timeline_start_seconds + 0.001 < point < clip.timeline_end_seconds - 0.001
+        )
+        if not cuts:
+            expanded.append(clip)
+            continue
+        points = [clip.timeline_start_seconds, *cuts, clip.timeline_end_seconds]
+        for index, (start, end) in enumerate(zip(points, points[1:]), start=1):
+            expanded.append(_slice_clip(clip, start, end, index))
+
+    rendered: list[VideoClipModel] = []
+    for clip in expanded:
+        if not isinstance(clip, SourceVideoClip):
+            rendered.append(clip)
+            continue
+        start_frame = round(clip.timeline_start_seconds * 30)
+        end_frame = round(clip.timeline_end_seconds * 30)
+        composition = next((
+            item for item in compiled_plan.composition_plan.segments
+            if item.output.start_frame <= start_frame and end_frame <= item.output.end_frame
+        ), None)
+        broll = next((
+            item for item in compiled_plan.source_broll_plan.segments
+            if item.destination.start_frame <= start_frame and end_frame <= item.destination.end_frame
+        ), None)
+        crop = clip.crop_plan
+        if composition is not None:
+            crop = _native_crop_plan(
+                composition.crop,
+                composition.layout,
+                source_width,
+                source_height,
+                rotation,
+                composition.crop_keyframes,
+                clip.timeline_start_seconds,
+                clip.timeline_end_seconds,
+            )
+        updates: dict[str, object] = {"crop_plan": crop}
+        if broll is not None:
+            destination_frames = broll.destination.end_frame - broll.destination.start_frame
+            source_seconds = (broll.source_cutaway.end_tick - broll.source_cutaway.start_tick) / 1_000_000
+            offset = (start_frame - broll.destination.start_frame) / destination_frames
+            span = (end_frame - start_frame) / destination_frames
+            source_start = broll.source_cutaway.start_tick / 1_000_000 + source_seconds * offset
+            source_end = source_start + source_seconds * span
+            updates.update({
+                "source_start_seconds": round(source_start, 6),
+                "source_end_seconds": round(source_end, 6),
+                "freeze_duration_seconds": 0.0,
+                "visual_strategy": "candidate_excerpt",
+                "status": "ready",
+                "fallback_reason": None,
+            })
+        rendered.append(clip.model_copy(update=updates))
+
+    normalized = [
+        clip.model_copy(update={"order": order})
+        for order, clip in enumerate(rendered, start=1)
+    ]
+    transitions = []
+    for left, right in zip(normalized, normalized[1:]):
+        boundary_frame = round(right.timeline_start_seconds * 30)
+        broll = next((
+            item for item in compiled_plan.source_broll_plan.segments
+            if boundary_frame in {item.destination.start_frame, item.destination.end_frame}
+        ), None)
+        transition_type = "short_crossfade" if broll is not None and broll.transition == "short_dissolve" else "cut"
+        transitions.append(VideoTransition(
+            transition_type=transition_type,
+            from_clip_id=left.clip_id,
+            to_clip_id=right.clip_id,
+            duration_seconds=0.15 if transition_type == "short_crossfade" else 0,
+        ))
+    return timeline.model_copy(update={"clips": normalized, "transitions": transitions})
+
+
+def _slice_clip(clip: VideoClipModel, start: float, end: float, index: int) -> VideoClipModel:
+    duration = round(end - start, 6)
+    updates: dict[str, object] = {
+        "clip_id": f"{clip.clip_id}-native-{index:02d}",
+        "timeline_start_seconds": round(start, 6),
+        "timeline_end_seconds": round(end, 6),
+        "duration_seconds": duration,
+    }
+    if isinstance(clip, SourceVideoClip):
+        source_span = clip.source_end_seconds - clip.source_start_seconds
+        output_span = clip.timeline_end_seconds - clip.timeline_start_seconds
+        left_ratio = (start - clip.timeline_start_seconds) / output_span
+        right_ratio = (end - clip.timeline_start_seconds) / output_span
+        source_start = clip.source_start_seconds + source_span * left_ratio
+        source_end = clip.source_start_seconds + source_span * right_ratio
+        updates.update({
+            "source_start_seconds": round(source_start, 6),
+            "source_end_seconds": round(source_end, 6),
+            "freeze_duration_seconds": 0.0,
+        })
+    return clip.model_copy(update=updates)
+
+
+def _native_crop_plan(
+    rect: NormalizedRect,
+    layout: LayoutFamily,
+    source_width: int,
+    source_height: int,
+    rotation: Literal[0, 90, 180, 270],
+    keyframes: Sequence[CompositionCropKeyframe],
+    clip_start: float,
+    clip_end: float,
+) -> CropPlan:
+    if layout == LayoutFamily.FIT_BACKGROUND:
+        return CropPlan(
+            strategy="fit_blur_background",
+            source_width=source_width,
+            source_height=source_height,
+            display_rotation_degrees=rotation,
+        )
+    width = _even_dimension(rect.width * source_width, source_width)
+    height = _even_dimension(rect.height * source_height, source_height)
+    x = _even_origin(rect.x * source_width, source_width - width)
+    y = _even_origin(rect.y * source_height, source_height - height)
+    tracking = []
+    seen_times: set[float] = set()
+    for keyframe in keyframes:
+        time = round(keyframe.frame / 30 - clip_start, 6)
+        if time < 0 or time >= clip_end - clip_start or time in seen_times:
+            continue
+        seen_times.add(time)
+        tracking.append(ReframeKeyframe(
+            time_seconds=time,
+            normalized_x=keyframe.crop.x + keyframe.crop.width / 2,
+            normalized_y=keyframe.crop.y + keyframe.crop.height / 2,
+            confidence=1,
+        ))
+    return CropPlan(
+        strategy="manual_normalized_crop",
+        source_width=source_width,
+        source_height=source_height,
+        display_rotation_degrees=rotation,
+        normalized_x=rect.x + rect.width / 2,
+        normalized_y=rect.y + rect.height / 2,
+        crop_width=width,
+        crop_height=height,
+        crop_x=x,
+        crop_y=y,
+        tracking_keyframes=tracking,
+    )
+
+
+def _even_dimension(value: float, maximum: int) -> int:
+    result = max(2, min(maximum, int(round(value)) // 2 * 2))
+    return result if result <= maximum else maximum - maximum % 2
+
+
+def _even_origin(value: float, maximum: int) -> int:
+    return max(0, min(maximum, int(round(value)) // 2 * 2))

@@ -11,14 +11,39 @@ from pydantic import ValidationError
 from app.audio_service import AudioCompositionService
 from app.cli import build_parser
 from app.creative_contracts import (
+    AttentionTarget,
+    BeatRole,
+    CanvasPlan,
     CompiledRenderPlan,
+    CreativeIntent,
+    CreativePolicy,
+    EvidenceItem,
+    Intensity,
+    ImmutableProductionPlanLink,
+    LayoutFamily,
+    MotionDomain,
+    MotionPurpose,
+    OutputInterval,
     RenderParityManifest,
+    ResolvedBeat,
+    ResolvedCompositionTarget,
+    ResolvedEmphasis,
+    ResolvedMotionEvent,
+    ResolvedSourceBRoll,
+    SemanticClass,
+    SourceBRollSemanticKind,
+    SourceInterval,
     assert_preview_final_parity,
+    compile_render_plan,
+    source_output_map_from_legacy_timeline,
 )
+from app.composition_planning import TargetObservation
 from app.errors import ProductionRenderError
+from app.motion_planning import build_motion_plan
 from app.pipeline import Pipeline, StageTracker
 from app.production_subtitles import build_subtitle_project, resolve_subtitle_style, split_subtitle_text, write_production_ass
 from app.sources import local_source
+from app.source_broll_planning import SourceSceneEvidence
 from app.video_composition import (
     VideoCompositionService,
     apply_composition_segments,
@@ -72,6 +97,81 @@ def _upstream(tmp_path: Path):
         plan, source, transcript, _tts_result(tmp_path, config, plan), tmp_path / "work", tmp_path / "out",
     )
     return config, plan, source, transcript, audio
+
+
+def _native_intent(plan, mapping) -> CreativeIntent:
+    story = EvidenceItem(
+        evidence_ref="story-native", evidence_kind="story_unit",
+        source=SourceInterval.from_seconds(0.2, 0.8), confidence=0.96,
+        artifact_fingerprint="1" * 64, provenance="regression:story",
+    )
+    visual = EvidenceItem(
+        evidence_ref="visual-native", evidence_kind="visual",
+        source=SourceInterval.from_seconds(0.2, 0.8), confidence=0.95,
+        artifact_fingerprint="2" * 64, provenance="regression:target",
+    )
+    scene = EvidenceItem(
+        evidence_ref="scene-native", evidence_kind="scene",
+        source=SourceInterval.from_seconds(2.0, 2.6), confidence=0.94,
+        artifact_fingerprint="3" * 64, provenance="regression:cutaway",
+    )
+    interval = OutputInterval(start_frame=6, end_frame=24)
+    source = SourceInterval.from_seconds(0.2, 0.8)
+    return CreativeIntent(
+        intent_id="intent-native-regression",
+        revision=1,
+        production_plan=ImmutableProductionPlanLink.from_reference(plan.reference()),
+        source_output_mapping=mapping,
+        evidence_fingerprint="4" * 64,
+        evidence_manifest=(story, visual, scene),
+        proposal_hash="5" * 64,
+        policy=CreativePolicy(
+            preset_id="documentary", preset_version="1", platform="universal",
+            caption_style_family="emphasis", intensity=Intensity.BALANCED,
+            source_broll_enabled=True,
+        ),
+        confidence=0.94,
+        provenance=("e2e-regression",),
+        beats=(ResolvedBeat(
+            decision_id="beat-native", source=source, output=interval,
+            confidence=0.95, evidence_refs=("story-native",),
+            role=BeatRole.ACTION, importance=0.9,
+        ),),
+        semantic_emphasis=(ResolvedEmphasis(
+            decision_id="emphasis-native", source=source, output=interval,
+            confidence=0.94, evidence_refs=("story-native",),
+            text_span="Source", semantic_class=SemanticClass.ACTION, importance=0.9,
+        ),),
+        composition_targets=(ResolvedCompositionTarget(
+            decision_id="target-native", source=source, output=interval,
+            confidence=0.95, evidence_refs=("visual-native",),
+            target=AttentionTarget.SUBJECT, target_ref="subject-native", priority=90,
+            allowed_layouts=(LayoutFamily.SINGLE_SUBJECT,),
+        ),),
+        motion_events=(
+            ResolvedMotionEvent(
+                decision_id="motion-caption", source=SourceInterval.from_seconds(0.2, 0.4),
+                output=OutputInterval(start_frame=6, end_frame=12),
+                confidence=0.93, evidence_refs=("story-native",),
+                purpose=MotionPurpose.HOOK, domain=MotionDomain.CAPTION,
+                intensity=Intensity.BALANCED,
+            ),
+            ResolvedMotionEvent(
+                decision_id="motion-composition", source=source, output=interval,
+                confidence=0.94, evidence_refs=("visual-native",),
+                purpose=MotionPurpose.EVIDENCE_REVEAL, domain=MotionDomain.COMPOSITION,
+                intensity=Intensity.BALANCED,
+            ),
+        ),
+        source_broll=(ResolvedSourceBRoll(
+            decision_id="broll-native", source=source, output=interval,
+            confidence=0.93, evidence_refs=("story-native",),
+            source_cutaway=SourceInterval.from_seconds(2.0, 2.6),
+            source_cutaway_evidence_refs=("scene-native",),
+            story_unit_id="story-native", story_unit_evidence_ref="story-native",
+            semantic_kind=SourceBRollSemanticKind.ACTION,
+        ),),
+    )
 
 
 def test_video_models_validate_canvas_crop_and_timeline_ranges() -> None:
@@ -781,6 +881,115 @@ def test_creative_preview_and_final_render_the_same_compiled_plan(tmp_path: Path
             compiled_plan=compiled,
         )
     assert final_path.read_bytes() == previous_final
+
+
+def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: Path) -> None:
+    config, plan, source, transcript, audio = _upstream(tmp_path)
+    source_info = probe_media(source.path, require_video=True)
+    raw_timeline, _fallbacks = build_video_timeline(
+        plan, audio, transcript, source.path, source_info,
+        CanvasConfig(width=180, height=320, fps=30), config.production_render,
+    )
+    mapping = source_output_map_from_legacy_timeline(raw_timeline)
+    rich_intent = _native_intent(plan, mapping)
+    calm_intent = rich_intent.model_copy(update={
+        "intent_id": "intent-native-calm",
+        "proposal_hash": "6" * 64,
+        "policy": rich_intent.policy.model_copy(update={"source_broll_enabled": False}),
+        "beats": (),
+        "semantic_emphasis": (),
+        "composition_targets": (),
+        "motion_events": (),
+        "source_broll": (),
+    })
+    observations = (
+        TargetObservation(
+            observation_id="observation-native-1", frame=8,
+            target=AttentionTarget.SUBJECT, target_ref="subject-native",
+            bounds={"x": 0.04, "y": 0.18, "width": 0.30, "height": 0.58},
+            confidence=0.96, evidence_ref="visual-native", scene_id="scene-native",
+        ),
+        TargetObservation(
+            observation_id="observation-native-2", frame=20,
+            target=AttentionTarget.SUBJECT, target_ref="subject-native",
+            bounds={"x": 0.08, "y": 0.18, "width": 0.30, "height": 0.58},
+            confidence=0.95, evidence_ref="visual-native", scene_id="scene-native",
+        ),
+    )
+    scenes = (SourceSceneEvidence(
+        scene_id="scene-native", source_id=plan.reference().identity.source_id,
+        source=SourceInterval.from_seconds(2.0, 2.6),
+        semantic_kinds=(SourceBRollSemanticKind.ACTION,),
+        story_unit_ids=("story-native",), beat_roles=(BeatRole.ACTION,),
+        evidence_refs=("scene-native",), confidence=0.94,
+        identity_status="verified", attribution_status="verified",
+        chronology_status="safe", causality_status="supported", rights_status="verified",
+        payoff_signal="none", provenance=("e2e-regression",),
+    ),)
+    service = VideoCompositionService(tmp_path, config)
+
+    calm = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "calm",
+        creative_intent=calm_intent, force_recompute=True,
+    )
+    preview = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "rich",
+        render_profile="creative_preview", creative_intent=rich_intent,
+        target_observations=observations, source_scenes=scenes, force_recompute=True,
+    )
+    compiled = CompiledRenderPlan.model_validate(json.loads(
+        (tmp_path / "rich" / "creative-preview" / "compiled-render-plan.json").read_text(encoding="utf-8")
+    ))
+    final = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "rich",
+        compiled_plan=compiled, force_recompute=True,
+    )
+    no_motion = build_motion_plan(
+        rich_intent.model_copy(update={"motion_events": ()}),
+        compiled.caption_plan,
+        compiled.composition_plan,
+        compiled.source_broll_plan,
+    )
+    motionless_compiled = compile_render_plan(
+        rich_intent,
+        compiled.caption_plan,
+        compiled.composition_plan,
+        no_motion,
+        compiled.source_broll_plan,
+        CanvasPlan(width=compiled.canvas.width, height=compiled.canvas.height),
+    )
+    motionless = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "motionless",
+        compiled_plan=motionless_compiled, force_recompute=True,
+    )
+
+    assert compiled.compatibility_mode == "native"
+    assert compiled.caption_plan.schema_version == "7C.caption-plan.1"
+    assert compiled.composition_plan.schema_version == "7D.composition-plan.1"
+    assert compiled.source_broll_plan.schema_version == "7E.source-broll-plan.1"
+    assert compiled.motion_plan.schema_version == "7F.motion-plan.1"
+    assert compiled.source_broll_plan.segments
+    assert any(item.primitive_id == "punch_in" for item in compiled.motion_plan.events)
+    rendered_timeline = json.loads(
+        (tmp_path / "rich" / "production-render" / "video-timeline.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        item["visual_strategy"] == "candidate_excerpt" and item["source_start_seconds"] >= 2
+        for item in rendered_timeline["clips"]
+    )
+    assert any(
+        item["crop_plan"]["strategy"] == "manual_normalized_crop"
+        for item in rendered_timeline["clips"]
+    )
+    rendered_ass = (tmp_path / "rich" / "production-render" / "production-subtitles.ass").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "CaptionPlan: 7C.caption-plan.1" in rendered_ass
+    assert "\\fad(" in rendered_ass
+    assert preview.metadata.compiled_plan_hash == final.metadata.compiled_plan_hash == compiled.plan_hash
+    assert preview.metadata.parity_signature == final.metadata.parity_signature == compiled.parity_signature
+    assert Path(calm.result.output_file or "").read_bytes() != Path(final.result.output_file or "").read_bytes()
+    assert Path(motionless.result.output_file or "").read_bytes() != Path(final.result.output_file or "").read_bytes()
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:
