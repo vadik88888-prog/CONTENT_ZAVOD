@@ -86,7 +86,7 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert data["findings"] == []
     assert {item["code"] for item in data["checks"]} == {
         "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "PLAN_IDENTITY", "COMPOSITION",
-        "SOURCE_BROLL", "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE",
+        "SOURCE_BROLL", "EDITORIAL_MOTION", "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE",
         "ARTIFACT_IDENTITY",
     }
     assert data["artifact_id"] and data["artifact_sha256"]
@@ -188,6 +188,35 @@ def test_source_broll_rejection_flows_into_quality_report_as_safe_fallback(tmp_p
     assert report.metrics["source_broll"]["metrics"]["a_roll_fallback_count"] == 1
     assert next(item for item in report.checks if item["code"] == "SOURCE_BROLL")["status"] == "warning"
     assert "source_broll:broll-1:a_roll_current_composition" in report.fallbacks
+
+
+def test_motion_budget_suppression_flows_into_quality_report_as_safe_fallback(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render["motion_plan"] = {
+        "quality_report": {
+            "schema_version": "7F.motion-quality.1",
+            "status": "PASS_WITH_WARNINGS",
+            "metrics": {"requested_event_count": 5, "emitted_event_count": 3, "budget_suppression_count": 2},
+            "findings": [{
+                "code": "MOTION_BUDGET_SUPPRESSED", "severity": "warning",
+                "event_id": "motion-4", "measured_value": "points=10,frames=58",
+                "threshold": "points<=8,frames<=42",
+                "message": "The lower-priority animation exceeded the global animation budget.",
+            }],
+        },
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "PASS_WITH_WARNINGS"
+    assert report.metrics["motion"]["metrics"]["budget_suppression_count"] == 2
+    assert next(item for item in report.checks if item["code"] == "EDITORIAL_MOTION")["status"] == "warning"
+    assert "motion:motion-4:calm_fallback" in report.fallbacks
 
 
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:

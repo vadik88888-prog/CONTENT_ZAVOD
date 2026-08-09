@@ -242,14 +242,17 @@ def build_quality_report(
         "captions": _caption_quality(render) or {},
         "composition": _composition_quality(render) or {},
         "source_broll": _source_broll_quality(render) or {},
+        "motion": _motion_quality(render) or {},
     }
     composition_fallbacks = _composition_fallbacks(render)
     source_broll_fallbacks = _source_broll_fallbacks(render)
+    motion_fallbacks = _motion_fallbacks(render)
     fallbacks = _unique([
         *(render.get("fallback_reasons", []) if isinstance(render.get("fallback_reasons"), list) else []),
         *(render.get("warnings", []) if isinstance(render.get("warnings"), list) else []),
         *composition_fallbacks,
         *source_broll_fallbacks,
+        *motion_fallbacks,
     ])
     return QualityReport(
         report_id=report_id,
@@ -574,6 +577,29 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 producer="source_broll_quality_report",
                 message="Source B-roll safety blocks the final artifact.",
             )
+    motion_report = _motion_quality(render)
+    if motion_report is not None:
+        raw_findings = motion_report.get("findings")
+        motion_findings: list[Any] = raw_findings if isinstance(raw_findings, list) else []
+        for item in motion_findings:
+            if not isinstance(item, dict):
+                continue
+            severity = "blocker" if item.get("severity") == "blocker" else "warning"
+            finding(
+                str(item.get("code") or "MOTION_QUALITY_DEGRADED"), severity,
+                {"motion_quality_report": motion_report, "motion_finding": item},
+                measured_value=item.get("measured_value"), threshold=item.get("threshold"),
+                producer="motion_quality_report",
+                message=str(item.get("message") or "Editorial motion requires attention."),
+            )
+        if motion_report.get("status") == "BLOCKED" and not motion_findings:
+            finding(
+                "MOTION_QUALITY_BLOCKED", "blocker",
+                {"motion_quality_report": motion_report},
+                measured_value="BLOCKED", threshold="PASS or PASS_WITH_WARNINGS",
+                producer="motion_quality_report",
+                message="Editorial motion quality blocks the final artifact.",
+            )
     if quality.get("status") == "failed" and not segments and subtitle is None:
         finding(
             "MEDIA_INVALID", "blocker", {"output_quality": quality}, measured_value=quality.get("errors", []),
@@ -646,6 +672,7 @@ def _check_catalog(
         else "composition_quality_decision"
     )
     source_broll_quality = _source_broll_quality(render)
+    motion_quality = _motion_quality(render)
     sources = [
         ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
@@ -658,6 +685,10 @@ def _check_catalog(
         (
             "SOURCE_BROLL", "source_broll_quality_report", source_broll_quality,
             "evidence relevance and forbidden insertion checks passed",
+        ),
+        (
+            "EDITORIAL_MOTION", "motion_quality_report", motion_quality,
+            "registry, cooldown, concurrency, readability and animation budget passed",
         ),
         (
             "SUBTITLES", "subtitle_quality_decision",
@@ -723,6 +754,15 @@ def _source_broll_quality(render: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _motion_quality(render: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the 7F report from a compiled-plan or render-report shape."""
+
+    plan = render.get("motion_plan")
+    if isinstance(plan, dict) and isinstance(plan.get("quality_report"), dict):
+        return dict(plan["quality_report"])
+    return None
+
+
 def _composition_fallbacks(render: dict[str, Any]) -> list[str]:
     composition_plan = render.get("composition_plan")
     if not isinstance(composition_plan, dict):
@@ -746,6 +786,19 @@ def _source_broll_fallbacks(render: dict[str, Any]) -> list[str]:
     return [
         f"source_broll:{item.get('decision_id')}:a_roll_current_composition"
         for item in findings if isinstance(item, dict) and item.get("decision_id")
+    ]
+
+
+def _motion_fallbacks(render: dict[str, Any]) -> list[str]:
+    plan = render.get("motion_plan")
+    if not isinstance(plan, dict):
+        return []
+    report = plan.get("quality_report")
+    raw_findings = report.get("findings") if isinstance(report, dict) else None
+    findings: list[Any] = raw_findings if isinstance(raw_findings, list) else []
+    return [
+        f"motion:{item.get('event_id')}:calm_fallback"
+        for item in findings if isinstance(item, dict) and item.get("event_id")
     ]
 
 

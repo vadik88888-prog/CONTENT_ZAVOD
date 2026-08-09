@@ -25,7 +25,7 @@ CREATIVE_INTENT_SCHEMA_VERSION = "7A.intent.1"
 TIME_MAPPING_SCHEMA_VERSION = "7A.time-map.1"
 CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
 COMPOSITION_PLAN_SCHEMA_VERSION: Literal["7D.composition-plan.1"] = "7D.composition-plan.1"
-MOTION_PLAN_SCHEMA_VERSION = "7A.motion-plan.1"
+MOTION_PLAN_SCHEMA_VERSION: Literal["7F.motion-plan.1"] = "7F.motion-plan.1"
 SOURCE_BROLL_PLAN_SCHEMA_VERSION: Literal["7E.source-broll-plan.1"] = "7E.source-broll-plan.1"
 COMPILED_RENDER_PLAN_SCHEMA_VERSION = "7A.compiled-render-plan.1"
 PARITY_SIGNATURE_SCHEMA_VERSION = "7A.parity.1"
@@ -1260,19 +1260,189 @@ class MotionEventPlan(FrozenContract):
     output: OutputInterval
     purpose: MotionPurpose
     domain: MotionDomain
-    primitive_id: Literal["static", "fade", "dissolve", "crop_translate", "punch_in"]
+    primitive_id: Literal[
+        "static", "fade", "scale", "slide", "dissolve", "crop_translate", "punch_in",
+    ]
     easing_id: Literal["none", "linear", "ease_in_out"] = "none"
     intensity: Intensity
     evidence_refs: tuple[str, ...]
     fallback_primitive_id: Literal["static", "fade"] = "static"
+    requested_primitive_id: Literal[
+        "static", "fade", "scale", "slide", "dissolve", "crop_translate", "punch_in",
+    ] | None = None
+    backend_id: Literal["none", "libass", "ffmpeg"] = "none"
+    duration_frames: int = Field(default=0, ge=0, le=30)
+    scale_from: float = Field(default=1, ge=0.94, le=1.12)
+    scale_to: float = Field(default=1, ge=0.94, le=1.12)
+    translate_x_ratio: float = Field(default=0, ge=-0.05, le=0.05)
+    translate_y_ratio: float = Field(default=0, ge=-0.05, le=0.05)
+    opacity_from: float = Field(default=1, ge=0, le=1)
+    opacity_to: float = Field(default=1, ge=0, le=1)
+    target_plan_ids: tuple[str, ...] = ()
+    budget_points: int = Field(default=0, ge=0, le=8)
+    reduced_motion_fallback: bool = False
+    fallback_reason: Literal[
+        "reduced_motion", "readability", "cooldown", "concurrency",
+        "animation_budget", "unsupported_primitive", "missing_domain_target",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def _bounded_registered_motion(self) -> "MotionEventPlan":
+        span = self.output.end_frame - self.output.start_frame
+        if self.duration_frames > span:
+            raise ValueError("motion duration must stay inside its editorial event")
+        if self.primitive_id == "scale" and self.scale_from == self.scale_to:
+            raise ValueError("scale motion requires a bounded scale change")
+        if self.primitive_id == "slide" and self.translate_x_ratio == 0 and self.translate_y_ratio == 0:
+            raise ValueError("slide motion requires a bounded translation")
+        if self.primitive_id == "fade" and self.opacity_from == self.opacity_to:
+            raise ValueError("fade motion requires a bounded opacity change")
+        if self.primitive_id == "static" and self.budget_points:
+            raise ValueError("static fallback cannot consume animation budget")
+        if self.reduced_motion_fallback and self.primitive_id not in {"static", "fade"}:
+            raise ValueError("reduced motion permits only static or fade")
+        return self
+
+
+class MotionAnimationBudget(FrozenContract):
+    intensity: Intensity = Intensity.LOW
+    point_limit: int = Field(default=0, ge=0)
+    points_used: int = Field(default=0, ge=0)
+    animated_frame_limit: int = Field(default=0, ge=0)
+    animated_frames_used: int = Field(default=0, ge=0)
+    cooldown_frames: int = Field(default=0, ge=0)
+    max_concurrent_layers: int = Field(default=1, ge=1, le=3)
+
+    @model_validator(mode="after")
+    def _within_limits(self) -> "MotionAnimationBudget":
+        if self.points_used > self.point_limit:
+            raise ValueError("motion point budget exceeded")
+        if self.animated_frames_used > self.animated_frame_limit:
+            raise ValueError("motion frame budget exceeded")
+        return self
+
+
+class MotionQualityFinding(FrozenContract):
+    code: Literal[
+        "MOTION_COOLDOWN_SUPPRESSED", "MOTION_CONCURRENCY_SUPPRESSED",
+        "MOTION_BUDGET_SUPPRESSED", "MOTION_READABILITY_SUPPRESSED",
+        "MOTION_PRIMITIVE_FALLBACK", "MOTION_DOMAIN_TARGET_MISSING",
+        "MOTION_REDUCED_MOTION_FALLBACK",
+    ]
+    severity: Literal["warning", "blocker"]
+    event_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    measured_value: float | int | str | bool | None = None
+    threshold: float | int | str | bool | None = None
+    message: str = Field(min_length=1, max_length=1200)
+
+
+class MotionQualityMetrics(FrozenContract):
+    requested_event_count: int = Field(default=0, ge=0)
+    emitted_event_count: int = Field(default=0, ge=0)
+    animated_event_count: int = Field(default=0, ge=0)
+    suppressed_event_count: int = Field(default=0, ge=0)
+    cooldown_suppression_count: int = Field(default=0, ge=0)
+    concurrency_suppression_count: int = Field(default=0, ge=0)
+    budget_suppression_count: int = Field(default=0, ge=0)
+    readability_suppression_count: int = Field(default=0, ge=0)
+    fallback_count: int = Field(default=0, ge=0)
+    max_concurrent_layers: int = Field(default=0, ge=0, le=3)
+    animation_points_used: int = Field(default=0, ge=0)
+    animated_frames_used: int = Field(default=0, ge=0)
+    events_per_minute: float = Field(default=0, ge=0)
+
+
+class MotionQualityProvenance(FrozenContract):
+    producer: str = Field(default="legacy_motion_contract", min_length=1, max_length=240)
+    planner_version: str = Field(default="legacy", min_length=1, max_length=120)
+    capability_registry_version: str = Field(default="legacy", min_length=1, max_length=120)
+    intent_id: str = Field(default="legacy", min_length=1, max_length=160)
+    caption_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    composition_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    source_broll_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+
+
+class MotionQualityReport(FrozenContract):
+    schema_version: Literal["7F.motion-quality.1"] = "7F.motion-quality.1"
+    status: Literal["PASS", "PASS_WITH_WARNINGS", "BLOCKED", "LEGACY_UNASSESSED"] = "LEGACY_UNASSESSED"
+    findings: tuple[MotionQualityFinding, ...] = ()
+    metrics: MotionQualityMetrics = Field(default_factory=MotionQualityMetrics)
+    provenance: MotionQualityProvenance = Field(default_factory=MotionQualityProvenance)
+
+    @model_validator(mode="after")
+    def _status_matches_findings(self) -> "MotionQualityReport":
+        expected = (
+            "BLOCKED" if any(item.severity == "blocker" for item in self.findings)
+            else "PASS_WITH_WARNINGS" if self.findings else "PASS"
+        )
+        if self.status != "LEGACY_UNASSESSED" and self.status != expected:
+            raise ValueError("motion quality status does not match findings")
+        return self
 
 
 class MotionPlan(FrozenContract):
-    schema_version: Literal["7A.motion-plan.1"] = "7A.motion-plan.1"
+    schema_version: Literal["7A.motion-plan.1", "7F.motion-plan.1"] = "7A.motion-plan.1"
     intent_id: str = Field(pattern=ID_PATTERN)
     events: tuple[MotionEventPlan, ...] = ()
+    intensity: Intensity = Intensity.LOW
     reduced_motion: bool = False
+    capability_registry_version: str = "legacy"
+    animation_budget: MotionAnimationBudget = Field(default_factory=MotionAnimationBudget)
+    caption_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    composition_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    source_broll_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    quality_report: MotionQualityReport = Field(default_factory=MotionQualityReport)
     diagnostics: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _ordered_assessed_motion(self) -> "MotionPlan":
+        if any(
+            (right.output.start_frame, right.event_id) < (left.output.start_frame, left.event_id)
+            for left, right in zip(self.events, self.events[1:])
+        ):
+            raise ValueError("motion events must be deterministically ordered")
+        if self.schema_version == "7F.motion-plan.1":
+            if None in {
+                self.caption_plan_sha256,
+                self.composition_plan_sha256,
+                self.source_broll_plan_sha256,
+            }:
+                raise ValueError("7F motion requires current domain plan identities")
+            if self.quality_report.status == "LEGACY_UNASSESSED":
+                raise ValueError("7F motion requires an assessed quality report")
+            if self.capability_registry_version != "7B.capability-registry.1":
+                raise ValueError("7F motion requires the frozen 7B capability registry")
+            if self.animation_budget.intensity != self.intensity:
+                raise ValueError("motion intensity and animation budget must agree")
+            if self.animation_budget.points_used != sum(item.budget_points for item in self.events):
+                raise ValueError("motion budget accounting must match emitted events")
+            animated_frames = sum(
+                item.duration_frames for item in self.events if item.primitive_id != "static"
+            )
+            if self.animation_budget.animated_frames_used != animated_frames:
+                raise ValueError("motion frame accounting must match emitted events")
+            if any(
+                (item.primitive_id == "static") != (item.duration_frames == 0)
+                for item in self.events
+            ):
+                raise ValueError("7F static and animated timing must be explicit")
+            if any(
+                item.primitive_id == "punch_in" and item.scale_to <= item.scale_from
+                for item in self.events
+            ):
+                raise ValueError("7F punch-in requires bounded increasing scale")
+            if self.reduced_motion and any(
+                item.primitive_id not in {"static", "fade"} for item in self.events
+            ):
+                raise ValueError("reduced MotionPlan permits only static or fade")
+            metrics = self.quality_report.metrics
+            if metrics.emitted_event_count != len(self.events):
+                raise ValueError("motion quality event accounting must match MotionPlan")
+            if metrics.animation_points_used != self.animation_budget.points_used:
+                raise ValueError("motion quality point accounting must match MotionPlan")
+            if metrics.animated_frames_used != self.animation_budget.animated_frames_used:
+                raise ValueError("motion quality frame accounting must match MotionPlan")
+        return self
 
 
 class SourceBRollSafetyChecks(FrozenContract):
@@ -1660,6 +1830,8 @@ def compile_render_plan(
         "expected_quality_constraints": [
             "no_raw_commands", "identity_match", "source_ranges_bounded",
             "source_broll_evidence_and_forbidden_checks", "a_roll_master_audio",
+            "motion_capability_registry", "cross_domain_animation_budget",
+            "motion_cooldown_and_concurrency", "reduced_motion_fallback",
             "preview_final_parity",
         ],
         "ordered_fallbacks": list(intent.ordered_fallbacks),
@@ -1736,7 +1908,8 @@ def _validate_domain_plans(
 
     for event in motion.events:
         if not any(
-            request.purpose == event.purpose
+            request.decision_id == event.event_id
+            and request.purpose == event.purpose
             and request.domain == event.domain
             and request.output.contains(event.output)
             and set(event.evidence_refs).issubset(request.evidence_refs)
@@ -1744,6 +1917,29 @@ def _validate_domain_plans(
             for request in intent.motion_events
         ):
             raise ValueError("MOTION_PLAN_EVIDENCE_MISMATCH")
+
+    if motion.schema_version == "7F.motion-plan.1":
+        if motion.caption_plan_sha256 != captions.canonical_hash():
+            raise ValueError("MOTION_CAPTION_PLAN_STALE")
+        if motion.composition_plan_sha256 != composition.canonical_hash():
+            raise ValueError("MOTION_COMPOSITION_PLAN_STALE")
+        if motion.source_broll_plan_sha256 != broll.canonical_hash():
+            raise ValueError("MOTION_SOURCE_BROLL_PLAN_STALE")
+        if motion.intensity != intent.policy.intensity:
+            raise ValueError("MOTION_INTENSITY_POLICY_MISMATCH")
+        if motion.reduced_motion != intent.policy.reduced_motion:
+            raise ValueError("MOTION_REDUCED_POLICY_MISMATCH")
+        caption_ids = {item.cue_id for item in captions.cues}
+        composition_ids = {item.segment_id for item in composition.segments}
+        broll_ids = {item.segment_id for item in broll.segments}
+        for event in motion.events:
+            valid_ids = (
+                caption_ids if event.domain == MotionDomain.CAPTION
+                else composition_ids if event.domain == MotionDomain.COMPOSITION
+                else broll_ids | composition_ids
+            )
+            if not event.target_plan_ids or not set(event.target_plan_ids).issubset(valid_ids):
+                raise ValueError("MOTION_DOMAIN_TARGET_MISMATCH")
 
     if broll.segments and not intent.policy.source_broll_enabled:
         raise ValueError("SOURCE_BROLL_DISABLED")
