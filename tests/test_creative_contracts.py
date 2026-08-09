@@ -26,11 +26,15 @@ from app.creative_contracts import (
     MotionEventPlan,
     MotionPlan,
     OutputInterval,
+    RenderProfile,
     SourceBRollPlan,
     SourceBRollProposal,
     SourceInterval,
     SourceOutputTimeMap,
+    assert_preview_final_parity,
+    build_render_parity_manifest,
     canonical_hash,
+    check_preview_final_parity,
     compile_creative_intent,
     compile_legacy_render_plan,
     compile_render_plan,
@@ -314,7 +318,8 @@ def test_compiled_plan_hash_and_parity_are_canonical_and_immutable() -> None:
     assert first.plan_hash == second.plan_hash
     assert first.parity_signature == second.parity_signature
     assert [node.node_id for node in first.render_graph_nodes] == [
-        "base-visual", "caption-overlay", "composite", "quality-check",
+        "captions", "composition", "broll", "motion",
+        "base-visual", "composite", "encode", "qc",
     ]
     assert canonical_hash({"b": 2, "a": 1}) == canonical_hash({"a": 1, "b": 2})
     with pytest.raises(ValidationError, match="Instance is frozen"):
@@ -328,6 +333,11 @@ def test_compiled_plan_hash_and_parity_are_canonical_and_immutable() -> None:
     changed = compile_with(changed_captions)
     assert changed.plan_hash != first.plan_hash
     assert changed.parity_signature != first.parity_signature
+    first_keys = {node.node_id: node.cache_key for node in first.render_graph_nodes}
+    changed_keys = {node.node_id: node.cache_key for node in changed.render_graph_nodes}
+    assert {
+        node for node in first_keys if first_keys[node] == changed_keys[node]
+    } == {"composition", "broll", "motion", "base-visual"}
 
     tampered = first.model_dump(mode="json")
     tampered["caption_plan"]["cues"][0]["resolved_lines"] = ["tampered after compilation"]
@@ -356,6 +366,41 @@ def test_compiled_plan_hash_and_parity_are_canonical_and_immutable() -> None:
             CanvasPlan(width=1080, height=1920),
             backends=(backend,),
         )
+
+
+def test_preview_and_final_profiles_share_semantic_timing_layout_parity() -> None:
+    intent = compile_creative_intent(_proposal(), _evidence(), _mapping(), _policy())
+    plan = compile_render_plan(
+        intent,
+        CaptionPlan(intent_id=intent.intent_id),
+        CompositionPlan(intent_id=intent.intent_id),
+        MotionPlan(intent_id=intent.intent_id),
+        SourceBRollPlan(intent_id=intent.intent_id),
+        CanvasPlan(width=1080, height=1920),
+    )
+    preview = build_render_parity_manifest(
+        plan,
+        RenderProfile(
+            profile_id="creative_preview", width=540, height=960,
+            video_bitrate="1800k", sampling_precision="preview",
+        ),
+    )
+    final = build_render_parity_manifest(
+        plan,
+        RenderProfile(
+            profile_id="final", width=1080, height=1920,
+            video_bitrate="8M", sampling_precision="full",
+        ),
+    )
+
+    assert check_preview_final_parity(preview, final).status == "matched"
+    assert_preview_final_parity(preview, final)
+    mismatch = final.model_copy(update={"resolved_lines_hash": "f" * 64})
+    result = check_preview_final_parity(preview, mismatch)
+    assert result.status == "mismatch"
+    assert result.mismatch_fields == ("resolved_lines_hash",)
+    with pytest.raises(ValueError, match="PREVIEW_FINAL_PARITY_MISMATCH"):
+        assert_preview_final_parity(preview, mismatch)
 
 
 def _constructed_production_plan() -> ProductionPlan:

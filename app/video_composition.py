@@ -7,15 +7,25 @@ import tempfile
 from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.audio_models import AudioProject
 from app.config import AppConfig, ProductionRenderConfig
+from app.creative_contracts import (
+    CompiledRenderPlan,
+    RenderParityManifest,
+    RenderProfile,
+    assert_preview_final_parity,
+    build_render_parity_manifest,
+    compile_legacy_render_plan,
+    source_output_map_from_legacy_timeline,
+)
 from app.errors import ProductionRenderError
 from app.output_quality import validate_output_quality
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_renderer_handoff
 from app.production_subtitles import build_subtitle_project, write_production_ass
 from app.rendering import nvenc_available
+from app.render_cache import CacheArtifact, GranularRenderCache, runtime_cache_key
 from app.sources import Source
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.utils import read_json, stable_file_hash, stable_text_hash, utc_now, write_bytes_atomic, write_json
@@ -45,7 +55,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "5D.0"
+PRODUCTION_RENDER_ENGINE_VERSION = "7G.0"
 
 
 class VideoCompositionService:
@@ -59,6 +69,8 @@ class VideoCompositionService:
         self, plan: ProductionPlan, audio_project: AudioProject, source: Source,
         transcript: dict[str, Any], work_directory: Path, output_directory: Path,
         force_recompute: bool = False, visual_analysis: dict[str, Any] | None = None,
+        render_profile: RenderProfile | Literal["creative_preview", "final"] = "final",
+        compiled_plan: CompiledRenderPlan | None = None,
     ) -> VideoProject:
         render_config = self.config.production_render
         if not source.path.is_file():
@@ -93,15 +105,15 @@ class VideoCompositionService:
         mixed_info = probe_media(mixed_path, require_audio=True)
         source_checksum = stable_file_hash(source.path)
         mixed_checksum = stable_file_hash(mixed_path)
-        canvas = CanvasConfig(
+        planning_canvas = CanvasConfig(
             width=render_config.output_width, height=render_config.output_height,
-            fps=render_config.output_fps, pixel_format=render_config.pixel_format,
+            fps=render_config.output_fps, pixel_format="yuv420p",
         )
         timeline, fallback_reasons = build_video_timeline(
-            plan, audio_project, transcript, source.path, source_info, canvas, render_config,
+            plan, audio_project, transcript, source.path, source_info, planning_canvas, render_config,
         )
         plan_reference = plan.reference()
-        reframe_plan = build_reframe_plan(source_info, canvas, render_config, timeline).model_copy(update={
+        reframe_plan = build_reframe_plan(source_info, planning_canvas, render_config, timeline).model_copy(update={
             "plan_reference": plan_reference,
         })
         timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
@@ -123,21 +135,45 @@ class VideoCompositionService:
         ).model_copy(update={
             "plan_reference": plan_reference,
         })
+        generated_plan = compile_legacy_render_plan(
+            plan,
+            source_output_map_from_legacy_timeline(timeline),
+            subtitle_project=subtitle_project,
+            reframe_plan=reframe_plan,
+        )
+        if compiled_plan is not None and (
+            compiled_plan.plan_hash != generated_plan.plan_hash
+            or compiled_plan.parity_signature != generated_plan.parity_signature
+        ):
+            raise ProductionRenderError(
+                "PREVIEW_FINAL_PARITY_MISMATCH: supplied CompiledRenderPlan does not match resolved render inputs."
+            )
+        compiled_plan = compiled_plan or generated_plan
+        profile = _resolve_render_profile(compiled_plan, render_profile, render_config)
+        canvas = CanvasConfig(
+            width=profile.width, height=profile.height, fps=profile.fps,
+            pixel_format="yuv420p",
+        )
         cache_key = _render_cache_key(
             plan, source_checksum, mixed_checksum, audio_project, timeline, subtitle_project, canvas, render_config,
             platform=self.config.product_flow.platform,
             product_flow_revision=self.config.product_flow.preset_version,
+            compiled_plan=compiled_plan,
+            render_profile=profile,
         )
         project_id = f"video-{plan.plan_id}-{audio_project.project_id}-{cache_key[:12]}"
         request = RenderRequest(
             video_project_id=project_id, source_path=str(source.path), mixed_audio_path=str(mixed_path),
-            canvas=canvas, encoder_preference=render_config.encoder, video_bitrate=render_config.video_bitrate,
+            canvas=canvas, encoder_preference=profile.encoder, video_bitrate=profile.video_bitrate,
             subtitles_enabled=render_config.subtitles_enabled,
         )
         metadata = RenderMetadata(
             production_plan_id=plan.plan_id, audio_project_id=audio_project.project_id,
             source_checksum=source_checksum, mixed_audio_checksum=mixed_checksum,
             render_config_version=render_config.render_config_version, cache_key=cache_key,
+            compiled_plan_hash=compiled_plan.plan_hash,
+            parity_signature=compiled_plan.parity_signature,
+            render_profile_id=profile.profile_id,
             created_at=utc_now(), updated_at=utc_now(),
         )
         track = VideoTrack(
@@ -164,12 +200,33 @@ class VideoCompositionService:
                 "Resolved Subtitle Quality V2 validation failed before final-ready state: "
                 + "; ".join(quality["errors"])
             )
-        render_root = output_directory / "production-render"
+        render_root = output_directory / (
+            "creative-preview" if profile.profile_id == "creative_preview" else "production-render"
+        )
+        if profile.profile_id == "final":
+            preview_manifest_path = output_directory / "creative-preview" / "parity-manifest.json"
+            if preview_manifest_path.is_file():
+                try:
+                    preview_manifest = RenderParityManifest.model_validate(read_json(preview_manifest_path, {}))
+                    preview_output = output_directory / "creative-preview" / "creative-preview.mp4"
+                    if (
+                        preview_manifest.output_checksum is None
+                        or not preview_output.is_file()
+                        or stable_file_hash(preview_output) != preview_manifest.output_checksum
+                    ):
+                        raise ValueError("CREATIVE_PREVIEW_ARTIFACT_CHECKSUM_MISMATCH")
+                    final_manifest = build_render_parity_manifest(compiled_plan, profile)
+                    assert_preview_final_parity(preview_manifest, final_manifest)
+                except (OSError, ValueError) as error:
+                    raise ProductionRenderError(
+                        f"PREVIEW_FINAL_PARITY_MISMATCH: Final render blocked: {_safe_error(error)}"
+                    ) from error
         cache_path = self.root / "work" / "production-render-cache" / f"{cache_key}.json"
-        cached = self._try_cache(project, render_root, cache_path, force_recompute)
-        if cached is not None:
-            return cached
-        return self._render(project, source_info, mixed_info, render_root, cache_path)
+        return self._render(
+            project, source_info, mixed_info, render_root, cache_path,
+            compiled_plan=compiled_plan, render_profile=profile,
+            force_recompute=force_recompute,
+        )
 
     def _try_cache(
         self, project: VideoProject, render_root: Path, cache_path: Path, force_recompute: bool,
@@ -213,36 +270,167 @@ class VideoCompositionService:
     def _render(
         self, project: VideoProject, source_info: dict[str, Any], mixed_info: dict[str, Any],
         render_root: Path, cache_path: Path,
+        *, compiled_plan: CompiledRenderPlan, render_profile: RenderProfile,
+        force_recompute: bool,
     ) -> VideoProject:
         quality = validate_output_quality(project, project.render_request.subtitles_enabled)
         if quality["status"] == "failed":
             raise ProductionRenderError("Resolved subtitle quality validation failed: " + "; ".join(quality["errors"]))
-        clips_root = render_root / "clips"
         temp_root = render_root / "temp"
         render_root.mkdir(parents=True, exist_ok=True)
-        clips_root.mkdir(parents=True, exist_ok=True)
         temp_root.mkdir(parents=True, exist_ok=True)
-        ass_path = render_root / "production-subtitles.ass"
-        if project.subtitle_project is not None:
-            write_production_ass(project.subtitle_project, ass_path, project.canvas.width, project.canvas.height)
-        prepared: list[Path] = []
-        temporary: Path | None = None
-        try:
-            for clip in project.timeline.clips:
-                destination = clips_root / f"{clip.order:03d}-{clip.clip_id}.mp4"
-                self._prepare_visual_clip(clip, project.canvas, destination)
-                prepared.append(destination)
-            temporary = _temporary_path(temp_root, ".mp4")
-            encoder, hardware_fallback, encoder_warning = self._mux_final(
-                prepared, Path(project.mixed_audio_path), ass_path if self.config.production_render.subtitles_enabled else None,
-                temporary, project.canvas, [clip.duration_seconds for clip in project.timeline.clips], project.timeline.transitions,
+        cache = GranularRenderCache(
+            self.root / "work" / "creative-render-cache",
+            producer_version=PRODUCTION_RENDER_ENGINE_VERSION,
+        )
+        nodes = {node.node_id: node for node in compiled_plan.render_graph_nodes}
+        cache_hits: dict[str, bool] = {}
+        bypass_cache = force_recompute or not self.config.production_render.cache_enabled
+
+        captions_key = runtime_cache_key(nodes["captions"].cache_key)
+        captions = None if bypass_cache else cache.load("captions", captions_key, suffix=".ass")
+        cache_hits["captions"] = captions is not None
+        if captions is None:
+            generated_ass = _temporary_path(temp_root, ".ass")
+            try:
+                if project.subtitle_project is not None:
+                    # Keep the plan canvas as ASS PlayRes. libass scales the same
+                    # resolved lines/font geometry into either quality profile.
+                    write_production_ass(
+                        project.subtitle_project, generated_ass,
+                        compiled_plan.canvas.width, compiled_plan.canvas.height,
+                    )
+                else:
+                    write_bytes_atomic(generated_ass, b"")
+                if generated_ass.stat().st_size == 0:
+                    write_bytes_atomic(generated_ass, b"; captions disabled\n")
+                captions = cache.store_file("captions", captions_key, generated_ass, suffix=".ass")
+            finally:
+                generated_ass.unlink(missing_ok=True)
+
+        plan_artifacts: dict[str, CacheArtifact] = {}
+        for node_id, payload in (
+            ("composition", compiled_plan.composition_plan.model_dump(mode="json")),
+            ("broll", compiled_plan.source_broll_plan.model_dump(mode="json")),
+            ("motion", compiled_plan.motion_plan.model_dump(mode="json")),
+        ):
+            # Cache execution inputs, not the parent lifecycle id. The complete
+            # identity remains in compiled-render-plan.json; excluding intent_id
+            # here is what permits caption-only revisions to reuse visual work.
+            payload.pop("intent_id", None)
+            node_key = runtime_cache_key(nodes[node_id].cache_key)
+            artifact = None if bypass_cache else cache.load(node_id, node_key, suffix=".json")
+            cache_hits[node_id] = artifact is not None
+            if artifact is None:
+                artifact = cache.store_json(node_id, node_key, payload)
+            plan_artifacts[node_id] = artifact
+
+        profile_payload = render_profile.model_dump(mode="json")
+        visual_profile_payload = {
+            "width": render_profile.width,
+            "height": render_profile.height,
+            "fps": render_profile.fps,
+            "sampling_precision": render_profile.sampling_precision,
+        }
+        base_key = runtime_cache_key(
+            nodes["base-visual"].cache_key,
+            profile=visual_profile_payload,
+            inputs={"source_checksum": project.source_checksum},
+        )
+        base_dependencies = {
+            "composition": plan_artifacts["composition"].checksum,
+            "broll": plan_artifacts["broll"].checksum,
+        }
+        base = None if bypass_cache else cache.load(
+            "base-visual", base_key, suffix=".mp4", dependency_checksums=base_dependencies,
+        )
+        cache_hits["base-visual"] = base is not None
+        if base is None:
+            generated_base = _temporary_path(temp_root, ".mp4")
+            try:
+                self._render_base_visual(
+                    project.timeline.clips, project.canvas, generated_base,
+                    project.timeline.transitions,
+                )
+                rendered = probe_media(generated_base, require_video=True)
+                if abs(float(rendered["video_duration"]) - project.timeline.duration_seconds) > 0.15:
+                    raise ProductionRenderError("Base visual cache node has an invalid duration.")
+                base = cache.store_file(
+                    "base-visual", base_key, generated_base, suffix=".mp4",
+                    dependency_checksums=base_dependencies,
+                )
+            finally:
+                generated_base.unlink(missing_ok=True)
+
+        assert captions is not None and base is not None
+        composite_key = runtime_cache_key(
+            nodes["composite"].cache_key,
+            profile=visual_profile_payload,
+            inputs={
+                "mixed_audio_checksum": project.metadata.mixed_audio_checksum,
+                "subtitles_enabled": project.render_request.subtitles_enabled,
+            },
+        )
+        composite_dependencies = {
+            "base-visual": base.checksum,
+            "captions": captions.checksum,
+            "motion": plan_artifacts["motion"].checksum,
+        }
+        composite = None if bypass_cache else cache.load(
+            "composite", composite_key, suffix=".json",
+            dependency_checksums=composite_dependencies,
+        )
+        cache_hits["composite"] = composite is not None
+        if composite is None:
+            composite = cache.store_json(
+                "composite", composite_key,
+                {
+                    "base_visual_checksum": base.checksum,
+                    "caption_checksum": captions.checksum,
+                    "motion_checksum": plan_artifacts["motion"].checksum,
+                    "mixed_audio_checksum": project.metadata.mixed_audio_checksum,
+                    "subtitles_enabled": project.render_request.subtitles_enabled,
+                },
+                dependency_checksums=composite_dependencies,
             )
-            validation = validate_final_video(temporary, project.canvas, Path(project.mixed_audio_path), self.config.production_render)
-            if validation.status == "invalid":
-                temporary.unlink(missing_ok=True)
-                raise ProductionRenderError("Final MP4 не прошёл обязательную ffprobe validation.")
-            final_path = render_root / "final-short.mp4"
-            temporary.replace(final_path)
+
+        encode_key = runtime_cache_key(
+            nodes["encode"].cache_key,
+            profile=profile_payload,
+            inputs={
+                "composite_checksum": composite.checksum,
+                "pixel_format": project.canvas.pixel_format,
+            },
+        )
+        encode_dependencies = {"composite": composite.checksum}
+        encoded = None if bypass_cache else cache.load(
+            "encode", encode_key, suffix=".mp4", dependency_checksums=encode_dependencies,
+        )
+        cache_hits["encode"] = encoded is not None
+        temporary: Path | None = None
+        encoder = "cache"
+        hardware_fallback = False
+        encoder_warning: str | None = None
+        try:
+            if encoded is None:
+                temporary = _temporary_path(temp_root, ".mp4")
+                encoder, hardware_fallback, encoder_warning = self._mux_base_visual(
+                    base.path, Path(project.mixed_audio_path),
+                    captions.path if project.render_request.subtitles_enabled else None,
+                    temporary, project.canvas, render_profile.video_bitrate, render_profile.encoder,
+                )
+                validation = validate_final_video(
+                    temporary, project.canvas, Path(project.mixed_audio_path), self.config.production_render,
+                )
+                if validation.status == "invalid":
+                    raise ProductionRenderError("Final MP4 не прошёл обязательную ffprobe validation.")
+                encoded = cache.store_file(
+                    "encode", encode_key, temporary, suffix=".mp4",
+                    dependency_checksums=encode_dependencies,
+                )
+            final_path = render_root / (
+                "creative-preview.mp4" if render_profile.profile_id == "creative_preview" else "final-short.mp4"
+            )
         except ProductionRenderError:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -251,21 +439,78 @@ class VideoCompositionService:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
             raise ProductionRenderError(f"Production render failed: {_safe_error(error)}") from error
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+        qc_key = runtime_cache_key(
+            nodes["qc"].cache_key,
+            profile=profile_payload,
+            inputs={
+                "output_checksum": encoded.checksum,
+                "quality_policy": {
+                    "av_sync_warning_ms": self.config.production_render.av_sync_warning_ms,
+                    "av_sync_error_ms": self.config.production_render.av_sync_error_ms,
+                    "maximum_duration_difference": self.config.production_render.maximum_duration_difference,
+                    "render_config_version": self.config.production_render.render_config_version,
+                },
+            },
+        )
+        qc_dependencies = {"encode": encoded.checksum}
+        qc = None if bypass_cache else cache.load(
+            "qc", qc_key, suffix=".json", dependency_checksums=qc_dependencies,
+        )
+        cache_hits["qc"] = qc is not None
+        if qc is not None:
+            qc_payload = read_json(qc.path, {})
+            try:
+                validation = RenderValidation.model_validate(qc_payload.get("validation", {}))
+            except (AttributeError, ValueError):
+                qc = None
+        if qc is None:
+            validation = validate_final_video(
+                encoded.path, project.canvas, Path(project.mixed_audio_path), self.config.production_render,
+            )
+            if validation.status == "invalid":
+                raise ProductionRenderError("Cached/rendered MP4 failed QC validation.")
+            qc = cache.store_json(
+                "qc", qc_key,
+                {"validation": validation.model_dump(mode="json"), "output_checksum": encoded.checksum},
+                dependency_checksums=qc_dependencies,
+            )
+            cache_hits["qc"] = False
+
+        # Publish only after the content-addressed encode and QC nodes have both
+        # validated. A failed/corrupt fallback therefore cannot replace the last
+        # known-good preview or final artifact.
+        cache.materialize(encoded, final_path)
+
+        parity_manifest = build_render_parity_manifest(
+            compiled_plan, render_profile, output_checksum=encoded.checksum,
+        )
+        write_json(render_root / "compiled-render-plan.json", compiled_plan.model_dump(mode="json"))
+        write_json(render_root / "parity-manifest.json", parity_manifest.model_dump(mode="json"))
+        ass_path = render_root / "production-subtitles.ass"
+        cache.materialize(captions, ass_path)
         warnings = [*project.warnings, *validation.messages, *quality["warnings"]]
         if encoder_warning:
             warnings.append(encoder_warning)
         result = RenderResult(
             status="warning" if warnings or validation.status == "warning" else "completed",
             output_file=str(final_path), encoder=encoder, hardware_fallback=hardware_fallback,
-            cache_hit=False, validation=validation, artifacts=[], warnings=warnings,
+            cache_hit=cache_hits["encode"], validation=validation, artifacts=[], warnings=warnings,
         )
         complete = project.model_copy(update={
             "status": result.status, "actual_duration_seconds": validation.video_duration_seconds or 0,
             "result": result, "warnings": warnings,
-            "metadata": project.metadata.model_copy(update={"updated_at": utc_now()}),
+            "metadata": project.metadata.model_copy(update={
+                "updated_at": utc_now(),
+                "cache_node_hits": cache_hits,
+                "single_pass_encode": not project.render_request.subtitles_enabled,
+            }),
         })
         _write_project_artifacts(complete, render_root)
-        artifacts = _artifacts(render_root, final_path, prepared)
+        artifacts = _artifacts(render_root, final_path)
         result = result.model_copy(update={"artifacts": artifacts})
         complete = complete.model_copy(update={
             "result": result, "artifact_paths": [item.path for item in artifacts],
@@ -275,9 +520,126 @@ class VideoCompositionService:
         write_json(cache_path, {
             "schema_version": PRODUCTION_RENDER_ENGINE_VERSION, "cache_key": complete.metadata.cache_key,
             "checksum": stable_file_hash(final_path), "encoder": encoder,
-            "hardware_fallback": hardware_fallback, "created_at": utc_now(),
+            "hardware_fallback": hardware_fallback,
+            "compiled_plan_hash": compiled_plan.plan_hash,
+            "parity_signature": compiled_plan.parity_signature,
+            "cache_node_hits": cache_hits,
+            "created_at": utc_now(),
         })
         return complete
+
+    def _render_base_visual(
+        self,
+        clips: list[VideoClipModel],
+        canvas: CanvasConfig,
+        destination: Path,
+        transitions: list[VideoTransition],
+    ) -> None:
+        """Compose all source ranges into one reusable visual mezzanine.
+
+        The former path encoded every clip separately and encoded the joined
+        result again.  This graph performs one base encode regardless of clip
+        count; caption revisions reuse it without repeating decode/crop work.
+        """
+
+        if not clips:
+            raise ProductionRenderError("Video timeline has no renderable visual clips.")
+        inputs: list[str] = []
+        filters: list[str] = []
+        labels: list[str] = []
+        for index, clip in enumerate(clips):
+            label = f"[base{index}]"
+            labels.append(label)
+            if isinstance(clip, FillClip):
+                inputs.extend([
+                    "-f", "lavfi", "-t", f"{clip.duration_seconds:.6f}",
+                    "-i", f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}",
+                ])
+                filters.append(
+                    f"[{index}:v]fps={canvas.fps},trim=duration={clip.duration_seconds:.6f},"
+                    f"setpts=PTS-STARTPTS,format={canvas.pixel_format}{label}"
+                )
+                continue
+            source = Path(clip.source_path)
+            if not source.is_file() or clip.source_start_seconds is None or clip.source_end_seconds is None:
+                raise ProductionRenderError(f"Visual clip {clip.clip_id} has no usable source media.")
+            available = max(0.04, clip.source_end_seconds - clip.source_start_seconds)
+            inputs.extend([
+                "-ss", f"{clip.source_start_seconds:.6f}", "-t", f"{available:.6f}",
+                "-i", str(source),
+            ])
+            filters.append(_visual_filter(clip, canvas, input_label=f"[{index}:v]", output_label=label))
+        transition_plan: str | list[VideoTransition] = self.config.production_render.transitions
+        if self.config.production_render.transitions == "short_crossfade" and any(
+            item.transition_type == "cut" for item in transitions
+        ):
+            transition_plan = transitions
+        timeline_graph, video_label = _timeline_filter(
+            [clip.duration_seconds for clip in clips], transition_plan, input_labels=labels,
+        )
+        filters.append(timeline_graph)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            _ffmpeg(), "-y", "-hide_banner", "-loglevel", "error", *inputs,
+            "-filter_complex", ";".join(filters), "-map", video_label,
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", canvas.pixel_format, "-r", str(canvas.fps),
+            "-movflags", "+faststart", str(destination),
+        ]
+        _run_ffmpeg(command, "base visual composition")
+
+    def _mux_base_visual(
+        self,
+        base_visual: Path,
+        mixed_audio: Path,
+        ass_path: Path | None,
+        destination: Path,
+        canvas: CanvasConfig,
+        video_bitrate: str,
+        encoder_preference: Literal["auto", "nvenc", "cpu"],
+    ) -> tuple[str, bool, str | None]:
+        """Composite captions when needed; otherwise mux without a second video encode."""
+
+        ffmpeg = _ffmpeg()
+        if ass_path is None:
+            _run_ffmpeg([
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(base_visual), "-i", str(mixed_audio),
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+                str(destination),
+            ], "single-pass production mux")
+            return "copy", False, None
+
+        graph = f"[0:v]ass='{_filter_path(ass_path)}'[vout]"
+        requested = encoder_preference
+
+        def command(encoder: str) -> list[str]:
+            return [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(base_visual), "-i", str(mixed_audio),
+                "-filter_complex", graph, "-map", "[vout]", "-map", "1:a:0",
+                "-c:v", encoder, "-preset", "p4" if encoder == "h264_nvenc" else "medium",
+                "-b:v", video_bitrate, "-pix_fmt", canvas.pixel_format, "-r", str(canvas.fps),
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(destination),
+            ]
+
+        if requested == "cpu":
+            _run_ffmpeg(command("libx264"), "caption composite encode")
+            return "libx264", False, None
+        if requested == "nvenc" and not nvenc_available():
+            raise ProductionRenderError("Запрошен production_render.encoder=nvenc, но h264_nvenc недоступен.")
+        if requested == "auto" and not nvenc_available():
+            _run_ffmpeg(command("libx264"), "caption composite encode")
+            return "libx264", True, "NVENC недоступен: production render безопасно выполнен на CPU."
+        try:
+            _run_ffmpeg(command("h264_nvenc"), "caption composite encode")
+            return "h264_nvenc", False, None
+        except ProductionRenderError as error:
+            if requested == "nvenc":
+                raise
+            _run_ffmpeg(command("libx264"), "caption composite encode CPU fallback")
+            return "libx264", True, f"NVENC render failed; CPU fallback used: {_safe_error(error)}"
 
     def _prepare_visual_clip(self, clip: VideoClipModel, canvas: CanvasConfig, destination: Path) -> None:
         ffmpeg = _ffmpeg()
@@ -1862,35 +2224,46 @@ def _smooth_reframe_keyframes(keyframes: list[ReframeKeyframe]) -> list[ReframeK
     return result
 
 
-def _visual_filter(clip: SourceVideoClip | FreezeFrameClip, canvas: CanvasConfig) -> str:
+def _visual_filter(
+    clip: SourceVideoClip | FreezeFrameClip,
+    canvas: CanvasConfig,
+    *,
+    input_label: str = "[0:v]",
+    output_label: str = "[vout]",
+) -> str:
     crop = clip.crop_plan
     assert crop is not None
+    label_prefix = output_label.strip("[]").replace("-", "_")
+    bg_label = f"[{label_prefix}_bg]"
+    fg_label = f"[{label_prefix}_fg]"
+    blur_label = f"[{label_prefix}_blur]"
+    fit_label = f"[{label_prefix}_fit]"
     tail = (
         f",fps={canvas.fps},tpad=stop_mode=clone:stop_duration={clip.freeze_duration_seconds:.6f},"
-        f"trim=duration={clip.duration_seconds:.6f},setpts=PTS-STARTPTS,format={canvas.pixel_format}[vout]"
+        f"trim=duration={clip.duration_seconds:.6f},setpts=PTS-STARTPTS,format={canvas.pixel_format}{output_label}"
     )
     if crop.strategy == "fit_blur_background":
         return (
-            f"[0:v]split=2[bg][fg];[bg]scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
-            f"crop={canvas.width}:{canvas.height},boxblur=20:10[blur];[fg]scale={canvas.width}:{canvas.height}:"
-            f"force_original_aspect_ratio=decrease[fit];[blur][fit]overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
+            f"{input_label}split=2{bg_label}{fg_label};{bg_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
+            f"crop={canvas.width}:{canvas.height},boxblur=20:10{blur_label};{fg_label}scale={canvas.width}:{canvas.height}:"
+            f"force_original_aspect_ratio=decrease{fit_label};{blur_label}{fit_label}overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     if crop.strategy == "fit_solid_background":
         return (
-            f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}[bg];"
-            f"[0:v]scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease[fit];"
-            f"[bg][fit]overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
+            f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}{bg_label};"
+            f"{input_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease{fit_label};"
+            f"{bg_label}{fit_label}overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
     if crop.tracking_keyframes:
         x = _tracking_crop_expression(crop.tracking_keyframes, crop.source_width, crop.crop_width, "x")
         y = _tracking_crop_expression(crop.tracking_keyframes, crop.source_height, crop.crop_height, "y")
         return (
-            f"[0:v]crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
+            f"{input_label}crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
             f"scale={canvas.width}:{canvas.height},setsar=1" + tail
         )
     return (
-        f"[0:v]crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
+        f"{input_label}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
         f"scale={canvas.width}:{canvas.height},setsar=1" + tail
     )
 
@@ -2001,6 +2374,8 @@ def _render_cache_key(
     plan: ProductionPlan, source_checksum: str, mixed_checksum: str, audio_project: AudioProject, timeline: VideoTimeline,
     subtitles: SubtitleProject, canvas: CanvasConfig, config: ProductionRenderConfig,
     *, platform: str, product_flow_revision: str,
+    compiled_plan: CompiledRenderPlan,
+    render_profile: RenderProfile,
 ) -> str:
     return stable_text_hash(json.dumps({
         "source_checksum": source_checksum, "mixed_audio_checksum": mixed_checksum,
@@ -2023,9 +2398,45 @@ def _render_cache_key(
         "encoder": config.encoder, "codec": config.video_codec, "bitrate": config.video_bitrate,
         "subtitles_enabled": config.subtitles_enabled, "render_config": asdict(config),
         "platform": platform, "product_flow_revision": product_flow_revision,
+        "compiled_plan_hash": compiled_plan.plan_hash,
+        "parity_signature": compiled_plan.parity_signature,
+        "render_profile": render_profile.model_dump(mode="json"),
         "version": config.render_config_version,
         "engine_version": PRODUCTION_RENDER_ENGINE_VERSION,
     }, sort_keys=True, ensure_ascii=False))
+
+
+def _resolve_render_profile(
+    plan: CompiledRenderPlan,
+    requested: RenderProfile | Literal["creative_preview", "final"],
+    config: ProductionRenderConfig,
+) -> RenderProfile:
+    if isinstance(requested, RenderProfile):
+        profile = requested
+    elif requested == "final":
+        profile = RenderProfile(
+            profile_id="final",
+            width=plan.canvas.width,
+            height=plan.canvas.height,
+            video_bitrate=config.video_bitrate,
+            encoder=config.encoder,
+            sampling_precision="full",
+        )
+    else:
+        scale = min(1.0, 540 / plan.canvas.width, 960 / plan.canvas.height)
+        width = max(2, _even_down(plan.canvas.width * scale))
+        height = max(2, _even_down(plan.canvas.height * scale))
+        profile = RenderProfile(
+            profile_id="creative_preview",
+            width=width,
+            height=height,
+            video_bitrate="1800k",
+            encoder=config.encoder,
+            sampling_precision="preview",
+        )
+    # This validates fps, aspect ratio and final-canvas identity up front.
+    build_render_parity_manifest(plan, profile)
+    return profile
 
 
 def _write_project_artifacts(project: VideoProject, root: Path) -> None:
@@ -2041,6 +2452,9 @@ def _write_project_artifacts(project: VideoProject, root: Path) -> None:
         artifacts.append(str(root / "production-subtitles.ass"))
     if project.result and project.result.output_file:
         artifacts.append(project.result.output_file)
+    for extra in (root / "compiled-render-plan.json", root / "parity-manifest.json"):
+        if extra.is_file():
+            artifacts.append(str(extra))
     complete = project.model_copy(update={"artifact_paths": artifacts})
     write_json(timeline_path, complete.timeline.model_dump(mode="json"))
     write_json(reframe_path, complete.reframe_plan.model_dump(mode="json"))
@@ -2058,6 +2472,8 @@ def _artifacts(root: Path, final_path: Path, clips: list[Path] | None = None) ->
         ("video_timeline", root / "video-timeline.json"), ("reframe_plan", root / "reframe-plan.json"), ("subtitle_project", root / "subtitle-project.json"),
         ("production_ass", root / "production-subtitles.ass"), ("render_result", root / "render-result.json"),
         ("summary", root / "render-summary.txt"),
+        ("compiled_render_plan", root / "compiled-render-plan.json"),
+        ("parity_manifest", root / "parity-manifest.json"),
     ]
     pairs.extend(("clip", path) for path in clips or [])
     for kind, path in pairs:
@@ -2076,6 +2492,9 @@ def _summary(project: VideoProject) -> str:
         f"Duration: {project.actual_duration_seconds:.3f} s", f"Visual clips: {len(project.timeline.clips)}",
         f"Subtitle cues: {len(project.subtitle_project.cues) if project.subtitle_project else 0}",
         f"Encoder: {result.encoder if result else 'not-run'}", f"Cache hit: {result.cache_hit if result else False}",
+        f"Render profile: {project.metadata.render_profile_id}",
+        f"Compiled plan: {project.metadata.compiled_plan_hash or 'missing'}",
+        f"Parity signature: {project.metadata.parity_signature or 'missing'}",
         "No AI call, TTS regeneration, audio remix, legacy render mutation, or source media mutation was performed.", "",
     ])
 
@@ -2093,19 +2512,27 @@ def _final_command(
     ]
 
 
-def _timeline_filter(durations: list[float], transition: str | list[VideoTransition]) -> tuple[str, str]:
+def _timeline_filter(
+    durations: list[float],
+    transition: str | list[VideoTransition],
+    *,
+    input_labels: list[str] | None = None,
+) -> tuple[str, str]:
     if not durations:
         raise ProductionRenderError("No visual durations were supplied for final mux.")
+    labels = input_labels or [f"[{index}:v]" for index in range(len(durations))]
+    if len(labels) != len(durations):
+        raise ProductionRenderError("Timeline input labels do not match visual durations.")
     if isinstance(transition, list):
-        return _mixed_timeline_filter(durations, transition)
+        return _mixed_timeline_filter(durations, transition, input_labels=labels)
     if transition == "short_crossfade" and len(durations) > 1:
         fade = 0.15
-        current = "[0:v]"
+        current = labels[0]
         elapsed = durations[0]
         for index, duration in enumerate(durations[1:], start=1):
             label = f"[xf{index}]"
             offset = max(0.0, elapsed - fade)
-            graph = f"{current}[{index}:v]xfade=transition=fade:duration={fade:.3f}:offset={offset:.6f}{label}"
+            graph = f"{current}{labels[index]}xfade=transition=fade:duration={fade:.3f}:offset={offset:.6f}{label}"
             current = label
             elapsed += duration - fade
             if index == 1:
@@ -2115,8 +2542,8 @@ def _timeline_filter(durations: list[float], transition: str | list[VideoTransit
         loss = fade * (len(durations) - 1)
         parts.append(f"{current}tpad=stop_mode=clone:stop_duration={loss:.6f},trim=duration={sum(durations):.6f}[vconcat]")
         return ";".join(parts), "[vconcat]"
-    labels = "".join(f"[{index}:v]" for index in range(len(durations)))
-    graph = f"{labels}concat=n={len(durations)}:v=1:a=0[vconcat]"
+    joined_labels = "".join(labels)
+    graph = f"{joined_labels}concat=n={len(durations)}:v=1:a=0[vconcat]"
     fade = min(0.15, durations[0])
     if transition == "fade_from_black":
         return graph + f";[vconcat]fade=t=in:st=0:d={fade:.3f}[vfaded]", "[vfaded]"
@@ -2126,15 +2553,23 @@ def _timeline_filter(durations: list[float], transition: str | list[VideoTransit
     return graph, "[vconcat]"
 
 
-def _mixed_timeline_filter(durations: list[float], transitions: list[VideoTransition]) -> tuple[str, str]:
+def _mixed_timeline_filter(
+    durations: list[float],
+    transitions: list[VideoTransition],
+    *,
+    input_labels: list[str] | None = None,
+) -> tuple[str, str]:
     """Honor controlled scene cuts while retaining requested crossfades elsewhere."""
 
     if len(durations) == 1:
-        return _timeline_filter(durations, "cut")
+        return _timeline_filter(durations, "cut", input_labels=input_labels)
+    labels = input_labels or [f"[{index}:v]" for index in range(len(durations))]
+    if len(labels) != len(durations):
+        raise ProductionRenderError("Timeline input labels do not match visual durations.")
     by_pair = [item.transition_type for item in transitions]
     # concat outputs AVTB while decoded MP4 clips commonly use a stream-specific
     # timebase. Normalize every branch before a later xfade can join it.
-    parts = [f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS[v{index}]" for index in range(len(durations))]
+    parts = [f"{label}settb=AVTB,setpts=PTS-STARTPTS[v{index}]" for index, label in enumerate(labels)]
     current = "[v0]"
     elapsed = durations[0]
     crossfade_loss = 0.0
@@ -2289,6 +2724,11 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
             "final_validation": quality,
         },
         "cache_hit": bool(result.cache_hit) if result else False,
+        "render_profile": project.metadata.render_profile_id,
+        "compiled_plan_hash": project.metadata.compiled_plan_hash,
+        "parity_signature": project.metadata.parity_signature,
+        "cache_nodes": dict(project.metadata.cache_node_hits),
+        "single_pass_encode": project.metadata.single_pass_encode,
         "validation": validation.status,
         "warnings": project.warnings,
         "fallback_reasons": project.fallback_reasons,

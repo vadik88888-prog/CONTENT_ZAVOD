@@ -582,7 +582,11 @@ class RenderRequest(BaseModel):
 class RenderArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    artifact_type: Literal["final_mp4", "video_project", "video_timeline", "reframe_plan", "subtitle_project", "production_ass", "render_result", "summary", "clip"]
+    artifact_type: Literal[
+        "final_mp4", "video_project", "video_timeline", "reframe_plan",
+        "subtitle_project", "production_ass", "render_result", "summary", "clip",
+        "compiled_render_plan", "parity_manifest",
+    ]
     path: str
     checksum: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     byte_size: int = Field(ge=0)
@@ -622,6 +626,11 @@ class RenderMetadata(BaseModel):
     mixed_audio_checksum: str = Field(pattern=r"^[a-f0-9]{64}$")
     render_config_version: str
     cache_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    compiled_plan_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    parity_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    render_profile_id: Literal["creative_preview", "final"] = "final"
+    cache_node_hits: dict[str, bool] = Field(default_factory=dict)
+    single_pass_encode: bool = False
     created_at: str
     updated_at: str
     ai_called: Literal[False] = False

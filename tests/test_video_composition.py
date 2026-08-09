@@ -10,6 +10,11 @@ from pydantic import ValidationError
 
 from app.audio_service import AudioCompositionService
 from app.cli import build_parser
+from app.creative_contracts import (
+    CompiledRenderPlan,
+    RenderParityManifest,
+    assert_preview_final_parity,
+)
 from app.errors import ProductionRenderError
 from app.pipeline import Pipeline, StageTracker
 from app.production_subtitles import build_subtitle_project, resolve_subtitle_style, split_subtitle_text, write_production_ass
@@ -710,10 +715,13 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
     assert first.subtitle_project and first.subtitle_project.plan_reference == plan.reference()
     second = service.compose(plan, audio, source, transcript, tmp_path / "work", tmp_path / "out")
     assert second.result and second.result.cache_hit
-    cache = tmp_path / "work" / "production-render-cache" / f"{second.metadata.cache_key}.json"
-    cache.write_text("{corrupt", encoding="utf-8")
+    encode_manifest = next((tmp_path / "work" / "creative-render-cache" / "encode").glob("*.manifest.json"))
+    encode_cache = encode_manifest.with_name(encode_manifest.name.removesuffix(".manifest.json") + ".mp4")
+    encode_cache.write_bytes(b"corrupt")
     rebuilt = service.compose(plan, audio, source, transcript, tmp_path / "work", tmp_path / "out")
     assert rebuilt.result and rebuilt.result.cache_hit is False
+    assert rebuilt.metadata.cache_node_hits["base-visual"] is True
+    assert rebuilt.metadata.cache_node_hits["encode"] is False
     report = production_render_report_section(second)
     assert report["cache_hit"] and "sk-" not in json.dumps(report)
     assert report["quality"]["status"] in {"passed", "warning"}
@@ -733,6 +741,46 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
         "foreground_coverage_ratio", "blur_coverage_ratio", "subject_screen_ratio",
         "unused_visual_area_ratio", "scene_transition_count",
     } <= composition["summary"].keys()
+
+
+def test_creative_preview_and_final_render_the_same_compiled_plan(tmp_path: Path) -> None:
+    config, plan, source, transcript, audio = _upstream(tmp_path)
+    service = VideoCompositionService(tmp_path, config)
+    final = service.compose(plan, audio, source, transcript, tmp_path / "work", tmp_path / "out")
+    compiled = CompiledRenderPlan.model_validate(json.loads(
+        (tmp_path / "out" / "production-render" / "compiled-render-plan.json").read_text(encoding="utf-8")
+    ))
+    preview = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "out",
+        render_profile="creative_preview", compiled_plan=compiled,
+    )
+    preview_manifest = RenderParityManifest.model_validate(json.loads(
+        (tmp_path / "out" / "creative-preview" / "parity-manifest.json").read_text(encoding="utf-8")
+    ))
+    final_manifest = RenderParityManifest.model_validate(json.loads(
+        (tmp_path / "out" / "production-render" / "parity-manifest.json").read_text(encoding="utf-8")
+    ))
+
+    assert preview.canvas.fps == final.canvas.fps == 30
+    assert (preview.canvas.width, preview.canvas.height) == (540, 960)
+    assert preview.metadata.compiled_plan_hash == final.metadata.compiled_plan_hash == compiled.plan_hash
+    assert preview.metadata.parity_signature == final.metadata.parity_signature == compiled.parity_signature
+    assert_preview_final_parity(preview_manifest, final_manifest)
+    approved = service.compose(
+        plan, audio, source, transcript, tmp_path / "work", tmp_path / "out",
+        compiled_plan=compiled,
+    )
+    assert approved.result and approved.result.cache_hit is True
+
+    final_path = Path(approved.result.output_file or "")
+    previous_final = final_path.read_bytes()
+    Path(preview.result.output_file or "").write_bytes(b"corrupt preview")
+    with pytest.raises(ProductionRenderError, match="PREVIEW_FINAL_PARITY_MISMATCH"):
+        service.compose(
+            plan, audio, source, transcript, tmp_path / "work", tmp_path / "out",
+            compiled_plan=compiled,
+        )
+    assert final_path.read_bytes() == previous_final
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -761,6 +809,16 @@ def test_subtitle_style_change_rerenders_without_changing_audio(tmp_path: Path) 
     second = service.compose(plan, audio, source, transcript, tmp_path / "work", tmp_path / "out")
     assert first.result and second.result and second.result.cache_hit is False
     assert Path(audio.mix.mixed_audio_path or "").read_bytes() == audio_checksum
+    assert second.metadata.cache_node_hits == {
+        "captions": False,
+        "composition": True,
+        "broll": True,
+        "motion": True,
+        "base-visual": True,
+        "composite": False,
+        "encode": False,
+        "qc": False,
+    }
 
 
 def test_subtitle_disabled_still_exports_ass_artifact_without_burning_it_into_mp4(tmp_path: Path) -> None:
@@ -771,6 +829,8 @@ def test_subtitle_disabled_still_exports_ass_artifact_without_burning_it_into_mp
     root = tmp_path / "out" / "production-render"
     assert (root / "production-subtitles.ass").is_file()
     assert result.render_request.subtitles_enabled is False
+    assert result.metadata.single_pass_encode is True
+    assert result.result.encoder == "copy"
 
 
 def test_atomic_invalid_final_keeps_previous_mp4(tmp_path: Path, monkeypatch) -> None:

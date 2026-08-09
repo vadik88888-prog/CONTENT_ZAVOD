@@ -27,8 +27,10 @@ CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
 COMPOSITION_PLAN_SCHEMA_VERSION: Literal["7D.composition-plan.1"] = "7D.composition-plan.1"
 MOTION_PLAN_SCHEMA_VERSION: Literal["7F.motion-plan.1"] = "7F.motion-plan.1"
 SOURCE_BROLL_PLAN_SCHEMA_VERSION: Literal["7E.source-broll-plan.1"] = "7E.source-broll-plan.1"
-COMPILED_RENDER_PLAN_SCHEMA_VERSION = "7A.compiled-render-plan.1"
-PARITY_SIGNATURE_SCHEMA_VERSION = "7A.parity.1"
+COMPILED_RENDER_PLAN_SCHEMA_VERSION = "7G.compiled-render-plan.1"
+PARITY_SIGNATURE_SCHEMA_VERSION = "7G.parity.1"
+RENDER_PROFILE_SCHEMA_VERSION = "7G.render-profile.1"
+PARITY_MANIFEST_SCHEMA_VERSION = "7G.parity-manifest.1"
 
 SOURCE_TICKS_PER_SECOND = 1_000_000
 OUTPUT_FPS = 30
@@ -1585,6 +1587,27 @@ class CanvasPlan(FrozenContract):
         return self
 
 
+class RenderProfile(FrozenContract):
+    """Quality-only choices which are deliberately outside the compiled plan."""
+
+    schema_version: Literal["7G.render-profile.1"] = "7G.render-profile.1"
+    profile_id: Literal["creative_preview", "final"]
+    width: int = Field(ge=2, le=7680)
+    height: int = Field(ge=2, le=7680)
+    fps: Literal[30] = 30
+    video_bitrate: str = Field(min_length=2, max_length=32)
+    encoder: Literal["auto", "nvenc", "cpu"] = "auto"
+    sampling_precision: Literal["full", "preview"] = "full"
+
+    @model_validator(mode="after")
+    def _valid_profile(self) -> "RenderProfile":
+        if self.width % 2 or self.height % 2:
+            raise ValueError("render profile dimensions must be even")
+        if self.profile_id == "final" and self.sampling_precision != "full":
+            raise ValueError("final render profile requires full sampling precision")
+        return self
+
+
 class AssetManifestEntry(FrozenContract):
     asset_id: str = Field(pattern=ID_PATTERN)
     asset_type: Literal["font", "image", "overlay"]
@@ -1601,7 +1624,10 @@ class BackendAssignment(FrozenContract):
 
 class RenderGraphNode(FrozenContract):
     node_id: str = Field(pattern=ID_PATTERN)
-    node_kind: Literal["base_visual", "caption_overlay", "composite", "quality_check"]
+    node_kind: Literal[
+        "captions", "composition", "broll", "motion",
+        "base_visual", "composite", "encode", "qc",
+    ]
     dependency_ids: tuple[str, ...] = ()
     cache_key: str = Field(pattern=HASH_PATTERN)
     backend_domain: Literal["base_video", "caption", "composition", "motion", "broll"]
@@ -1622,7 +1648,7 @@ class CompiledInputFingerprints(FrozenContract):
 class CompiledRenderPlan(FrozenContract):
     """Immutable Phase 7 hand-off; no raw proposal or executable strings."""
 
-    schema_version: Literal["7A.compiled-render-plan.1"] = "7A.compiled-render-plan.1"
+    schema_version: Literal["7G.compiled-render-plan.1"] = "7G.compiled-render-plan.1"
     production_plan: ImmutableProductionPlanLink
     intent_id: str = Field(pattern=ID_PATTERN)
     intent_hash: str = Field(pattern=HASH_PATTERN)
@@ -1663,6 +1689,123 @@ class CompiledRenderPlan(FrozenContract):
         if self.parity_signature != expected_parity:
             raise ValueError("PARITY_SIGNATURE_MISMATCH")
         return self
+
+
+class RenderParityManifest(FrozenContract):
+    """Auditable semantic/timing/layout identity emitted by every render profile."""
+
+    schema_version: Literal["7G.parity-manifest.1"] = "7G.parity-manifest.1"
+    profile_id: Literal["creative_preview", "final"]
+    plan_hash: str = Field(pattern=HASH_PATTERN)
+    parity_signature: str = Field(pattern=HASH_PATTERN)
+    fps: Literal[30] = 30
+    event_frames_hash: str = Field(pattern=HASH_PATTERN)
+    resolved_lines_hash: str = Field(pattern=HASH_PATTERN)
+    normalized_geometry_hash: str = Field(pattern=HASH_PATTERN)
+    font_asset_hash: str = Field(pattern=HASH_PATTERN)
+    motion_math_hash: str = Field(pattern=HASH_PATTERN)
+    output_checksum: str | None = Field(default=None, pattern=HASH_PATTERN)
+
+
+class ParityCheckResult(FrozenContract):
+    status: Literal["matched", "mismatch"]
+    mismatch_fields: tuple[str, ...] = ()
+
+
+def build_render_parity_manifest(
+    plan: CompiledRenderPlan,
+    profile: RenderProfile,
+    *,
+    output_checksum: str | None = None,
+) -> RenderParityManifest:
+    """Bind a quality profile to one plan without changing creative identity."""
+
+    if profile.fps != plan.canvas.fps:
+        raise ValueError("RENDER_PROFILE_FPS_MISMATCH")
+    if profile.width * plan.canvas.height != profile.height * plan.canvas.width:
+        raise ValueError("RENDER_PROFILE_ASPECT_MISMATCH")
+    if profile.profile_id == "final" and (
+        profile.width != plan.canvas.width or profile.height != plan.canvas.height
+    ):
+        raise ValueError("FINAL_PROFILE_CANVAS_MISMATCH")
+    parity = _parity_payload(plan.model_dump(mode="json"), plan.plan_hash)
+    caption_events = parity["caption_events"]
+    composition_events = parity["composition_events"]
+    motion_events = parity["motion_events"]
+    broll_events = parity["broll_events"]
+    return RenderParityManifest(
+        profile_id=profile.profile_id,
+        plan_hash=plan.plan_hash,
+        parity_signature=plan.parity_signature,
+        event_frames_hash=canonical_hash({
+            "timeline": parity["timeline"],
+            "captions": [item["output"] for item in caption_events],
+            "composition": [item["output"] for item in composition_events],
+            "motion": [item["output"] for item in motion_events],
+            "broll": [item["destination"] for item in broll_events],
+        }),
+        resolved_lines_hash=canonical_hash([item["lines"] for item in caption_events]),
+        normalized_geometry_hash=canonical_hash({
+            "captions": [
+                {"lane": item["lane"], "bounds": item["bounds"]}
+                for item in caption_events
+            ],
+            "composition": [
+                {"layout": item["layout"], "target": item["target"], "crop": item["crop"]}
+                for item in composition_events
+            ],
+        }),
+        font_asset_hash=canonical_hash({
+            "font": parity["caption_font"],
+            "typography": parity["caption_typography"],
+            "assets": parity["asset_hashes"],
+        }),
+        motion_math_hash=canonical_hash({
+            "caption": [
+                {
+                    "primitive": item["primitive"],
+                    "easing": item["easing"],
+                    "duration": item["motion_duration_frames"],
+                    "scale": item["scale_percent"],
+                    "slide": item["slide_distance_ratio"],
+                }
+                for item in caption_events
+            ],
+            "motion": motion_events,
+        }),
+        output_checksum=output_checksum,
+    )
+
+
+def check_preview_final_parity(
+    preview: RenderParityManifest,
+    final: RenderParityManifest,
+) -> ParityCheckResult:
+    fields = (
+        "plan_hash", "parity_signature", "fps", "event_frames_hash",
+        "resolved_lines_hash", "normalized_geometry_hash", "font_asset_hash",
+        "motion_math_hash",
+    )
+    mismatches = tuple(field for field in fields if getattr(preview, field) != getattr(final, field))
+    if preview.profile_id != "creative_preview":
+        mismatches = ("preview_profile_id", *mismatches)
+    if final.profile_id != "final":
+        mismatches = (*mismatches, "final_profile_id")
+    return ParityCheckResult(
+        status="mismatch" if mismatches else "matched",
+        mismatch_fields=mismatches,
+    )
+
+
+def assert_preview_final_parity(
+    preview: RenderParityManifest,
+    final: RenderParityManifest,
+) -> None:
+    result = check_preview_final_parity(preview, final)
+    if result.status == "mismatch":
+        raise ValueError(
+            "PREVIEW_FINAL_PARITY_MISMATCH: " + ", ".join(result.mismatch_fields)
+        )
 
 
 def _compiled_plan_hash(payload: Mapping[str, Any]) -> str:
@@ -1742,54 +1885,110 @@ def _parity_signature(payload: Mapping[str, Any], plan_hash: str) -> str:
     return canonical_hash(_parity_payload(payload, plan_hash))
 
 
+def _cache_domain_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove lifecycle identity that is not an execution dependency.
+
+    A caption-only ProductionPlan revision receives a new intent id, but that
+    must not invalidate byte-identical composition/B-roll/motion work.
+    """
+
+    result = dict(value)
+    result.pop("intent_id", None)
+    return result
+
+
 def _render_graph_nodes(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    base_key = canonical_hash({
-        "production_plan": payload["production_plan"],
-        "mapping": payload["source_output_mapping"],
-        "canvas": payload["canvas"],
-        "composition": payload["composition_plan"],
-        "broll": payload["source_broll_plan"],
-        "backends": payload["backends"],
-    })
     caption_key = canonical_hash({
-        "captions": payload["caption_plan"],
-        "motion": payload["motion_plan"],
-        "assets": payload["assets"],
-        "canvas": payload["canvas"],
-        "backends": payload["backends"],
+        "captions": _cache_domain_payload(payload["caption_plan"]),
+        "assets": [item for item in payload["assets"] if item["asset_type"] == "font"],
+        "backend": [item for item in payload["backends"] if item["domain"] == "caption"],
     })
-    composite_key = canonical_hash({"base": base_key, "caption": caption_key})
-    quality_key = canonical_hash({
-        "composite": composite_key,
+    composition_key = canonical_hash({
+        "composition": _cache_domain_payload(payload["composition_plan"]),
+        "mapping": payload["source_output_mapping"],
+        "backend": [item for item in payload["backends"] if item["domain"] == "composition"],
+    })
+    broll_key = canonical_hash({
+        "broll": _cache_domain_payload(payload["source_broll_plan"]),
+        "mapping": payload["source_output_mapping"],
+        "backend": [item for item in payload["backends"] if item["domain"] == "broll"],
+    })
+    motion_key = canonical_hash({
+        "motion": _cache_domain_payload(payload["motion_plan"]),
+        "backend": [item for item in payload["backends"] if item["domain"] == "motion"],
+    })
+    base_key = canonical_hash({
+        "mapping": payload["source_output_mapping"],
+        "canvas_aspect": [payload["canvas"]["width"], payload["canvas"]["height"]],
+        "composition": composition_key,
+        "broll": broll_key,
+        "backend": [item for item in payload["backends"] if item["domain"] == "base_video"],
+    })
+    composite_key = canonical_hash({
+        "base": base_key,
+        "captions": caption_key,
+        "motion": motion_key,
+    })
+    encode_key = canonical_hash({"composite": composite_key})
+    qc_key = canonical_hash({
+        "encode": encode_key,
         "constraints": payload["expected_quality_constraints"],
     })
     return [
         {
-            "node_id": "base-visual",
-            "node_kind": "base_visual",
-            "dependency_ids": [],
-            "cache_key": base_key,
-            "backend_domain": "base_video",
-        },
-        {
-            "node_id": "caption-overlay",
-            "node_kind": "caption_overlay",
+            "node_id": "captions",
+            "node_kind": "captions",
             "dependency_ids": [],
             "cache_key": caption_key,
             "backend_domain": "caption",
         },
         {
+            "node_id": "composition",
+            "node_kind": "composition",
+            "dependency_ids": [],
+            "cache_key": composition_key,
+            "backend_domain": "composition",
+        },
+        {
+            "node_id": "broll",
+            "node_kind": "broll",
+            "dependency_ids": [],
+            "cache_key": broll_key,
+            "backend_domain": "broll",
+        },
+        {
+            "node_id": "motion",
+            "node_kind": "motion",
+            "dependency_ids": [],
+            "cache_key": motion_key,
+            "backend_domain": "motion",
+        },
+        {
+            "node_id": "base-visual",
+            "node_kind": "base_visual",
+            "dependency_ids": ["composition", "broll"],
+            "cache_key": base_key,
+            "backend_domain": "base_video",
+        },
+        {
             "node_id": "composite",
             "node_kind": "composite",
-            "dependency_ids": ["base-visual", "caption-overlay"],
+            "dependency_ids": ["captions", "motion", "base-visual"],
             "cache_key": composite_key,
             "backend_domain": "base_video",
         },
         {
-            "node_id": "quality-check",
-            "node_kind": "quality_check",
+            "node_id": "encode",
+            "node_kind": "encode",
             "dependency_ids": ["composite"],
-            "cache_key": quality_key,
+            "cache_key": encode_key,
+            "backend_domain": "base_video",
+        },
+        {
+            "node_id": "qc",
+            "node_kind": "qc",
+            "dependency_ids": ["encode"],
+            "cache_key": qc_key,
             "backend_domain": "base_video",
         },
     ]
