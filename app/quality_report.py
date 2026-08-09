@@ -240,10 +240,13 @@ def build_quality_report(
         },
         "audio": dict(audio.get("validation") or {}) if isinstance(audio.get("validation"), dict) else {},
         "captions": _caption_quality(render) or {},
+        "composition": _composition_quality(render) or {},
     }
+    composition_fallbacks = _composition_fallbacks(render)
     fallbacks = _unique([
         *(render.get("fallback_reasons", []) if isinstance(render.get("fallback_reasons"), list) else []),
         *(render.get("warnings", []) if isinstance(render.get("warnings"), list) else []),
+        *composition_fallbacks,
     ])
     return QualityReport(
         report_id=report_id,
@@ -521,6 +524,30 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 producer="caption_quality_report",
                 message="Semantic caption quality blocks the final artifact.",
             )
+    composition_report = _composition_quality(render)
+    if composition_report is not None:
+        raw_findings = composition_report.get("findings")
+        composition_findings: list[Any] = raw_findings if isinstance(raw_findings, list) else []
+        for item in composition_findings:
+            if not isinstance(item, dict):
+                continue
+            severity = "blocker" if item.get("severity") == "blocker" else "warning"
+            code = str(item.get("code") or "COMPOSITION_QUALITY_DEGRADED")
+            finding(
+                code, severity,
+                {"composition_quality_report": composition_report, "composition_finding": item},
+                measured_value=item.get("measured_value"), threshold=item.get("threshold"),
+                producer="composition_quality_report",
+                message=str(item.get("message") or "Dynamic composition quality requires attention."),
+            )
+        if composition_report.get("status") == "BLOCKED" and not composition_findings:
+            finding(
+                "COMPOSITION_QUALITY_BLOCKED", "blocker",
+                {"composition_quality_report": composition_report},
+                measured_value="BLOCKED", threshold="PASS or PASS_WITH_WARNINGS",
+                producer="composition_quality_report",
+                message="Dynamic composition quality blocks the final artifact.",
+            )
     if quality.get("status") == "failed" and not segments and subtitle is None:
         finding(
             "MEDIA_INVALID", "blocker", {"output_quality": quality}, measured_value=quality.get("errors", []),
@@ -586,12 +613,21 @@ def _check_catalog(
 ) -> list[dict[str, Any]]:
     """Persist pass-state provenance too, without turning it into a finding."""
 
+    composition_quality = _composition_quality(render)
+    composition_evidence = render.get("composition_plan") or render.get("composition")
+    composition_producer = (
+        "composition_quality_report" if composition_quality is not None
+        else "composition_quality_decision"
+    )
     sources = [
         ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),
         ("PLAN_IDENTITY", "production_plan_envelope", plan.get("envelope"), "plan parents match output"),
-        ("COMPOSITION", "composition_quality_decision", render.get("composition"), "composition decision passed"),
+        (
+            "COMPOSITION", composition_producer, composition_evidence,
+            "composition decision passed",
+        ),
         (
             "SUBTITLES", "subtitle_quality_decision",
             render.get("caption_plan") or render.get("subtitle_layout"),
@@ -633,6 +669,31 @@ def _caption_quality(render: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(subtitle_layout, dict) and isinstance(subtitle_layout.get("caption_quality_report"), dict):
         return dict(subtitle_layout["caption_quality_report"])
     return None
+
+
+def _composition_quality(render: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the 7D report from a compiled plan or render-report shape."""
+
+    composition_plan = render.get("composition_plan")
+    if isinstance(composition_plan, dict) and isinstance(composition_plan.get("quality_report"), dict):
+        return dict(composition_plan["quality_report"])
+    composition = render.get("composition")
+    if isinstance(composition, dict) and isinstance(composition.get("quality_report"), dict):
+        return dict(composition["quality_report"])
+    return None
+
+
+def _composition_fallbacks(render: dict[str, Any]) -> list[str]:
+    composition_plan = render.get("composition_plan")
+    if not isinstance(composition_plan, dict):
+        return []
+    raw_segments = composition_plan.get("segments")
+    segments: list[Any] = raw_segments if isinstance(raw_segments, list) else []
+    return [
+        f"composition:{item.get('segment_id')}:{item.get('fallback')}"
+        for item in segments
+        if isinstance(item, dict) and item.get("fallback") not in {None, "none"}
+    ]
 
 
 def _boundary_interval(boundary: dict[str, Any]) -> dict[str, float] | None:

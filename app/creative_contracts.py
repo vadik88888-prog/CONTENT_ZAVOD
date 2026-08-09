@@ -24,7 +24,7 @@ CREATIVE_PROPOSAL_SCHEMA_VERSION = "7A.proposal.1"
 CREATIVE_INTENT_SCHEMA_VERSION = "7A.intent.1"
 TIME_MAPPING_SCHEMA_VERSION = "7A.time-map.1"
 CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
-COMPOSITION_PLAN_SCHEMA_VERSION = "7A.composition-plan.1"
+COMPOSITION_PLAN_SCHEMA_VERSION: Literal["7D.composition-plan.1"] = "7D.composition-plan.1"
 MOTION_PLAN_SCHEMA_VERSION = "7A.motion-plan.1"
 SOURCE_BROLL_PLAN_SCHEMA_VERSION = "7A.source-broll-plan.1"
 COMPILED_RENDER_PLAN_SCHEMA_VERSION = "7A.compiled-render-plan.1"
@@ -246,6 +246,7 @@ class AttentionTarget(StrEnum):
     SPEAKER = "speaker"
     SUBJECT = "subject"
     OBJECT = "object"
+    PRODUCT = "product"
     SCREEN = "screen"
     REACTION = "reaction"
     GROUP = "group"
@@ -260,6 +261,7 @@ class LayoutFamily(StrEnum):
     SPLIT = "split"
     STACKED = "stacked"
     SCREEN_PRIORITY = "screen_priority"
+    SCREEN_PRODUCT = "screen_product"
     LEGACY_PASSTHROUGH = "legacy_passthrough"
 
 
@@ -1063,6 +1065,114 @@ class CaptionPlan(FrozenContract):
         return self
 
 
+class CompositionCropKeyframe(FrozenContract):
+    """One deterministic crop state in normalized source coordinates."""
+
+    frame: int = Field(ge=0)
+    crop: NormalizedRect
+    velocity_per_frame: float = Field(default=0, ge=0, le=1)
+    acceleration_per_frame_sq: float = Field(default=0, ge=0, le=1)
+    reason: Literal[
+        "static", "target_acquired", "target_switch", "editorial_punch_in",
+        "punch_out", "scene_reset", "safe_fallback",
+    ] = "static"
+
+
+class CompositionGeometryRegion(FrozenContract):
+    """Stable collision-resolver input expressed on the output canvas."""
+
+    region_id: str = Field(pattern=ID_PATTERN)
+    kind: Literal["face", "subject", "object", "product", "screen", "reaction", "group", "overlay"]
+    bounds: NormalizedRect
+    target_ref: str | None = Field(default=None, pattern=ID_PATTERN)
+    confidence: float = Field(default=1, ge=0, le=1)
+    importance: float = Field(default=1, ge=0, le=1)
+
+
+class CompositionGeometryContract(FrozenContract):
+    """Coordinate-space hand-off for the future caption collision resolver.
+
+    ``source_crop`` uses normalized source coordinates.  Every other rectangle
+    uses normalized output-canvas coordinates, independent of render profile.
+    """
+
+    schema_version: Literal["7D.composition-geometry.1"] = "7D.composition-geometry.1"
+    source_coordinate_space: Literal["normalized_source"] = "normalized_source"
+    output_coordinate_space: Literal["normalized_output"] = "normalized_output"
+    source_crop: NormalizedRect
+    output_content_bounds: NormalizedRect
+    target_regions: tuple[CompositionGeometryRegion, ...] = ()
+    protected_regions: tuple[CompositionGeometryRegion, ...] = ()
+
+    @model_validator(mode="after")
+    def _unique_regions(self) -> "CompositionGeometryContract":
+        for regions in (self.target_regions, self.protected_regions):
+            ids = [item.region_id for item in regions]
+            if len(ids) != len(set(ids)):
+                raise ValueError("composition geometry region ids must be unique")
+        return self
+
+
+class CompositionPunchIn(FrozenContract):
+    event_id: str = Field(pattern=ID_PATTERN)
+    output: OutputInterval
+    scale: float = Field(gt=1, le=1.12)
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class CompositionQualityFinding(FrozenContract):
+    code: Literal[
+        "COMPOSITION_JITTER", "COMPOSITION_TARGET_CLIPPED", "COMPOSITION_UNSAFE_CROP",
+        "COMPOSITION_VELOCITY_LIMIT", "COMPOSITION_ACCELERATION_LIMIT",
+        "COMPOSITION_SWITCH_RATE_HIGH", "COMPOSITION_MINIMUM_HOLD_VIOLATION",
+        "COMPOSITION_LOW_CONFIDENCE", "COMPOSITION_SAFE_FALLBACK",
+    ]
+    severity: Literal["warning", "blocker"]
+    segment_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    measured_value: float | int | str | bool | None = None
+    threshold: float | int | str | bool | None = None
+    message: str = Field(min_length=1, max_length=1200)
+
+
+class CompositionQualityMetrics(FrozenContract):
+    segment_count: int = Field(default=0, ge=0)
+    target_switch_count: int = Field(default=0, ge=0)
+    suppressed_switch_count: int = Field(default=0, ge=0)
+    fallback_count: int = Field(default=0, ge=0)
+    punch_in_count: int = Field(default=0, ge=0)
+    clipped_target_count: int = Field(default=0, ge=0)
+    unsafe_crop_count: int = Field(default=0, ge=0)
+    jitter_event_count: int = Field(default=0, ge=0)
+    minimum_hold_violation_count: int = Field(default=0, ge=0)
+    max_velocity_per_frame: float = Field(default=0, ge=0)
+    max_acceleration_per_frame_sq: float = Field(default=0, ge=0)
+    switches_per_minute: float = Field(default=0, ge=0)
+    minimum_target_containment: float = Field(default=1, ge=0, le=1)
+
+
+class CompositionQualityProvenance(FrozenContract):
+    producer: str = Field(default="legacy_composition_contract", min_length=1, max_length=240)
+    planner_version: str = Field(default="legacy", min_length=1, max_length=120)
+    intent_id: str = Field(default="legacy", min_length=1, max_length=160)
+
+
+class CompositionQualityReport(FrozenContract):
+    schema_version: Literal["7D.composition-quality.1"] = "7D.composition-quality.1"
+    status: Literal["PASS", "PASS_WITH_WARNINGS", "BLOCKED", "LEGACY_UNASSESSED"] = "LEGACY_UNASSESSED"
+    findings: tuple[CompositionQualityFinding, ...] = ()
+    metrics: CompositionQualityMetrics = Field(default_factory=CompositionQualityMetrics)
+    provenance: CompositionQualityProvenance = Field(default_factory=CompositionQualityProvenance)
+
+    @model_validator(mode="after")
+    def _status_matches_findings(self) -> "CompositionQualityReport":
+        has_blocker = any(item.severity == "blocker" for item in self.findings)
+        has_warning = any(item.severity == "warning" for item in self.findings)
+        expected = "BLOCKED" if has_blocker else "PASS_WITH_WARNINGS" if has_warning else "PASS"
+        if self.status != "LEGACY_UNASSESSED" and self.status != expected:
+            raise ValueError("composition quality status does not match findings")
+        return self
+
+
 class CompositionSegmentPlan(FrozenContract):
     segment_id: str = Field(pattern=ID_PATTERN)
     output: OutputInterval
@@ -1070,16 +1180,47 @@ class CompositionSegmentPlan(FrozenContract):
     target: AttentionTarget = AttentionTarget.STABLE_SOURCE
     target_ref: str | None = Field(default=None, pattern=ID_PATTERN)
     crop: NormalizedRect
+    target_confidence: float = Field(default=0, ge=0, le=1)
+    target_bounds: NormalizedRect | None = None
     protected_regions: tuple[NormalizedRect, ...] = ()
+    geometry: CompositionGeometryContract | None = None
+    crop_keyframes: tuple[CompositionCropKeyframe, ...] = ()
+    movement_reason: Literal[
+        "none", "target_acquired", "target_switch", "editorial_punch_in",
+        "punch_out", "scene_reset", "safe_fallback",
+    ] = "none"
+    punch_in: CompositionPunchIn | None = None
     easing_id: Literal["none", "linear", "ease_in_out"] = "none"
     evidence_refs: tuple[str, ...] = ()
-    fallback: Literal["none", "stable_source", "fit_background"] = "none"
+    fallback: Literal["none", "wider_crop", "stable_source", "fit_background"] = "none"
+
+    @model_validator(mode="after")
+    def _valid_geometry_and_track(self) -> "CompositionSegmentPlan":
+        if self.geometry is not None and self.geometry.source_crop != self.crop:
+            raise ValueError("composition geometry source crop must match segment crop")
+        if self.crop_keyframes:
+            frames = [item.frame for item in self.crop_keyframes]
+            if frames != sorted(set(frames)):
+                raise ValueError("composition crop keyframes must be unique and ordered")
+            if any(frame < self.output.start_frame or frame >= self.output.end_frame for frame in frames):
+                raise ValueError("composition crop keyframe must stay inside its segment")
+        if self.punch_in is not None and not self.output.contains(self.punch_in.output):
+            raise ValueError("composition punch-in must stay inside its segment")
+        if (self.punch_in is not None) != (self.movement_reason == "editorial_punch_in"):
+            raise ValueError("composition punch-in requires an explicit editorial movement reason")
+        return self
 
 
 class CompositionPlan(FrozenContract):
-    schema_version: Literal["7A.composition-plan.1"] = "7A.composition-plan.1"
+    # 7A remains readable for persisted compatibility plans.  The 7D planner
+    # always emits assessed geometry using the production schema.
+    schema_version: Literal["7A.composition-plan.1", "7D.composition-plan.1"] = "7A.composition-plan.1"
     intent_id: str = Field(pattern=ID_PATTERN)
     segments: tuple[CompositionSegmentPlan, ...] = ()
+    ordered_fallbacks: tuple[Literal["wider_crop", "stable_source", "fit_background"], ...] = (
+        "wider_crop", "stable_source", "fit_background",
+    )
+    quality_report: CompositionQualityReport = Field(default_factory=CompositionQualityReport)
     diagnostics: tuple[str, ...] = ()
 
     @model_validator(mode="after")
@@ -1089,6 +1230,13 @@ class CompositionPlan(FrozenContract):
             for left, right in zip(self.segments, self.segments[1:])
         ):
             raise ValueError("composition segments must be ordered without overlap")
+        if self.schema_version == "7D.composition-plan.1":
+            if self.ordered_fallbacks != ("wider_crop", "stable_source", "fit_background"):
+                raise ValueError("7D composition fallback order is fixed for safety")
+            if self.quality_report.status == "LEGACY_UNASSESSED":
+                raise ValueError("7D composition requires an assessed quality report")
+            if any(segment.geometry is None or not segment.crop_keyframes for segment in self.segments):
+                raise ValueError("7D composition segments require frozen geometry and crop keyframes")
         return self
 
 
@@ -1440,15 +1588,26 @@ def _validate_domain_plans(
 
     for segment in composition.segments:
         if segment.target == AttentionTarget.STABLE_SOURCE:
-            continue
-        if not any(
-            target.target == segment.target
-            and target.output.contains(segment.output)
-            and set(segment.evidence_refs).issubset(target.evidence_refs)
-            and bool(segment.evidence_refs)
-            for target in intent.composition_targets
-        ):
+            target_valid = True
+        else:
+            target_valid = any(
+                target.target == segment.target
+                and target.output.contains(segment.output)
+                and set(segment.evidence_refs).issubset(target.evidence_refs)
+                and bool(segment.evidence_refs)
+                for target in intent.composition_targets
+            )
+        if not target_valid:
             raise ValueError("COMPOSITION_PLAN_EVIDENCE_MISMATCH")
+        if segment.punch_in is not None and not any(
+            event.decision_id == segment.punch_in.event_id
+            and event.domain == MotionDomain.COMPOSITION
+            and event.output.contains(segment.punch_in.output)
+            and set(segment.punch_in.evidence_refs).issubset(event.evidence_refs)
+            and bool(segment.punch_in.evidence_refs)
+            for event in intent.motion_events
+        ):
+            raise ValueError("COMPOSITION_PUNCH_IN_EVIDENCE_MISMATCH")
 
     for event in motion.events:
         if not any(

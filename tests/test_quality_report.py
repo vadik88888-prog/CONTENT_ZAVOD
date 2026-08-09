@@ -129,6 +129,36 @@ def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_repor
     assert next(item for item in report.checks if item["code"] == "SEMANTIC_CAPTIONS")["status"] == "blocked"
 
 
+def test_dynamic_composition_jitter_and_unsafe_crop_flow_into_quality_report(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render["composition_plan"] = {
+        "segments": [{"segment_id": "composition-001", "fallback": "fit_background"}],
+        "quality_report": {
+            "schema_version": "7D.composition-quality.1",
+            "status": "BLOCKED",
+            "metrics": {"jitter_event_count": 2, "unsafe_crop_count": 1},
+            "findings": [{
+                "code": "COMPOSITION_JITTER", "severity": "blocker",
+                "segment_id": "composition-001", "measured_value": 2, "threshold": 0,
+                "message": "The crop track contains unintended direction reversals.",
+            }],
+        },
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    assert report.metrics["composition"]["metrics"]["unsafe_crop_count"] == 1
+    assert any(item.code == "COMPOSITION_JITTER" for item in report.findings)
+    assert next(item for item in report.checks if item["code"] == "COMPOSITION")["status"] == "blocked"
+    assert "composition:composition-001:fit_background" in report.fallbacks
+
+
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:
     artifact, _result, report = _report(tmp_path, word_integrity=False)
     reference = report.reference(artifact.with_name("quality-report-01.json"))
