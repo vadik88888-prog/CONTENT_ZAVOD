@@ -86,7 +86,7 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert data["findings"] == []
     assert {item["code"] for item in data["checks"]} == {
         "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "PLAN_IDENTITY", "COMPOSITION",
-        "SUBTITLES", "AUDIO", "FFPROBE", "ARTIFACT_IDENTITY",
+        "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE", "ARTIFACT_IDENTITY",
     }
     assert data["artifact_id"] and data["artifact_sha256"]
 
@@ -99,6 +99,34 @@ def test_quality_report_warning_preserves_machine_readable_evidence(tmp_path: Pa
     assert finding["code"] == "DURATION_VARIANCE_LOW"
     assert finding["severity"] == "warning"
     assert {"evidence", "measured_value", "threshold", "provenance"} <= finding.keys()
+
+
+def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_report(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render["caption_plan"] = {
+        "quality_report": {
+            "schema_version": "7C.caption-quality.1",
+            "status": "BLOCKED",
+            "metrics": {"max_cps": 21.8, "protected_overlap_count": 1, "weak_timing_cue_count": 1},
+            "findings": [{
+                "code": "CAPTION_PROTECTED_REGION_OVERLAP", "severity": "blocker",
+                "cue_id": "caption-003", "measured_value": 0.24, "threshold": 0.01,
+                "message": "No caption lane avoids an important face/object/screen region.",
+            }],
+        },
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    assert report.metrics["captions"]["metrics"]["weak_timing_cue_count"] == 1
+    assert any(item.code == "CAPTION_PROTECTED_REGION_OVERLAP" for item in report.findings)
+    assert next(item for item in report.checks if item["code"] == "SEMANTIC_CAPTIONS")["status"] == "blocked"
 
 
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:

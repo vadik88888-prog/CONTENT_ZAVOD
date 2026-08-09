@@ -23,7 +23,7 @@ from app.video_models import ReframePlan, SubtitleProject, VideoTimeline
 CREATIVE_PROPOSAL_SCHEMA_VERSION = "7A.proposal.1"
 CREATIVE_INTENT_SCHEMA_VERSION = "7A.intent.1"
 TIME_MAPPING_SCHEMA_VERSION = "7A.time-map.1"
-CAPTION_PLAN_SCHEMA_VERSION = "7A.caption-plan.1"
+CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
 COMPOSITION_PLAN_SCHEMA_VERSION = "7A.composition-plan.1"
 MOTION_PLAN_SCHEMA_VERSION = "7A.motion-plan.1"
 SOURCE_BROLL_PLAN_SCHEMA_VERSION = "7A.source-broll-plan.1"
@@ -855,6 +855,143 @@ class NormalizedRect(FrozenContract):
         return self
 
 
+class CaptionWordPlan(FrozenContract):
+    """One display word with immutable output-frame timing."""
+
+    word_id: str = Field(pattern=ID_PATTERN)
+    text: str = Field(min_length=1, max_length=400)
+    output: OutputInterval
+    timing_source: Literal["verified", "aligned", "phrase", "estimated"]
+    confidence: float = Field(ge=0, le=1)
+
+
+class CaptionEmphasisPlan(FrozenContract):
+    """A single evidence-backed semantic treatment inside a cue."""
+
+    emphasis_id: str = Field(pattern=ID_PATTERN)
+    output: OutputInterval
+    word_indexes: tuple[int, ...] = Field(min_length=1)
+    semantic_class: SemanticClass
+    importance: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+    treatment: Literal["color", "phrase_color", "karaoke", "bounded_scale"]
+
+    @model_validator(mode="after")
+    def _ordered_indexes(self) -> "CaptionEmphasisPlan":
+        if tuple(sorted(set(self.word_indexes))) != self.word_indexes:
+            raise ValueError("caption emphasis word indexes must be unique and ordered")
+        return self
+
+
+class CaptionFontManifest(FrozenContract):
+    """Deterministic font identity used by both Preview and Final."""
+
+    font_id: str = Field(pattern=ID_PATTERN)
+    requested_family: str = Field(min_length=1, max_length=160)
+    resolved_family: str = Field(min_length=1, max_length=160)
+    style: Literal["normal", "italic"] = "normal"
+    weight: Literal["normal", "bold"] = "bold"
+    file_name: str | None = Field(default=None, max_length=260)
+    file_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    supported_scripts: tuple[Literal["latin", "cyrillic", "unknown"], ...] = ("unknown",)
+    metrics_backend: Literal["gdi_file_metrics", "qt_file_metrics", "qt_family_metrics", "heuristic"] = "heuristic"
+    shaping_backend: str = Field(default="libass-harfbuzz", min_length=1, max_length=120)
+    fallback_chain: tuple[str, ...] = ()
+    deployment_status: Literal["system", "bundled", "unverified"] = "unverified"
+    fallback_used: bool = False
+
+    @model_validator(mode="after")
+    def _exact_identity_is_complete(self) -> "CaptionFontManifest":
+        if (self.file_name is None) != (self.file_sha256 is None):
+            raise ValueError("font file name and checksum must be provided together")
+        if self.metrics_backend in {"gdi_file_metrics", "qt_file_metrics"} and self.file_sha256 is None:
+            raise ValueError("file metrics require an exact font checksum")
+        return self
+
+
+class CaptionTypographyToken(FrozenContract):
+    token_id: str = Field(pattern=ID_PATTERN)
+    font_size_ratio: float = Field(gt=0, le=0.2)
+    minimum_font_size_ratio: float = Field(gt=0, le=0.2)
+    line_height: float = Field(default=1.22, ge=1, le=2)
+    font_weight: Literal["normal", "bold"] = "bold"
+    text_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    highlight_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    outline_color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    outline_width_ratio: float = Field(ge=0, le=0.02)
+    shadow_ratio: float = Field(ge=0, le=0.02)
+    max_width_ratio: float = Field(gt=0.2, le=0.95)
+    alignment: Literal["center", "left"] = "center"
+    uppercase_emphasis: bool = False
+
+
+class CaptionCollisionDecision(FrozenContract):
+    lane: Literal["lower", "lower_mid", "upper_mid", "upper"]
+    candidate_costs: tuple[tuple[str, float], ...] = ()
+    overlap_ratio: float = Field(default=0, ge=0, le=1)
+    protected_region_ids: tuple[str, ...] = ()
+    safe_zone_valid: bool = True
+    switched_lane: bool = False
+    reason: Literal[
+        "preferred_lane", "protected_region_avoidance", "platform_safe_zone",
+        "stable_lane", "least_overlap_fallback",
+    ] = "preferred_lane"
+
+
+class CaptionQualityFinding(FrozenContract):
+    code: Literal[
+        "CAPTION_CPS_HIGH", "CAPTION_TIMING_WEAK", "CAPTION_FONT_FALLBACK",
+        "CAPTION_METRICS_FALLBACK", "CAPTION_INTENSITY_DEGRADED",
+        "CAPTION_SAFE_ZONE_VIOLATION", "CAPTION_PROTECTED_REGION_OVERLAP",
+        "CAPTION_LANE_SWITCH_RATE_HIGH", "CAPTION_LINE_OVERFLOW",
+        "CAPTION_READABILITY_FALLBACK",
+    ]
+    severity: Literal["warning", "blocker"]
+    cue_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    measured_value: float | int | str | bool | None = None
+    threshold: float | int | str | bool | None = None
+    message: str = Field(min_length=1, max_length=1200)
+
+
+class CaptionQualityMetrics(FrozenContract):
+    cue_count: int = Field(default=0, ge=0)
+    word_timed_cue_count: int = Field(default=0, ge=0)
+    weak_timing_cue_count: int = Field(default=0, ge=0)
+    semantic_emphasis_count: int = Field(default=0, ge=0)
+    motion_cue_count: int = Field(default=0, ge=0)
+    lane_switch_count: int = Field(default=0, ge=0)
+    protected_overlap_count: int = Field(default=0, ge=0)
+    safe_zone_violation_count: int = Field(default=0, ge=0)
+    max_cps: float = Field(default=0, ge=0)
+    font_exact: bool = False
+    metrics_exact: bool = False
+
+
+class CaptionQualityProvenance(FrozenContract):
+    producer: str = Field(default="legacy_caption_contract", min_length=1, max_length=240)
+    planner_version: str = Field(default="legacy", min_length=1, max_length=120)
+    backend: str = Field(default="legacy", min_length=1, max_length=120)
+    intent_id: str = Field(default="legacy", min_length=1, max_length=160)
+
+
+class CaptionQualityReport(FrozenContract):
+    schema_version: Literal["7C.caption-quality.1"] = "7C.caption-quality.1"
+    status: Literal["PASS", "PASS_WITH_WARNINGS", "BLOCKED", "LEGACY_UNASSESSED"] = "LEGACY_UNASSESSED"
+    findings: tuple[CaptionQualityFinding, ...] = ()
+    metrics: CaptionQualityMetrics = Field(default_factory=CaptionQualityMetrics)
+    provenance: CaptionQualityProvenance = Field(default_factory=CaptionQualityProvenance)
+
+    @model_validator(mode="after")
+    def _status_matches_findings(self) -> "CaptionQualityReport":
+        has_blocker = any(item.severity == "blocker" for item in self.findings)
+        has_warning = any(item.severity == "warning" for item in self.findings)
+        expected = "BLOCKED" if has_blocker else "PASS_WITH_WARNINGS" if has_warning else "PASS"
+        if self.status != "LEGACY_UNASSESSED" and self.status != expected:
+            raise ValueError("caption quality status does not match findings")
+        return self
+
+
 class CaptionCuePlan(FrozenContract):
     cue_id: str = Field(pattern=ID_PATTERN)
     output: OutputInterval
@@ -863,22 +1000,66 @@ class CaptionCuePlan(FrozenContract):
     typography_token_id: str = Field(pattern=ID_PATTERN)
     semantic_class: SemanticClass | None = None
     evidence_refs: tuple[str, ...] = ()
-    primitive_id: Literal["legacy_passthrough", "static", "fade", "karaoke"] = "static"
+    primitive_id: Literal["legacy_passthrough", "static", "fade", "scale", "slide", "karaoke"] = "static"
     easing_id: Literal["none", "linear", "ease_in_out"] = "none"
     normalized_bounds: NormalizedRect | None = None
+    words: tuple[CaptionWordPlan, ...] = ()
+    timing_mode: Literal["word", "phrase", "static"] = "static"
+    timing_confidence: float = Field(default=0, ge=0, le=1)
+    emphasis: CaptionEmphasisPlan | None = None
+    beat_role: BeatRole | None = None
+    collision: CaptionCollisionDecision | None = None
+    resolved_font_size_ratio: float | None = Field(default=None, gt=0, le=0.2)
+    motion_duration_frames: int = Field(default=0, ge=0, le=30)
+    scale_percent: int = Field(default=100, ge=94, le=108)
+    slide_distance_ratio: float = Field(default=0, ge=0, le=0.05)
+    fallback_reason: Literal[
+        "weak_timing", "missing_font", "metrics_unavailable", "readability",
+        "collision", "unsupported_primitive",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def _bounded_caption_cue(self) -> "CaptionCuePlan":
+        if any(not self.output.contains(word.output) for word in self.words):
+            raise ValueError("caption word timing must stay inside its cue")
+        if self.emphasis is not None:
+            if not self.output.contains(self.emphasis.output):
+                raise ValueError("caption emphasis timing must stay inside its cue")
+            if any(index >= len(self.words) for index in self.emphasis.word_indexes):
+                raise ValueError("caption emphasis index is outside cue words")
+        if self.timing_mode != "word" and self.primitive_id == "karaoke":
+            raise ValueError("karaoke requires trusted word timing")
+        if self.primitive_id == "scale" and self.scale_percent == 100:
+            raise ValueError("scale primitive requires a bounded scale change")
+        if self.primitive_id == "slide" and self.slide_distance_ratio == 0:
+            raise ValueError("slide primitive requires a bounded distance")
+        return self
 
 
 class CaptionPlan(FrozenContract):
-    schema_version: Literal["7A.caption-plan.1"] = "7A.caption-plan.1"
+    # Default remains the frozen 7A shape for compatibility with persisted
+    # foundation plans. The 7C planner always opts into the production schema.
+    schema_version: Literal["7A.caption-plan.1", "7C.caption-plan.1"] = "7A.caption-plan.1"
     intent_id: str = Field(pattern=ID_PATTERN)
     cues: tuple[CaptionCuePlan, ...] = ()
     backend_id: Literal["none", "libass", "legacy_passthrough"] = "none"
+    intensity: Intensity = Intensity.LOW
+    font_manifest: CaptionFontManifest | None = None
+    typography: CaptionTypographyToken | None = None
+    quality_report: CaptionQualityReport = Field(default_factory=CaptionQualityReport)
     diagnostics: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _ordered_cues(self) -> "CaptionPlan":
         if any(right.output.start_frame < left.output.start_frame for left, right in zip(self.cues, self.cues[1:])):
             raise ValueError("caption cues must be ordered")
+        if self.schema_version == "7C.caption-plan.1" and self.backend_id == "libass":
+            if self.font_manifest is None or self.typography is None:
+                raise ValueError("7C libass captions require deterministic font and typography manifests")
+            if self.quality_report.status == "LEGACY_UNASSESSED":
+                raise ValueError("7C libass captions require an assessed quality report")
+            if any(cue.normalized_bounds is None or cue.collision is None for cue in self.cues):
+                raise ValueError("7C libass caption cues require frozen geometry and collision decisions")
         return self
 
 
@@ -1068,9 +1249,24 @@ def _parity_payload(payload: Mapping[str, Any], plan_hash: str) -> dict[str, Any
                 "bounds": cue["normalized_bounds"],
                 "primitive": cue["primitive_id"],
                 "easing": cue["easing_id"],
+                "words": [
+                    {
+                        "output": word["output"],
+                        "timing_source": word["timing_source"],
+                    }
+                    for word in cue.get("words", [])
+                ],
+                "emphasis": cue.get("emphasis"),
+                "collision": cue.get("collision"),
+                "resolved_font_size_ratio": cue.get("resolved_font_size_ratio"),
+                "motion_duration_frames": cue.get("motion_duration_frames", 0),
+                "scale_percent": cue.get("scale_percent", 100),
+                "slide_distance_ratio": cue.get("slide_distance_ratio", 0),
             }
             for cue in caption["cues"]
         ],
+        "caption_font": caption.get("font_manifest"),
+        "caption_typography": caption.get("typography"),
         "composition_events": [
             {
                 "output": segment["output"],
@@ -1267,13 +1463,13 @@ def _validate_domain_plans(
 
     if broll.segments and not intent.policy.source_broll_enabled:
         raise ValueError("SOURCE_BROLL_DISABLED")
-    for segment in broll.segments:
+    for broll_segment in broll.segments:
         if not any(
-            request.output == segment.destination
-            and request.source_cutaway == segment.source_cutaway
-            and request.story_unit_id == segment.story_unit_id
-            and request.story_unit_evidence_ref in segment.evidence_refs
-            and set(segment.evidence_refs).issubset(
+            request.output == broll_segment.destination
+            and request.source_cutaway == broll_segment.source_cutaway
+            and request.story_unit_id == broll_segment.story_unit_id
+            and request.story_unit_evidence_ref in broll_segment.evidence_refs
+            and set(broll_segment.evidence_refs).issubset(
                 {*request.evidence_refs, *request.source_cutaway_evidence_refs}
             )
             for request in intent.source_broll

@@ -239,6 +239,7 @@ def build_quality_report(
             if key in render
         },
         "audio": dict(audio.get("validation") or {}) if isinstance(audio.get("validation"), dict) else {},
+        "captions": _caption_quality(render) or {},
     }
     fallbacks = _unique([
         *(render.get("fallback_reasons", []) if isinstance(render.get("fallback_reasons"), list) else []),
@@ -406,7 +407,8 @@ def _collect_plan_and_boundary(
             producer="production_plan", message="Production plan uses an explicit legacy compatibility contract.",
         )
         return
-    identity = envelope.get("identity") if isinstance(envelope.get("identity"), dict) else {}
+    raw_identity = envelope.get("identity")
+    identity: dict[str, Any] = raw_identity if isinstance(raw_identity, dict) else {}
     expected = {
         "candidate_id": result.candidate_id,
         "source_id": source_id,
@@ -450,9 +452,12 @@ def _collect_plan_and_boundary(
 
 
 def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> None:
-    quality = render.get("quality") if isinstance(render.get("quality"), dict) else {}
-    composition = render.get("composition") if isinstance(render.get("composition"), dict) else {}
-    segments = composition.get("segments") if isinstance(composition.get("segments"), list) else []
+    raw_quality = render.get("quality")
+    quality: dict[str, Any] = raw_quality if isinstance(raw_quality, dict) else {}
+    raw_composition = render.get("composition")
+    composition: dict[str, Any] = raw_composition if isinstance(raw_composition, dict) else {}
+    raw_segments = composition.get("segments")
+    segments: list[Any] = raw_segments if isinstance(raw_segments, list) else []
     for segment in segments:
         if not isinstance(segment, dict):
             continue
@@ -473,8 +478,10 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 message="Composition quality uses a declared fallback or limited evidence.",
                 interval=_segment_interval(segment),
             )
-    subtitle_layout = render.get("subtitle_layout") if isinstance(render.get("subtitle_layout"), dict) else {}
-    subtitle = subtitle_layout.get("quality_decision") if isinstance(subtitle_layout.get("quality_decision"), dict) else None
+    raw_subtitle_layout = render.get("subtitle_layout")
+    subtitle_layout: dict[str, Any] = raw_subtitle_layout if isinstance(raw_subtitle_layout, dict) else {}
+    raw_subtitle = subtitle_layout.get("quality_decision")
+    subtitle: dict[str, Any] | None = raw_subtitle if isinstance(raw_subtitle, dict) else None
     if subtitle is not None:
         subtitle_status = str(subtitle.get("status") or "legacy_unassessed")
         codes = [str(item) for item in subtitle.get("reason_codes", [])]
@@ -491,6 +498,28 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 code, "warning", {"subtitle_quality_decision": subtitle}, measured_value=codes,
                 threshold="subtitle layout passed", producer="subtitle_quality_decision",
                 message="Subtitle quality decision requires attention.",
+            )
+    caption = _caption_quality(render)
+    if caption is not None:
+        raw_caption_findings = caption.get("findings")
+        caption_findings: list[Any] = raw_caption_findings if isinstance(raw_caption_findings, list) else []
+        for item in caption_findings:
+            if not isinstance(item, dict):
+                continue
+            severity = "blocker" if item.get("severity") == "blocker" else "warning"
+            code = str(item.get("code") or "CAPTION_QUALITY_DEGRADED")
+            finding(
+                code, severity, {"caption_quality_report": caption, "caption_finding": item},
+                measured_value=item.get("measured_value"), threshold=item.get("threshold"),
+                producer="caption_quality_report",
+                message=str(item.get("message") or "Semantic caption quality requires attention."),
+            )
+        if caption.get("status") == "BLOCKED" and not caption_findings:
+            finding(
+                "CAPTION_QUALITY_BLOCKED", "blocker", {"caption_quality_report": caption},
+                measured_value="BLOCKED", threshold="PASS or PASS_WITH_WARNINGS",
+                producer="caption_quality_report",
+                message="Semantic caption quality blocks the final artifact.",
             )
     if quality.get("status") == "failed" and not segments and subtitle is None:
         finding(
@@ -563,7 +592,15 @@ def _check_catalog(
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),
         ("PLAN_IDENTITY", "production_plan_envelope", plan.get("envelope"), "plan parents match output"),
         ("COMPOSITION", "composition_quality_decision", render.get("composition"), "composition decision passed"),
-        ("SUBTITLES", "subtitle_quality_decision", render.get("subtitle_layout"), "subtitle decision passed"),
+        (
+            "SUBTITLES", "subtitle_quality_decision",
+            render.get("caption_plan") or render.get("subtitle_layout"),
+            "subtitle and semantic caption decisions passed",
+        ),
+        (
+            "SEMANTIC_CAPTIONS", "caption_quality_report", _caption_quality(render),
+            "readability, timing, safe zones and protected-region overlap passed",
+        ),
         ("AUDIO", "audio_validation", audio.get("validation"), "audio validation valid"),
         ("FFPROBE", "render_validation", render.get("validation"), "ffprobe validation valid"),
         ("ARTIFACT_IDENTITY", "artifact_identity", artifact, "canonical bytes and parents match"),
@@ -584,6 +621,18 @@ def _check_catalog(
             "provenance": {"producer": producer, "config_version": config_version},
         })
     return checks
+
+
+def _caption_quality(render: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the 7C report from either compiled-plan or render-report shape."""
+
+    caption_plan = render.get("caption_plan")
+    if isinstance(caption_plan, dict) and isinstance(caption_plan.get("quality_report"), dict):
+        return dict(caption_plan["quality_report"])
+    subtitle_layout = render.get("subtitle_layout")
+    if isinstance(subtitle_layout, dict) and isinstance(subtitle_layout.get("caption_quality_report"), dict):
+        return dict(subtitle_layout["caption_quality_report"])
+    return None
 
 
 def _boundary_interval(boundary: dict[str, Any]) -> dict[str, float] | None:
