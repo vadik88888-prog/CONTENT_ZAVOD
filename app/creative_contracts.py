@@ -26,7 +26,7 @@ TIME_MAPPING_SCHEMA_VERSION = "7A.time-map.1"
 CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
 COMPOSITION_PLAN_SCHEMA_VERSION: Literal["7D.composition-plan.1"] = "7D.composition-plan.1"
 MOTION_PLAN_SCHEMA_VERSION = "7A.motion-plan.1"
-SOURCE_BROLL_PLAN_SCHEMA_VERSION = "7A.source-broll-plan.1"
+SOURCE_BROLL_PLAN_SCHEMA_VERSION: Literal["7E.source-broll-plan.1"] = "7E.source-broll-plan.1"
 COMPILED_RENDER_PLAN_SCHEMA_VERSION = "7A.compiled-render-plan.1"
 PARITY_SIGNATURE_SCHEMA_VERSION = "7A.parity.1"
 
@@ -149,6 +149,9 @@ class OutputInterval(FrozenContract):
 
     def contains(self, other: "OutputInterval") -> bool:
         return self.start_frame <= other.start_frame and other.end_frame <= self.end_frame
+
+    def overlaps(self, other: "OutputInterval") -> bool:
+        return self.start_frame < other.end_frame and other.start_frame < self.end_frame
 
     @classmethod
     def from_seconds(cls, start: float, end: float) -> "OutputInterval":
@@ -294,6 +297,15 @@ class SemanticClass(StrEnum):
     PAYOFF = "payoff"
 
 
+class SourceBRollSemanticKind(StrEnum):
+    ACTION = "action"
+    OBJECT = "object"
+    PRODUCT = "product"
+    SCREEN = "screen"
+    REACTION = "reaction"
+    CONTEXT = "context"
+
+
 class EvidenceItem(FrozenContract):
     evidence_ref: str = Field(pattern=ID_PATTERN)
     evidence_kind: Literal[
@@ -370,6 +382,7 @@ class SourceBRollProposal(ProposalDecision):
     source_cutaway_evidence_refs: tuple[str, ...] = Field(min_length=1)
     story_unit_id: str = Field(pattern=ID_PATTERN)
     story_unit_evidence_ref: str = Field(pattern=ID_PATTERN)
+    semantic_kind: SourceBRollSemanticKind = SourceBRollSemanticKind.CONTEXT
     retain_source_audio: Literal[False] = False
 
     @model_validator(mode="after")
@@ -476,6 +489,7 @@ class ResolvedSourceBRoll(ResolvedDecision):
     source_cutaway_evidence_refs: tuple[str, ...]
     story_unit_id: str
     story_unit_evidence_ref: str
+    semantic_kind: SourceBRollSemanticKind = SourceBRollSemanticKind.CONTEXT
     retain_source_audio: Literal[False] = False
 
 
@@ -718,6 +732,7 @@ class EvidenceResolver:
             source_cutaway_evidence_refs=decision.source_cutaway_evidence_refs,
             story_unit_id=decision.story_unit_id,
             story_unit_evidence_ref=decision.story_unit_evidence_ref,
+            semantic_kind=decision.semantic_kind,
             retain_source_audio=False,
         )
 
@@ -1260,23 +1275,131 @@ class MotionPlan(FrozenContract):
     diagnostics: tuple[str, ...] = ()
 
 
+class SourceBRollSafetyChecks(FrozenContract):
+    evidence_relevance: Literal[True] = True
+    story_unit_linked: Literal[True] = True
+    beat_linked: Literal[True] = True
+    source_identity_verified: Literal[True] = True
+    attribution_verified: Literal[True] = True
+    chronology_safe: Literal[True] = True
+    causality_safe: Literal[True] = True
+    payoff_timing_safe: Literal[True] = True
+    screen_text_safe: Literal[True] = True
+    source_rights_verified: Literal[True] = True
+    lip_sync_not_required: Literal[True] = True
+    filler_range_unique: Literal[True] = True
+
+
+class SourceBRollQualityFinding(FrozenContract):
+    code: str = Field(pattern=r"^SOURCE_BROLL_[A-Z0-9_]+$")
+    severity: Literal["warning", "blocker"]
+    decision_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    scene_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    measured_value: float | int | str | bool | None = None
+    threshold: float | int | str | bool | None = None
+    message: str = Field(min_length=1, max_length=1200)
+
+
+class SourceBRollQualityMetrics(FrozenContract):
+    proposal_count: int = Field(default=0, ge=0)
+    selected_count: int = Field(default=0, ge=0)
+    rejected_count: int = Field(default=0, ge=0)
+    a_roll_fallback_count: int = Field(default=0, ge=0)
+    repeated_range_count: int = Field(default=0, ge=0)
+    premature_reveal_count: int = Field(default=0, ge=0)
+    attribution_violation_count: int = Field(default=0, ge=0)
+    causality_violation_count: int = Field(default=0, ge=0)
+    chronology_violation_count: int = Field(default=0, ge=0)
+    selected_duration_frames: int = Field(default=0, ge=0)
+    semantic_kind_counts: tuple[tuple[SourceBRollSemanticKind, int], ...] = ()
+
+
+class SourceBRollQualityProvenance(FrozenContract):
+    producer: str = Field(default="legacy_source_broll_contract", min_length=1, max_length=240)
+    planner_version: str = Field(default="legacy", min_length=1, max_length=120)
+    intent_id: str = Field(default="legacy", min_length=1, max_length=160)
+    evidence_fingerprint: str | None = Field(default=None, pattern=HASH_PATTERN)
+    composition_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+
+
+class SourceBRollQualityReport(FrozenContract):
+    schema_version: Literal["7E.source-broll-quality.1"] = "7E.source-broll-quality.1"
+    status: Literal["PASS", "PASS_WITH_WARNINGS", "BLOCKED", "LEGACY_UNASSESSED"] = "LEGACY_UNASSESSED"
+    findings: tuple[SourceBRollQualityFinding, ...] = ()
+    metrics: SourceBRollQualityMetrics = Field(default_factory=SourceBRollQualityMetrics)
+    provenance: SourceBRollQualityProvenance = Field(default_factory=SourceBRollQualityProvenance)
+
+    @model_validator(mode="after")
+    def _status_matches_findings(self) -> "SourceBRollQualityReport":
+        expected = (
+            "BLOCKED" if any(item.severity == "blocker" for item in self.findings)
+            else "PASS_WITH_WARNINGS" if self.findings else "PASS"
+        )
+        if self.status != "LEGACY_UNASSESSED" and self.status != expected:
+            raise ValueError("source B-roll quality status does not match findings")
+        return self
+
+
 class SourceBRollSegmentPlan(FrozenContract):
     segment_id: str = Field(pattern=ID_PATTERN)
+    decision_id: str = Field(default="legacy", pattern=ID_PATTERN)
     destination: OutputInterval
     source_cutaway: SourceInterval
+    source_scene_id: str = Field(default="legacy", pattern=ID_PATTERN)
     story_unit_id: str = Field(pattern=ID_PATTERN)
+    beat_role: BeatRole | None = None
+    semantic_kind: SourceBRollSemanticKind = SourceBRollSemanticKind.CONTEXT
     evidence_refs: tuple[str, ...] = Field(min_length=1)
+    scene_evidence_refs: tuple[str, ...] = ()
+    relevance_confidence: float = Field(default=0, ge=0, le=1)
     retain_source_audio: Literal[False] = False
+    audio_timeline: Literal["a_roll_master"] = "a_roll_master"
     transition: Literal["cut", "short_dissolve"] = "cut"
     fallback: Literal["a_roll"] = "a_roll"
+    fallback_composition_segment_ids: tuple[str, ...] = ()
+    safety_checks: SourceBRollSafetyChecks | None = None
+    provenance: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _evidence_is_unique(self) -> "SourceBRollSegmentPlan":
+        if len(self.evidence_refs) != len(set(self.evidence_refs)):
+            raise ValueError("source B-roll evidence refs must be unique")
+        if len(self.scene_evidence_refs) != len(set(self.scene_evidence_refs)):
+            raise ValueError("source B-roll scene evidence refs must be unique")
+        if not set(self.scene_evidence_refs).issubset(self.evidence_refs):
+            raise ValueError("source B-roll scene evidence must be included in provenance refs")
+        return self
 
 
 class SourceBRollPlan(FrozenContract):
-    schema_version: Literal["7A.source-broll-plan.1"] = "7A.source-broll-plan.1"
+    schema_version: Literal["7A.source-broll-plan.1", "7E.source-broll-plan.1"] = "7A.source-broll-plan.1"
     intent_id: str = Field(pattern=ID_PATTERN)
     segments: tuple[SourceBRollSegmentPlan, ...] = ()
     default_visual: Literal["a_roll"] = "a_roll"
+    default_audio: Literal["a_roll_master"] = "a_roll_master"
+    fallback_policy: Literal["a_roll_current_composition"] = "a_roll_current_composition"
+    composition_plan_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    quality_report: SourceBRollQualityReport = Field(default_factory=SourceBRollQualityReport)
     diagnostics: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _safe_ordered_segments(self) -> "SourceBRollPlan":
+        if any(
+            right.destination.start_frame < left.destination.end_frame
+            for left, right in zip(self.segments, self.segments[1:])
+        ):
+            raise ValueError("source B-roll destinations must be ordered without overlap")
+        ranges = [item.source_cutaway for item in self.segments]
+        if any(left.overlaps(right) for index, left in enumerate(ranges) for right in ranges[index + 1:]):
+            raise ValueError("source B-roll cannot repeat a filler range")
+        if self.schema_version == "7E.source-broll-plan.1":
+            if self.composition_plan_sha256 is None:
+                raise ValueError("7E source B-roll requires current CompositionPlan identity")
+            if self.quality_report.status == "LEGACY_UNASSESSED":
+                raise ValueError("7E source B-roll requires an assessed quality report")
+            if any(item.safety_checks is None or item.beat_role is None for item in self.segments):
+                raise ValueError("7E source B-roll segments require beat and safety evidence")
+        return self
 
 
 class CanvasPlan(FrozenContract):
@@ -1535,7 +1658,9 @@ def compile_render_plan(
         "assets": [item.model_dump(mode="json") for item in assets],
         "backends": [item.model_dump(mode="json") for item in backends],
         "expected_quality_constraints": [
-            "no_raw_commands", "identity_match", "source_ranges_bounded", "preview_final_parity",
+            "no_raw_commands", "identity_match", "source_ranges_bounded",
+            "source_broll_evidence_and_forbidden_checks", "a_roll_master_audio",
+            "preview_final_parity",
         ],
         "ordered_fallbacks": list(intent.ordered_fallbacks),
         "compatibility_mode": compatibility_mode,
@@ -1624,16 +1749,20 @@ def _validate_domain_plans(
         raise ValueError("SOURCE_BROLL_DISABLED")
     for broll_segment in broll.segments:
         if not any(
-            request.output == broll_segment.destination
+            request.decision_id == broll_segment.decision_id
+            and request.output == broll_segment.destination
             and request.source_cutaway == broll_segment.source_cutaway
             and request.story_unit_id == broll_segment.story_unit_id
+            and request.semantic_kind == broll_segment.semantic_kind
             and request.story_unit_evidence_ref in broll_segment.evidence_refs
-            and set(broll_segment.evidence_refs).issubset(
-                {*request.evidence_refs, *request.source_cutaway_evidence_refs}
-            )
+            and set(broll_segment.scene_evidence_refs).issubset(request.source_cutaway_evidence_refs)
             for request in intent.source_broll
         ):
             raise ValueError("SOURCE_BROLL_PLAN_EVIDENCE_MISMATCH")
+        if not set(broll_segment.evidence_refs).issubset({item.evidence_ref for item in intent.evidence_manifest}):
+            raise ValueError("SOURCE_BROLL_PLAN_EVIDENCE_MISMATCH")
+        if broll.schema_version == "7E.source-broll-plan.1" and broll_segment.safety_checks is None:
+            raise ValueError("SOURCE_BROLL_PLAN_SAFETY_UNASSESSED")
 
 
 def legacy_safe_intent(

@@ -86,7 +86,8 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert data["findings"] == []
     assert {item["code"] for item in data["checks"]} == {
         "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "PLAN_IDENTITY", "COMPOSITION",
-        "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE", "ARTIFACT_IDENTITY",
+        "SOURCE_BROLL", "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE",
+        "ARTIFACT_IDENTITY",
     }
     assert data["artifact_id"] and data["artifact_sha256"]
 
@@ -157,6 +158,36 @@ def test_dynamic_composition_jitter_and_unsafe_crop_flow_into_quality_report(tmp
     assert any(item.code == "COMPOSITION_JITTER" for item in report.findings)
     assert next(item for item in report.checks if item["code"] == "COMPOSITION")["status"] == "blocked"
     assert "composition:composition-001:fit_background" in report.fallbacks
+
+
+def test_source_broll_rejection_flows_into_quality_report_as_safe_fallback(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render["source_broll_plan"] = {
+        "fallback_policy": "a_roll_current_composition",
+        "quality_report": {
+            "schema_version": "7E.source-broll-quality.1",
+            "status": "PASS_WITH_WARNINGS",
+            "metrics": {"selected_count": 0, "a_roll_fallback_count": 1},
+            "findings": [{
+                "code": "SOURCE_BROLL_PREMATURE_REVEAL", "severity": "warning",
+                "decision_id": "broll-1", "measured_value": "rejected_to_a_roll",
+                "threshold": "payoff timing safe",
+                "message": "The scene reveals payoff before the payoff beat.",
+            }],
+        },
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "PASS_WITH_WARNINGS"
+    assert report.metrics["source_broll"]["metrics"]["a_roll_fallback_count"] == 1
+    assert next(item for item in report.checks if item["code"] == "SOURCE_BROLL")["status"] == "warning"
+    assert "source_broll:broll-1:a_roll_current_composition" in report.fallbacks
 
 
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:
