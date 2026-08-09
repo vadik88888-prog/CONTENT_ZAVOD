@@ -1,0 +1,44 @@
+{
+  "schema_version": "7B.renderer-fixture.1",
+  "policy": "deterministic synthetic media; no network, AI, user media or production mutation",
+  "duration_seconds": 3.0,
+  "measured_repeats": 3,
+  "decision_thresholds": {
+    "preview_rtf_max": 0.5,
+    "preview_cpu_fallback_rtf_max": 1.5,
+    "final_gpu_rtf_max": 1.5,
+    "final_cpu_fallback_rtf_max": 4.0,
+    "preview_peak_rss_mb_max": 2048,
+    "final_peak_rss_mb_max": 3072,
+    "preview_peak_vram_delta_mb_max": 2048,
+    "final_peak_vram_delta_mb_max": 3072,
+    "cold_startup_seconds_max": 2.0,
+    "normalized_geometry_delta_max": 0.003
+  },
+  "sources": [
+    {
+      "source_id": "h264_1080",
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "stress_class": "1080p_baseline"
+    },
+    {
+      "source_id": "h264_4k",
+      "codec": "h264",
+      "width": 3840,
+      "height": 2160,
+      "fps": 30,
+      "stress_class": "4k_decode_and_scale"
+    },
+    {
+      "source_id": "av1_4k",
+      "codec": "av1",
+      "width": 3840,
+      "height": 2160,
+      "fps": 30,
+      "stress_class": "av1_heavy_decode_and_scale"
+    }
+  ]
+}
