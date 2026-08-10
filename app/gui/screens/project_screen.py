@@ -117,6 +117,11 @@ class ProjectScreen(QWidget):
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
         self._candidate_thumbnail_paths: dict[str, Path] = {}
         self._candidate_cards: dict[str, QFrame] = {}
+        # Drafts owns one vertical scroll surface at every size.  The two
+        # inner scroll areas remain available to Moments, but are bypassed in
+        # Drafts so wheel/trackpad input always has one unambiguous owner.
+        self._drafts_single_scroll_layout: bool | None = None
+        self._drafts_geometry_refresh_pending = False
         self._flow_step = "settings"
         self._results_subflow_override: str | None = None
         # Keep the long analysis list responsive.  Additional cards are added
@@ -204,6 +209,7 @@ class ProjectScreen(QWidget):
         left.setContentsMargins(0, 0, 0, 0)
         self.preview = VideoPreview()
         self.preview.preview_ready.connect(self._focus_preview_player)
+        self.preview.geometry_requirement_changed.connect(self._queue_drafts_workspace_geometry)
         left.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter)
         self.download_card = self._card("Загрузка")
         self.download_source = QLabel()
@@ -483,6 +489,7 @@ class ProjectScreen(QWidget):
             self._apply_stage_responsive_layout()
         if hasattr(self, "candidate_detail"):
             QTimer.singleShot(0, self._refresh_candidate_detail_geometry)
+        self._queue_drafts_workspace_geometry()
 
     def _apply_stage_responsive_layout(self, *, force: bool = False) -> None:
         """Stack dense stage panels before a scaled desktop can overflow.
@@ -517,6 +524,7 @@ class ProjectScreen(QWidget):
             # the sticky bar tall until the next breakpoint was crossed.
             self._refresh_stage_action_geometry()
             QTimer.singleShot(0, self._refresh_stage_action_geometry)
+            self._queue_drafts_workspace_geometry()
             return
         self._compact_stage_layout = compact
         self._compact_action_layout = compact_actions
@@ -585,6 +593,7 @@ class ProjectScreen(QWidget):
         self._refresh_stage_action_geometry()
         self.updateGeometry()
         QTimer.singleShot(0, self._refresh_stage_action_geometry)
+        self._queue_drafts_workspace_geometry()
         # Candidate cards own an action rail.  Rebuild them only when the
         # breakpoint changes so that the rail can become a full-width block
         # instead of being horizontally squeezed or clipped.
@@ -655,6 +664,203 @@ class ProjectScreen(QWidget):
         if not self.stage_actions.isHidden():
             self.stage_actions.setMinimumHeight(max(required, actions_layout.totalMinimumSize().height()))
         self.stage_actions.updateGeometry()
+
+    def _queue_drafts_workspace_geometry(self, *_: object) -> None:
+        """Coalesce Drafts geometry changes after Qt finishes one layout pass."""
+
+        if self._drafts_geometry_refresh_pending:
+            return
+        self._drafts_geometry_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_drafts_workspace_geometry)
+
+    def _refresh_drafts_workspace_geometry(self) -> None:
+        """Give Drafts one scroll owner and preserve natural content.
+
+        The review body's 2:3:2 stretch factors can give the list and inspector
+        tiny nested viewports and make a fixed phone preview taller than its
+        panel.  In Drafts only, the actual list and inspector widgets therefore
+        live directly in their panels; the existing outer project scroll
+        exposes the resulting natural page at every width.  Moments keeps its
+        independent catalogue/inspector scrollers.
+        """
+
+        self._drafts_geometry_refresh_pending = False
+        if not hasattr(self, "review_workspace"):
+            return
+
+        is_drafts = bool(
+            self.project is not None
+            and self._derive_flow_step(self.project) == "drafts"
+        )
+        preview_height = self._draft_preview_natural_height()
+        single_scroll = is_drafts
+        mode_changed = single_scroll != self._drafts_single_scroll_layout
+        self._set_drafts_single_scroll_layout(single_scroll)
+        previous_panel_constraints = tuple(
+            (panel.minimumHeight(), panel.maximumHeight())
+            for panel in (
+                self.review_list_panel,
+                self.review_preview_panel,
+                self.review_inspector_panel,
+            )
+        )
+        cards_changed = False
+
+        if single_scroll:
+            cards_changed = self._refresh_draft_candidate_card_heights()
+            list_height = self._set_widget_layout_natural_height(
+                self.candidate_review
+            )
+            inspector_height = self._set_widget_layout_natural_height(
+                self.candidate_detail
+            )
+            # Two pixels account for the themed panel frame.  Pin the current
+            # natural extent in both directions: a Preferred child otherwise
+            # retains its former narrow-column height after wide→narrow and
+            # leaves a large blank gap above the boundary controls.
+            panel_heights = (
+                list_height + 2,
+                preview_height + 2,
+                inspector_height + 2,
+            )
+            if not self._compact_stage_layout:
+                common_height = max(panel_heights)
+                panel_heights = (common_height,) * 3
+            for panel, panel_height in zip(
+                (
+                    self.review_list_panel,
+                    self.review_preview_panel,
+                    self.review_inspector_panel,
+                ),
+                panel_heights,
+                strict=True,
+            ):
+                panel.setMinimumHeight(panel_height)
+                panel.setMaximumHeight(panel_height)
+            self.review_preview_panel.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Preferred,
+            )
+        else:
+            for panel in (
+                self.review_list_panel,
+                self.review_preview_panel,
+                self.review_inspector_panel,
+            ):
+                panel.setMinimumHeight(0)
+                panel.setMaximumHeight(16_777_215)
+
+        self._review_list_panel_layout.invalidate()
+        self._review_preview_panel_layout.invalidate()
+        self._review_inspector_panel_layout.invalidate()
+        self._review_body_layout.invalidate()
+        self._review_body_layout.activate()
+        self.review_list_panel.updateGeometry()
+        self.review_preview_panel.updateGeometry()
+        self.review_inspector_panel.updateGeometry()
+        self.review_workspace.updateGeometry()
+        self.content_host.updateGeometry()
+        current_panel_constraints = tuple(
+            (panel.minimumHeight(), panel.maximumHeight())
+            for panel in (
+                self.review_list_panel,
+                self.review_preview_panel,
+                self.review_inspector_panel,
+            )
+        )
+        if (
+            mode_changed
+            or cards_changed
+            or current_panel_constraints != previous_panel_constraints
+        ):
+            # Reparenting and new cards receive their final widths in later
+            # event turns. Repeat only while a natural extent is still
+            # changing, then stop once the geometry is stable.
+            self._queue_drafts_workspace_geometry()
+
+    def _set_drafts_single_scroll_layout(self, enabled: bool) -> None:
+        if enabled == self._drafts_single_scroll_layout:
+            return
+        pairs = (
+            (
+                self.review_list_panel,
+                self._review_list_panel_layout,
+                self.review_list_scroll,
+                self.candidate_review,
+            ),
+            (
+                self.review_inspector_panel,
+                self._review_inspector_panel_layout,
+                self.review_inspector_scroll,
+                self.candidate_detail,
+            ),
+        )
+        for panel, panel_layout, scroll, content in pairs:
+            if enabled:
+                if scroll.widget() is content:
+                    scroll.takeWidget()
+                scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
+                scroll.verticalScrollBar().setRange(0, 0)
+                scroll.hide()
+                content.setParent(panel)
+                panel_layout.addWidget(content)
+                content.show()
+                panel.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Preferred,
+                )
+            else:
+                if scroll.widget() is not content:
+                    panel_layout.removeWidget(content)
+                    content.setParent(None)
+                    scroll.setWidget(content)
+                scroll.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAsNeeded
+                )
+                scroll.show()
+                panel.setSizePolicy(
+                    QSizePolicy.Policy.Preferred,
+                    QSizePolicy.Policy.Preferred,
+                )
+        self._drafts_single_scroll_layout = enabled
+
+    @staticmethod
+    def _set_widget_layout_natural_height(widget: QWidget) -> int:
+        layout = widget.layout()
+        if layout is None:
+            return max(0, widget.minimumHeight())
+        widget.setMinimumHeight(0)
+        layout.invalidate()
+        layout.activate()
+        required_height = layout.totalHeightForWidth(max(1, widget.width()))
+        if required_height < 0:
+            required_height = layout.totalSizeHint().height()
+        natural_height = max(required_height, layout.totalMinimumSize().height())
+        widget.setMinimumHeight(natural_height)
+        widget.updateGeometry()
+        return natural_height
+
+    def _refresh_draft_candidate_card_heights(self) -> bool:
+        changed = False
+        for card in self._candidate_cards.values():
+            previous_height = card.minimumHeight()
+            natural_height = self._set_widget_layout_natural_height(card)
+            changed = changed or natural_height != previous_height
+        return changed
+
+    def _draft_preview_natural_height(self) -> int:
+        preview_layout = self.preview.layout()
+        required_height = self.preview.sizeHint().height()
+        if preview_layout is not None:
+            layout_height = preview_layout.totalHeightForWidth(
+                max(1, self.preview.width())
+            )
+            if layout_height < 0:
+                layout_height = preview_layout.totalSizeHint().height()
+            required_height = max(required_height, layout_height)
+        return max(1, required_height)
 
     def _compose_stage_workspaces(self, legacy_layout: QVBoxLayout, body: QHBoxLayout) -> None:
         """Arrange the durable widgets into one focused workspace per stage.
@@ -857,6 +1063,7 @@ class ProjectScreen(QWidget):
         self.review_list_panel = list_panel
         list_panel.setObjectName("reviewListPanel")
         list_panel_layout = QVBoxLayout(list_panel)
+        self._review_list_panel_layout = list_panel_layout
         list_panel_layout.setContentsMargins(0, 0, 0, 0)
         self.review_list_scroll = QScrollArea()
         self.review_list_scroll.setWidgetResizable(True)
@@ -868,6 +1075,7 @@ class ProjectScreen(QWidget):
         self.review_preview_panel = preview_panel
         preview_panel.setObjectName("reviewPreviewPanel")
         preview_layout = QVBoxLayout(preview_panel)
+        self._review_preview_panel_layout = preview_layout
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         review_body.addWidget(preview_panel, 3)
@@ -875,6 +1083,7 @@ class ProjectScreen(QWidget):
         self.review_inspector_panel = inspector_panel
         inspector_panel.setObjectName("reviewInspectorPanel")
         inspector_layout = QVBoxLayout(inspector_panel)
+        self._review_inspector_panel_layout = inspector_layout
         inspector_layout.setContentsMargins(0, 0, 0, 0)
         self.review_inspector_scroll = QScrollArea()
         self.review_inspector_scroll.setWidgetResizable(True)
@@ -1265,6 +1474,7 @@ class ProjectScreen(QWidget):
         self._apply_compact_chrome(global_step)
         self._refresh_stage_action_geometry()
         QTimer.singleShot(0, self._refresh_stage_action_geometry)
+        self._queue_drafts_workspace_geometry()
 
     def _set_flow_hint(self, value: object) -> None:
         """Keep persisted diagnostics from turning global chrome into a page."""
@@ -1372,6 +1582,7 @@ class ProjectScreen(QWidget):
                 "finished": "Готовые ролики",
             }.get(workflow_step, "Моменты"))
         if workflow_step == "finished" and self._final_output_records(project):
+            self._queue_drafts_workspace_geometry()
             return
         while layout.count() > 1:
             item = layout.takeAt(1)
@@ -1434,6 +1645,7 @@ class ProjectScreen(QWidget):
             self.view_all_button.hide()
             self.draft_button.hide()
             self.production_button.hide()
+            self._queue_drafts_workspace_geometry()
             return
         draftable_ids = [
             candidate_id for candidate_id in project.review_selected_candidate_ids
@@ -1749,6 +1961,7 @@ class ProjectScreen(QWidget):
             show_more.clicked.connect(self._show_more_candidates)
             layout.addWidget(show_more)
         self._mark_active_candidate()
+        self._queue_drafts_workspace_geometry()
 
     def _configure_workflow_action(
         self,
@@ -2487,6 +2700,7 @@ class ProjectScreen(QWidget):
             max(required_height, layout.totalMinimumSize().height())
         )
         self.candidate_detail.updateGeometry()
+        self._queue_drafts_workspace_geometry()
 
     @staticmethod
     def _score_text(value: object) -> str:

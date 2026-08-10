@@ -1600,6 +1600,237 @@ def test_drafts_hide_moment_selection_toolbar_and_filters(tmp_path: Path, monkey
         app.processEvents()
 
 
+@pytest.mark.parametrize("with_preview", (False, True), ids=("failed-no-preview", "real-preview"))
+def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessible(
+    tmp_path: Path, monkeypatch, with_preview: bool,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    previous_style = app.styleSheet()
+    app.setStyleSheet(load_theme())
+    services, project = _workspace(tmp_path)
+    services.settings.onboarding_completed = True
+    candidate_id = "candidate-recommended"
+    project.active_preview_candidate_id = candidate_id
+    if with_preview:
+        project.review_selected_candidate_ids = [candidate_id]
+        draft_preview = tmp_path / "persisted-draft-preview.mp4"
+        draft_preview.write_bytes(b"preview")
+        draft_artifact = tmp_path / "persisted-draft.json"
+        write_json(draft_artifact, {"candidates": [{
+            "candidate_id": candidate_id,
+            "preview": {"output_file": str(draft_preview)},
+        }]})
+        project.candidate_states[candidate_id] = "draft_ready"
+        project.candidate_draft_statuses[candidate_id] = "ready"
+        project.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+    else:
+        analysis_path = Path(project.analysis_artifact_path or "")
+        analysis = read_json(analysis_path, {})
+        third_candidate = dict(analysis["candidates"][1])
+        third_candidate["candidate_id"] = "candidate-third"
+        third_candidate["title"] = "Третий неготовый черновик"
+        analysis["candidates"].append(third_candidate)
+        write_json(analysis_path, analysis)
+        failed_ids = [candidate_id, "candidate-other", "candidate-third"]
+        project.review_selected_candidate_ids = failed_ids
+        for failed_id in failed_ids:
+            project.candidate_states[failed_id] = "draft_failed"
+            project.candidate_draft_statuses[failed_id] = "failed"
+            project.candidate_errors[failed_id] = "Сохранённая ошибка подготовки черновика."
+    services.projects.save(project)
+
+    # Exercise the real source/vertical presentation and its HFW geometry
+    # without asking Qt Multimedia to decode the tiny test fixture.
+    monkeypatch.setattr(VideoPreview, "_request_poster", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(VideoPreview, "_queue_source_load", lambda *_args, **_kwargs: None)
+    window = MainWindow(services)
+
+    try:
+        window.show()
+        for _ in range(3):
+            app.processEvents()
+        screen = window.project_screen
+        monkeypatch.setattr(
+            screen._thumbnail_loader,
+            "request",
+            lambda **_kwargs: Path("thumbnail.jpg"),
+        )
+        window.show_project(services.projects.load(project.project_id))
+
+        # Return to the first size after crossing the wide breakpoint so stale
+        # scroll ownership/minimum heights cannot hide a resize-history bug.
+        clients = (
+            # 1280/1366/1600/1920 physical pixels at the native QA host's
+            # 125% scale, followed by a logical Full HD wide-breakpoint pass.
+            (1280, 720),
+            (1024, 576),
+            (1093, 614),
+            (1536, 864),
+            (1920, 1080),
+            (1024, 576),
+            (1280, 720),
+        )
+        first_geometry: tuple[int, ...] | None = None
+        for client_index, (width, height) in enumerate(clients):
+            window.resize(width, height)
+            for _ in range(8):
+                app.processEvents()
+
+            assert screen._flow_step == "drafts"
+            assert screen._drafts_single_scroll_layout is True
+            assert screen.review_list_scroll.isHidden()
+            assert screen.review_inspector_scroll.isHidden()
+            assert screen.review_list_scroll.widget() is None
+            assert screen.review_inspector_scroll.widget() is None
+            assert screen.candidate_review.parent() is screen.review_list_panel
+            assert screen.candidate_detail.parent() is screen.review_inspector_panel
+            assert screen.review_list_scroll.verticalScrollBar().maximum() == 0
+            assert screen.review_inspector_scroll.verticalScrollBar().maximum() == 0
+            assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+
+            candidate_origin = screen.candidate_review.mapTo(
+                screen.review_list_panel, QPoint(0, 0)
+            )
+            assert candidate_origin.y() >= screen.review_list_panel.contentsRect().top()
+            assert (
+                candidate_origin.y() + screen.candidate_review.height()
+                <= screen.review_list_panel.contentsRect().bottom() + 1
+            )
+            detail_origin = screen.candidate_detail.mapTo(
+                screen.review_inspector_panel, QPoint(0, 0)
+            )
+            assert detail_origin.y() >= screen.review_inspector_panel.contentsRect().top()
+            assert (
+                detail_origin.y() + screen.candidate_detail.height()
+                <= screen.review_inspector_panel.contentsRect().bottom() + 1
+            )
+
+            for candidate_card in screen._candidate_cards.values():
+                card_layout = candidate_card.layout()
+                card_required = card_layout.totalHeightForWidth(
+                    max(1, candidate_card.width())
+                )
+                if card_required < 0:
+                    card_required = card_layout.totalSizeHint().height()
+                assert candidate_card.height() >= card_required
+                card_children = [
+                    *candidate_card.findChildren(QLabel),
+                    *candidate_card.findChildren(QPushButton),
+                ]
+                for child in card_children:
+                    if not child.isVisibleTo(candidate_card):
+                        continue
+                    origin = child.mapTo(candidate_card, QPoint(0, 0))
+                    assert origin.x() >= candidate_card.contentsRect().left()
+                    assert origin.y() >= candidate_card.contentsRect().top()
+                    assert (
+                        origin.x() + child.width()
+                        <= candidate_card.contentsRect().right() + 1
+                    )
+                    assert (
+                        origin.y() + child.height()
+                        <= candidate_card.contentsRect().bottom() + 1
+                    )
+            card = screen._candidate_cards[candidate_id]
+
+            preview_origin = screen.preview.mapTo(screen.review_preview_panel, QPoint(0, 0))
+            assert preview_origin.x() >= screen.review_preview_panel.contentsRect().left()
+            assert preview_origin.y() >= screen.review_preview_panel.contentsRect().top()
+            assert (
+                preview_origin.x() + screen.preview.width()
+                <= screen.review_preview_panel.contentsRect().right() + 1
+            )
+            assert (
+                preview_origin.y() + screen.preview.height()
+                <= screen.review_preview_panel.contentsRect().bottom() + 1
+            )
+            assert screen.preview.presentation == ("vertical" if with_preview else "source")
+
+            controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
+            assert controls is not None
+            detail_layout = screen.candidate_detail.layout()
+            detail_required = detail_layout.totalHeightForWidth(max(1, screen.candidate_detail.width()))
+            if detail_required < 0:
+                detail_required = detail_layout.totalSizeHint().height()
+            assert screen.candidate_detail.height() >= detail_required
+            assert controls.geometry().bottom() <= screen.candidate_detail.contentsRect().bottom()
+            assert (
+                screen.candidate_detail.contentsRect().bottom()
+                - controls.geometry().bottom()
+                <= 24
+            )
+
+            current_geometry = (
+                screen.review_list_panel.height(),
+                screen.review_preview_panel.height(),
+                screen.review_inspector_panel.height(),
+                screen.content_scroll.verticalScrollBar().maximum(),
+                controls.y(),
+            )
+            if client_index == 0:
+                first_geometry = current_geometry
+            elif client_index == len(clients) - 1:
+                assert first_geometry is not None
+                assert all(
+                    abs(current - initial) <= 4
+                    for current, initial in zip(
+                        current_geometry, first_geometry, strict=True,
+                    )
+                )
+
+            # Both the failed card actions and the inspector controls are
+            # reachable through the same outer scrollbar.
+            last_card_action = card.findChildren(QPushButton)[-1]
+            screen.content_scroll.ensureWidgetVisible(last_card_action, 0, 16)
+            for _ in range(3):
+                app.processEvents()
+            assert not last_card_action.visibleRegion().isEmpty()
+            screen.content_scroll.ensureWidgetVisible(controls, 0, 16)
+            for _ in range(3):
+                app.processEvents()
+            controls_origin = controls.mapTo(screen.content_scroll.viewport(), QPoint(0, 0))
+            assert controls_origin.y() >= 0
+            assert (
+                controls_origin.y() + controls.height()
+                <= screen.content_scroll.viewport().height()
+            )
+
+            scroll_origin = screen.content_scroll.mapTo(screen, QPoint(0, 0))
+            actions_origin = screen.stage_actions.mapTo(screen, QPoint(0, 0))
+            assert scroll_origin.y() + screen.content_scroll.height() <= actions_origin.y()
+
+        # The bypass is Drafts-local. Returning to Moments must put both
+        # widgets back under their original independent scroll areas and
+        # release every Drafts-only panel minimum.
+        assert screen.project is not None
+        screen._results_subflow_override = "candidates"
+        screen._project_changed(screen.project)
+        for _ in range(8):
+            app.processEvents()
+        assert screen._flow_step == "candidates"
+        assert screen._drafts_single_scroll_layout is False
+        assert screen.review_list_scroll.widget() is screen.candidate_review
+        assert screen.review_inspector_scroll.widget() is screen.candidate_detail
+        assert not screen.review_list_scroll.isHidden()
+        assert not screen.review_inspector_scroll.isHidden()
+        assert screen.review_list_scroll.verticalScrollBar().maximum() > 0
+        assert screen.review_inspector_scroll.verticalScrollBar().maximum() > 0
+        assert screen.review_list_panel.minimumHeight() == 0
+        assert screen.review_preview_panel.minimumHeight() == 0
+        assert screen.review_inspector_panel.minimumHeight() == 0
+        assert screen.review_list_panel.maximumHeight() == 16_777_215
+        assert screen.review_preview_panel.maximumHeight() == 16_777_215
+        assert screen.review_inspector_panel.maximumHeight() == 16_777_215
+    finally:
+        window.close()
+        window.deleteLater()
+        app.setStyleSheet(previous_style)
+        app.processEvents()
+
+
 def test_selection_update_does_not_reload_unchanged_active_preview(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
