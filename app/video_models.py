@@ -585,7 +585,8 @@ class RenderArtifact(BaseModel):
     artifact_type: Literal[
         "final_mp4", "video_project", "video_timeline", "reframe_plan",
         "subtitle_project", "production_ass", "render_result", "summary", "clip",
-        "compiled_render_plan", "parity_manifest",
+        "compiled_render_plan", "creative_intent", "creative_handoff",
+        "creative_execution", "parity_manifest",
     ]
     path: str
     checksum: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -629,6 +630,9 @@ class RenderMetadata(BaseModel):
     compiled_plan_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     parity_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     creative_compatibility_mode: Literal["native", "legacy_adapter"] | None = None
+    creative_execution_status: Literal["native_rich", "native_fallback", "legacy"] | None = None
+    creative_execution_reason_codes: list[str] = Field(default_factory=list)
+    creative_execution_diagnostics: list[str] = Field(default_factory=list)
     render_profile_id: Literal["creative_preview", "final"] = "final"
     cache_node_hits: dict[str, bool] = Field(default_factory=dict)
     single_pass_encode: bool = False
@@ -669,7 +673,7 @@ class VideoProject(BaseModel):
     target_duration_seconds: float = Field(ge=0)
     actual_duration_seconds: float = Field(ge=0)
     timeline: VideoTimeline
-    reframe_plan: ReframePlan
+    reframe_plan: ReframePlan | None = None
     tracks: list[VideoTrack]
     subtitle_project: SubtitleProject | None = None
     render_request: RenderRequest
@@ -688,7 +692,11 @@ class VideoProject(BaseModel):
         if self.plan_reference is not None:
             if self.plan_reference.plan_id != self.production_plan_id:
                 raise ValueError("VideoProject plan reference must match production_plan_id")
-            if self.reframe_plan.plan_reference is not None and self.reframe_plan.plan_reference != self.plan_reference:
+            if (
+                self.reframe_plan is not None
+                and self.reframe_plan.plan_reference is not None
+                and self.reframe_plan.plan_reference != self.plan_reference
+            ):
                 raise ValueError("ReframePlan must reference the same ProductionPlan")
             if (
                 self.subtitle_project is not None

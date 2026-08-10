@@ -272,6 +272,28 @@ def apply_native_visual_plan(
             span = (end_frame - start_frame) / destination_frames
             source_start = broll.source_cutaway.start_tick / 1_000_000 + source_seconds * offset
             source_end = source_start + source_seconds * span
+            broll_crop = (
+                _broll_crop_rect(broll.source_crop, source_width, source_height)
+                if broll.source_crop is not None else None
+            )
+            crop = (
+                _native_crop_plan(
+                    broll_crop,
+                    LayoutFamily.SINGLE_SUBJECT,
+                    source_width,
+                    source_height,
+                    rotation,
+                    (),
+                    clip.timeline_start_seconds,
+                    clip.timeline_end_seconds,
+                )
+                if broll_crop is not None else CropPlan(
+                    strategy="fit_blur_background",
+                    source_width=source_width,
+                    source_height=source_height,
+                    display_rotation_degrees=rotation,
+                )
+            )
             updates.update({
                 "source_start_seconds": round(source_start, 6),
                 "source_end_seconds": round(source_end, 6),
@@ -279,6 +301,7 @@ def apply_native_visual_plan(
                 "visual_strategy": "candidate_excerpt",
                 "status": "ready",
                 "fallback_reason": None,
+                "crop_plan": crop,
             })
         rendered.append(clip.model_copy(update=updates))
 
@@ -373,6 +396,28 @@ def _native_crop_plan(
         crop_y=y,
         tracking_keyframes=tracking,
     )
+
+
+def _broll_crop_rect(
+    target: NormalizedRect,
+    source_width: int,
+    source_height: int,
+) -> NormalizedRect:
+    """Derive cutaway geometry only from its own scene evidence."""
+
+    output_aspect = 9 / 16
+    source_aspect = source_width / source_height
+    normalized_width = output_aspect / max(source_aspect, 1e-9)
+    margin = 0.1
+    height = min(1.0, max(0.58, target.height / (1 - 2 * margin)))
+    width = min(1.0, max(normalized_width * height, target.width / (1 - 2 * margin)))
+    height = min(1.0, max(height, width / max(normalized_width, 1e-9)))
+    width = min(1.0, normalized_width * height)
+    center_x = target.x + target.width / 2
+    center_y = target.y + target.height / 2
+    x = min(1 - width, max(0.0, center_x - width / 2))
+    y = min(1 - height, max(0.0, center_y - height / 2))
+    return NormalizedRect(x=x, y=y, width=width, height=height)
 
 
 def _even_dimension(value: float, maximum: int) -> int:

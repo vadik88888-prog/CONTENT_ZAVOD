@@ -14,6 +14,7 @@ from typing import Iterable, Literal, Mapping, Sequence
 from pydantic import Field, model_validator
 
 from app.creative_contracts import (
+    AttentionTarget,
     BeatRole,
     CompositionPlan,
     CreativeIntent,
@@ -30,6 +31,7 @@ from app.creative_contracts import (
     SourceBRollSegmentPlan,
     SourceBRollSemanticKind,
     SourceInterval,
+    NormalizedRect,
     ResolvedBeat,
     ResolvedSourceBRoll,
 )
@@ -53,6 +55,8 @@ class SourceSceneEvidence(FrozenContract):
     story_unit_ids: tuple[str, ...] = Field(min_length=1)
     beat_roles: tuple[BeatRole, ...] = Field(min_length=1)
     evidence_refs: tuple[str, ...] = Field(min_length=1)
+    source_crop: NormalizedRect | None = None
+    source_target: AttentionTarget | None = None
     confidence: float = Field(ge=0, le=1)
     identity_status: Verification = "uncertain"
     attribution_status: Verification = "uncertain"
@@ -155,6 +159,8 @@ class SourceBRollPlanner:
                 decision_id=request.decision_id,
                 destination=request.output,
                 source_cutaway=request.source_cutaway,
+                source_crop=scene.source_crop,
+                source_target=scene.source_target,
                 source_scene_id=scene.scene_id,
                 story_unit_id=request.story_unit_id,
                 beat_role=beat.role,

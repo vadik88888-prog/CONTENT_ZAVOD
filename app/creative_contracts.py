@@ -1517,6 +1517,8 @@ class SourceBRollSegmentPlan(FrozenContract):
     decision_id: str = Field(default="legacy", pattern=ID_PATTERN)
     destination: OutputInterval
     source_cutaway: SourceInterval
+    source_crop: NormalizedRect | None = None
+    source_target: AttentionTarget | None = None
     source_scene_id: str = Field(default="legacy", pattern=ID_PATTERN)
     story_unit_id: str = Field(pattern=ID_PATTERN)
     beat_role: BeatRole | None = None

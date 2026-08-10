@@ -23,6 +23,7 @@ from app.creative_contracts import (
     LayoutFamily,
     MotionDomain,
     MotionPurpose,
+    NormalizedRect,
     OutputInterval,
     RenderParityManifest,
     ResolvedBeat,
@@ -54,6 +55,7 @@ from app.video_composition import (
     probe_media,
     production_render_report_section,
     _ffmpeg,
+    _native_motion_filter,
     _source_range_for_audio,
     _timeline_filter,
     _split_timeline_at_scene_boundaries,
@@ -922,6 +924,8 @@ def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: P
         semantic_kinds=(SourceBRollSemanticKind.ACTION,),
         story_unit_ids=("story-native",), beat_roles=(BeatRole.ACTION,),
         evidence_refs=("scene-native",), confidence=0.94,
+        source_crop=NormalizedRect(x=0.40, y=0.20, width=0.36, height=0.55),
+        source_target=AttentionTarget.OBJECT,
         identity_status="verified", attribution_status="verified",
         chronology_status="safe", causality_status="supported", rights_status="verified",
         payoff_signal="none", provenance=("e2e-regression",),
@@ -989,7 +993,11 @@ def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: P
     assert preview.metadata.compiled_plan_hash == final.metadata.compiled_plan_hash == compiled.plan_hash
     assert preview.metadata.parity_signature == final.metadata.parity_signature == compiled.parity_signature
     assert Path(calm.result.output_file or "").read_bytes() != Path(final.result.output_file or "").read_bytes()
-    assert Path(motionless.result.output_file or "").read_bytes() != Path(final.result.output_file or "").read_bytes()
+    assert _native_motion_filter(compiled.motion_plan, final.canvas) is None
+    motionless_timeline = json.loads(
+        (tmp_path / "motionless" / "production-render" / "video-timeline.json").read_text(encoding="utf-8")
+    )
+    assert motionless_timeline["clips"] == rendered_timeline["clips"]
 
 
 def test_auto_encoder_falls_back_to_cpu_when_nvenc_is_unavailable(tmp_path: Path, monkeypatch) -> None:

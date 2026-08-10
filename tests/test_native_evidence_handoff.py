@@ -45,6 +45,11 @@ def _phase6_artifacts(candidate_id: str) -> tuple[dict, dict, dict]:
             "start_seconds": 1.0,
             "end_seconds": 2.0,
             "confidence": 0.94,
+        }, {
+            "scene_id": "scene-phase6-cutaway",
+            "start_seconds": 2.1,
+            "end_seconds": 2.8,
+            "confidence": 0.93,
         }],
         "visual_event_map": [{
             "event_id": "visual-subject-1",
@@ -67,12 +72,32 @@ def _phase6_artifacts(candidate_id: str) -> tuple[dict, dict, dict]:
                 "motion_action": {"gesture_observed": True},
                 "framing_relevance": {"scene_id": "scene-phase6-1"},
             },
+        }, {
+            "event_id": "visual-object-cutaway",
+            "event_type": "subject_observation",
+            "start_seconds": 2.35,
+            "end_seconds": 2.35,
+            "confidence": 0.94,
+            "observation": {
+                "active_subject": {
+                    "target_type": "important_object",
+                    "normalized_bbox": {
+                        "normalized_x": 0.58,
+                        "normalized_y": 0.50,
+                        "normalized_width": 0.34,
+                        "normalized_height": 0.46,
+                    },
+                },
+                "motion_action": {"gesture_observed": True},
+                "framing_relevance": {"scene_id": "scene-phase6-cutaway"},
+            },
+            "action": "demonstration",
         }],
     }
     stories = {"story_units": [{
         "story_unit_id": "story-native-1",
         "start": 1.0,
-        "end": 2.0,
+        "end": 2.8,
         "confidence": 0.93,
         "information_density": 0.86,
         "hook_seed": "Source dialogue",
@@ -164,10 +189,12 @@ def test_phase6_artifacts_build_rich_native_handoff_without_analysis_calls() -> 
     ),))
     candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
 
+    config = AppConfig()
+    config.production_render.same_source_broll_allowed = True
     handoff = build_native_evidence_handoff(
         plan,
         mapping,
-        AppConfig(),
+        config,
         candidate=candidate,
         multimodal_timeline=timeline,
         story_units=stories,
@@ -183,13 +210,37 @@ def test_phase6_artifacts_build_rich_native_handoff_without_analysis_calls() -> 
     assert handoff.intent.semantic_emphasis
     assert handoff.intent.composition_targets
     assert handoff.intent.motion_events
+    assert handoff.intent.source_broll
+    assert handoff.execution_status == "native_rich"
     assert handoff.target_observations[0].evidence_ref in {
         item.evidence_ref for item in handoff.intent.evidence_manifest
     }
     assert handoff.source_scenes[0].story_unit_ids == ("story-native-1",)
 
 
-def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(tmp_path: Path) -> None:
+def test_same_source_cutaway_without_explicit_usage_contract_falls_back_to_a_roll() -> None:
+    plan = _plan()
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="candidate-map",
+        source=SourceInterval.from_seconds(1.0, 2.0),
+        output=OutputInterval.from_seconds(0.0, 1.0),
+    ),))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+
+    handoff = build_native_evidence_handoff(
+        plan, mapping, AppConfig(), candidate=candidate,
+        multimodal_timeline=timeline, story_units=stories,
+    )
+
+    assert handoff.execution_status == "native_fallback"
+    assert not handoff.intent.source_broll
+    assert "SOURCE_BROLL_USAGE_NOT_AUTHORIZED" in handoff.reason_codes
+    assert all(scene.rights_status == "uncertain" for scene in handoff.source_scenes)
+
+
+def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(
+    tmp_path: Path, monkeypatch,
+) -> None:
     config = _audio_config()
     config.production_render.enabled = True
     config.production_render.output_width = 180
@@ -197,6 +248,7 @@ def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(tmp_path
     config.production_render.output_fps = 30
     config.production_render.video_bitrate = "500k"
     config.production_render.encoder = "cpu"
+    config.production_render.same_source_broll_allowed = True
     config.validate()
     source = Source(
         "source-audio",
@@ -241,6 +293,14 @@ def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(tmp_path
         "output_directory": str(candidate_output),
     }]}
     pipeline = Pipeline(tmp_path, config, run_id="run-native-regression")
+    monkeypatch.setattr(
+        "app.video_composition.build_reframe_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy reframe builder called")),
+    )
+    monkeypatch.setattr(
+        "app.video_composition.build_subtitle_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy subtitle builder called")),
+    )
 
     rendered = pipeline._run_production_render(
         StageTracker(tmp_path / "pipeline-state.json"),
@@ -264,8 +324,15 @@ def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(tmp_path
     assert compiled.compatibility_mode == "native"
     assert compiled.composition_plan.segments
     assert compiled.motion_plan.events
+    assert compiled.source_broll_plan.segments
     assert compiled.input_fingerprints.creative_intent_sha256 != compiled.input_fingerprints.production_plan_sha256
     assert item_report["creative_qc_source"] == "compiled_render_plan"
     assert item_report["quality"]["source_of_truth"] == "compiled_render_plan"
     assert item_report["caption_plan"]["intent_id"] == compiled.intent_id
     assert item_report["composition_plan"]["intent_id"] == compiled.intent_id
+    assert item_report["execution_status"] == "native_rich"
+    assert (candidate_output / "production-render" / "creative-intent.json").is_file()
+    assert (candidate_output / "production-render" / "creative-handoff.json").is_file()
+    assert (candidate_output / "production-render" / "creative-execution.json").is_file()
+    assert not (candidate_output / "production-render" / "reframe-plan.json").exists()
+    assert not (candidate_output / "production-render" / "subtitle-project.json").exists()

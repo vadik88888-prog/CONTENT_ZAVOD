@@ -21,6 +21,13 @@ from app.creative_execution import (
     validate_native_handoff,
 )
 from app.creative_evidence import build_native_evidence_handoff
+from app.creative_lifecycle import (
+    CandidateCreativeExecution,
+    CandidateCreativeHandoff,
+    build_creative_execution,
+    build_creative_handoff,
+    persist_candidate_creative_identity,
+)
 from app.creative_contracts import (
     CompiledRenderPlan,
     CreativeIntent,
@@ -68,7 +75,7 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "7G.1"
+PRODUCTION_RENDER_ENGINE_VERSION = "7G.3"
 
 
 class VideoCompositionService:
@@ -90,19 +97,29 @@ class VideoCompositionService:
         phase6_candidate: Mapping[str, Any] | None = None,
         phase6_multimodal_timeline: Mapping[str, Any] | None = None,
         phase6_story_units: Mapping[str, Any] | None = None,
+        creative_handoff: CandidateCreativeHandoff | None = None,
+        execution_status: Literal["native_rich", "native_fallback", "legacy"] | None = None,
+        execution_reason_codes: Iterable[str] = (),
+        execution_diagnostics: Iterable[str] = (),
+        parent_compiled_plan_hash: str | None = None,
+        parent_creative_intent_hash: str | None = None,
+        style_revision: bool = False,
+        allow_creative_revision: bool = False,
     ) -> VideoProject:
         render_config = self.config.production_render
         if not source.path.is_file():
             raise ProductionRenderError("Исходный video file для production render не найден.")
+        envelope = plan.envelope
+        revision_handoff = allow_creative_revision and envelope is not None
         handoff_failure = validate_renderer_handoff(
             plan,
             audio_project,
             source_id=source.id,
             source_sha256=stable_file_hash(source.path),
             transcript=transcript,
-            expected_preset_id=self.config.product_flow.subtitle_preset,
-            expected_preset_version=self.config.product_flow.preset_version,
-            expected_platform=self.config.product_flow.platform,
+            expected_preset_id=(envelope.preset.preset_id if revision_handoff else self.config.product_flow.subtitle_preset),
+            expected_preset_version=(envelope.preset.preset_version if revision_handoff else self.config.product_flow.preset_version),
+            expected_platform=(envelope.preset.platform if revision_handoff else self.config.product_flow.platform),
             expected_target=(render_config.output_width, render_config.output_height, render_config.output_fps),
         )
         if handoff_failure is not None:
@@ -132,35 +149,58 @@ class VideoCompositionService:
             plan, audio_project, transcript, source.path, source_info, planning_canvas, render_config,
         )
         plan_reference = plan.reference()
-        reframe_plan = build_reframe_plan(source_info, planning_canvas, render_config, timeline).model_copy(update={
-            "plan_reference": plan_reference,
-        })
-        composition_fallbacks = [
-            f"{segment.segment_id}: {segment.fallback_reason}"
-            for segment in reframe_plan.composition_segments
-            if segment.fallback_reason
-        ]
+        native_path = (
+            (compiled_plan is not None and compiled_plan.compatibility_mode == "native")
+            or creative_intent is not None
+            or (plan.envelope is not None and plan.envelope.compatibility_mode == "native")
+        )
+        reframe_plan: ReframePlan | None = None
+        subtitle_project: SubtitleProject | None = None
+        composition_fallbacks: list[str] = []
+        if not native_path:
+            reframe_plan = build_reframe_plan(source_info, planning_canvas, render_config, timeline).model_copy(update={
+                "plan_reference": plan_reference,
+            })
+            composition_fallbacks = [
+                f"{segment.segment_id}: {segment.fallback_reason}"
+                for segment in reframe_plan.composition_segments
+                if segment.fallback_reason
+            ]
         actual_audio_duration = float(mixed_info["audio_duration"])
         if abs(timeline.duration_seconds - actual_audio_duration) > render_config.maximum_duration_difference:
             raise ProductionRenderError(
                 "AudioProject timeline и mixed_audio.wav имеют несовместимую длительность: "
                 f"{timeline.duration_seconds:.3f}s vs {actual_audio_duration:.3f}s."
             )
-        subtitle_project = build_subtitle_project(
-            plan, audio_project, render_config, transcript,
-            composition_segments=reframe_plan.composition_segments,
-            platform=self.config.product_flow.platform,
-        ).model_copy(update={
-            "plan_reference": plan_reference,
-        })
+        if not native_path:
+            assert reframe_plan is not None
+            subtitle_project = build_subtitle_project(
+                plan, audio_project, render_config, transcript,
+                composition_segments=reframe_plan.composition_segments,
+                platform=self.config.product_flow.platform,
+            ).model_copy(update={
+                "plan_reference": plan_reference,
+            })
         mapping = source_output_map_from_legacy_timeline(timeline)
-        if compiled_plan is not None and creative_intent is not None:
-            raise ProductionRenderError("Provide either CreativeIntent or CompiledRenderPlan, not both.")
+        if compiled_plan is not None and creative_intent is not None and (
+            compiled_plan.intent_hash != creative_intent.canonical_hash()
+            or compiled_plan.intent_id != creative_intent.intent_id
+        ):
+            raise ProductionRenderError("CreativeIntent does not match the supplied CompiledRenderPlan.")
         target_observations = tuple(target_observations)
         source_scenes = tuple(source_scenes)
+        intent = creative_intent
+        status = execution_status
+        reason_codes = tuple(execution_reason_codes)
+        diagnostics = tuple(execution_diagnostics)
+        if creative_handoff is not None:
+            target_observations = creative_handoff.target_observations
+            source_scenes = creative_handoff.source_scenes
         try:
             if compiled_plan is not None:
                 validate_native_handoff(plan, mapping, compiled_plan)
+                if intent is not None and intent.source_output_mapping != mapping:
+                    raise ValueError("NATIVE_CREATIVE_INTENT_EDIT_MAPPING_MISMATCH")
             elif creative_intent is not None or (
                 plan.envelope is not None and plan.envelope.compatibility_mode == "native"
             ):
@@ -176,6 +216,9 @@ class VideoCompositionService:
                     intent = evidence_handoff.intent
                     target_observations = evidence_handoff.target_observations
                     source_scenes = evidence_handoff.source_scenes
+                    status = evidence_handoff.execution_status
+                    reason_codes = evidence_handoff.reason_codes
+                    diagnostics = evidence_handoff.diagnostics
                 else:
                     intent = creative_intent or default_native_creative_intent(plan, mapping, self.config)
                 if intent.source_output_mapping != mapping:
@@ -190,6 +233,7 @@ class VideoCompositionService:
                     source_scenes=source_scenes,
                 )
             else:
+                assert reframe_plan is not None and subtitle_project is not None
                 timeline = apply_composition_segments(timeline, reframe_plan.composition_segments)
                 compiled_plan = compile_legacy_render_plan(
                     plan,
@@ -201,12 +245,44 @@ class VideoCompositionService:
         except ValueError as error:
             raise ProductionRenderError(f"NATIVE_CREATIVE_PLAN_REJECTED: {_safe_error(error)}") from error
         if compiled_plan.compatibility_mode == "native":
+            if intent is not None and (
+                creative_handoff is None
+                or creative_handoff.creative_intent_hash != intent.canonical_hash()
+            ):
+                creative_handoff = build_creative_handoff(
+                    intent,
+                    target_observations=target_observations,
+                    source_scenes=source_scenes,
+                )
+            if status is None:
+                status = (
+                    "native_rich"
+                    if compiled_plan.source_broll_plan.segments
+                    and any(item.target.value != "stable_source" for item in compiled_plan.composition_plan.segments)
+                    else "native_fallback"
+                )
+                if status == "native_fallback":
+                    reason_codes = (*reason_codes, "NATIVE_EXECUTION_STATUS_INFERRED_FALLBACK")
             timeline = apply_native_visual_plan(
                 timeline,
                 compiled_plan,
                 source_width=int(source_info["display_width"]),
                 source_height=int(source_info["display_height"]),
                 rotation=cast(Literal[0, 90, 180, 270], int(source_info.get("rotation", 0))),
+            )
+        else:
+            status = "legacy"
+        creative_execution: CandidateCreativeExecution | None = None
+        if intent is not None and creative_handoff is not None:
+            creative_execution = build_creative_execution(
+                intent,
+                compiled_plan,
+                execution_status=cast(Literal["native_rich", "native_fallback", "legacy"], status),
+                reason_codes=reason_codes,
+                diagnostics=diagnostics,
+                parent_compiled_plan_hash=parent_compiled_plan_hash,
+                parent_creative_intent_hash=parent_creative_intent_hash,
+                style_revision=style_revision,
             )
         profile = _resolve_render_profile(compiled_plan, render_profile, render_config)
         canvas = CanvasConfig(
@@ -235,6 +311,11 @@ class VideoCompositionService:
             creative_compatibility_mode=(
                 "native" if compiled_plan.compatibility_mode == "native" else "legacy_adapter"
             ),
+            creative_execution_status=cast(
+                Literal["native_rich", "native_fallback", "legacy"], status,
+            ),
+            creative_execution_reason_codes=list(reason_codes),
+            creative_execution_diagnostics=list(diagnostics),
             render_profile_id=profile.profile_id,
             created_at=utc_now(), updated_at=utc_now(),
         )
@@ -249,11 +330,14 @@ class VideoCompositionService:
             canvas=canvas, target_duration_seconds=timeline.duration_seconds, actual_duration_seconds=0,
             timeline=timeline, reframe_plan=reframe_plan, tracks=[track], subtitle_project=subtitle_project, render_request=request,
             metadata=metadata,
-            warnings=list(subtitle_project.warnings),
+            warnings=list(subtitle_project.warnings) if subtitle_project is not None else [],
             fallback_reasons=[
                 *fallback_reasons,
                 *composition_fallbacks,
-                *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else []),
+                *(
+                    [reframe_plan.fallback_reason]
+                    if reframe_plan is not None and reframe_plan.fallback_reason else []
+                ),
             ],
         )
         quality = validate_output_quality(
@@ -291,6 +375,9 @@ class VideoCompositionService:
         return self._render(
             project, source_info, mixed_info, render_root, cache_path,
             compiled_plan=compiled_plan, render_profile=profile,
+            creative_intent=intent,
+            creative_handoff=creative_handoff,
+            creative_execution=creative_execution,
             force_recompute=force_recompute,
         )
 
@@ -342,6 +429,9 @@ class VideoCompositionService:
         self, project: VideoProject, source_info: dict[str, Any], mixed_info: dict[str, Any],
         render_root: Path, cache_path: Path,
         *, compiled_plan: CompiledRenderPlan, render_profile: RenderProfile,
+        creative_intent: CreativeIntent | None,
+        creative_handoff: CandidateCreativeHandoff | None,
+        creative_execution: CandidateCreativeExecution | None,
         force_recompute: bool,
     ) -> VideoProject:
         quality = validate_output_quality(
@@ -584,6 +674,18 @@ class VideoCompositionService:
             compiled_plan, render_profile, output_checksum=encoded.checksum,
         )
         write_json(render_root / "compiled-render-plan.json", compiled_plan.model_dump(mode="json"))
+        if (
+            creative_intent is not None
+            and creative_handoff is not None
+            and creative_execution is not None
+        ):
+            persist_candidate_creative_identity(
+                render_root,
+                intent=creative_intent,
+                compiled_plan=compiled_plan,
+                handoff=creative_handoff,
+                execution=creative_execution,
+            )
         write_json(render_root / "parity-manifest.json", parity_manifest.model_dump(mode="json"))
         ass_path = render_root / "production-subtitles.ass"
         cache.materialize(captions, ass_path)
@@ -2479,12 +2581,12 @@ def validate_final_video(path: Path, canvas: CanvasConfig, mixed_audio: Path, co
 
 def _render_cache_key(
     plan: ProductionPlan, source_checksum: str, mixed_checksum: str, audio_project: AudioProject, timeline: VideoTimeline,
-    subtitles: SubtitleProject, canvas: CanvasConfig, config: ProductionRenderConfig,
+    subtitles: SubtitleProject | None, canvas: CanvasConfig, config: ProductionRenderConfig,
     *, platform: str, product_flow_revision: str,
     compiled_plan: CompiledRenderPlan,
     render_profile: RenderProfile,
 ) -> str:
-    return stable_text_hash(json.dumps({
+    payload = {
         "source_checksum": source_checksum, "mixed_audio_checksum": mixed_checksum,
         "production_plan": {
             "plan_id": plan.plan_id,
@@ -2500,7 +2602,7 @@ def _render_cache_key(
             "plan_envelope": plan.envelope.model_dump(mode="json", exclude={"created_at"}) if plan.envelope else None,
         },
         "audio_project_checksum": stable_text_hash(audio_project.model_dump_json()),
-        "timeline": timeline.model_dump(mode="json"), "subtitle_project": subtitles.model_dump(mode="json"),
+        "timeline": timeline.model_dump(mode="json"),
         "canvas": canvas.model_dump(mode="json"), "crop": config.crop_strategy,
         "encoder": config.encoder, "codec": config.video_codec, "bitrate": config.video_bitrate,
         "subtitles_enabled": config.subtitles_enabled, "render_config": asdict(config),
@@ -2510,7 +2612,10 @@ def _render_cache_key(
         "render_profile": render_profile.model_dump(mode="json"),
         "version": config.render_config_version,
         "engine_version": PRODUCTION_RENDER_ENGINE_VERSION,
-    }, sort_keys=True, ensure_ascii=False))
+    }
+    if compiled_plan.compatibility_mode != "native":
+        payload["subtitle_project"] = subtitles.model_dump(mode="json") if subtitles is not None else None
+    return stable_text_hash(json.dumps(payload, sort_keys=True, ensure_ascii=False))
 
 
 def _resolve_render_profile(
@@ -2547,32 +2652,15 @@ def _resolve_render_profile(
 
 
 def _native_motion_filter(motion_plan: Any, canvas: CanvasConfig) -> str | None:
-    """Compile bounded 7F FFmpeg motion events without accepting filter syntax."""
+    """Return no second pixel transform for composition-owned punch-ins.
 
-    events = [
-        item for item in motion_plan.events
-        if item.backend_id == "ffmpeg"
-        and item.domain == MotionDomain.COMPOSITION
-        and item.primitive_id == "punch_in"
-        and item.duration_frames > 0
-        and item.scale_to > item.scale_from
-    ]
-    if not events:
-        return None
-    pulses = []
-    for event in events:
-        start = event.output.start_frame
-        duration = max(1, event.duration_frames)
-        end = min(event.output.end_frame, start + duration)
-        delta = max(0.0, min(0.12, event.scale_to - event.scale_from))
-        pulses.append(
-            f"if(between(on,{start},{end}),{delta:.6f}*(1-cos(2*PI*(on-{start})/{duration}))/2,0)"
-        )
-    zoom = "1+" + "+".join(pulses)
-    return (
-        f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"d=1:s={canvas.width}x{canvas.height}:fps={canvas.fps}"
-    )
+    The 7D composition crop is the sole pixel owner. The corresponding 7F
+    event remains in the immutable plan for timing, budgeting and QC, but must
+    not add another zoom after the base visual has already applied the crop.
+    """
+
+    del motion_plan, canvas
+    return None
 
 
 def _write_project_artifacts(project: VideoProject, root: Path) -> None:
@@ -2583,17 +2671,28 @@ def _write_project_artifacts(project: VideoProject, root: Path) -> None:
     project_path = root / "video-project.json"
     result_path = root / "render-result.json"
     summary_path = root / "render-summary.txt"
-    artifacts = [str(project_path), str(timeline_path), str(reframe_path), str(subtitle_path), str(result_path), str(summary_path)]
+    artifacts = [str(project_path), str(timeline_path), str(result_path), str(summary_path)]
+    if project.reframe_plan is not None:
+        artifacts.append(str(reframe_path))
+    if project.subtitle_project is not None:
+        artifacts.append(str(subtitle_path))
     if (root / "production-subtitles.ass").is_file():
         artifacts.append(str(root / "production-subtitles.ass"))
     if project.result and project.result.output_file:
         artifacts.append(project.result.output_file)
-    for extra in (root / "compiled-render-plan.json", root / "parity-manifest.json"):
+    for extra in (
+        root / "creative-intent.json",
+        root / "creative-handoff.json",
+        root / "creative-execution.json",
+        root / "compiled-render-plan.json",
+        root / "parity-manifest.json",
+    ):
         if extra.is_file():
             artifacts.append(str(extra))
     complete = project.model_copy(update={"artifact_paths": artifacts})
     write_json(timeline_path, complete.timeline.model_dump(mode="json"))
-    write_json(reframe_path, complete.reframe_plan.model_dump(mode="json"))
+    if complete.reframe_plan is not None:
+        write_json(reframe_path, complete.reframe_plan.model_dump(mode="json"))
     if complete.subtitle_project is not None:
         write_json(subtitle_path, complete.subtitle_project.model_dump(mode="json"))
     write_json(project_path, complete.model_dump(mode="json"))
@@ -2608,6 +2707,9 @@ def _artifacts(root: Path, final_path: Path, clips: list[Path] | None = None) ->
         ("video_timeline", root / "video-timeline.json"), ("reframe_plan", root / "reframe-plan.json"), ("subtitle_project", root / "subtitle-project.json"),
         ("production_ass", root / "production-subtitles.ass"), ("render_result", root / "render-result.json"),
         ("summary", root / "render-summary.txt"),
+        ("creative_intent", root / "creative-intent.json"),
+        ("creative_handoff", root / "creative-handoff.json"),
+        ("creative_execution", root / "creative-execution.json"),
         ("compiled_render_plan", root / "compiled-render-plan.json"),
         ("parity_manifest", root / "parity-manifest.json"),
     ]
@@ -2833,7 +2935,8 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
     else:
         quality = validate_output_quality(project, project.render_request.subtitles_enabled)
     subtitles = project.subtitle_project
-    composition_segments = project.reframe_plan.composition_segments
+    reframe = project.reframe_plan
+    composition_segments = reframe.composition_segments if reframe is not None else []
     strategy_counts: dict[str, int] = {}
     tracking_mode_counts: dict[str, int] = {}
     for segment in composition_segments:
@@ -2885,6 +2988,9 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "compiled_plan_hash": project.metadata.compiled_plan_hash,
         "creative_qc_source": "compiled_render_plan" if native else "legacy_adapter",
         "compatibility_mode": "native" if native else "legacy_adapter",
+        "execution_status": project.metadata.creative_execution_status,
+        "execution_reason_codes": list(project.metadata.creative_execution_reason_codes),
+        "execution_diagnostics": list(project.metadata.creative_execution_diagnostics),
         "parity_signature": project.metadata.parity_signature,
         "cache_nodes": dict(project.metadata.cache_node_hits),
         "single_pass_encode": project.metadata.single_pass_encode,
@@ -2892,8 +2998,8 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "warnings": project.warnings,
         "fallback_reasons": project.fallback_reasons,
         "composition": {
-            "strategy": project.reframe_plan.strategy,
-            "subject_detection_used": project.reframe_plan.subject_detection_used,
+            "strategy": reframe.strategy if reframe is not None else None,
+            "subject_detection_used": reframe.subject_detection_used if reframe is not None else False,
             "summary": {
                 "strategy_counts": strategy_counts,
                 "tracking_mode_counts": tracking_mode_counts,
@@ -2917,7 +3023,7 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
             },
             "segments": [
                 segment.model_dump(mode="json")
-                for segment in project.reframe_plan.composition_segments
+                for segment in composition_segments
             ],
             "tracking_validation": quality.get("tracking", {}),
         },

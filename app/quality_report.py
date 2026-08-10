@@ -207,6 +207,7 @@ def build_quality_report(
     _collect_eligibility(finding, candidate_data)
     _collect_diversity(finding, diversity_decision, result.candidate_id)
     _collect_plan_and_boundary(finding, plan_data, result, project_id, source_id)
+    _collect_creative_execution(finding, render)
     _collect_composition_and_subtitles(finding, render)
     _collect_audio(finding, audio)
     _collect_ffprobe(finding, render)
@@ -625,6 +626,43 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
             threshold="existing output quality validation passed", producer="output_quality",
             message="Existing final output quality validation failed.",
         )
+
+
+def _collect_creative_execution(finding: Any, render: dict[str, Any]) -> None:
+    native = render.get("compatibility_mode") == "native"
+    status = str(render.get("execution_status") or "")
+    reasons = [str(item) for item in render.get("execution_reason_codes", [])]
+    if native and status not in {"native_rich", "native_fallback"}:
+        finding(
+            "CREATIVE_EXECUTION_STATUS_MISSING", "blocker",
+            {"execution_status": status, "reason_codes": reasons},
+            measured_value=status or "missing",
+            threshold="native_rich or native_fallback",
+            producer="creative_execution",
+            message="Native render is missing its explicit creative execution status.",
+        )
+        return
+    if status == "native_fallback":
+        finding(
+            "NATIVE_CREATIVE_FALLBACK", "warning",
+            {"execution_status": status, "reason_codes": reasons},
+            measured_value=reasons,
+            threshold="explicit safe fallback diagnostics",
+            producer="creative_execution",
+            message="Native render used declared evidence-bounded fallbacks.",
+        )
+    if status == "native_rich":
+        raw_broll = render.get("source_broll_plan")
+        segments = raw_broll.get("segments") if isinstance(raw_broll, dict) else None
+        if not isinstance(segments, list) or not segments:
+            finding(
+                "NATIVE_RICH_EVIDENCE_MISSING", "blocker",
+                {"execution_status": status, "source_broll_plan": raw_broll},
+                measured_value="empty source B-roll",
+                threshold="evidence-backed rich domain plans",
+                producer="creative_execution",
+                message="native_rich cannot mask an empty rich creative plan.",
+            )
 
 
 def _collect_audio(finding: Any, audio: dict[str, Any]) -> None:

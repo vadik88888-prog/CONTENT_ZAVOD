@@ -699,10 +699,21 @@ class ProductionRenderConfig:
     av_sync_error_ms: float = 350.0
     maximum_duration_difference: float = 0.35
     render_config_version: str = "3D.0"
+    # File availability does not prove permission to reuse another range as a
+    # cutaway. Native source B-roll requires this explicit runtime contract.
+    same_source_broll_allowed: bool = False
 
     def validate(self) -> None:
-        if not isinstance(self.enabled, bool) or not isinstance(self.cache_enabled, bool) or not isinstance(self.subtitles_enabled, bool):
-            raise ClipEngineError("production_render.enabled, cache_enabled и subtitles_enabled должны быть true или false.")
+        if (
+            not isinstance(self.enabled, bool)
+            or not isinstance(self.cache_enabled, bool)
+            or not isinstance(self.subtitles_enabled, bool)
+            or not isinstance(self.same_source_broll_allowed, bool)
+        ):
+            raise ClipEngineError(
+                "production_render.enabled, cache_enabled, subtitles_enabled и "
+                "same_source_broll_allowed должны быть true или false."
+            )
         if self.output_width < 2 or self.output_height < 2 or self.output_width % 2 or self.output_height % 2:
             raise ClipEngineError("production_render output_width/output_height должны быть положительными чётными числами.")
         if abs((self.output_width / self.output_height) - (9 / 16)) > 0.002:

@@ -8,7 +8,7 @@ bounded editorial/visual observations into the Phase 7 native contracts.
 """
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from app.candidate_quality import MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
 from app.composition_planning import TargetObservation
@@ -28,6 +28,7 @@ from app.creative_contracts import (
     ResolvedCompositionTarget,
     ResolvedEmphasis,
     ResolvedMotionEvent,
+    ResolvedSourceBRoll,
     SemanticClass,
     SourceBRollSemanticKind,
     SourceInterval,
@@ -39,7 +40,7 @@ from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 
 
-NATIVE_EVIDENCE_HANDOFF_VERSION = "7G.2"
+NATIVE_EVIDENCE_HANDOFF_VERSION = "7G.3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +48,9 @@ class NativeEvidenceHandoff:
     intent: CreativeIntent
     target_observations: tuple[TargetObservation, ...] = ()
     source_scenes: tuple[SourceSceneEvidence, ...] = ()
+    execution_status: Literal["native_rich", "native_fallback"] = "native_fallback"
+    reason_codes: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
 
 def build_native_evidence_handoff(
@@ -62,7 +66,11 @@ def build_native_evidence_handoff(
 
     fallback = default_native_creative_intent(plan, mapping, config)
     if not isinstance(candidate, Mapping):
-        return NativeEvidenceHandoff(intent=fallback)
+        return NativeEvidenceHandoff(
+            intent=fallback,
+            reason_codes=("PHASE6_CANDIDATE_MISSING", "SAFE_A_ROLL_FALLBACK"),
+            diagnostics=("No persisted candidate record was supplied to the native hand-off.",),
+        )
 
     timeline = multimodal_timeline if isinstance(multimodal_timeline, Mapping) else {}
     stories_artifact = story_units if isinstance(story_units, Mapping) else {}
@@ -79,10 +87,13 @@ def build_native_evidence_handoff(
     motion: list[ResolvedMotionEvent] = []
     observations: list[TargetObservation] = []
     composition: list[ResolvedCompositionTarget] = []
+    source_broll: list[ResolvedSourceBRoll] = []
+    story_evidence_refs: dict[str, str] = {}
 
     for index, story in enumerate(stories, start=1):
+        story_source = _source_interval(_float(story.get("start")), _float(story.get("end")))
         source = _mapped_intersection(mapping, _float(story.get("start")), _float(story.get("end")))
-        if source is None:
+        if source is None or story_source is None:
             continue
         output = mapping.map_interval(source)
         if output is None:
@@ -92,12 +103,13 @@ def build_native_evidence_handoff(
         manifest.append(EvidenceItem(
             evidence_ref=evidence_ref,
             evidence_kind="story_unit",
-            source=source,
+            source=story_source,
             confidence=confidence,
             artifact_fingerprint=canonical_hash(story),
             provenance="phase6:story_units",
         ))
         story_id = str(story.get("story_unit_id") or f"story-{index}")
+        story_evidence_refs[story_id] = evidence_ref
         claim = ResolvedBeat(
             decision_id=_id("beat-claim", candidate_id, story_id),
             source=source,
@@ -113,13 +125,18 @@ def build_native_evidence_handoff(
             beats, emphasis, motion,
         )
 
+    _append_audio_decisions(
+        plan, mapping, timeline, candidate_id, manifest, emphasis, motion,
+    )
+
     visual_rows = _visual_rows(candidate, timeline)
+    composition_intent = _composition_intent(candidate, plan)
     seen_observations: set[tuple[int, str, str]] = set()
     for index, row in enumerate(visual_rows, start=1):
         timestamp = _timestamp(row)
         source = _source_interval_at(mapping, timestamp)
         bounds = _target_bounds(row)
-        target = _attention_target(row)
+        target = _attention_target(row, composition_intent)
         if source is None or bounds is None or target is None:
             continue
         output = mapping.map_interval(source)
@@ -167,12 +184,21 @@ def build_native_evidence_handoff(
         ))
 
     scenes, scene_manifest = _source_scenes(
-        plan, mapping, timeline, story_ids, beats, visual_rows, candidate_id,
+        plan, timeline, stories, beats, visual_rows, candidate_id,
+        same_source_usage_allowed=config.production_render.same_source_broll_allowed,
     )
     manifest.extend(scene_manifest)
+    if config.production_render.same_source_broll_allowed:
+        source_broll.extend(_source_broll_decisions(
+            mapping, beats, scenes, story_evidence_refs, candidate_id,
+        ))
     manifest = _unique_manifest(manifest)
     if not manifest:
-        return NativeEvidenceHandoff(intent=fallback)
+        return NativeEvidenceHandoff(
+            intent=fallback,
+            reason_codes=("PHASE6_EVIDENCE_UNAVAILABLE", "SAFE_A_ROLL_FALLBACK"),
+            diagnostics=("Persisted Phase 6 artifacts contained no mappable trusted evidence.",),
+        )
 
     evidence_fingerprint = canonical_hash([item.model_dump(mode="json") for item in manifest])
     proposal_hash = canonical_hash({
@@ -183,10 +209,16 @@ def build_native_evidence_handoff(
         "emphasis": [item.model_dump(mode="json") for item in emphasis],
         "composition": [item.model_dump(mode="json") for item in composition],
         "motion": [item.model_dump(mode="json") for item in motion],
+        "source_broll": [item.model_dump(mode="json") for item in source_broll],
     })
     accepted_confidence = [
-        item.confidence for item in (*beats, *emphasis, *composition, *motion)
+        item.confidence for item in (*beats, *emphasis, *composition, *motion, *source_broll)
     ]
+    policy = fallback.policy.model_copy(update={
+        "source_broll_enabled": bool(
+            config.production_render.same_source_broll_allowed and source_broll
+        ),
+    })
     intent = fallback.model_copy(update={
         "intent_id": f"intent-phase6-{proposal_hash[:17]}",
         "evidence_fingerprint": evidence_fingerprint,
@@ -202,15 +234,36 @@ def build_native_evidence_handoff(
             "phase6:story_units",
             NATIVE_EVIDENCE_HANDOFF_VERSION,
         ),
+        "policy": policy,
         "beats": tuple(sorted(beats, key=lambda item: (item.output.start_frame, item.decision_id))),
         "semantic_emphasis": tuple(sorted(emphasis, key=lambda item: (item.output.start_frame, item.decision_id))),
         "composition_targets": tuple(sorted(composition, key=lambda item: (item.output.start_frame, item.decision_id))),
         "motion_events": tuple(sorted(motion, key=lambda item: (item.output.start_frame, item.decision_id))),
+        "source_broll": tuple(sorted(source_broll, key=lambda item: (item.output.start_frame, item.decision_id))),
     })
+    reason_codes: list[str] = []
+    diagnostics: list[str] = []
+    if not composition:
+        reason_codes.append("COMPOSITION_EVIDENCE_UNAVAILABLE")
+    if not observations:
+        reason_codes.append("STABLE_COMPOSITION_FALLBACK")
+    if not config.production_render.same_source_broll_allowed:
+        reason_codes.append("SOURCE_BROLL_USAGE_NOT_AUTHORIZED")
+    elif not source_broll:
+        reason_codes.append("SOURCE_BROLL_RELEVANCE_UNPROVEN")
+    if not motion:
+        reason_codes.append("STATIC_MOTION_FALLBACK")
+    rich = bool(composition and observations and source_broll)
+    if not rich:
+        reason_codes.append("SAFE_A_ROLL_FALLBACK")
+        diagnostics.append("Native execution retained only evidence-backed domains and used safe fallbacks elsewhere.")
     return NativeEvidenceHandoff(
         intent=intent,
         target_observations=tuple(sorted(observations, key=lambda item: (item.frame, item.observation_id))),
         source_scenes=scenes,
+        execution_status="native_rich" if rich else "native_fallback",
+        reason_codes=tuple(dict.fromkeys(reason_codes)),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -270,14 +323,15 @@ def _append_edge_decisions(
 
 def _source_scenes(
     plan: ProductionPlan,
-    mapping: SourceOutputTimeMap,
     timeline: Mapping[str, Any],
-    story_ids: tuple[str, ...],
+    stories: list[Mapping[str, Any]],
     beats: Iterable[ResolvedBeat],
     visual_rows: list[Mapping[str, Any]],
     candidate_id: str,
+    *,
+    same_source_usage_allowed: bool,
 ) -> tuple[tuple[SourceSceneEvidence, ...], list[EvidenceItem]]:
-    if not story_ids:
+    if not stories:
         return (), []
     result: list[SourceSceneEvidence] = []
     manifest: list[EvidenceItem] = []
@@ -285,17 +339,39 @@ def _source_scenes(
     for index, raw in enumerate(timeline.get("scenes", []), start=1):
         if not isinstance(raw, Mapping):
             continue
-        source = _mapped_intersection(mapping, _float(raw.get("start_seconds")), _float(raw.get("end_seconds")))
+        source = _source_interval(_float(raw.get("start_seconds")), _float(raw.get("end_seconds")))
         if source is None:
             continue
         source_start = source.start_tick / 1_000_000
         source_end = source.end_tick / 1_000_000
         rows = [row for row in visual_rows if source_start <= _timestamp(row) < source_end]
+        geometry_row = max(
+            (row for row in rows if _target_bounds(row) is not None and _attention_target(row) is not None),
+            key=lambda item: _confidence(item.get("confidence"), default=0.0),
+            default=None,
+        )
         kinds = tuple(dict.fromkeys(
             kind for row in rows for kind in _semantic_kinds(row)
         )) or (SourceBRollSemanticKind.CONTEXT,)
+        linked_story_ids = tuple(dict.fromkeys(
+            str(story.get("story_unit_id") or "")
+            for story in stories
+            if str(story.get("story_unit_id") or "")
+            and (
+                story_source := _source_interval(
+                    _float(story.get("start")), _float(story.get("end")),
+                )
+            ) is not None
+            and story_source.overlaps(source)
+        ))
+        if not linked_story_ids:
+            continue
         roles = tuple(dict.fromkeys(
-            beat.role for beat in beat_list if beat.source.overlaps(source)
+            beat.role for beat in beat_list
+            if any(
+                beat.evidence_refs == (_id("story", candidate_id, story_id),)
+                for story_id in linked_story_ids
+            )
         )) or (BeatRole.CLAIM,)
         evidence_ref = _id("scene", candidate_id, str(raw.get("scene_id") or index))
         confidence = _confidence(raw.get("confidence"), default=0.65)
@@ -312,19 +388,183 @@ def _source_scenes(
             source_id=plan.reference().identity.source_id,
             source=source,
             semantic_kinds=kinds,
-            story_unit_ids=story_ids,
+            story_unit_ids=linked_story_ids,
             beat_roles=roles,
             evidence_refs=(evidence_ref,),
+            source_crop=_target_bounds(geometry_row) if geometry_row is not None else None,
+            source_target=_attention_target(geometry_row) if geometry_row is not None else None,
             confidence=confidence,
             identity_status="verified",
             attribution_status="verified",
             chronology_status="safe",
             causality_status="not_claimed",
-            rights_status="uncertain",
+            rights_status="verified" if same_source_usage_allowed else "uncertain",
             payoff_signal=_scene_payoff(rows),
             provenance=("phase6:multimodal_timeline", NATIVE_EVIDENCE_HANDOFF_VERSION),
         ))
     return tuple(result), manifest
+
+
+def _append_audio_decisions(
+    plan: ProductionPlan,
+    mapping: SourceOutputTimeMap,
+    timeline: Mapping[str, Any],
+    candidate_id: str,
+    manifest: list[EvidenceItem],
+    emphasis: list[ResolvedEmphasis],
+    motion: list[ResolvedMotionEvent],
+) -> None:
+    """Carry persisted emphasis/reaction evidence without another audio pass."""
+
+    for index, raw in enumerate(timeline.get("audio_event_map", []), start=1):
+        if not isinstance(raw, Mapping) or raw.get("event_type") not in {"emphasis", "reaction_label"}:
+            continue
+        source = _mapped_intersection(
+            mapping, _float(raw.get("start_seconds")), _float(raw.get("end_seconds")),
+        )
+        if source is None:
+            continue
+        output = mapping.map_interval(source)
+        if output is None:
+            continue
+        confidence = _confidence(raw.get("confidence"), default=0.0)
+        if confidence < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE:
+            continue
+        event_type = str(raw.get("event_type"))
+        evidence_ref = _id("audio", candidate_id, str(raw.get("event_id") or index))
+        manifest.append(EvidenceItem(
+            evidence_ref=evidence_ref,
+            evidence_kind="audio",
+            source=source,
+            confidence=confidence,
+            artifact_fingerprint=canonical_hash(raw),
+            provenance="phase6:multimodal_timeline.audio_event_map",
+        ))
+        raw_observation = raw.get("observation")
+        observation: Mapping[str, Any] = raw_observation if isinstance(raw_observation, Mapping) else {}
+        text = str(observation.get("label") or "audio emphasis")
+        emphasis.append(ResolvedEmphasis(
+            decision_id=_id("emphasis-audio", candidate_id, str(index)),
+            source=source,
+            output=output,
+            confidence=confidence,
+            evidence_refs=(evidence_ref,),
+            text_span=text[:240],
+            semantic_class=SemanticClass.ACTION if event_type == "reaction_label" else SemanticClass.CLAIM,
+            importance=0.82 if event_type == "reaction_label" else 0.72,
+        ))
+        motion.append(ResolvedMotionEvent(
+            decision_id=_id("motion-audio", candidate_id, str(index)),
+            source=source,
+            output=output,
+            confidence=confidence,
+            evidence_refs=(evidence_ref,),
+            purpose=MotionPurpose.REACTION if event_type == "reaction_label" else MotionPurpose.CLAIM_CHANGE,
+            domain=MotionDomain.CAPTION,
+            intensity=Intensity.BALANCED,
+        ))
+
+    boundary = plan.boundary_decision
+    context = boundary.multimodal_context if boundary is not None else {}
+    if not isinstance(context, Mapping):
+        return
+    for index, value in enumerate(context.get("audio_or_visual_payoff_times", []), start=1):
+        timestamp = _float(value)
+        source = _source_interval_at(mapping, timestamp) if timestamp is not None else None
+        if source is None:
+            continue
+        output = mapping.map_interval(source)
+        if output is None:
+            continue
+        confidence = _confidence(context.get("confidence"), default=0.0)
+        evidence_ref = _id("boundary", candidate_id, str(index))
+        manifest.append(EvidenceItem(
+            evidence_ref=evidence_ref,
+            evidence_kind="boundary",
+            source=source,
+            confidence=confidence,
+            artifact_fingerprint=canonical_hash(context),
+            provenance="phase6:BoundaryDecision.multimodal_context",
+        ))
+        motion.append(ResolvedMotionEvent(
+            decision_id=_id("motion-boundary-payoff", candidate_id, str(index)),
+            source=source,
+            output=output,
+            confidence=confidence,
+            evidence_refs=(evidence_ref,),
+            purpose=MotionPurpose.PAYOFF,
+            domain=MotionDomain.CAPTION,
+            intensity=Intensity.BALANCED,
+        ))
+
+
+def _source_broll_decisions(
+    mapping: SourceOutputTimeMap,
+    beats: list[ResolvedBeat],
+    scenes: tuple[SourceSceneEvidence, ...],
+    story_evidence_refs: Mapping[str, str],
+    candidate_id: str,
+) -> tuple[ResolvedSourceBRoll, ...]:
+    """Resolve deterministic same-source cutaways from already-proven scenes."""
+
+    results: list[ResolvedSourceBRoll] = []
+    used_ranges: list[SourceInterval] = []
+    for scene in sorted(scenes, key=lambda item: (-item.confidence, item.source.start_tick, item.scene_id)):
+        if scene.confidence < 0.72 or scene.rights_status != "verified":
+            continue
+        semantic = next(
+            (kind for kind in scene.semantic_kinds if kind != SourceBRollSemanticKind.CONTEXT),
+            None,
+        )
+        if semantic is None:
+            continue
+        story_id = next(
+            (item for item in scene.story_unit_ids if item in story_evidence_refs), None,
+        )
+        if story_id is None:
+            continue
+        story_ref = story_evidence_refs[story_id]
+        linked = [beat for beat in beats if story_ref in beat.evidence_refs]
+        if scene.payoff_signal in {"reveal", "result", "resolution"}:
+            linked = [beat for beat in linked if beat.role == BeatRole.PAYOFF]
+        else:
+            linked = [beat for beat in linked if beat.role != BeatRole.PAYOFF] or linked
+        beat = max(linked, key=lambda item: (item.importance, item.confidence), default=None)
+        if beat is None or scene.source.overlaps(beat.source):
+            continue
+        destination_frames = min(
+            beat.output.end_frame - beat.output.start_frame,
+            max(12, min(45, round((scene.source.end_tick - scene.source.start_tick) * 30 / 1_000_000))),
+        )
+        if destination_frames <= 0:
+            continue
+        destination = OutputInterval(
+            start_frame=beat.output.start_frame,
+            end_frame=beat.output.start_frame + destination_frames,
+        )
+        destination_source = _source_for_output_slice(beat.source, beat.output, destination)
+        cutaway_duration = max(1, round(destination_frames * 1_000_000 / 30))
+        cutaway = SourceInterval(
+            start_tick=scene.source.start_tick,
+            end_tick=min(scene.source.end_tick, scene.source.start_tick + cutaway_duration),
+        )
+        if any(item.overlaps(cutaway) for item in used_ranges):
+            continue
+        used_ranges.append(cutaway)
+        results.append(ResolvedSourceBRoll(
+            decision_id=_id("source-broll", candidate_id, str(len(results) + 1)),
+            source=destination_source,
+            output=destination,
+            confidence=min(scene.confidence, beat.confidence),
+            evidence_refs=(story_ref,),
+            source_cutaway=cutaway,
+            source_cutaway_evidence_refs=scene.evidence_refs,
+            story_unit_id=story_id,
+            story_unit_evidence_ref=story_ref,
+            semantic_kind=semantic,
+            retain_source_audio=False,
+        ))
+    return tuple(results)
 
 
 def _visual_rows(candidate: Mapping[str, Any], timeline: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -348,6 +588,21 @@ def _candidate_story_ids(candidate: Mapping[str, Any]) -> tuple[str, ...]:
     if candidate.get("story_unit_id"):
         result.append(str(candidate["story_unit_id"]))
     return tuple(dict.fromkeys(result))
+
+
+def _composition_intent(
+    candidate: Mapping[str, Any], plan: ProductionPlan,
+) -> Mapping[str, Any]:
+    value = candidate.get("composition_intent")
+    if isinstance(value, Mapping) and value.get("evidence_status") == "available":
+        return value
+    return plan.composition_intent if isinstance(plan.composition_intent, Mapping) else {}
+
+
+def _source_interval(start: float | None, end: float | None) -> SourceInterval | None:
+    if start is None or end is None or end <= start:
+        return None
+    return SourceInterval(start_tick=round(start * 1_000_000), end_tick=round(end * 1_000_000))
 
 
 def _mapped_intersection(mapping: SourceOutputTimeMap, start: float | None, end: float | None) -> SourceInterval | None:
@@ -412,7 +667,9 @@ def _target_bounds(row: Mapping[str, Any]) -> NormalizedRect | None:
     return NormalizedRect(x=x, y=y, width=width, height=height)
 
 
-def _attention_target(row: Mapping[str, Any]) -> AttentionTarget | None:
+def _attention_target(
+    row: Mapping[str, Any], composition_intent: Mapping[str, Any] | None = None,
+) -> AttentionTarget | None:
     observation = row.get("observation") if isinstance(row.get("observation"), Mapping) else row
     active = observation.get("active_subject") if isinstance(observation, Mapping) else None
     raw = str(active.get("target_type") if isinstance(active, Mapping) else row.get("primary_subject") or "")
@@ -420,7 +677,7 @@ def _attention_target(row: Mapping[str, Any]) -> AttentionTarget | None:
     count = faces.get("visible_count") if isinstance(faces, Mapping) else row.get("visible_face_count")
     if isinstance(count, int) and count > 1:
         return AttentionTarget.GROUP
-    return {
+    resolved = {
         "primary_face": AttentionTarget.SPEAKER,
         "face": AttentionTarget.SPEAKER,
         "primary_person": AttentionTarget.SUBJECT,
@@ -433,6 +690,31 @@ def _attention_target(row: Mapping[str, Any]) -> AttentionTarget | None:
         "screen_region": AttentionTarget.SCREEN,
         "screen": AttentionTarget.SCREEN,
     }.get(raw)
+    if resolved is not None:
+        return resolved
+    intent = composition_intent or {}
+    explicit = {
+        "screen": AttentionTarget.SCREEN,
+        "product": AttentionTarget.PRODUCT,
+        "object": AttentionTarget.OBJECT,
+        "person": AttentionTarget.SUBJECT,
+        "face": AttentionTarget.SPEAKER,
+        "group": AttentionTarget.GROUP,
+    }.get(str(_intent_value(intent, "screen_or_product") or _intent_value(intent, "important_subject_or_object") or ""))
+    if explicit is not None:
+        return explicit
+    if _intent_value(intent, "multiple_subjects") is True:
+        return AttentionTarget.GROUP
+    if _intent_value(intent, "reaction") not in {None, "", "none", "unknown"}:
+        return AttentionTarget.REACTION
+    if _intent_value(intent, "active_speaker") is True:
+        return AttentionTarget.SPEAKER
+    return None
+
+
+def _intent_value(intent: Mapping[str, Any], name: str) -> Any:
+    raw = intent.get(name)
+    return raw.get("value") if isinstance(raw, Mapping) else raw
 
 
 def _semantic_kinds(row: Mapping[str, Any]) -> tuple[SourceBRollSemanticKind, ...]:

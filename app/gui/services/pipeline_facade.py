@@ -493,17 +493,35 @@ class PipelineFacade:
             parent_output = Path(str(parent_value)) if isinstance(parent_value, str) and parent_value.strip() else None
         if parent_output is None or not parent_output.is_dir():
             raise InputValidationError("Не найдена run directory исходного успешного запуска для повторного экспорта.")
+        candidate_ids: list[str] = []
+        parent_report = read_json(parent_output / "report.json", {})
+        primary_results = parent_report.get("primary_results", []) if isinstance(parent_report, dict) else []
+        if project.last_final_result_id and isinstance(primary_results, list):
+            selected = next((
+                item for item in primary_results
+                if isinstance(item, dict)
+                and str(item.get("clip_result_id") or "") == project.last_final_result_id
+            ), None)
+            if isinstance(selected, dict) and selected.get("candidate_id"):
+                candidate_ids = [str(selected["candidate_id"])]
+        if not candidate_ids:
+            candidate_ids = [
+                str(item) for item in parent_run.settings_snapshot.get("candidate_ids", [])
+                if str(item)
+            ]
         arguments = [
             "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id,
             "--upstream-run-directory", str(parent_output),
             "--production-render-only", "--recompute-production-render",
         ]
+        for candidate_id in candidate_ids:
+            arguments.extend(["--candidate-id", candidate_id])
         return self._pending_prepared(
             arguments, source_path, config_path, run.run_id, project.project_id,
             {
                 "render_only": "true", "device": str(config.device), "encoder": str(config.production_render.encoder),
                 "cache": str(config.production_render.cache_enabled).lower(), "processing_mode": resolved.processing_mode,
-                "platform": resolved.platform.platform,
+                "platform": resolved.platform.platform, "candidate_count": str(len(candidate_ids)),
             },
             source_duration_seconds=_source_duration_seconds(project),
         )

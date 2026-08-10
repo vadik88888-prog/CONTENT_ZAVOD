@@ -223,6 +223,8 @@ def test_native_creative_qc_ignores_legacy_subtitle_and_reframe_decisions(tmp_pa
     artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
     render.update({
         "compatibility_mode": "native",
+        "execution_status": "native_fallback",
+        "execution_reason_codes": ["TEST_EVIDENCE_UNAVAILABLE"],
         "creative_qc_source": "compiled_render_plan",
         "compiled_render_plan": {"schema_version": "7G.compiled-render-plan.1", "plan_hash": "a" * 64},
         "composition": {"segments": [{
@@ -244,7 +246,7 @@ def test_native_creative_qc_ignores_legacy_subtitle_and_reframe_decisions(tmp_pa
         all_results=[result],
     )
 
-    assert report.status == "PASS"
+    assert report.status == "PASS_WITH_WARNINGS"
     assert not any(item.provenance.get("producer") in {
         "composition_quality_decision", "subtitle_quality_decision",
     } for item in report.findings)

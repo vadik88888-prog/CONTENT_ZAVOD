@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.creative_contracts import (
     BeatProposal,
     BeatRole,
+    AttentionTarget,
     CanvasPlan,
     CaptionPlan,
     CompositionPlan,
@@ -129,6 +130,8 @@ def _scene(kind: SourceBRollSemanticKind = SourceBRollSemanticKind.ACTION) -> So
         source=SourceInterval.from_seconds(20, 21), semantic_kinds=(kind,),
         story_unit_ids=("story-1",), beat_roles=(BeatRole.ACTION, BeatRole.REACTION),
         evidence_refs=("scene-cutaway", "visual-cutaway"), confidence=0.9,
+        source_crop=NormalizedRect(x=0.40, y=0.20, width=0.35, height=0.55),
+        source_target=AttentionTarget.OBJECT,
         identity_status="verified", attribution_status="verified",
         chronology_status="safe", causality_status="supported", rights_status="verified",
         payoff_signal="none", provenance=("vision:scene-20",),
@@ -145,6 +148,8 @@ def test_each_supported_semantic_kind_requires_matching_scene_evidence(kind) -> 
     assert segment.semantic_kind == kind
     assert segment.beat_role == BeatRole.ACTION
     assert segment.audio_timeline == "a_roll_master" and segment.retain_source_audio is False
+    assert segment.source_crop == _scene(kind).source_crop
+    assert segment.source_target == AttentionTarget.OBJECT
     assert segment.fallback == "a_roll"
     assert segment.fallback_composition_segment_ids == ("composition-current",)
     assert segment.safety_checks is not None

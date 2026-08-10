@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--config", type=Path, help="Путь к YAML-конфигурации.")
     process.add_argument("--run-id", help="Обязательный идентификатор desktop run; без него CLI создаст новый isolated run.")
     process.add_argument("--upstream-run-directory", type=Path, help=argparse.SUPPRESS)
+    process.add_argument("--candidate-id", action="append", default=[], help=argparse.SUPPRESS)
     process.add_argument("--project-id", help=argparse.SUPPRESS)
     process.add_argument(
         "--mock-ai", action="store_true",
@@ -314,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=arguments.run_id,
             upstream_run_directory=arguments.upstream_run_directory,
             project_id=arguments.project_id,
+            selected_candidate_ids=list(arguments.candidate_id),
         ).run(
             input_path=arguments.input, url=arguments.url
         )

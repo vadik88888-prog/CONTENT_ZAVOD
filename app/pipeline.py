@@ -22,6 +22,14 @@ from app.audio_features import analyse_audio
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
+from app.creative_contracts import CompiledRenderPlan, CreativeIntent
+from app.creative_lifecycle import (
+    CreativeArtifactError,
+    creative_policy_changed,
+    CandidateCreativeHandoff,
+    load_candidate_creative_identity,
+    revise_creative_intent,
+)
 from app.content_understanding import (
     CONTENT_STRATEGY_VERSION,
     build_coverage_map,
@@ -2688,6 +2696,16 @@ class Pipeline:
         phase6_candidate: dict[str, Any] | None = None,
         multimodal_timeline: dict[str, Any] | None = None,
         story_units: dict[str, Any] | None = None,
+        compiled_plan: CompiledRenderPlan | None = None,
+        creative_intent: CreativeIntent | None = None,
+        creative_handoff: CandidateCreativeHandoff | None = None,
+        execution_status: str | None = None,
+        execution_reason_codes: Iterable[str] = (),
+        execution_diagnostics: Iterable[str] = (),
+        parent_compiled_plan_hash: str | None = None,
+        parent_creative_intent_hash: str | None = None,
+        style_revision: bool = False,
+        allow_creative_revision: bool = False,
     ) -> dict[str, Any]:
         stage_name = f"production_render:{plan.plan_id}"
         tracker.start(stage_name, _hash({
@@ -2702,6 +2720,16 @@ class Pipeline:
                 phase6_candidate=phase6_candidate,
                 phase6_multimodal_timeline=multimodal_timeline,
                 phase6_story_units=story_units,
+                compiled_plan=compiled_plan,
+                creative_intent=creative_intent,
+                creative_handoff=creative_handoff,
+                execution_status=cast(Any, execution_status),
+                execution_reason_codes=execution_reason_codes,
+                execution_diagnostics=execution_diagnostics,
+                parent_compiled_plan_hash=parent_compiled_plan_hash,
+                parent_creative_intent_hash=parent_creative_intent_hash,
+                style_revision=style_revision,
+                allow_creative_revision=allow_creative_revision,
             )
         except ProductionRenderError as error:
             safe = sanitize_api_error(error)
@@ -2941,6 +2969,11 @@ class Pipeline:
     ) -> PipelineResult:
         """Execute only Goal 3D artifacts; this branch cannot invoke AI, TTS, audio mix, or legacy render."""
 
+        if self.upstream_run_directory is not None:
+            return self._run_candidate_production_rerender(
+                tracker, source, work_directory, output_directory,
+            )
+
         upstream_directory = self.upstream_run_directory or output_directory
         plan_path = upstream_directory / "production-plan.json"
         audio_path = upstream_directory / "audio" / "audio-project.json"
@@ -3052,6 +3085,234 @@ class Pipeline:
         return PipelineResult(
             work_directory, output_directory, report_path,
             int(existing.get("selected_clips_count", 0) or 0), output_files, self.warnings,
+        )
+
+    def _run_candidate_production_rerender(
+        self, tracker: StageTracker, source: Source, work_directory: Path, output_directory: Path,
+    ) -> PipelineResult:
+        """Resolve every rerender input through its selected candidate identity."""
+
+        assert self.upstream_run_directory is not None
+        upstream = self.upstream_run_directory.resolve()
+        parent_report = read_json(upstream / "report.json", None)
+        if not isinstance(parent_report, dict):
+            raise ProductionRenderError("RERENDER_PARENT_REPORT_INVALID: parent report is missing or corrupt.")
+        raw_production_section = parent_report.get("production_plan")
+        production_section: dict[str, Any] = (
+            raw_production_section if isinstance(raw_production_section, dict) else {}
+        )
+        raw_render_section = parent_report.get("production_render")
+        render_section: dict[str, Any] = (
+            raw_render_section if isinstance(raw_render_section, dict) else {}
+        )
+        production_items = {
+            str(item.get("candidate_id") or ""): item
+            for item in production_section.get("items", [])
+            if isinstance(item, dict) and isinstance(item.get("plan"), dict)
+        }
+        render_items = {
+            str(item.get("candidate_id") or ""): item
+            for item in render_section.get("items", [])
+            if isinstance(item, dict) and str(item.get("candidate_id") or "")
+        }
+        legacy_direct_parent = not production_items and isinstance(
+            production_section.get("production_plan"), dict,
+        )
+        if legacy_direct_parent:
+            raw = production_section["production_plan"]
+            candidate_id = str(raw.get("metadata", {}).get("candidate_id") or "")
+            if candidate_id:
+                production_items[candidate_id] = {
+                    "candidate_id": candidate_id, "plan": raw, "requested_index": 1,
+                }
+        candidate_ids = list(dict.fromkeys(self.selected_candidate_ids or render_items or production_items))
+        if not candidate_ids:
+            raise ProductionRenderError("RERENDER_CANDIDATE_MISSING: parent run has no candidate outputs.")
+
+        transcript = read_json(work_directory / "transcript.json", {})
+        if not isinstance(transcript, dict):
+            transcript = {}
+        tracker.skip("tts_generation", "Rerender reuses the selected candidate AudioProject.")
+        tracker.skip("audio_composition", "Rerender reuses the selected candidate mixed audio.")
+        outcomes: list[dict[str, Any]] = []
+        plan_outcomes: list[dict[str, Any]] = []
+        audio_outcomes: list[dict[str, Any]] = []
+
+        for fallback_index, candidate_id in enumerate(candidate_ids, start=1):
+            plan_item = production_items.get(candidate_id)
+            render_item = render_items.get(candidate_id)
+            failure: str | None = None
+            plan: ProductionPlan | None = None
+            audio_project: AudioProject | None = None
+            if not isinstance(plan_item, dict) or not isinstance(plan_item.get("plan"), dict):
+                failure = "RERENDER_PRODUCTION_PLAN_MISSING: selected candidate has no parent ProductionPlan."
+            else:
+                try:
+                    plan = ProductionPlan.model_validate(plan_item["plan"])
+                except Exception as error:
+                    failure = f"RERENDER_PRODUCTION_PLAN_INVALID: {sanitize_api_error(error)}"
+            if plan is not None and plan.metadata.candidate_id != candidate_id:
+                failure = "RERENDER_CANDIDATE_IDENTITY_MISMATCH: ProductionPlan belongs to another candidate."
+            requested_index = int((plan_item or {}).get("requested_index") or fallback_index)
+            parent_output_value = render_item.get("output_directory") if isinstance(render_item, dict) else None
+            parent_candidate_output = (
+                Path(str(parent_output_value)).resolve()
+                if isinstance(parent_output_value, str) and parent_output_value.strip()
+                else (
+                    upstream
+                    if legacy_direct_parent else _candidate_output_directory(
+                        upstream, candidate_id, requested_index,
+                    ).resolve()
+                )
+            )
+            if not parent_candidate_output.is_relative_to(upstream):
+                failure = (
+                    "RERENDER_PARENT_OUTPUT_UNSAFE: selected candidate output is outside "
+                    "the parent run directory."
+                )
+            if failure is None:
+                try:
+                    audio_project = AudioProject.model_validate(
+                        read_json(parent_candidate_output / "audio" / "audio-project.json", None)
+                    )
+                except Exception as error:
+                    failure = f"RERENDER_AUDIO_PROJECT_INVALID: {sanitize_api_error(error)}"
+            if (
+                failure is None and plan is not None and audio_project is not None
+                and audio_project.metadata.plan_reference is not None
+                and audio_project.metadata.plan_reference != plan.reference()
+            ):
+                failure = "RERENDER_AUDIO_IDENTITY_MISMATCH: AudioProject belongs to another ProductionPlan."
+            if failure is not None or plan is None or audio_project is None:
+                outcomes.append({
+                    "candidate_id": candidate_id, "status": "failed",
+                    "errors": [failure or "RERENDER_PARENT_ARTIFACT_INVALID"],
+                    "requested_index": requested_index,
+                })
+                continue
+
+            compiled: CompiledRenderPlan | None = None
+            intent: CreativeIntent | None = None
+            handoff: CandidateCreativeHandoff | None = None
+            execution_status: str | None = None
+            reason_codes: tuple[str, ...] = ()
+            diagnostics: tuple[str, ...] = ()
+            parent_compiled_hash: str | None = None
+            parent_intent_hash: str | None = None
+            style_revision = False
+            if plan.envelope is not None and plan.envelope.compatibility_mode == "native":
+                try:
+                    parent_intent, parent_compiled, handoff, parent_execution = load_candidate_creative_identity(
+                        parent_candidate_output / "production-render", plan,
+                    )
+                except CreativeArtifactError as error:
+                    outcomes.append({
+                        "candidate_id": candidate_id, "status": "failed",
+                        "errors": [str(error)], "requested_index": requested_index,
+                    })
+                    continue
+                parent_compiled_hash = parent_compiled.plan_hash
+                parent_intent_hash = parent_intent.canonical_hash()
+                execution_status = parent_execution.execution_status
+                reason_codes = parent_execution.reason_codes
+                diagnostics = parent_execution.diagnostics
+                if creative_policy_changed(parent_intent, self.config):
+                    intent = revise_creative_intent(parent_intent, self.config)
+                    style_revision = True
+                else:
+                    intent = parent_intent
+                    compiled = parent_compiled
+
+            candidate_output = _candidate_output_directory(
+                output_directory, candidate_id, fallback_index,
+            )
+            report = self._compose_production_render(
+                tracker, plan, audio_project, source, transcript, work_directory,
+                candidate_output, raise_on_error=False,
+                compiled_plan=compiled, creative_intent=intent, creative_handoff=handoff,
+                execution_status=execution_status,
+                execution_reason_codes=reason_codes,
+                execution_diagnostics=diagnostics,
+                parent_compiled_plan_hash=parent_compiled_hash,
+                parent_creative_intent_hash=parent_intent_hash,
+                style_revision=style_revision, allow_creative_revision=True,
+            )
+            output_file = str(report.get("output_file") or "")
+            if report.get("status") in {"completed", "warning"} and output_file:
+                canonical = self._publish_run_result(Path(output_file), output_directory, requested_index)
+                report = dict(report)
+                report.update({"intermediate_output_file": output_file, "output_file": str(canonical)})
+                output_file = str(canonical)
+            identity = _production_item_identity(plan_item or {})
+            outcomes.append({
+                "clip_result_id": f"{candidate_id}:{plan.plan_id}",
+                "candidate_id": candidate_id, "status": report.get("status", "failed"),
+                "output_directory": str(candidate_output), "report": report,
+                "output_file": output_file, "production_plan_id": plan.plan_id,
+                "source_start_seconds": identity.get("source_start_seconds"),
+                "source_end_seconds": identity.get("source_end_seconds"),
+                "source_fingerprint": _source_range_fingerprint(source.id, identity),
+                "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
+                "run_id": self.run_id,
+                "revision_id": f"{self.run_id}:render-{requested_index:02d}",
+                "requested_index": requested_index,
+            })
+            plan_outcomes.append({
+                "candidate_id": candidate_id, "status": "completed",
+                "plan": plan.model_dump(mode="json"), "requested_index": requested_index,
+            })
+            audio_outcomes.append({
+                "candidate_id": candidate_id, "status": audio_project.status,
+                "output_directory": str(parent_candidate_output),
+                "report": audio_report_section(audio_project),
+            })
+
+        production_render = _multi_stage_report("production_render", outcomes)
+        production = _multi_stage_report("production_plan", plan_outcomes)
+        audio = _multi_stage_report("audio", audio_outcomes)
+        registry = primary_clip_results(production_render)
+        registry, quality_reports = self._persist_quality_reports(
+            output_directory=output_directory, registry=registry, source_data=source.to_dict(),
+            production=production, audio=audio, production_render=production_render,
+            final_scored=[], diversity_decision=None,
+        )
+        production_render["quality_reports"] = quality_reports
+        self._assert_current_run_results(registry, output_directory)
+        output_files = [path for path in result_paths(registry, output_directory) if path.is_file()]
+        terminal = build_terminal_state(
+            len(candidate_ids), output_files, {}, delivery_required=True,
+            quality_reports=quality_reports,
+        )
+        report_path = output_directory / "report.json"
+        report = {
+            "source": source.to_dict(), "source_duration_seconds": None,
+            "selected_clips_count": len(candidate_ids), "candidates_count": len(candidate_ids),
+            "produced_clips_count": len(registry), "output_files": [str(path) for path in output_files],
+            "warnings": list(self.warnings), "errors": list(self.errors),
+            "stages": tracker.data.get("stages", {}), "production_plan": production,
+            "tts": {"enabled": False, "status": "skipped", "reason": "rerender_reuses_parent_audio"},
+            "audio": audio, "production_render": production_render,
+            "primary_results": [item.to_dict() for item in registry],
+            "quality_gate": _quality_gate_summary(quality_reports), "terminal": terminal,
+            "run": {
+                "run_id": self.run_id, "project_id": self.project_id, "source_id": source.id,
+                "run_directory": str(output_directory), "started_at": self.started_at or utc_now(),
+                "upstream_run_directory": str(upstream), "selected_candidate_ids": candidate_ids,
+                "manifest_path": str(output_directory / "manifest.json"),
+            },
+        }
+        write_json(report_path, report)
+        write_run_manifest(
+            output_directory / "manifest.json", run_id=self.run_id, source=source.to_dict(),
+            started_at=self.started_at or utc_now(), requested_clip_count=len(candidate_ids),
+            production_render=production_render, results=registry, run_directory=output_directory,
+            project_id=self.project_id, terminal=terminal,
+            quality_gate=_quality_gate_summary(quality_reports),
+        )
+        return PipelineResult(
+            work_directory, output_directory, report_path, len(candidate_ids), output_files,
+            self.warnings, terminal_status=str(terminal.get("status") or "failed"),
+            error_code=terminal.get("error_code"),
         )
 
     def _write_production_artifacts(
