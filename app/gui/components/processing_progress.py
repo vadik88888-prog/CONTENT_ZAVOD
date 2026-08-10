@@ -39,8 +39,7 @@ class ProcessingProgress(QFrame):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.eyebrow = QLabel("ОБРАБОТКА")
-        self.eyebrow.setObjectName("muted")
-        self.eyebrow.setStyleSheet("color: #FF8A2A; font-size: 11px; font-weight: 700;")
+        self.eyebrow.setObjectName("eyebrow")
         layout.addWidget(self.eyebrow)
 
         top = QHBoxLayout()
@@ -74,7 +73,7 @@ class ProcessingProgress(QFrame):
         self.progress_caption = QLabel("Общий прогресс")
         self.progress_caption.setStyleSheet("font-weight: 600;")
         self.progress_value = QLabel("")
-        self.progress_value.setStyleSheet("color: #FF8A2A; font-size: 18px; font-weight: 700;")
+        self.progress_value.setObjectName("progressValue")
         progress_top.addWidget(self.progress_caption)
         progress_top.addStretch()
         progress_top.addWidget(self.progress_value)

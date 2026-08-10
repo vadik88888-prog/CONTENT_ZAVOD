@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from app.gui.services.pipeline_facade import PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
-from app.gui.styles import load_theme
+from app.gui.styles import THEME_TOKENS, load_theme
 from app.gui.viewmodels import ProjectsViewModel
 
 
@@ -29,6 +30,31 @@ def _application() -> QApplication:
     application = QApplication.instance() or QApplication([])
     application.setStyleSheet(load_theme())
     return application
+
+
+def test_desktop_theme_resolves_only_the_approved_creator_tech_tokens() -> None:
+    assert dict(THEME_TOKENS) == {
+        "APP_BG": "#0D0F13",
+        "SIDEBAR": "#11141A",
+        "MAIN": "#151922",
+        "ELEVATED": "#1B202C",
+        "BORDER": "#2A303D",
+        "PRIMARY": "#FF6A00",
+        "PRIMARY_HOVER": "#FF7F33",
+        "ACCENT": "#252A4A",
+        "SUCCESS": "#56D6A0",
+        "WARNING": "#D7A95B",
+        "ERROR": "#E46B78",
+        "PRIMARY_TEXT": "#F3F4F7",
+        "SECONDARY": "#9299AA",
+        "MUTED": "#676E7F",
+    }
+    theme = load_theme()
+    assert "@" not in theme
+    assert "#FF6A00" in theme
+    assert "#FF7900" not in theme
+    assert "#0B0C0E" not in theme
+    assert set(re.findall(r"#[0-9A-Fa-f]{6}", theme)) <= set(THEME_TOKENS.values())
 
 
 def _screen(tmp_path: Path) -> ProjectsScreen:

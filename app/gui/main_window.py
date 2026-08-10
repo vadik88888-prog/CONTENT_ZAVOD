@@ -58,14 +58,9 @@ class MainWindow(QMainWindow):
         brand_layout.setContentsMargins(2, 0, 2, 10)
         brand_layout.setSpacing(0)
         self.brand_content = QLabel("CONTENT")
-        self.brand_content.setStyleSheet(
-            "font-size: 20px; font-weight: 700; letter-spacing: 1px; color: #F4F6F8;"
-        )
+        self.brand_content.setObjectName("brandContent")
         self.brand_factory = QLabel("FACTORY")
-        self.brand_factory.setStyleSheet(
-            "font-size: 20px; font-weight: 700; letter-spacing: 1px; color: #101216; "
-            "background: #FF7900; padding: 0 4px;"
-        )
+        self.brand_factory.setObjectName("brandFactory")
         self.brand_factory.setMaximumWidth(108)
         brand_layout.addWidget(self.brand_content)
         brand_layout.addWidget(self.brand_factory)
@@ -92,7 +87,7 @@ class MainWindow(QMainWindow):
         status_layout.setContentsMargins(12, 11, 12, 11)
         status_layout.setSpacing(4)
         status_title = QLabel("●  Система готова")
-        status_title.setStyleSheet("font-weight: 600; color: #DCE4DD;")
+        status_title.setObjectName("systemStatusTitle")
         status_detail = QLabel("Локальная обработка\nВсе проекты остаются здесь")
         status_detail.setObjectName("muted")
         status_detail.setWordWrap(True)

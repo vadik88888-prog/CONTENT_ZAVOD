@@ -449,6 +449,8 @@ class ProjectScreen(QWidget):
         super().resizeEvent(event)
         if hasattr(self, "_body_layout"):
             self._apply_stage_responsive_layout()
+        if hasattr(self, "candidate_detail"):
+            QTimer.singleShot(0, self._refresh_candidate_detail_geometry)
 
     def _apply_stage_responsive_layout(self, *, force: bool = False) -> None:
         """Stack dense stage panels before a scaled desktop can overflow.
@@ -1439,10 +1441,9 @@ class ProjectScreen(QWidget):
             row.setContentsMargins(10, 8, 10, 8)
             row.setSpacing(8)
             thumbnail = QLabel("Кадр\nзагружается")
-            thumbnail.setObjectName("muted")
+            thumbnail.setObjectName("candidateThumbnail")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
             thumbnail.setFixedSize(112, 64)
-            thumbnail.setStyleSheet("border: 1px solid #303640; border-radius: 4px;")
             self._candidate_thumbnail_labels.setdefault(candidate_id, []).append(thumbnail)
             try:
                 start_seconds = float(start_value)
@@ -2273,6 +2274,7 @@ class ProjectScreen(QWidget):
                 lines.append("Черновик для этого момента не создан. Его можно повторить отдельно; подробности сохранены в журнале проекта.")
         self._replace_card_text(self.candidate_detail, lines)
         controls = QWidget()
+        controls.setObjectName("candidateBoundaryControls")
         grid = QGridLayout(controls)
         grid.setContentsMargins(0, 4, 0, 0)
         grid.setHorizontalSpacing(6)
@@ -2294,6 +2296,20 @@ class ProjectScreen(QWidget):
         for column in range(columns):
             grid.setColumnStretch(column, 1)
         self.candidate_detail.layout().addWidget(controls)
+        self._refresh_candidate_detail_geometry()
+
+    def _refresh_candidate_detail_geometry(self) -> None:
+        """Keep inspector copy above its controls and scroll when necessary."""
+
+        layout = self.candidate_detail.layout()
+        if layout is None:
+            return
+        self.candidate_detail.setMinimumHeight(0)
+        layout.invalidate()
+        layout.activate()
+        required_height = layout.totalSizeHint().height()
+        self.candidate_detail.setMinimumHeight(required_height)
+        self.candidate_detail.updateGeometry()
 
     @staticmethod
     def _score_text(value: object) -> str:
@@ -2828,7 +2844,13 @@ class ProjectScreen(QWidget):
         layout = card.layout()
         while layout.count() > 1:
             item = layout.takeAt(1)
-            if item.widget(): item.widget().deleteLater()
+            if widget := item.widget():
+                # Detached dynamic inspector rows otherwise remain paintable
+                # until the next event-loop deletion and can appear beneath a
+                # newly inserted boundary-control grid in captured frames.
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         for value in values:
             label = QLabel(value); label.setObjectName("muted")
             # Candidate excerpts and error details can be long.  They are

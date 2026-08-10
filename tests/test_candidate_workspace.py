@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton, QWidget
 
 from app.gui.components import VideoPreview
 from app.gui.main_window import MainWindow
@@ -1090,6 +1090,34 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
         assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
         assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
+        assert controls is not None
+        detail_layout = screen.candidate_detail.layout()
+        controls_index = next(
+            index for index in range(detail_layout.count())
+            if detail_layout.itemAt(index).widget() is controls
+        )
+        descriptive_labels = [
+            detail_layout.itemAt(index).widget()
+            for index in range(controls_index)
+            if isinstance(detail_layout.itemAt(index).widget(), QLabel)
+        ]
+        assert descriptive_labels
+        assert max(label.geometry().bottom() for label in descriptive_labels) < controls.geometry().top()
+        assert controls.geometry().bottom() <= screen.candidate_detail.contentsRect().bottom()
+        assert screen.candidate_detail.minimumHeight() >= detail_layout.totalSizeHint().height()
+        assert all(
+            "Выберите момент в списке" not in label.text()
+            for label in screen.candidate_detail.findChildren(QLabel)
+        )
+
+        # When the inspector is vertically constrained, the content keeps its
+        # natural order and the dedicated scroll area exposes the remainder.
+        screen.review_inspector_scroll.setFixedHeight(280)
+        app.processEvents()
+        app.processEvents()
+        assert screen.review_inspector_scroll.verticalScrollBar().maximum() > 0
+        assert max(label.geometry().bottom() for label in descriptive_labels) < controls.geometry().top()
         card = screen._candidate_cards["candidate-recommended"]
         assert card.width() <= screen.review_list_scroll.viewport().width()
         for button in card.findChildren(QPushButton):
