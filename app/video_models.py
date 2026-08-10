@@ -628,6 +628,7 @@ class RenderMetadata(BaseModel):
     cache_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     compiled_plan_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     parity_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    creative_compatibility_mode: Literal["native", "legacy_adapter"] | None = None
     render_profile_id: Literal["creative_preview", "final"] = "final"
     cache_node_hits: dict[str, bool] = Field(default_factory=dict)
     single_pass_encode: bool = False

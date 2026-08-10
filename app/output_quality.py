@@ -5,8 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
-def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, Any]:
+def validate_output_quality(
+    project: Any,
+    subtitles_enabled: bool,
+    *,
+    compiled_plan: Any | None = None,
+) -> dict[str, Any]:
     """Return explainable visual/subtitle findings without inspecting user content remotely."""
+
+    if compiled_plan is not None and getattr(compiled_plan, "compatibility_mode", None) == "native":
+        return _validate_native_output_quality(project, subtitles_enabled, compiled_plan)
 
     warnings: list[str] = []
     errors: list[str] = []
@@ -121,6 +129,68 @@ def validate_output_quality(project: Any, subtitles_enabled: bool) -> dict[str, 
         },
         "composition_quality": composition_quality,
         "subtitle_quality": subtitle_quality,
+        "fallback_fill_count": len(fills),
+        "visual_clip_count": len(clips),
+    }
+
+
+def _validate_native_output_quality(
+    project: Any,
+    subtitles_enabled: bool,
+    compiled_plan: Any,
+) -> dict[str, Any]:
+    """Validate native execution only from the immutable compiled domain plans.
+
+    ``SubtitleProject`` and ``ReframePlan`` remain execution adapters while the
+    legacy backend exists, but they are intentionally absent from this gate.
+    """
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    clips = list(getattr(getattr(project, "timeline", None), "clips", []) or [])
+    if not clips:
+        errors.append("Output has no visual timeline clips.")
+
+    domain_plans = {
+        "captions": getattr(compiled_plan, "caption_plan", None),
+        "composition": getattr(compiled_plan, "composition_plan", None),
+        "source_broll": getattr(compiled_plan, "source_broll_plan", None),
+        "motion": getattr(compiled_plan, "motion_plan", None),
+    }
+    domain_quality: dict[str, Any] = {}
+    for name, domain_plan in domain_plans.items():
+        report = getattr(domain_plan, "quality_report", None)
+        payload = report.model_dump(mode="json") if report is not None else None
+        domain_quality[name] = payload
+        status = str(getattr(report, "status", "")) if report is not None else ""
+        findings = list(getattr(report, "findings", ()) or ())
+        if status == "BLOCKED":
+            errors.append(f"Native {name} quality report blocks the compiled render plan.")
+        elif status == "PASS_WITH_WARNINGS":
+            warnings.append(f"Native {name} quality report uses a declared warning/fallback.")
+        for finding in findings:
+            message = str(getattr(finding, "message", "") or getattr(finding, "code", "native quality finding"))
+            if str(getattr(finding, "severity", "warning")) == "blocker":
+                errors.append(message)
+            elif message not in warnings:
+                warnings.append(message)
+
+    caption_plan = domain_plans["captions"]
+    caption_cues = list(getattr(caption_plan, "cues", ()) or ())
+    if subtitles_enabled and not caption_cues and float(getattr(project, "target_duration_seconds", 0) or 0) > 0.5:
+        warnings.append("Native captions are enabled but the compiled plan contains no cues.")
+
+    fills = [clip for clip in clips if getattr(clip, "clip_type", "") == "fill"]
+    if clips and len(fills) / len(clips) > 0.5:
+        warnings.append("More than half of the visual timeline uses neutral fallback fills.")
+
+    return {
+        "status": "failed" if errors else "warning" if warnings else "passed",
+        "source_of_truth": "compiled_render_plan",
+        "compiled_plan_hash": getattr(compiled_plan, "plan_hash", None),
+        "warnings": warnings,
+        "errors": errors,
+        "domains": domain_quality,
         "fallback_fill_count": len(fills),
         "visual_clip_count": len(clips),
     }

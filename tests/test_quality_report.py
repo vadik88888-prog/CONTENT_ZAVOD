@@ -219,6 +219,62 @@ def test_motion_budget_suppression_flows_into_quality_report_as_safe_fallback(tm
     assert "motion:motion-4:calm_fallback" in report.fallbacks
 
 
+def test_native_creative_qc_ignores_legacy_subtitle_and_reframe_decisions(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render.update({
+        "compatibility_mode": "native",
+        "creative_qc_source": "compiled_render_plan",
+        "compiled_render_plan": {"schema_version": "7G.compiled-render-plan.1", "plan_hash": "a" * 64},
+        "composition": {"segments": [{
+            "segment_id": "legacy-crop",
+            "composition_quality_status": "failed",
+            "composition_quality_decision": {"status": "blocked"},
+        }]},
+        "subtitle_layout": {"quality_decision": {"status": "blocked", "reason_codes": ["LEGACY_ONLY"]}},
+        "caption_plan": {"quality_report": {"status": "PASS", "findings": [], "metrics": {}}},
+        "composition_plan": {"quality_report": {"status": "PASS", "findings": [], "metrics": {}}},
+        "source_broll_plan": {"quality_report": {"status": "PASS", "findings": [], "metrics": {}}},
+        "motion_plan": {"quality_report": {"status": "PASS", "findings": [], "metrics": {}}},
+    })
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "PASS"
+    assert not any(item.provenance.get("producer") in {
+        "composition_quality_decision", "subtitle_quality_decision",
+    } for item in report.findings)
+
+
+def test_legacy_adapter_keeps_legacy_subtitle_and_reframe_qc(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    plan["envelope"]["compatibility_mode"] = "legacy_adapter"
+    render.update({
+        "compatibility_mode": "legacy_adapter",
+        "composition": {"segments": [{
+            "segment_id": "legacy-crop",
+            "composition_quality_status": "failed",
+            "composition_quality_decision": {"status": "blocked"},
+        }]},
+        "subtitle_layout": {"quality_decision": {"status": "blocked", "reason_codes": ["LEGACY_ONLY"]}},
+    })
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    assert any(item.provenance.get("producer") == "composition_quality_decision" for item in report.findings)
+    assert any(item.provenance.get("producer") == "subtitle_quality_decision" for item in report.findings)
+
+
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:
     artifact, _result, report = _report(tmp_path, word_integrity=False)
     reference = report.reference(artifact.with_name("quality-report-01.json"))

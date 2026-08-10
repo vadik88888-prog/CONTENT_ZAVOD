@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Iterable, Literal, cast
+from typing import Any, Iterable, Literal, Mapping, cast
 
 from app.audio_models import AudioProject
 from app.caption_planning import write_caption_plan_ass
@@ -20,6 +20,7 @@ from app.creative_execution import (
     default_native_creative_intent,
     validate_native_handoff,
 )
+from app.creative_evidence import build_native_evidence_handoff
 from app.creative_contracts import (
     CompiledRenderPlan,
     CreativeIntent,
@@ -86,6 +87,9 @@ class VideoCompositionService:
         creative_intent: CreativeIntent | None = None,
         target_observations: Iterable[TargetObservation] = (),
         source_scenes: Iterable[SourceSceneEvidence] = (),
+        phase6_candidate: Mapping[str, Any] | None = None,
+        phase6_multimodal_timeline: Mapping[str, Any] | None = None,
+        phase6_story_units: Mapping[str, Any] | None = None,
     ) -> VideoProject:
         render_config = self.config.production_render
         if not source.path.is_file():
@@ -152,13 +156,28 @@ class VideoCompositionService:
         mapping = source_output_map_from_legacy_timeline(timeline)
         if compiled_plan is not None and creative_intent is not None:
             raise ProductionRenderError("Provide either CreativeIntent or CompiledRenderPlan, not both.")
+        target_observations = tuple(target_observations)
+        source_scenes = tuple(source_scenes)
         try:
             if compiled_plan is not None:
                 validate_native_handoff(plan, mapping, compiled_plan)
             elif creative_intent is not None or (
                 plan.envelope is not None and plan.envelope.compatibility_mode == "native"
             ):
-                intent = creative_intent or default_native_creative_intent(plan, mapping, self.config)
+                if creative_intent is None and phase6_candidate is not None:
+                    evidence_handoff = build_native_evidence_handoff(
+                        plan,
+                        mapping,
+                        self.config,
+                        candidate=phase6_candidate,
+                        multimodal_timeline=phase6_multimodal_timeline,
+                        story_units=phase6_story_units,
+                    )
+                    intent = evidence_handoff.intent
+                    target_observations = evidence_handoff.target_observations
+                    source_scenes = evidence_handoff.source_scenes
+                else:
+                    intent = creative_intent or default_native_creative_intent(plan, mapping, self.config)
                 if intent.source_output_mapping != mapping:
                     raise ValueError("NATIVE_CREATIVE_INTENT_EDIT_MAPPING_MISMATCH")
                 compiled_plan = compile_native_creative_plan(
@@ -213,6 +232,9 @@ class VideoCompositionService:
             render_config_version=render_config.render_config_version, cache_key=cache_key,
             compiled_plan_hash=compiled_plan.plan_hash,
             parity_signature=compiled_plan.parity_signature,
+            creative_compatibility_mode=(
+                "native" if compiled_plan.compatibility_mode == "native" else "legacy_adapter"
+            ),
             render_profile_id=profile.profile_id,
             created_at=utc_now(), updated_at=utc_now(),
         )
@@ -234,10 +256,14 @@ class VideoCompositionService:
                 *([reframe_plan.fallback_reason] if reframe_plan.fallback_reason else []),
             ],
         )
-        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        quality = validate_output_quality(
+            project,
+            project.render_request.subtitles_enabled,
+            compiled_plan=compiled_plan,
+        )
         if quality["status"] == "failed":
             raise ProductionRenderError(
-                "Resolved Subtitle Quality V2 validation failed before final-ready state: "
+                "Resolved creative quality validation failed before final-ready state: "
                 + "; ".join(quality["errors"])
             )
         render_root = output_directory / (
@@ -270,6 +296,7 @@ class VideoCompositionService:
 
     def _try_cache(
         self, project: VideoProject, render_root: Path, cache_path: Path, force_recompute: bool,
+        *, compiled_plan: CompiledRenderPlan,
     ) -> VideoProject | None:
         if not self.config.production_render.cache_enabled or force_recompute:
             return None
@@ -288,7 +315,11 @@ class VideoCompositionService:
             return None
         if validation.status == "invalid":
             return None
-        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        quality = validate_output_quality(
+            project,
+            project.render_request.subtitles_enabled,
+            compiled_plan=compiled_plan,
+        )
         if quality["status"] == "failed":
             return None
         artifacts = _artifacts(render_root, final_path)
@@ -313,9 +344,13 @@ class VideoCompositionService:
         *, compiled_plan: CompiledRenderPlan, render_profile: RenderProfile,
         force_recompute: bool,
     ) -> VideoProject:
-        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+        quality = validate_output_quality(
+            project,
+            project.render_request.subtitles_enabled,
+            compiled_plan=compiled_plan,
+        )
         if quality["status"] == "failed":
-            raise ProductionRenderError("Resolved subtitle quality validation failed: " + "; ".join(quality["errors"]))
+            raise ProductionRenderError("Resolved creative quality validation failed: " + "; ".join(quality["errors"]))
         temp_root = render_root / "temp"
         render_root.mkdir(parents=True, exist_ok=True)
         temp_root.mkdir(parents=True, exist_ok=True)
@@ -2777,7 +2812,26 @@ def _safe_error(error: BaseException) -> str:
 def production_render_report_section(project: VideoProject) -> dict[str, Any]:
     result = project.result
     validation = result.validation if result else RenderValidation(status="invalid", messages=["Render result is unavailable."])
-    quality = validate_output_quality(project, project.render_request.subtitles_enabled)
+    compiled_plan = _compiled_plan_from_project(project)
+    execution_mode = project.metadata.creative_compatibility_mode or (
+        "native" if compiled_plan is not None and compiled_plan.compatibility_mode == "native" else "legacy_adapter"
+    )
+    if compiled_plan is not None:
+        quality = validate_output_quality(
+            project,
+            project.render_request.subtitles_enabled,
+            compiled_plan=compiled_plan,
+        )
+    elif execution_mode == "native":
+        quality = {
+            "status": "failed",
+            "source_of_truth": "compiled_render_plan",
+            "compiled_plan_hash": project.metadata.compiled_plan_hash,
+            "warnings": [],
+            "errors": ["Native CompiledRenderPlan artifact is missing or invalid."],
+        }
+    else:
+        quality = validate_output_quality(project, project.render_request.subtitles_enabled)
     subtitles = project.subtitle_project
     composition_segments = project.reframe_plan.composition_segments
     strategy_counts: dict[str, int] = {}
@@ -2787,7 +2841,9 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         tracking_mode_counts[segment.tracking_mode] = tracking_mode_counts.get(segment.tracking_mode, 0) + 1
     diagnostics = [segment.composition_diagnostics for segment in composition_segments]
     mean = lambda name: round(sum(float(item.get(name, 0)) for item in diagnostics) / len(diagnostics), 4) if diagnostics else 0.0
-    return {
+    native = execution_mode == "native"
+    caption_plan = compiled_plan.caption_plan if compiled_plan is not None else None
+    report = {
         "enabled": True,
         "status": project.status,
         "video_project_id": project.project_id,
@@ -2803,7 +2859,7 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "sync_difference_ms": validation.sync_difference_ms,
         "clip_count": len(project.timeline.clips),
         "subtitles_enabled": project.render_request.subtitles_enabled,
-        "subtitle_cue_count": len(subtitles.cues) if subtitles else 0,
+        "subtitle_cue_count": len(caption_plan.cues) if native and caption_plan else (len(subtitles.cues) if subtitles else 0),
         "subtitle_layout": {
             "contract_version": subtitles.layout_contract_version if subtitles else None,
             "quality_decision": subtitles.quality_decision.model_dump(mode="json") if subtitles else None,
@@ -2827,6 +2883,8 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "cache_hit": bool(result.cache_hit) if result else False,
         "render_profile": project.metadata.render_profile_id,
         "compiled_plan_hash": project.metadata.compiled_plan_hash,
+        "creative_qc_source": "compiled_render_plan" if native else "legacy_adapter",
+        "compatibility_mode": "native" if native else "legacy_adapter",
         "parity_signature": project.metadata.parity_signature,
         "cache_nodes": dict(project.metadata.cache_node_hits),
         "single_pass_encode": project.metadata.single_pass_encode,
@@ -2870,3 +2928,58 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
         "tts_regenerated": False,
         "audio_remixed": False,
     }
+    if compiled_plan is not None:
+        report.update({
+            "compiled_render_plan": {
+                "schema_version": compiled_plan.schema_version,
+                "intent_id": compiled_plan.intent_id,
+                "intent_hash": compiled_plan.intent_hash,
+                "plan_hash": compiled_plan.plan_hash,
+                "parity_signature": compiled_plan.parity_signature,
+                "input_fingerprints": compiled_plan.input_fingerprints.model_dump(mode="json"),
+            },
+            "caption_plan": compiled_plan.caption_plan.model_dump(mode="json"),
+            "composition_plan": compiled_plan.composition_plan.model_dump(mode="json"),
+            "source_broll_plan": compiled_plan.source_broll_plan.model_dump(mode="json"),
+            "motion_plan": compiled_plan.motion_plan.model_dump(mode="json"),
+        })
+        if native:
+            report["subtitle_layout"] = {
+                "contract_version": compiled_plan.caption_plan.schema_version,
+                "quality_decision": compiled_plan.caption_plan.quality_report.model_dump(mode="json"),
+                "resolved_cue_count": len(compiled_plan.caption_plan.cues),
+                "cues": [cue.model_dump(mode="json") for cue in compiled_plan.caption_plan.cues],
+                "final_validation": quality,
+                "source_of_truth": "compiled_render_plan.caption_plan",
+            }
+            report["composition"] = {
+                "contract_version": compiled_plan.composition_plan.schema_version,
+                "quality_report": compiled_plan.composition_plan.quality_report.model_dump(mode="json"),
+                "segments": [
+                    segment.model_dump(mode="json")
+                    for segment in compiled_plan.composition_plan.segments
+                ],
+                "source_of_truth": "compiled_render_plan.composition_plan",
+            }
+    return report
+
+
+def _compiled_plan_from_project(project: VideoProject) -> CompiledRenderPlan | None:
+    """Load and validate the exact immutable plan emitted beside this MP4."""
+
+    candidates = [
+        Path(path) for path in project.artifact_paths
+        if Path(path).name == "compiled-render-plan.json"
+    ]
+    if project.result is not None and project.result.output_file:
+        candidates.append(Path(project.result.output_file).parent / "compiled-render-plan.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            plan = CompiledRenderPlan.model_validate(read_json(path, {}))
+        except (OSError, ValueError):
+            continue
+        if plan.plan_hash == project.metadata.compiled_plan_hash:
+            return plan
+    return None

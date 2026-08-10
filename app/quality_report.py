@@ -247,6 +247,7 @@ def build_quality_report(
     composition_fallbacks = _composition_fallbacks(render)
     source_broll_fallbacks = _source_broll_fallbacks(render)
     motion_fallbacks = _motion_fallbacks(render)
+    native_creative_qc = render.get("compatibility_mode") == "native"
     fallbacks = _unique([
         *(render.get("fallback_reasons", []) if isinstance(render.get("fallback_reasons"), list) else []),
         *(render.get("warnings", []) if isinstance(render.get("warnings"), list) else []),
@@ -276,7 +277,16 @@ def build_quality_report(
             "quality_config_version": config_version,
             "low_level_checks_reused": [
                 "eligibility", "diversity", "boundary_decision", "production_plan_envelope",
-                "composition_quality_decision", "subtitle_quality_decision", "audio_validation",
+                *(
+                    [
+                        "compiled_render_plan", "caption_quality_report",
+                        "composition_quality_report", "source_broll_quality_report",
+                        "motion_quality_report",
+                    ]
+                    if native_creative_qc
+                    else ["composition_quality_decision", "subtitle_quality_decision"]
+                ),
+                "audio_validation",
                 "render_validation", "artifact_identity",
             ],
         },
@@ -461,11 +471,20 @@ def _collect_plan_and_boundary(
 
 
 def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> None:
+    native = render.get("compatibility_mode") == "native"
+    compiled = render.get("compiled_render_plan")
+    if native and not isinstance(compiled, dict):
+        finding(
+            "EDIT_PLAN_MISMATCH", "blocker", {"compiled_render_plan": compiled},
+            measured_value="missing", threshold="validated native CompiledRenderPlan",
+            producer="compiled_render_plan",
+            message="Native creative QC is missing its immutable CompiledRenderPlan.",
+        )
     raw_quality = render.get("quality")
     quality: dict[str, Any] = raw_quality if isinstance(raw_quality, dict) else {}
     raw_composition = render.get("composition")
     composition: dict[str, Any] = raw_composition if isinstance(raw_composition, dict) else {}
-    raw_segments = composition.get("segments")
+    raw_segments = composition.get("segments") if not native else None
     segments: list[Any] = raw_segments if isinstance(raw_segments, list) else []
     for segment in segments:
         if not isinstance(segment, dict):
@@ -487,7 +506,7 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 message="Composition quality uses a declared fallback or limited evidence.",
                 interval=_segment_interval(segment),
             )
-    raw_subtitle_layout = render.get("subtitle_layout")
+    raw_subtitle_layout = render.get("subtitle_layout") if not native else None
     subtitle_layout: dict[str, Any] = raw_subtitle_layout if isinstance(raw_subtitle_layout, dict) else {}
     raw_subtitle = subtitle_layout.get("quality_decision")
     subtitle: dict[str, Any] | None = raw_subtitle if isinstance(raw_subtitle, dict) else None

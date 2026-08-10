@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Iterable, cast
 
 from app.ai import get_scorer, get_transformer, get_vision_provider, sanitize_api_error
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
@@ -325,6 +325,7 @@ class Pipeline:
         self.warnings: list[str] = []
         self.errors: list[str] = []
         self._heartbeat: RunHeartbeat | None = None
+        self._native_evidence_context: tuple[list[Any], dict[str, Any], dict[str, Any]] | None = None
 
     def __del__(self) -> None:
         heartbeat = getattr(self, "_heartbeat", None)
@@ -901,6 +902,7 @@ class Pipeline:
             tracker, production, tts, source, transcript, work_directory, output_directory,
             Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
         )
+        self._native_evidence_context = (final_scored, multimodal_timeline, story_units)
         production_render = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
@@ -1973,6 +1975,7 @@ class Pipeline:
         content_profile = load_reference("content_profile")
         content_map = load_reference("content_map")
         story_units = load_reference("story_units")
+        multimodal_timeline = load_reference("multimodal_timeline")
         coverage_map = load_reference("coverage_map")
         recommendation = load_reference("clip_count_recommendation")
         candidate_data_path = Path(analysis.candidate_data_ref).resolve()
@@ -1988,6 +1991,7 @@ class Pipeline:
             tracker, production, tts, source, transcript, work_directory, output_directory,
             Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
         )
+        self._native_evidence_context = (final_scored, multimodal_timeline, story_units)
         production_render = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
         )
@@ -2594,6 +2598,9 @@ class Pipeline:
     def _run_production_render(
         self, tracker: StageTracker, production: dict[str, Any], audio: dict[str, Any], source: Source,
         transcript: dict[str, Any], work_directory: Path, output_directory: Path, visual_analysis: dict[str, Any] | None = None,
+        *, creative_candidates: Iterable[Any] = (),
+        multimodal_timeline: dict[str, Any] | None = None,
+        story_units: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the Goal 3D executor after its upstream artifacts, never through legacy render."""
 
@@ -2610,7 +2617,20 @@ class Pipeline:
         if not plan_items:
             tracker.skip("production_render", "Нет ProductionPlan для production render.")
             return {"enabled": True, "status": "skipped", "reason": "no_production_plan"}
+        creative_candidates = tuple(creative_candidates)
+        saved_context = getattr(self, "_native_evidence_context", None)
+        if saved_context is not None and not creative_candidates:
+            saved_candidates, saved_timeline, saved_stories = saved_context
+            creative_candidates = saved_candidates
+            multimodal_timeline = multimodal_timeline or saved_timeline
+            story_units = story_units or saved_stories
         audio_items = {str(item.get("candidate_id")): item for item in audio.get("items", []) if isinstance(item, dict)}
+        candidate_evidence = {
+            str(record.get("id") or ""): record
+            for item in creative_candidates
+            for record in [item.to_dict() if hasattr(item, "to_dict") else item]
+            if isinstance(record, dict)
+        }
         outcomes: list[dict[str, Any]] = []
         for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
@@ -2632,6 +2652,9 @@ class Pipeline:
             report = self._compose_production_render(
                 tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
                 raise_on_error=False, visual_analysis=visual_analysis,
+                phase6_candidate=candidate_evidence.get(candidate_id),
+                multimodal_timeline=multimodal_timeline,
+                story_units=story_units,
             )
             output_file = str(report.get("output_file") or "")
             if report.get("status") in {"completed", "warning"} and output_file:
@@ -2660,7 +2683,11 @@ class Pipeline:
 
     def _compose_production_render(
         self, tracker: StageTracker, plan: ProductionPlan, audio_project: AudioProject, source: Source,
-        transcript: dict[str, Any], work_directory: Path, output_directory: Path, raise_on_error: bool, visual_analysis: dict[str, Any] | None = None,
+        transcript: dict[str, Any], work_directory: Path, output_directory: Path, raise_on_error: bool,
+        visual_analysis: dict[str, Any] | None = None,
+        phase6_candidate: dict[str, Any] | None = None,
+        multimodal_timeline: dict[str, Any] | None = None,
+        story_units: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stage_name = f"production_render:{plan.plan_id}"
         tracker.start(stage_name, _hash({
@@ -2672,6 +2699,9 @@ class Pipeline:
             project = VideoCompositionService(self.root, self.config).compose(
                 plan, audio_project, source, transcript, work_directory, output_directory, visual_analysis=visual_analysis,
                 force_recompute=self.recompute_production_render,
+                phase6_candidate=phase6_candidate,
+                phase6_multimodal_timeline=multimodal_timeline,
+                phase6_story_units=story_units,
             )
         except ProductionRenderError as error:
             safe = sanitize_api_error(error)
