@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from app.gui.components.candidate_thumbnail import CandidateThumbnailLoader
 from app.gui.components.video_preview import VideoPreview
+from app.gui.responsive import make_label_shrinkable, set_responsive_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,8 @@ class FinalResultsWorkspace(QWidget):
         self._responsive_profile: str | None = None
         self._body_layout_mode: str | None = None
         self._bottom_actions_stacked: bool | None = None
+        self._body_height_floor = 0
+        self._body_geometry_refresh_pending = False
         self._observed_window: QWidget | None = None
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
@@ -149,7 +152,7 @@ class FinalResultsWorkspace(QWidget):
         # The outer project view can scroll the screen, while each dense area
         # below keeps its own scrolling.  This avoids a very tall final page
         # when a project has many outputs or a lengthy QualityReport warning.
-        self._body_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._body_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._body_layout = QGridLayout(self._body_host)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
         self._body_layout.setSpacing(14)
@@ -182,6 +185,7 @@ class FinalResultsWorkspace(QWidget):
         self.preview = VideoPreview()
         self.preview.set_vertical_frame_size(247, 440)
         self.preview.open_button.hide()
+        self.preview.geometry_requirement_changed.connect(self._schedule_body_geometry_refresh)
 
         self._info_panel = QFrame()
         self._info_panel.setObjectName("finalInfo")
@@ -211,7 +215,7 @@ class FinalResultsWorkspace(QWidget):
             name.setObjectName("muted")
             value = QLabel("—")
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setWordWrap(True)
+            make_label_shrinkable(value)
             self.info_grid.addWidget(name, row, 0)
             self.info_grid.addWidget(value, row, 1)
             self.info_values[key] = value
@@ -327,7 +331,10 @@ class FinalResultsWorkspace(QWidget):
         dense = width < 920 or (0 < window_height <= 760)
         compact = dense or width < 1260 or (0 < window_height <= 860)
         profile = "dense" if dense else "compact" if compact else "standard"
-        body_mode = "stacked" if width < 760 else "two_row" if profile != "standard" else "columns"
+        # Panel composition follows the actual workspace width.  Height only
+        # tunes density; a wide-but-short window can use columns and let the
+        # surrounding project viewport provide vertical scrolling.
+        body_mode = "stacked" if width < 760 else "two_row" if width < 1260 else "columns"
         bottom_actions_stacked = width < 620
         if (
             not force
@@ -365,7 +372,9 @@ class FinalResultsWorkspace(QWidget):
             self.heading.setStyleSheet("font-size: 24px; font-weight: 700;")
             summary_value_style = "font-size: 19px; font-weight: 700;"
         else:
-            list_width = (352, 380)
+            # 356 leaves the full-width “Create more” CTA at least its themed
+            # 320px minimum after the panel's 16px side margins and frame.
+            list_width = (356, 380)
             # Keep the metadata grid's two readable columns inside its own
             # viewport.  The old 420 px cap left a five-pixel hidden range at
             # full-HD once the scroll frame and its vertical bar were present.
@@ -416,13 +425,43 @@ class FinalResultsWorkspace(QWidget):
         else:
             self._info_panel.setMinimumWidth(0)
             self._info_panel.setMaximumWidth(16_777_215)
-        self._body_host.setFixedHeight(body_height)
+        # This is a profile floor, not a hard clipping boundary.  VideoPreview
+        # owns wrapped titles/status copy and advertises their current
+        # height-for-width; the grid is therefore free to grow into the outer
+        # project's vertical scroll area when that copy needs more room.
+        self._body_height_floor = body_height
+        self._body_host.setMinimumHeight(body_height)
         self.preview.set_vertical_frame_size(*frame_size)
         for value in self.summary_values.values():
             value.setStyleSheet(summary_value_style)
         for caption in self._summary_captions:
             caption.setStyleSheet("font-size: 12px;" if compact else "")
         self._resize_output_cards()
+        self._body_layout.invalidate()
+        self._body_host.updateGeometry()
+        self.updateGeometry()
+        self._schedule_body_geometry_refresh()
+
+    def _schedule_body_geometry_refresh(self) -> None:
+        """Coalesce child HFW changes before recomputing the grid floor."""
+
+        if self._body_geometry_refresh_pending:
+            return
+        self._body_geometry_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_body_geometry)
+
+    def _refresh_body_geometry(self) -> None:
+        """Let the outer page scroll instead of clipping overlapping panels."""
+
+        self._body_geometry_refresh_pending = False
+        self._body_layout.invalidate()
+        required_height = self._body_layout.totalMinimumSize().height()
+        target_height = max(self._body_height_floor, required_height)
+        if self._body_host.minimumHeight() != target_height:
+            self._body_host.setMinimumHeight(target_height)
+        self._body_host.updateGeometry()
+        self._root_layout.invalidate()
+        self.updateGeometry()
 
     def _place_body_panels(self, mode: str) -> None:
         """Reflow result panels before their internal scroll views must clip.
@@ -516,8 +555,11 @@ class FinalResultsWorkspace(QWidget):
     def _rebuild_list(self) -> None:
         while self.list_items.count() > 1:
             item = self.list_items.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item is None:
+                break
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         self._cards = {}
         self._thumbnail_labels = {}
         self._thumbnail_pixmaps = {}
@@ -535,14 +577,20 @@ class FinalResultsWorkspace(QWidget):
             layout.addWidget(thumbnail)
             self._thumbnail_labels[output.result_id] = thumbnail
             text = QVBoxLayout()
-            title = QLabel(f"{number}. {output.title}")
+            title = QLabel()
             title.setStyleSheet("font-weight: 600;")
-            title.setWordWrap(True)
+            make_label_shrinkable(title)
+            set_responsive_text(title, f"{number}. {output.title}")
             state = QLabel("● Готово" if output.status == "completed" else "● Готово с предупреждениями")
             state.setObjectName("finalReady" if output.status == "completed" else "warning")
-            detail = QLabel(f"{self._seconds(output.duration_seconds)}  ·  {self._size(self._file_size(output.path))}")
+            make_label_shrinkable(state)
+            detail = QLabel()
             detail.setObjectName("muted")
-            detail.setWordWrap(True)
+            make_label_shrinkable(detail)
+            set_responsive_text(
+                detail,
+                f"{self._seconds(output.duration_seconds)}  ·  {self._size(self._file_size(output.path))}",
+            )
             text.addWidget(title)
             text.addWidget(state)
             text.addWidget(detail)
@@ -597,11 +645,14 @@ class FinalResultsWorkspace(QWidget):
             "created": created,
         }
         for key, value in values.items():
-            self.info_values[key].setText(value)
+            set_responsive_text(self.info_values[key], value)
         all_warnings = list(dict.fromkeys(warning for warning in warnings if warning.strip()))
         if output.status == "warning" and not all_warnings:
             all_warnings.append("Файл создан с предупреждением из отчёта о ролике.")
-        self.warning_text.setText("\n".join(f"• {warning}" for warning in all_warnings))
+        set_responsive_text(
+            self.warning_text,
+            "\n".join(f"• {warning}" for warning in all_warnings),
+        )
         self.warning_box.setVisible(bool(all_warnings))
         available = output.path.is_file()
         self.open_video_button.setEnabled(available)

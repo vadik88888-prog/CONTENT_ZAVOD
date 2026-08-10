@@ -352,3 +352,58 @@ def test_processing_progress_stays_indeterminate_until_a_real_fraction_is_availa
     finally:
         progress.deleteLater()
         app.processEvents()
+
+
+def test_processing_progress_recomputes_hostile_wrapped_text_after_resize() -> None:
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QApplication, QBoxLayout
+
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    from app.gui.components.processing_progress import ProcessingProgress
+
+    progress = ProcessingProgress()
+    hostile_token = "https://example.test/" + "неразрывныйсегмент" * 24
+    message = (
+        "Сохранённое сообщение о прерванной обработке должно переноситься и оставлять действия доступными. "
+        * 24
+    ) + hostile_token
+    try:
+        progress.resize(600, 5000)
+        progress.show()
+        app.processEvents()
+        progress.set_running(
+            message,
+            "Прошло 01:20",
+            detail=message,
+            long_stage_warning=message,
+        )
+        for _ in range(3):
+            app.processEvents()
+        narrow_height = progress.minimumHeight()
+        narrow_required = progress.layout().totalHeightForWidth(progress.width())
+        assert progress.width() == 600
+        assert progress._action_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert narrow_height >= narrow_required
+
+        progress.resize(1100, 5000)
+        for _ in range(3):
+            app.processEvents()
+        wide_height = progress.minimumHeight()
+        wide_required = progress.layout().totalHeightForWidth(progress.width())
+        assert progress._action_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert wide_height >= wide_required
+        assert wide_height < narrow_height
+        assert "\u200b" in progress.stage.text()
+        assert progress.stage.toolTip() == message
+
+        progress.resize(600, 5000)
+        for _ in range(3):
+            app.processEvents()
+        assert progress.minimumHeight() > wide_height
+    finally:
+        progress.close()
+        progress.deleteLater()
+        app.processEvents()

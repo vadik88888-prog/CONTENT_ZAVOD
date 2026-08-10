@@ -19,6 +19,7 @@ from app.analysis_artifact import candidate_is_draftable
 from app.clip_results import ClipResult, primary_clip_results, unique_primary_results
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
+from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
 
@@ -79,6 +80,22 @@ class _ElidedLabel(QLabel):
 class ProjectScreen(QWidget):
     back_requested = Signal()
 
+    # The wide review composition needs 1,582 logical pixels for its three
+    # content columns before page margins and the scroll frame are counted.
+    # Switching at 1,600 made the nominal wide layout overflow by a few pixels
+    # on real Windows clients; leave a small deterministic safety margin.
+    _WIDE_STAGE_MINIMUM_WIDTH = 1660
+    # The full review rail (Back + hint + two dynamic actions) needs about
+    # 1,000 logical pixels after page margins with the shipped Windows font.
+    # Required scaled-laptop clients around 911–937px must retain short labels.
+    _COMPACT_ACTION_BREAKPOINT = 1100
+
+    _SAME_SOURCE_BROLL_TEXT = "Использовать дополнительные кадры из этого видео"
+    _SAME_SOURCE_BROLL_COMPACT_TEXT = "Использовать дополнительные кадры\nиз этого видео"
+    _CACHE_TEXT = "Использовать готовый анализ, если он есть"
+    _CACHE_COMPACT_TEXT = "Использовать готовый анализ,\nесли он есть"
+    _FLOW_HINT_MAX_CHARS = 240
+
     def __init__(self, viewmodel: ProjectViewModel, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("screen")
@@ -114,17 +131,25 @@ class ProjectScreen(QWidget):
         root.setContentsMargins(34, 26, 34, 30)
         header = QHBoxLayout()
         self._header_layout = header
-        back = QPushButton("← Проекты")
-        back.clicked.connect(self.back_requested)
+        self.back_button = QPushButton("← Проекты")
+        self.back_button.setToolTip("Вернуться к списку проектов")
+        self.back_button.clicked.connect(self.back_requested)
         self.title = _ElidedLabel("Проект")
         self.title.setObjectName("title")
         self.status = _ElidedLabel("")
         self.status.setObjectName("status")
+        # Unlike the stretching project title, this header badge has zero
+        # layout stretch. Retain a preferred width so it cannot silently
+        # collapse to zero when the medium/wide chrome makes it visible.
+        self.status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.status.setMaximumWidth(260)
         self.settings_toggle = QPushButton("Дополнительно")
         self.settings_toggle.setCheckable(True)
+        self.settings_toggle.setToolTip("Показать дополнительные настройки")
         self.folder = QPushButton("Открыть папку")
+        self.folder.setToolTip("Открыть папку проекта")
         self.folder.clicked.connect(self._open_project_folder)
-        header.addWidget(back)
+        header.addWidget(self.back_button)
         header.addWidget(self.title, 1)
         header.addWidget(self.status)
         header.addWidget(self.settings_toggle)
@@ -162,10 +187,10 @@ class ProjectScreen(QWidget):
         self.flow_title.setObjectName("flowScreenTitle")
         self.flow_hint = QLabel()
         self.flow_hint.setObjectName("muted")
-        self.flow_hint.setWordWrap(True)
+        make_label_shrinkable(self.flow_hint)
         self.flow_route = QLabel("")
         self.flow_route.setObjectName("muted")
-        self.flow_route.setWordWrap(True)
+        make_label_shrinkable(self.flow_route)
         flow_layout.addWidget(self.flow_position)
         flow_layout.addWidget(self.flow_title)
         flow_layout.addWidget(self.flow_hint)
@@ -183,7 +208,7 @@ class ProjectScreen(QWidget):
         self.download_card = self._card("Загрузка")
         self.download_source = QLabel()
         self.download_source.setObjectName("muted")
-        self.download_source.setWordWrap(True)
+        make_label_shrinkable(self.download_source)
         self.download_button = QPushButton("Скачать видео")
         self.download_button.setObjectName("primary")
         self.download_button.clicked.connect(self.viewmodel.start_download)
@@ -195,7 +220,7 @@ class ProjectScreen(QWidget):
         setup_layout = self.setup_card.layout()
         self.setup_source = QLabel()
         self.setup_source.setObjectName("muted")
-        self.setup_source.setWordWrap(True)
+        make_label_shrinkable(self.setup_source)
         setup_layout.addWidget(self.setup_source)
         setup_layout.addWidget(QLabel("Как искать моменты"))
         self.setup_processing_mode = QComboBox()
@@ -208,7 +233,7 @@ class ProjectScreen(QWidget):
         setup_layout.addWidget(self.setup_processing_mode)
         self.setup_mode_help = QLabel()
         self.setup_mode_help.setObjectName("muted")
-        self.setup_mode_help.setWordWrap(True)
+        make_label_shrinkable(self.setup_mode_help)
         setup_layout.addWidget(self.setup_mode_help)
         setup_layout.addWidget(QLabel("Учитывать события в кадре"))
         self.setup_deep_analysis = QComboBox()
@@ -221,7 +246,7 @@ class ProjectScreen(QWidget):
         setup_layout.addWidget(self.setup_deep_analysis)
         self.setup_deep_help = QLabel()
         self.setup_deep_help.setObjectName("muted")
-        self.setup_deep_help.setWordWrap(True)
+        make_label_shrinkable(self.setup_deep_help)
         setup_layout.addWidget(self.setup_deep_help)
         setup_layout.addWidget(QLabel("Где будет показываться ролик"))
         self.setup_platform = QComboBox()
@@ -235,7 +260,7 @@ class ProjectScreen(QWidget):
         setup_layout.addWidget(self.setup_platform)
         self.setup_platform_help = QLabel("Размер и поля ролика будут подготовлены для выбранного места.")
         self.setup_platform_help.setObjectName("muted")
-        self.setup_platform_help.setWordWrap(True)
+        make_label_shrinkable(self.setup_platform_help)
         setup_layout.addWidget(self.setup_platform_help)
         setup_layout.addWidget(QLabel("Сколько черновиков подготовить"))
         self.setup_clip_count = QComboBox()
@@ -247,15 +272,15 @@ class ProjectScreen(QWidget):
         setup_layout.addWidget(self.setup_clip_count)
         self.setup_count_help = QLabel("Количество можно изменить позже — анализ не будет запущен повторно из-за выбора списка.")
         self.setup_count_help.setObjectName("muted")
-        self.setup_count_help.setWordWrap(True)
+        make_label_shrinkable(self.setup_count_help)
         setup_layout.addWidget(self.setup_count_help)
         self.setup_estimate = QLabel()
         self.setup_estimate.setObjectName("muted")
-        self.setup_estimate.setWordWrap(True)
+        make_label_shrinkable(self.setup_estimate)
         setup_layout.addWidget(self.setup_estimate)
         self.setup_change = QLabel()
         self.setup_change.setObjectName("muted")
-        self.setup_change.setWordWrap(True)
+        make_label_shrinkable(self.setup_change)
         setup_layout.addWidget(self.setup_change)
         self.setup_advanced_toggle = QPushButton("Дополнительные настройки")
         self.setup_advanced_toggle.setCheckable(True)
@@ -268,7 +293,7 @@ class ProjectScreen(QWidget):
         self.next_step = self._card("Следующий шаг")
         self.next_step_text = QLabel()
         self.next_step_text.setObjectName("muted")
-        self.next_step_text.setWordWrap(True)
+        make_label_shrinkable(self.next_step_text)
         self.next_step.layout().addWidget(self.next_step_text)
         left.addWidget(self.next_step)
         self.metadata = self._card("Сведения о видео")
@@ -294,15 +319,21 @@ class ProjectScreen(QWidget):
         self._candidate_sort = "recommendation"
         self.workflow_hint = QLabel()
         self.workflow_hint.setObjectName("muted")
-        self.workflow_hint.setWordWrap(True)
+        make_label_shrinkable(self.workflow_hint)
         self.draft_button = QPushButton("Создать черновики")
         self.draft_button.setObjectName("primary")
+        self.draft_button.setProperty("responsiveFullText", "Создать черновики")
+        self.draft_button.setProperty("responsiveCompactText", "Создать")
         self.draft_button.clicked.connect(self._draft_action)
         self.view_all_button = QPushButton("Посмотреть все моменты")
         self.view_all_button.setObjectName("secondaryAction")
+        self.view_all_button.setProperty("responsiveFullText", "Посмотреть все моменты")
+        self.view_all_button.setProperty("responsiveCompactText", "Все моменты")
         self.view_all_button.clicked.connect(self._view_all_candidates)
         self.production_button = QPushButton("Создать готовые ролики")
         self.production_button.setObjectName("primary")
+        self.production_button.setProperty("responsiveFullText", "Создать готовые ролики")
+        self.production_button.setProperty("responsiveCompactText", "Создать ролики")
         # QPushButton.clicked carries a ``bool`` checked argument.  Keep it
         # out of the candidate-id API: the delivery set is always derived
         # from the durable approved-draft state below.
@@ -398,7 +429,7 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(composition_strategy=str(self.composition_strategy.currentData()))
         )
         settings.addWidget(self.composition_strategy)
-        self.same_source_broll = QCheckBox("Использовать дополнительные кадры из этого видео")
+        self.same_source_broll = QCheckBox(self._SAME_SOURCE_BROLL_TEXT)
         self.same_source_broll.setToolTip(
             "Разрешает использовать только подходящие фрагменты из загруженного видео. "
             "Без вашего выбора дополнительные кадры не добавляются."
@@ -421,7 +452,8 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(subtitle_style=str(self.subtitle_style.currentData()))
         )
         settings.addWidget(self.subtitle_style)
-        self.cache = QCheckBox("Использовать готовый анализ, если он есть")
+        self.cache = QCheckBox(self._CACHE_TEXT)
+        self.cache.setToolTip(self._CACHE_TEXT)
         self.cache.toggled.connect(lambda value: self.viewmodel.save_options(use_cache=value))
         settings.addWidget(self.cache)
         settings.addStretch()
@@ -467,8 +499,8 @@ class ProjectScreen(QWidget):
         # to squeezing the card actions into hidden horizontal overflow.  A
         # full-HD desktop keeps the three-column composition from the approved
         # visual reference.
-        compact = self.width() < 1600
-        compact_actions = self.width() < 900
+        compact = self.width() < self._WIDE_STAGE_MINIMUM_WIDTH
+        compact_actions = self.width() < self._COMPACT_ACTION_BREAKPOINT
         cards_need_reflow = (
             self._compact_action_layout is not None
             and compact_actions != self._compact_action_layout
@@ -478,6 +510,13 @@ class ProjectScreen(QWidget):
             and compact == self._compact_stage_layout
             and compact_actions == self._compact_action_layout
         ):
+            # Height-for-width still changes inside one responsive profile.
+            # In particular, the full review hint can need several rows just
+            # above 1,100 px, then collapse again as the same medium layout is
+            # widened.  Returning without releasing that cached minimum kept
+            # the sticky bar tall until the next breakpoint was crossed.
+            self._refresh_stage_action_geometry()
+            QTimer.singleShot(0, self._refresh_stage_action_geometry)
             return
         self._compact_stage_layout = compact
         self._compact_action_layout = compact_actions
@@ -506,16 +545,19 @@ class ProjectScreen(QWidget):
         self._processing_workspace_layout.setSpacing(spacing)
         self._review_body_layout.setDirection(direction)
         self._review_body_layout.setSpacing(12 if compact else 14)
-        self._header_layout.setDirection(action_direction)
+        # Compact chrome stays one row.  Stacking the header and all four
+        # workflow steps consumed most of a 720×420 shell before the stage
+        # body and its CTA were laid out.
+        self._header_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._header_layout.setSpacing(6 if compact_actions else 8)
-        self._stepper_layout.setDirection(action_direction)
-        self._stepper_layout.setSpacing(4 if compact_actions else 0)
+        self._stepper_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+        self._stepper_layout.setSpacing(0)
         for divider in self._global_step_dividers:
             divider.setVisible(not compact_actions)
-        self._setup_action_layout.setDirection(action_direction)
-        self._processing_actions_layout.setDirection(action_direction)
+        self._setup_action_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+        self._processing_actions_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._review_header_layout.setDirection(action_direction)
-        self._review_action_layout.setDirection(action_direction)
+        self._review_action_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._review_action_layout.setSpacing(8 if compact_actions else 6)
         self.content_host.setMinimumWidth(0)
         if compact:
@@ -537,14 +579,82 @@ class ProjectScreen(QWidget):
         self.settings_panel.setMaximumWidth(16_777_215 if compact else 300)
         self.setup_summary.setMaximumWidth(16_777_215)
         self.processing_summary.setMaximumWidth(16_777_215)
+        self._apply_compact_chrome()
         self._review_body_layout.invalidate()
         self._review_body_layout.activate()
+        self._refresh_stage_action_geometry()
         self.updateGeometry()
+        QTimer.singleShot(0, self._refresh_stage_action_geometry)
         # Candidate cards own an action rail.  Rebuild them only when the
         # breakpoint changes so that the rail can become a full-width block
         # instead of being horizontally squeezed or clipped.
         if cards_need_reflow and self.project:
             self._update_candidate_review(self.project)
+            self._apply_compact_chrome()
+            self._refresh_stage_action_geometry()
+
+    def _apply_compact_chrome(self, global_step: str | None = None) -> None:
+        """Keep the current route and actions readable without tall chrome."""
+
+        compact = bool(self._compact_action_layout)
+        current_step = global_step or _GLOBAL_STEP_FOR_FLOW.get(self._flow_step, "settings")
+        self.back_button.setText("←" if compact else "← Проекты")
+        self.folder.setText("Папка" if compact else "Открыть папку")
+        self.settings_toggle.setText("Ещё" if compact else "Дополнительно")
+        self.setup_back_button.setText("←" if compact else "← К источнику")
+        self.review_back_button.setText("←" if compact else "← Назад к обработке")
+        self.setup_back_button.setToolTip("Вернуться к источнику")
+        self.review_back_button.setToolTip("Вернуться к обработке")
+        for button in (self.view_all_button, self.draft_button, self.production_button):
+            full_text = str(button.property("responsiveFullText") or button.text())
+            compact_text = str(button.property("responsiveCompactText") or full_text)
+            button.setText(compact_text if compact else full_text)
+            button.setToolTip(full_text)
+        self.status.setVisible(not compact)
+        for name, label in self._global_step_labels.items():
+            label.setVisible(not compact or name == current_step)
+        self.same_source_broll.setText(
+            self._SAME_SOURCE_BROLL_COMPACT_TEXT if compact else self._SAME_SOURCE_BROLL_TEXT
+        )
+        self.cache.setText(self._CACHE_COMPACT_TEXT if compact else self._CACHE_TEXT)
+        # The same next-step explanation already lives in the flow card.  In
+        # the compact sticky bar it stole a row from the body and could paint
+        # through the vertically stacked CTA buttons.
+        self.workflow_hint.setVisible(not compact and not self.review_action_bar.isHidden())
+
+    def _refresh_stage_action_geometry(self) -> None:
+        """Reserve the visible sticky action bar's real post-reflow height."""
+
+        if not hasattr(self, "stage_actions"):
+            return
+        root_margins = self._root_layout.contentsMargins()
+        available_width = max(
+            1,
+            self.width() - root_margins.left() - root_margins.right(),
+        )
+        for bar in (self.setup_action_bar, self.review_action_bar):
+            bar.setMinimumHeight(0)
+            bar_layout = bar.layout()
+            if bar_layout is None or bar.isHidden():
+                continue
+            bar_layout.invalidate()
+            bar_layout.activate()
+            required = bar_layout.totalHeightForWidth(available_width)
+            if required < 0:
+                required = bar_layout.totalSizeHint().height()
+            bar.setMinimumHeight(max(required, bar_layout.totalMinimumSize().height()))
+        actions_layout = self.stage_actions.layout()
+        if actions_layout is None:
+            return
+        self.stage_actions.setMinimumHeight(0)
+        actions_layout.invalidate()
+        actions_layout.activate()
+        required = actions_layout.totalHeightForWidth(available_width)
+        if required < 0:
+            required = actions_layout.totalSizeHint().height()
+        if not self.stage_actions.isHidden():
+            self.stage_actions.setMinimumHeight(max(required, actions_layout.totalMinimumSize().height()))
+        self.stage_actions.updateGeometry()
 
     def _compose_stage_workspaces(self, legacy_layout: QVBoxLayout, body: QHBoxLayout) -> None:
         """Arrange the durable widgets into one focused workspace per stage.
@@ -600,7 +710,7 @@ class ProjectScreen(QWidget):
         self.setup_source_summary = self._card("Ваше видео")
         self.setup_source_summary_text = QLabel()
         self.setup_source_summary_text.setObjectName("muted")
-        self.setup_source_summary_text.setWordWrap(True)
+        make_label_shrinkable(self.setup_source_summary_text)
         self.setup_source_summary.layout().addWidget(self.setup_source_summary_text)
         setup_main_layout.addWidget(self.setup_source_summary)
         self.recommendation_banner = QFrame()
@@ -610,7 +720,7 @@ class ProjectScreen(QWidget):
         recommendation_icon = QLabel("✦")
         recommendation_icon.setObjectName("recommendationIcon")
         self.recommendation_text = QLabel()
-        self.recommendation_text.setWordWrap(True)
+        make_label_shrinkable(self.recommendation_text)
         recommendation_layout.addWidget(recommendation_icon)
         recommendation_layout.addWidget(self.recommendation_text, 1)
         setup_main_layout.addWidget(self.recommendation_banner)
@@ -639,7 +749,7 @@ class ProjectScreen(QWidget):
         self.setup_summary.setObjectName("setupSummary")
         self.setup_summary_text = QLabel()
         self.setup_summary_text.setObjectName("muted")
-        self.setup_summary_text.setWordWrap(True)
+        make_label_shrinkable(self.setup_summary_text)
         self.setup_summary.layout().addWidget(self.setup_summary_text)
         setup_workspace_layout.addWidget(self.setup_summary, 1)
         self._stage_widgets["settings"] = self.setup_workspace
@@ -660,7 +770,7 @@ class ProjectScreen(QWidget):
         self.processing_source_summary = self._card("Обрабатываемое видео")
         self.processing_source_text = QLabel()
         self.processing_source_text.setObjectName("muted")
-        self.processing_source_text.setWordWrap(True)
+        make_label_shrinkable(self.processing_source_text)
         self.processing_source_summary.layout().addWidget(self.processing_source_text)
         processing_main_layout.addWidget(self.processing_source_summary)
         processing_main_layout.addWidget(self.progress)
@@ -705,11 +815,11 @@ class ProjectScreen(QWidget):
         self.processing_summary.setObjectName("processingSummary")
         self.processing_summary_text = QLabel()
         self.processing_summary_text.setObjectName("muted")
-        self.processing_summary_text.setWordWrap(True)
+        make_label_shrinkable(self.processing_summary_text)
         self.processing_summary.layout().addWidget(self.processing_summary_text)
         self.processing_next = QLabel("Результаты сохраняются автоматически. После остановки останутся только готовые артефакты.")
         self.processing_next.setObjectName("muted")
-        self.processing_next.setWordWrap(True)
+        make_label_shrinkable(self.processing_next)
         self.processing_summary.layout().addWidget(self.processing_next)
         processing_layout.addWidget(self.processing_summary, 1)
         self._stage_widgets["processing"] = self.processing_workspace
@@ -728,7 +838,7 @@ class ProjectScreen(QWidget):
         self.results_subflow.setObjectName("screenTitle")
         self.results_subflow_hint = QLabel()
         self.results_subflow_hint.setObjectName("subtitle")
-        self.results_subflow_hint.setWordWrap(True)
+        make_label_shrinkable(self.results_subflow_hint)
         review_header.addWidget(self.results_subflow)
         review_header.addWidget(self.results_subflow_hint, 1)
         review_layout.addLayout(review_header)
@@ -737,7 +847,7 @@ class ProjectScreen(QWidget):
         metrics_layout = QHBoxLayout(self.review_metrics)
         metrics_layout.setContentsMargins(14, 10, 14, 10)
         self.review_metrics_text = QLabel()
-        self.review_metrics_text.setWordWrap(True)
+        make_label_shrinkable(self.review_metrics_text)
         metrics_layout.addWidget(self.review_metrics_text)
         review_layout.addWidget(self.review_metrics)
         review_body = QHBoxLayout()
@@ -818,6 +928,9 @@ class ProjectScreen(QWidget):
 
         self.stage_actions = QWidget()
         self.stage_actions.setObjectName("stageActions")
+        self.stage_actions.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setup_action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.review_action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         actions_layout = QVBoxLayout(self.stage_actions)
         actions_layout.setContentsMargins(0, 10, 0, 0)
         actions_layout.setSpacing(0)
@@ -933,7 +1046,7 @@ class ProjectScreen(QWidget):
         details = f"{name}"
         if size != "н/д":
             details += f" · ожидаемый объём: {size}"
-        self.download_source.setText(f"{details}\n{message}")
+        set_responsive_text(self.download_source, f"{details}\n{message}")
         self.download_button.setText(button)
         blocked = self.viewmodel.active and not self.viewmodel.owns_active_job
         self.download_button.setDisabled(state == "downloading" or self.viewmodel.active)
@@ -957,8 +1070,8 @@ class ProjectScreen(QWidget):
             resolution = f" · {source['width']}×{source['height']}"
         source_kind = "Локальный файл" if project.source_spec.kind == "local_file" else "Публичная ссылка"
         summary = f"{source_name}\n{source_kind} · {duration}{resolution}"
-        self.setup_source_summary_text.setText(summary)
-        self.processing_source_text.setText(summary)
+        set_responsive_text(self.setup_source_summary_text, summary)
+        set_responsive_text(self.processing_source_text, summary)
 
         mode = {
             "fast": "Быстрый",
@@ -977,7 +1090,8 @@ class ProjectScreen(QWidget):
             "universal": "Вертикальный 9:16",
         }.get(project.settings.platform, "Вертикальный 9:16")
         count = self._selection_limit(project)
-        self.setup_summary_text.setText(
+        set_responsive_text(
+            self.setup_summary_text,
             f"Режим: {mode}\nЧто анализируем: {scope}\nФормат: {platform}\n"
             f"Рекомендуемых черновиков: {count}\n"
             f"Дополнительные кадры: {'разрешены' if project.settings.same_source_broll_allowed else 'не использовать'}"
@@ -987,7 +1101,7 @@ class ProjectScreen(QWidget):
             "standard": "Рекомендуем стандартный режим: он сохраняет хороший баланс между глубиной поиска и временем ожидания.",
             "maximum": "Максимальный режим тщательно проверит контекст и события в кадре. Он займёт больше времени.",
         }.get(project.settings.processing_mode, "Настройки сохраняются в проекте автоматически.")
-        self.recommendation_text.setText(recommendation)
+        set_responsive_text(self.recommendation_text, recommendation)
         latest = self._latest_run(project)
         launch = "Ожидает запуска"
         if latest:
@@ -999,7 +1113,8 @@ class ProjectScreen(QWidget):
                 "full": "Обработка видео",
             }.get(latest.run_kind, "Обработка")
             launch = f"{kind} · {self._run_status_text(latest.status)}"
-        self.processing_summary_text.setText(
+        set_responsive_text(
+            self.processing_summary_text,
             f"{launch}\nРежим: {mode}\nРезультаты сохраняются в проекте по мере готовности."
         )
 
@@ -1087,9 +1202,9 @@ class ProjectScreen(QWidget):
             title = presentation.status_label
             hint = self._recovery_message(latest)
         self.flow_title.setText(title)
-        self.flow_hint.setText(hint)
+        self._set_flow_hint(hint)
         if self.viewmodel.blocked_by_other_project:
-            self.flow_hint.setText(self._other_project_job_hint())
+            self._set_flow_hint(self._other_project_job_hint())
         for index, (name, label) in enumerate(_GLOBAL_FLOW_STEPS, start=1):
             state = "current" if name == global_step else ("done" if index < global_index else "pending")
             widget = self._global_step_labels[name]
@@ -1137,14 +1252,29 @@ class ProjectScreen(QWidget):
             "candidates": "Найденные моменты",
             "drafts": "Черновики",
         }.get(step, "Результаты"))
-        self.results_subflow_hint.setText({
+        set_responsive_text(self.results_subflow_hint, {
             "candidates": "Просмотрите сильные фрагменты и выберите те, которые хотите превратить в черновики.",
             "drafts": "Проверьте созданные варианты и подтвердите только готовые к финальной сборке.",
         }.get(step, ""))
         self.settings_toggle.setVisible(step == "settings" and not active)
-        self.autosave.setVisible(step == "settings" and not active)
+        self.autosave.setVisible(
+            step == "settings" and not active and not bool(self._compact_action_layout)
+        )
         if step != "settings" or active:
             self._set_advanced_visible(False)
+        self._apply_compact_chrome(global_step)
+        self._refresh_stage_action_geometry()
+        QTimer.singleShot(0, self._refresh_stage_action_geometry)
+
+    def _set_flow_hint(self, value: object) -> None:
+        """Keep persisted diagnostics from turning global chrome into a page."""
+
+        full_text = str(value)
+        visible_text = full_text
+        if len(visible_text) > self._FLOW_HINT_MAX_CHARS:
+            visible_text = visible_text[: self._FLOW_HINT_MAX_CHARS - 1].rstrip() + "…"
+        set_responsive_text(self.flow_hint, visible_text, tooltip=False)
+        self.flow_hint.setToolTip(full_text)
 
     def _update_setup_card(self, project: DesktopProject) -> None:
         source = project.source_metadata
@@ -1153,10 +1283,11 @@ class ProjectScreen(QWidget):
         source_name = project.source.name if project.source_spec.is_ready else str(source.get("title") or "Видео по ссылке")
         source_kind = "Файл" if project.source_spec.kind == "local_file" else "Видео по ссылке"
         source_state = "готов" if project.source_spec.is_ready else "ещё не загружен"
-        self.setup_source.setText(
+        set_responsive_text(
+            self.setup_source,
             f"{source_kind}: {source_name}\nДлительность: {duration} · Размер: {size}\nИсточник {source_state}."
         )
-        self.setup_mode_help.setText({
+        set_responsive_text(self.setup_mode_help, {
             "fast": "Быстрый вариант для интервью, лекций и других разговорных видео.",
             "standard": "Подходящий вариант по умолчанию: хороший баланс времени и качества.",
             "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени.",
@@ -1164,17 +1295,22 @@ class ProjectScreen(QWidget):
         try:
             resolved, estimate = self.viewmodel.setup_preflight()
             deep_state = "будет использован" if resolved.deep_analysis.resolved else "не потребуется"
-            self.setup_deep_help.setText(f"{resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.")
-            self.setup_platform_help.setText(
+            set_responsive_text(
+                self.setup_deep_help,
+                f"{resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.",
+            )
+            set_responsive_text(
+                self.setup_platform_help,
                 f"{resolved.platform.label}: ролик будет вертикальным, до {int(resolved.platform.maximum_duration_seconds)} секунд, "
                 "с субтитрами и полями для интерфейса."
             )
-            self.setup_estimate.setText(self._setup_estimate_text(estimate))
+            set_responsive_text(self.setup_estimate, self._setup_estimate_text(estimate))
         except Exception:
             saved = project.setup_state.last_estimate
-            self.setup_deep_help.setText("Рекомендация появится после проверки настроек.")
-            self.setup_estimate.setText(self._saved_estimate_text(saved))
-        self.setup_change.setText(
+            set_responsive_text(self.setup_deep_help, "Рекомендация появится после проверки настроек.")
+            set_responsive_text(self.setup_estimate, self._saved_estimate_text(saved))
+        set_responsive_text(
+            self.setup_change,
             project.setup_state.change_summary or "Настройки сохраняются в этом проекте."
         )
         preparing = not bool(project.analysis_artifact_path)
@@ -1291,7 +1427,7 @@ class ProjectScreen(QWidget):
             if preview_file and preview_file.is_file():
                 self._draft_preview_paths[candidate_id] = preview_file
         if not candidates:
-            self.workflow_hint.setText(
+            self._set_workflow_hint(
                 "После поиска здесь появятся подходящие моменты и готовая рекомендация."
             )
             self.workflow_hint.show()
@@ -1316,11 +1452,13 @@ class ProjectScreen(QWidget):
         ready_count = sum(state in {"draft_ready", "selected"} for state in project.candidate_states.values())
         processing_count = sum(state in {"draft_planning", "production_rendering"} for state in project.candidate_states.values())
         if workflow_step == "drafts":
-            self.review_metrics_text.setText(
+            set_responsive_text(
+                self.review_metrics_text,
                 f"Создано черновиков: {ready_count + rendered_count} · выбрано для финала: {len(project.selected_candidate_ids)}"
             )
         else:
-            self.review_metrics_text.setText(
+            set_responsive_text(
+                self.review_metrics_text,
                 f"Найдено {len(candidates)} · рекомендуем {recommended_count}"
             )
         if workflow_step == "candidates":
@@ -1480,13 +1618,14 @@ class ProjectScreen(QWidget):
             recommended = " · рекомендуем" if item.get("recommended", item.get("selected_by_recommendation")) else ""
             details = QLabel(f"{start}–{end} · {potential} · уверенность {confidence * 100:.0f}%{recommended}")
             details.setObjectName("muted")
-            details.setWordWrap(True)
+            make_label_shrinkable(details)
             information.addWidget(details)
             reasons = [str(value) for value in item.get("reasons", []) if str(value)]
             if reasons:
-                reason = QLabel("Почему: " + reasons[0])
+                reason = QLabel()
                 reason.setObjectName("muted")
-                reason.setWordWrap(True)
+                make_label_shrinkable(reason)
+                set_responsive_text(reason, "Почему: " + reasons[0])
                 information.addWidget(reason)
             if compact_actions:
                 summary_row = QHBoxLayout()
@@ -1521,7 +1660,7 @@ class ProjectScreen(QWidget):
                 # above explaining exactly which retry is safe.
                 status.setText(status_label)
                 status.setToolTip("Подробности сохранены в журнале проекта.")
-            status.setWordWrap(True)
+            make_label_shrinkable(status)
             actions.addWidget(status)
             source_preview = QPushButton("Исходный фрагмент" if workflow_step == "drafts" else "Просмотреть")
             source_preview.setObjectName(f"preview-candidate-{candidate_id}")
@@ -1627,10 +1766,10 @@ class ProjectScreen(QWidget):
         self.draft_button.setDisabled(True)
         self.production_button.setDisabled(True)
         if self.viewmodel.blocked_by_other_project:
-            self.workflow_hint.setText(self._other_project_job_hint())
+            self._set_workflow_hint(self._other_project_job_hint())
             return
         if project.status in {"analyzing", "processing", "rendering_selected"} or processing_count:
-            self.workflow_hint.setText("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
+            self._set_workflow_hint("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
             return
         if self._derive_flow_step(project) == "candidates":
             recommended_ids = self._recommended_candidate_ids()
@@ -1640,13 +1779,21 @@ class ProjectScreen(QWidget):
             ]
             if not selected_ids and recommended_ids:
                 count = len(recommended_ids)
-                self.workflow_hint.setText(
+                self._set_workflow_hint(
                     f"Найдено {len(self._review_candidates_by_id)} · рекомендуем {count}. "
                     "Можно сразу подготовить лучшие варианты или изменить выбор в списке."
                 )
-                self.view_all_button.setText(f"Посмотреть все {len(self._review_candidates_by_id)}")
+                self._set_review_action_text(
+                    self.view_all_button,
+                    f"Посмотреть все {len(self._review_candidates_by_id)}",
+                    f"Все ({len(self._review_candidates_by_id)})",
+                )
                 self.view_all_button.show()
-                self.draft_button.setText(f"Создать {count} рекомендованных")
+                self._set_review_action_text(
+                    self.draft_button,
+                    f"Создать {count} рекомендованных",
+                    f"Создать лучшие ({count})",
+                )
                 self.draft_button.setEnabled(True)
                 self.draft_button.show()
                 return
@@ -1661,33 +1808,59 @@ class ProjectScreen(QWidget):
                 if selected_count == count
                 else f"Выбрано {selected_count}. Для {count} из них ещё нужен черновик."
             )
-            self.workflow_hint.setText(
+            self._set_workflow_hint(
                 f"{selection_summary} Следующий шаг — создать черновики, чтобы посмотреть ролики перед финальной сборкой."
             )
-            self.draft_button.setText(f"Создать черновики ({count})")
+            self._set_review_action_text(
+                self.draft_button,
+                f"Создать черновики ({count})",
+                f"Создать ({count})",
+            )
             self.draft_button.setEnabled(True)
             self.draft_button.show()
             return
         if project.selected_candidate_ids:
             count = len(project.selected_candidate_ids)
-            self.workflow_hint.setText(
+            self._set_workflow_hint(
                 f"Подтверждено: {count}. Черновики проверены — теперь можно создать готовые ролики."
             )
-            self.production_button.setText(f"Создать готовые ролики ({count})")
+            self._set_review_action_text(
+                self.production_button,
+                f"Создать готовые ролики ({count})",
+                f"Создать ролики ({count})",
+            )
             self.production_button.setEnabled(True)
             self.production_button.show()
             return
         if ready_count:
-            self.workflow_hint.setText(
+            self._set_workflow_hint(
                 "Черновики готовы. Посмотрите каждый как вертикальный ролик, затем подтвердите нужные или отклоните их."
             )
             return
         if rendered_count:
-            self.workflow_hint.setText("Готовые ролики можно посмотреть в карточках или открыть в папке проекта.")
+            self._set_workflow_hint("Готовые ролики можно посмотреть в карточках или открыть в папке проекта.")
             return
-        self.workflow_hint.setText(
+        self._set_workflow_hint(
             "Посмотрите моменты и выберите любое число подходящих фрагментов."
         )
+
+    def _set_workflow_hint(self, value: object) -> None:
+        set_responsive_text(self.workflow_hint, value)
+        if hasattr(self, "stage_actions"):
+            QTimer.singleShot(0, self._refresh_stage_action_geometry)
+
+    def _set_review_action_text(
+        self,
+        button: QPushButton,
+        full_text: str,
+        compact_text: str,
+    ) -> None:
+        button.setProperty("responsiveFullText", full_text)
+        button.setProperty("responsiveCompactText", compact_text)
+        button.setToolTip(full_text)
+        button.setText(compact_text if self._compact_action_layout else full_text)
+        if hasattr(self, "stage_actions"):
+            QTimer.singleShot(0, self._refresh_stage_action_geometry)
 
     def _runs_for_project(self, project: DesktopProject) -> list[ProjectRun]:
         if self.runs and all(run.project_id == project.project_id for run in self.runs):
@@ -2307,8 +2480,12 @@ class ProjectScreen(QWidget):
         self.candidate_detail.setMinimumHeight(0)
         layout.invalidate()
         layout.activate()
-        required_height = layout.totalSizeHint().height()
-        self.candidate_detail.setMinimumHeight(required_height)
+        required_height = layout.totalHeightForWidth(max(1, self.candidate_detail.width()))
+        if required_height < 0:
+            required_height = layout.totalSizeHint().height()
+        self.candidate_detail.setMinimumHeight(
+            max(required_height, layout.totalMinimumSize().height())
+        )
         self.candidate_detail.updateGeometry()
 
     @staticmethod
@@ -2666,8 +2843,12 @@ class ProjectScreen(QWidget):
         ):
             widget.setDisabled(active)
         heavy_hint = self._other_project_job_hint() if blocked else ""
-        for button in (self.run_button, self.setup_start_button, self.draft_button, self.production_button):
+        for button in (self.run_button, self.setup_start_button):
             button.setToolTip(heavy_hint)
+        for button in (self.draft_button, self.production_button):
+            button.setToolTip(
+                heavy_hint or str(button.property("responsiveFullText") or button.text())
+            )
         if self.project:
             self.status.setText(self.viewmodel.services.presentation(
                 self.project, snapshot=snapshot,
@@ -2852,12 +3033,12 @@ class ProjectScreen(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         for value in values:
-            label = QLabel(value); label.setObjectName("muted")
+            label = QLabel(); label.setObjectName("muted")
             # Candidate excerpts and error details can be long.  They are
             # explanatory copy, never a reason to widen the whole review
             # page or expose a horizontal scrollbar.
-            label.setWordWrap(True)
-            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            make_label_shrinkable(label)
+            set_responsive_text(label, value)
             layout.addWidget(label)
 
     def _update_estimate(self, project: DesktopProject) -> None:
@@ -2907,8 +3088,9 @@ class ProjectScreen(QWidget):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle(error.title)
-        box.setText(error.user_message)
-        box.setInformativeText(error.suggested_action)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(break_long_tokens(error.user_message))
+        box.setInformativeText(break_long_tokens(error.suggested_action))
         log_button = None
         if self.project:
             latest = self._latest_run(self.project)

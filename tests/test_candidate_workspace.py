@@ -7,7 +7,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QUrl, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton, QWidget
@@ -16,6 +16,7 @@ from app.gui.components import VideoPreview
 from app.gui.main_window import MainWindow
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind, RunStatus
 from app.gui.screens.project_screen import ProjectScreen
+from app.gui.styles import load_theme
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineFacade
@@ -111,8 +112,8 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
 
         assert screen.content_scroll.widget() is screen.content_host
         assert screen.draft_button.isEnabled() is True
-        assert screen.draft_button.text() == "Создать 1 рекомендованных"
-        assert screen.view_all_button.text() == "Посмотреть все 2"
+        assert screen.draft_button.property("responsiveFullText") == "Создать 1 рекомендованных"
+        assert screen.view_all_button.property("responsiveFullText") == "Посмотреть все 2"
         assert screen.production_button.isEnabled() is False
 
         # The saved analysis opens directly at the single-purpose moments step;
@@ -335,7 +336,7 @@ def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_open
         screen.show()
         app.processEvents()
         assert screen.draft_button.isVisible() and screen.draft_button.isEnabled()
-        assert screen.draft_button.text() == "Создать черновики (3)"
+        assert screen.draft_button.property("responsiveFullText") == "Создать черновики (3)"
         assert screen.draft_button.height() > 0
 
         QTest.mouseClick(screen.draft_button, Qt.MouseButton.LeftButton)
@@ -999,7 +1000,14 @@ def test_review_selection_is_not_capped_by_persisted_top_n(tmp_path: Path, monke
     ("width", "height", "compact"),
     # 760×480 is the desktop shell's logical minimum, covering 1280×720 at
     # 150% Windows scaling as well as the requested 100% desktop sizes.
-    ((760, 480, True), (1280, 720, True), (1440, 900, True), (1920, 1080, False)),
+    (
+        (760, 480, True),
+        (1280, 720, True),
+        (1440, 900, True),
+        (1659, 900, True),
+        (1660, 900, False),
+        (1920, 1080, False),
+    ),
 )
 def test_review_workspace_stacks_before_laptop_cards_can_overflow(
     tmp_path: Path, monkeypatch, width: int, height: int, compact: bool,
@@ -1057,9 +1065,13 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         screen.show()
         app.processEvents()
 
-        assert screen._header_layout.direction() == QBoxLayout.Direction.TopToBottom
-        assert screen._stepper_layout.direction() == QBoxLayout.Direction.TopToBottom
-        assert screen._processing_actions_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert screen._header_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert screen._stepper_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert screen._processing_actions_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert screen._review_action_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert [
+            name for name, label in screen._global_step_labels.items() if label.isVisible()
+        ] == ["results"]
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
         assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
         assert screen.content_scroll.horizontalScrollBar().maximum() == 0
@@ -1105,7 +1117,9 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert descriptive_labels
         assert max(label.geometry().bottom() for label in descriptive_labels) < controls.geometry().top()
         assert controls.geometry().bottom() <= screen.candidate_detail.contentsRect().bottom()
-        assert screen.candidate_detail.minimumHeight() >= detail_layout.totalSizeHint().height()
+        assert screen.candidate_detail.minimumHeight() >= detail_layout.totalHeightForWidth(
+            screen.candidate_detail.width()
+        )
         assert all(
             "Выберите момент в списке" not in label.text()
             for label in screen.candidate_detail.findChildren(QLabel)
@@ -1123,6 +1137,64 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         for button in card.findChildren(QPushButton):
             assert button.width() >= button.minimumSizeHint().width()
     finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_candidate_detail_releases_narrow_height_after_width_grows(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    hostile_token = "https://example.test/" + "неразрывныйсегмент" * 24
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    candidate = analysis["candidates"][0]
+    candidate["transcript_excerpt"] = (
+        "Длинный сохранённый фрагмент расшифровки должен менять высоту вместе с шириной. " * 36
+    ) + hostile_token
+    candidate["reasons"] = ["Подробная сохранённая причина. " * 20]
+    write_json(analysis_path, analysis)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    detail = screen.candidate_detail
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+        screen._show_candidate_detail(candidate, 1.0, 18.0)
+        assert screen.review_inspector_scroll.takeWidget() is detail
+        detail.setParent(None)
+        detail.resize(520, 3000)
+        detail.show()
+        for _ in range(3):
+            app.processEvents()
+        screen._refresh_candidate_detail_geometry()
+        narrow_height = detail.minimumHeight()
+        narrow_required = detail.layout().totalHeightForWidth(detail.width())
+
+        detail.resize(1000, 3000)
+        for _ in range(3):
+            app.processEvents()
+        screen._refresh_candidate_detail_geometry()
+        wide_height = detail.minimumHeight()
+        wide_required = detail.layout().totalHeightForWidth(detail.width())
+
+        assert detail.width() == 1000
+        assert narrow_height >= narrow_required
+        assert wide_height >= wide_required
+        assert wide_height < narrow_height
+        assert any("\u200b" in label.text() for label in detail.findChildren(QLabel))
+    finally:
+        detail.close()
+        detail.deleteLater()
         screen.close()
         screen.deleteLater()
         app.processEvents()
@@ -1195,7 +1267,295 @@ def test_desktop_shell_keeps_navigation_controls_and_project_header_unclipped(
         assert title.text().endswith("…")
         assert window.project_screen.content_scroll.horizontalScrollBar().maximum() == 0
         if width == 760:
-            assert window.project_screen._review_action_layout.direction() == QBoxLayout.Direction.TopToBottom
+            assert window.project_screen._review_action_layout.direction() == QBoxLayout.Direction.LeftToRight
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_real_shell_client_matrix_keeps_project_ctas_and_persisted_text_responsive(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    previous_style = app.styleSheet()
+    app.setStyleSheet(load_theme())
+    services, project = _workspace(tmp_path)
+    services.settings.onboarding_completed = True
+    hostile_token = "https://example.test/" + "очень-длинный-сегмент-без-пробелов" * 18
+    project.name = "Очень длинное сохранённое имя проекта " * 16
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    analysis["candidates"][0].update({
+        "title": "Длинное русское название момента " * 18,
+        "reasons": ["Причина из сохранённого анализа: " + hostile_token],
+        "transcript_excerpt": ("Фрагмент расшифровки с реальными словами. " * 20) + hostile_token,
+    })
+    write_json(analysis_path, analysis)
+    services.projects.save(project)
+    project = services.projects.load(project.project_id)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(VideoPreview, "set_range", lambda *_args, **_kwargs: None)
+    window = MainWindow(services)
+
+    try:
+        window.show()
+        app.processEvents()
+        monkeypatch.setattr(
+            window.project_screen._thumbnail_loader,
+            "request",
+            lambda **_kwargs: Path("thumbnail.jpg"),
+        )
+        window.show_project(project)
+        # Physical QA sizes at 100%, plus the tightest 150%-scaled logical
+        # clients.  Resize after the first show so the offscreen test screen's
+        # own work-area clamp does not replace the forced client geometry.
+        clients = (
+            (760, 480),
+            (853, 480),
+            (911, 512),
+            (1067, 600),
+            (1280, 720),
+            (1366, 768),
+            (1600, 900),
+            (1707, 960),
+            (1920, 1080),
+            (2560, 1440),
+        )
+        for width, height in clients:
+            window.resize(width, height)
+            for _ in range(3):
+                app.processEvents()
+            screen = window.project_screen
+            assert window.size().toTuple() == (width, height)
+            assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+            assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
+            assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
+            if not screen._compact_action_layout:
+                assert screen.status.isVisible()
+                assert screen.status.width() > 0
+            visible_actions = [
+                button for button in (
+                    screen.review_back_button,
+                    screen.view_all_button,
+                    screen.draft_button,
+                    screen.production_button,
+                )
+                if button.isVisible()
+            ]
+            assert visible_actions
+            assert all(
+                screen.review_action_bar.contentsRect().contains(button.geometry())
+                for button in visible_actions
+            )
+            assert all(button.width() >= button.minimumSizeHint().width() for button in visible_actions)
+            assert all(
+                not first.geometry().intersects(second.geometry())
+                for index, first in enumerate(visible_actions)
+                for second in visible_actions[index + 1:]
+            )
+            if screen._compact_action_layout:
+                assert screen.stage_actions.height() <= 100
+                assert screen.content_scroll.viewport().height() >= 140
+                assert [
+                    name for name, label in screen._global_step_labels.items() if label.isVisible()
+                ] == ["results"]
+            else:
+                assert screen.workflow_hint.isVisible()
+                assert screen.workflow_hint.width() > 0
+
+        assert any(
+            "\u200b" in label.text()
+            for label in window.project_screen.candidate_review.findChildren(QLabel)
+        )
+
+        # Re-open a persisted Setup project and expose its real advanced rail;
+        # the formerly unbreakable checkbox captions must fit the client.
+        project.analysis_artifact_path = None
+        project.analysis_id = None
+        project.candidate_states = {}
+        project.review_selected_candidate_ids = []
+        project.selected_candidate_ids = []
+        project.status = ProjectStatus.SOURCE_READY
+        services.projects.save(project)
+        project = services.projects.load(project.project_id)
+        window.show_project(project)
+        window.resize(853, 480)
+        window.project_screen.setup_advanced_toggle.setChecked(True)
+        for _ in range(4):
+            app.processEvents()
+        screen = window.project_screen
+        assert screen._flow_step == "settings"
+        assert screen.settings_panel.isVisible()
+        assert screen.content_scroll.viewport().height() >= 140
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        assert "\n" in screen.same_source_broll.text()
+        assert "\n" in screen.cache.text()
+        assert screen.same_source_broll.minimumSizeHint().width() <= screen.settings_panel.contentsRect().width()
+        assert screen.cache.minimumSizeHint().width() <= screen.settings_panel.contentsRect().width()
+
+        # A separately persisted URL/error state exercises the actual download
+        # card instead of a synthetic QLabel fixture.
+        url_project = services.projects.create_url(
+            hostile_token,
+            {"title": hostile_token, "estimated_size_bytes": 123_456_789},
+            name="Сохранённое видео по длинной ссылке",
+        )
+        url_project.source_spec.download_state = "failed"
+        url_project.source_spec.error_message = (
+            "Не удалось скачать сохранённый URL: " + hostile_token
+        )
+        services.projects.save(url_project)
+        window.show_project(services.projects.load(url_project.project_id))
+        window.resize(853, 480)
+        for _ in range(4):
+            app.processEvents()
+        screen = window.project_screen
+        assert screen._flow_step == "download"
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        assert "\u200b" in screen.download_source.text()
+        assert hostile_token in screen.download_source.toolTip()
+        assert screen.download_card.contentsRect().contains(screen.download_button.geometry())
+    finally:
+        window.close()
+        window.deleteLater()
+        app.setStyleSheet(previous_style)
+        app.processEvents()
+
+
+def test_review_action_bar_releases_medium_width_minimum_during_resize_history(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    previous_style = app.styleSheet()
+    app.setStyleSheet(load_theme())
+    services, project = _workspace(tmp_path)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(ProjectViewModel(services))
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.resize(911, 512)
+        screen.show()
+        for _ in range(3):
+            app.processEvents()
+
+        # These are the exact ProjectScreen widths produced by the required
+        # 1,067/1,093 px shell clients. Both must retain compact CTA labels.
+        for width in (911, 937):
+            screen.resize(width, 512)
+            for _ in range(3):
+                app.processEvents()
+            assert screen.width() == width
+            assert screen._compact_action_layout is True
+            assert screen.stage_actions.height() <= 100
+            assert screen.content_scroll.viewport().height() >= 140
+            assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+
+        # Crossing 1,100 exposes the full hint and temporarily makes the bar
+        # taller. Widening inside that same profile must release its cached
+        # height-for-width minimum without waiting for the 1,660 breakpoint.
+        screen.resize(1101, 720)
+        for _ in range(4):
+            app.processEvents()
+        assert screen._compact_action_layout is False
+        narrow_bar_height = screen.stage_actions.height()
+        narrow_bar_minimum = screen.stage_actions.minimumHeight()
+        narrow_body_height = screen.content_scroll.viewport().height()
+
+        for width in (1376, 1600):
+            screen.resize(width, 720)
+            for _ in range(4):
+                app.processEvents()
+            assert screen._compact_action_layout is False
+            assert screen.stage_actions.height() < narrow_bar_height
+            assert screen.stage_actions.minimumHeight() < narrow_bar_minimum
+            assert screen.content_scroll.viewport().height() > narrow_body_height
+            assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+            assert screen.status.isVisible() and screen.status.width() > 0
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.setStyleSheet(previous_style)
+        app.processEvents()
+
+
+def test_long_persisted_recovery_error_does_not_starve_compact_stage(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    services.settings.onboarding_completed = True
+    project.analysis_artifact_path = None
+    project.analysis_id = None
+    project.candidate_states = {}
+    project.review_selected_candidate_ids = []
+    project.selected_candidate_ids = []
+    run = services.runs.create(
+        project,
+        {},
+        {"path": str(project.source)},
+        "test",
+        run_kind=RunKind.ANALYSIS,
+    )
+    long_error = (
+        "Сохранённая техническая ошибка должна оставаться доступной полностью. " * 48
+        + "https://example.test/" + "неразрывный-сегмент" * 80
+    )
+    run.status = RunStatus.FAILED
+    run.error_summary = long_error
+    services.runs.save(run)
+    project.latest_run_id = run.run_id
+    project.status = ProjectStatus.FAILED
+    services.projects.save(project)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    window = MainWindow(services)
+
+    try:
+        window.show()
+        app.processEvents()
+        window.resize(853, 480)
+        window.show_project(services.projects.load(project.project_id))
+        for _ in range(4):
+            app.processEvents()
+
+        screen = window.project_screen
+        visible_hint = screen.flow_hint.text().replace("\u200b", "")
+        assert screen._flow_step == "processing"
+        assert screen.flow_hint.toolTip() == long_error
+        assert len(visible_hint) <= screen._FLOW_HINT_MAX_CHARS
+        assert visible_hint.endswith("…")
+        assert screen.content_scroll.viewport().height() >= 140
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        retry = screen.progress.retry_button
+        viewport = screen.content_scroll.viewport()
+        assert retry.isVisible()
+        assert screen.progress.stage.toolTip() == long_error
+        visible_stage = screen.progress.stage.text().replace("\u200b", "")
+        assert len(visible_stage) <= screen.progress._FINISHED_MESSAGE_MAX_CHARS
+        assert visible_stage.endswith("…")
+        retry_top = retry.mapTo(viewport, QPoint(0, 0)).y()
+        required_scroll = max(0, retry_top + retry.height() - viewport.height())
+        assert required_scroll <= max(480, viewport.height() * 2)
+
+        screen.content_scroll.ensureWidgetVisible(retry, 0, 16)
+        for _ in range(3):
+            app.processEvents()
+        retry_origin = retry.mapTo(viewport, QPoint(0, 0))
+        assert retry_origin.x() >= 0
+        assert retry_origin.x() + retry.width() <= viewport.width()
+        assert retry_origin.y() >= 0
+        assert retry_origin.y() + retry.height() <= viewport.height()
     finally:
         window.close()
         window.deleteLater()

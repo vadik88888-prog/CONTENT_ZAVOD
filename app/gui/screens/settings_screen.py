@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from app.config import load_config
 from app.doctor import format_report
+from app.gui.responsive import make_label_shrinkable, set_responsive_text
 from app.gui.services.secure_secrets import key_configured
 from app.gui.viewmodels import SettingsViewModel
 
@@ -49,7 +51,9 @@ class SettingsScreen(QWidget):
         root.addSpacing(16)
 
         scroll = QScrollArea()
+        self.content_scroll = scroll
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 2, 6)
@@ -58,10 +62,10 @@ class SettingsScreen(QWidget):
         overview = self._section("Работа на этом компьютере")
         self.system_detail = QLabel()
         self.system_detail.setObjectName("subtitle")
-        self.system_detail.setWordWrap(True)
+        make_label_shrinkable(self.system_detail)
         private_note = QLabel("Проекты, исходные видео и готовые ролики не отправляются в облако из этого приложения.")
         private_note.setObjectName("muted")
-        private_note.setWordWrap(True)
+        make_label_shrinkable(private_note)
         overview.layout().addWidget(self.system_detail)
         overview.layout().addWidget(private_note)
         layout.addWidget(overview)
@@ -69,7 +73,7 @@ class SettingsScreen(QWidget):
         general = self._section("Хранение проектов")
         location_hint = QLabel("Выберите папку, где Content Factory хранит проекты, историю запусков и результаты.")
         location_hint.setObjectName("muted")
-        location_hint.setWordWrap(True)
+        make_label_shrinkable(location_hint)
         self.data_directory = QLineEdit()
         self.data_directory.setReadOnly(True)
         choose_data = QPushButton("Изменить папку")
@@ -92,6 +96,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(self.advanced_toggle)
 
         self.advanced_content = QWidget()
+        self.advanced_content.setMinimumWidth(0)
         advanced_layout = QVBoxLayout(self.advanced_content)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
         advanced_layout.setSpacing(12)
@@ -99,7 +104,7 @@ class SettingsScreen(QWidget):
         process = self._section("Подключение и производительность")
         process_hint = QLabel("Эти параметры нужны только при настройке движка или локальной технической проверке.")
         process_hint.setObjectName("muted")
-        process_hint.setWordWrap(True)
+        make_label_shrinkable(process_hint)
         self.config_path = QLineEdit()
         self.config_path.setPlaceholderText("Использовать стандартную конфигурацию")
         self.config_path.editingFinished.connect(self._save)
@@ -110,12 +115,17 @@ class SettingsScreen(QWidget):
         self.device.addItem("Предпочитать GPU", "cuda")
         self.device.addItem("Использовать CPU", "cpu")
         self.device.currentIndexChanged.connect(self._save)
-        self.local_test = QCheckBox("Локальный тестовый режим без внешних API")
-        self.local_test.setToolTip("Использует существующие mock-провайдеры AI и озвучки только для этого приложения.")
+        self.local_test = QCheckBox("Локальный тестовый режим")
+        self.local_test.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.local_test.setToolTip("Работать без внешних API, используя локальные тестовые провайдеры.")
         self.local_test.toggled.connect(self._save)
-        cache_info = QLabel(f"Рабочий кэш: {self.viewmodel.services.engine_root / 'work'}")
+        local_test_hint = QLabel("Без внешних API; предназначено только для локальной технической проверки.")
+        local_test_hint.setObjectName("muted")
+        make_label_shrinkable(local_test_hint)
+        cache_info = QLabel()
         cache_info.setObjectName("muted")
-        cache_info.setWordWrap(True)
+        make_label_shrinkable(cache_info)
+        set_responsive_text(cache_info, f"Рабочий кэш: {self.viewmodel.services.engine_root / 'work'}")
         process.layout().addWidget(process_hint)
         process.layout().addWidget(QLabel("Конфигурация движка"))
         process.layout().addWidget(self.config_path)
@@ -123,16 +133,17 @@ class SettingsScreen(QWidget):
         process.layout().addWidget(QLabel("Предпочтительное устройство"))
         process.layout().addWidget(self.device)
         process.layout().addWidget(self.local_test)
+        process.layout().addWidget(local_test_hint)
         process.layout().addWidget(cache_info)
         advanced_layout.addWidget(process)
 
         self.ai_section = self._section("Подключённые сервисы")
         self.ai_info = QLabel()
-        self.ai_info.setWordWrap(True)
+        make_label_shrinkable(self.ai_info)
         self.ai_info.setObjectName("subtitle")
         note = QLabel("Ключи не отображаются и не сохраняются в настройках или истории запусков.")
         note.setObjectName("muted")
-        note.setWordWrap(True)
+        make_label_shrinkable(note)
         self.ai_section.layout().addWidget(self.ai_info)
         self.ai_section.layout().addWidget(note)
         advanced_layout.addWidget(self.ai_section)
@@ -148,12 +159,14 @@ class SettingsScreen(QWidget):
         self.diagnostics_content = self._section("Проверка системы")
         diagnostics_hint = QLabel("Если что-то не запускается, выполните проверку и используйте результат для поддержки.")
         diagnostics_hint.setObjectName("muted")
-        diagnostics_hint.setWordWrap(True)
+        make_label_shrinkable(diagnostics_hint)
         self.check_button = QPushButton("Проверить систему")
         self.check_button.clicked.connect(self.viewmodel.diagnostics)
         self.diagnostics = QPlainTextEdit()
         self.diagnostics.setReadOnly(True)
         self.diagnostics.setMinimumHeight(150)
+        self.diagnostics.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.diagnostics.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.diagnostics_content.layout().addWidget(diagnostics_hint)
         self.diagnostics_content.layout().addWidget(self.check_button)
         self.diagnostics_content.layout().addWidget(self.diagnostics)
@@ -178,7 +191,9 @@ class SettingsScreen(QWidget):
 
     def _render(self, settings) -> None:
         self.data_directory.setText(settings.data_directory)
+        self.data_directory.setToolTip(settings.data_directory)
         self.config_path.setText(settings.config_path or "")
+        self.config_path.setToolTip(settings.config_path or "Используется стандартная конфигурация")
         index = self.device.findData(settings.device_preference)
         self.device.blockSignals(True)
         self.device.setCurrentIndex(max(index, 0))
@@ -194,13 +209,17 @@ class SettingsScreen(QWidget):
         try:
             config = load_config(config_path)
             key = "настроен" if key_configured(config.ai.provider, self.viewmodel.services.engine_root) else "не настроен"
-            self.ai_info.setText(
+            set_responsive_text(
+                self.ai_info,
                 f"AI: {config.ai.provider} · {config.ai.model}\n"
                 f"Озвучка: {config.tts.provider} · {config.tts.model}\n"
-                f"Статус ключа: {key}"
+                f"Статус ключа: {key}",
             )
         except Exception:
-            self.ai_info.setText("Выберите корректный файл конфигурации, чтобы увидеть используемые параметры.")
+            set_responsive_text(
+                self.ai_info,
+                "Выберите корректный файл конфигурации, чтобы увидеть используемые параметры.",
+            )
 
     def _save(self) -> None:
         self.viewmodel.settings.config_path = self.config_path.text().strip() or None
@@ -237,5 +256,6 @@ class SettingsScreen(QWidget):
         layout.setSpacing(9)
         heading = QLabel(title)
         heading.setStyleSheet("font-size: 16px; font-weight: 600;")
+        make_label_shrinkable(heading)
         layout.addWidget(heading)
         return frame

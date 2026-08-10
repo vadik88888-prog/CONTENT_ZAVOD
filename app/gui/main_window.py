@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QTimer
+from PySide6.QtCore import QByteArray, QPoint, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -28,10 +29,12 @@ class MainWindow(QMainWindow):
         self.project_viewmodel = ProjectViewModel(services, self)
         self.settings_viewmodel = SettingsViewModel(services, self)
         self._onboarding_dialog: OnboardingDialog | None = None
+        self._screen_signal_connected = False
         self.setWindowTitle("Content Factory")
-        # A smaller, practical lower bound lets Windows use the application at
-        # 1280×720 and elevated scaling without making the shell itself clip.
-        self.setMinimumSize(760, 480)
+        # Leave room for the native title bar at 1280×720 / 150%.  Every page
+        # owns vertical scrolling and sticky actions, so the shell itself does
+        # not need to claim the entire logical screen.
+        self.setMinimumSize(720, 380)
         self.resize(1320, 840)
         if services.settings.window_geometry:
             geometry = QByteArray.fromBase64(services.settings.window_geometry.encode("ascii", errors="ignore"))
@@ -53,15 +56,19 @@ class MainWindow(QMainWindow):
         nav.setSpacing(7)
 
         brand = QFrame()
+        self.brand = brand
         brand.setObjectName("brand")
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(2, 0, 2, 10)
         brand_layout.setSpacing(0)
         self.brand_content = QLabel("CONTENT")
         self.brand_content.setObjectName("brandContent")
+        self.brand_content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.brand_content.setToolTip("CONTENT FACTORY")
         self.brand_factory = QLabel("FACTORY")
         self.brand_factory.setObjectName("brandFactory")
-        self.brand_factory.setMaximumWidth(108)
+        self.brand_factory.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.brand_factory.setToolTip("CONTENT FACTORY")
         brand_layout.addWidget(self.brand_content)
         brand_layout.addWidget(self.brand_factory)
         nav.addWidget(brand)
@@ -86,13 +93,17 @@ class MainWindow(QMainWindow):
         status_layout = QVBoxLayout(self.system_status)
         status_layout.setContentsMargins(12, 11, 12, 11)
         status_layout.setSpacing(4)
-        status_title = QLabel("●  Система готова")
-        status_title.setObjectName("systemStatusTitle")
-        status_detail = QLabel("Локальная обработка\nВсе проекты остаются здесь")
-        status_detail.setObjectName("muted")
-        status_detail.setWordWrap(True)
-        status_layout.addWidget(status_title)
-        status_layout.addWidget(status_detail)
+        self.system_status_title = QLabel("●  Система готова")
+        self.system_status_title.setObjectName("systemStatusTitle")
+        self.system_status_title.setWordWrap(True)
+        self.system_status_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.system_status_title.setToolTip("Система готова")
+        self.system_status_detail = QLabel("Локальная обработка\nВсе проекты остаются здесь")
+        self.system_status_detail.setObjectName("muted")
+        self.system_status_detail.setWordWrap(True)
+        self.system_status_detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        status_layout.addWidget(self.system_status_title)
+        status_layout.addWidget(self.system_status_detail)
         nav.addWidget(self.system_status)
 
         self.help_button = QPushButton("?  Помощь и поддержка")
@@ -101,6 +112,9 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.help_button)
         self.version = QLabel("Локальная версия")
         self.version.setObjectName("muted")
+        self.version.setWordWrap(True)
+        self.version.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.version.setToolTip("Локальная версия")
         nav.addWidget(self.version)
 
         # A narrow shell should not truncate a primary navigation action.
@@ -130,6 +144,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stack, 1)
         self._restore_last_screen()
         self._apply_sidebar_layout()
+        QTimer.singleShot(0, self._fit_to_available_screen)
         QTimer.singleShot(0, self._maybe_onboard)
 
     def show_projects(self, *, remember: bool = True) -> None:
@@ -215,16 +230,67 @@ class MainWindow(QMainWindow):
             return
         self._apply_sidebar_layout()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not self._screen_signal_connected:
+            handle.screenChanged.connect(lambda _screen: QTimer.singleShot(0, self._fit_to_available_screen))
+            self._screen_signal_connected = True
+        QTimer.singleShot(0, self._fit_to_available_screen)
+
+    def _fit_to_available_screen(self) -> None:
+        """Clamp restored/default geometry to the current logical work area."""
+
+        if self.isMaximized() or self.isFullScreen():
+            return
+        screen = self.screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame_extra_width = max(0, frame.width() - self.width())
+        frame_extra_height = max(0, frame.height() - self.height())
+        maximum_width = max(1, available.width() - frame_extra_width)
+        maximum_height = max(1, available.height() - frame_extra_height)
+        target_width = min(self.width(), maximum_width)
+        target_height = min(self.height(), maximum_height)
+        if maximum_width >= self.minimumWidth():
+            target_width = max(self.minimumWidth(), target_width)
+        if maximum_height >= self.minimumHeight():
+            target_height = max(self.minimumHeight(), target_height)
+        if (target_width, target_height) != (self.width(), self.height()):
+            self.resize(target_width, target_height)
+            frame = self.frameGeometry()
+
+        maximum_x = available.right() - frame.width() + 1
+        maximum_y = available.bottom() - frame.height() + 1
+        target_x = min(max(frame.x(), available.left()), max(available.left(), maximum_x))
+        target_y = min(max(frame.y(), available.top()), max(available.top(), maximum_y))
+        if (target_x, target_y) != (frame.x(), frame.y()):
+            self.move(self.pos() + QPoint(target_x - frame.x(), target_y - frame.y()))
+
     def _apply_sidebar_layout(self) -> None:
         """Use compact, tooltip-backed navigation before labels can clip."""
 
         if not hasattr(self, "sidebar"):
             return
         width = self.width()
-        target_width = 156 if width < 920 else 184 if width < 1120 else 224
+        profile = "compact" if width < 920 else "medium" if width < 1120 else "wide"
+        # Compact and medium both retain the established 156 px rail.  At the
+        # 760 px shell minimum this leaves the Project workspace at its tested
+        # 604 px compact breakpoint; icon-only labels keep the rail itself safe.
+        target_width = 156 if profile != "wide" else 224
         if self.sidebar.width() != target_width:
             self.sidebar.setFixedWidth(target_width)
-        if width < 920:
+        compact_brand = profile != "wide"
+        for brand_label in (self.brand_content, self.brand_factory):
+            if brand_label.property("compactBrand") != compact_brand:
+                brand_label.setProperty("compactBrand", compact_brand)
+                brand_label.style().unpolish(brand_label)
+                brand_label.style().polish(brand_label)
+        self.brand_content.setText("CF" if compact_brand else "CONTENT")
+        self.brand_factory.setVisible(not compact_brand)
+        if profile != "wide":
             labels = {
                 self.new_button: "＋",
                 self.projects_button: "▣",
@@ -232,18 +298,21 @@ class MainWindow(QMainWindow):
                 self.help_button: "?",
             }
         else:
+            # Full meanings stay in tooltips.  These visible forms fit the
+            # 192 logical px left inside the wide sidebar with the shipped
+            # Windows font metrics and button padding.
             labels = {
                 self.new_button: "＋  Новый",
                 self.projects_button: "▣  Проекты",
                 self.settings_button: "⚙  Настройки",
                 self.help_button: "?  Помощь",
             }
-        for button, label in labels.items():
-            if button.text() != label:
-                button.setText(label)
-        compact = width < 920
-        self.system_status.setVisible(not compact)
-        self.version.setVisible(not compact)
+        for button, button_text in labels.items():
+            if button.text() != button_text:
+                button.setText(button_text)
+        show_wide_footer = profile == "wide" and self.height() >= 480
+        self.system_status.setVisible(show_wide_footer)
+        self.version.setVisible(show_wide_footer)
 
     @staticmethod
     def _nav_button(text: str) -> QPushButton:

@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QBoxLayout, QVBoxLayout, QWidget
 
 from app.gui.components.final_results import FinalOutput, FinalResultsWorkspace
 from app.gui.components.video_preview import VideoPreview
 from app.gui.models import DesktopProject, ProjectOptions, ProjectStatus
+from app.gui.styles import load_theme
 from app.source_models import SourceSpec
 
 
@@ -81,6 +83,7 @@ def test_final_results_workspace_switches_only_between_bound_outputs(tmp_path: P
         (542, 480, "dense", "stacked", True),
         (1026, 720, "compact", "two_row", False),
         (1186, 900, "compact", "two_row", False),
+        (1338, 900, "standard", "columns", False),
         (1660, 1080, "standard", "columns", False),
     ),
 )
@@ -97,12 +100,22 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
     app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(load_theme())
     output = tmp_path / "result.mp4"
     output.write_bytes(b"result")
+
+    def show_final_with_hostile_copy(preview: VideoPreview, _path: Path, title: str) -> None:
+        preview._set_presentation("vertical")
+        preview.active_candidate.setText(f"Готовый ролик · {title}")
+        preview.active_candidate.show()
+        preview._show_status(
+            "Preview unavailable: " + "https://example.test/very-long-error-token/" * 12
+        )
+
     monkeypatch.setattr(
         VideoPreview,
         "show_final",
-        lambda preview, *_args, **_kwargs: preview._set_presentation("vertical"),
+        show_final_with_hostile_copy,
     )
     workspace = FinalResultsWorkspace()
     host = QWidget()
@@ -112,10 +125,18 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
 
     try:
         workspace.set_results(
-            [FinalOutput("result", "candidate", output, "Long final title " * 12, 28.0, 1080, 1920)],
+            [FinalOutput(
+                "result",
+                "candidate",
+                output,
+                "ОченьДлинныйФинальныйЗаголовок_" * 12,
+                28.0,
+                1080,
+                1920,
+            )],
             selected_id="result",
             project_directory=tmp_path,
-            warnings=["A detailed warning that must wrap rather than widen the metadata panel. " * 8],
+            warnings=["https://example.test/very-long-warning-token/" * 16],
         )
         host.resize(width, height)
         host.show()
@@ -127,6 +148,21 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
         assert workspace.minimumSizeHint().width() <= width
         assert workspace.list_scroll.horizontalScrollBar().maximum() == 0
         assert workspace.info_scroll.horizontalScrollBar().maximum() == 0
+        assert workspace.preview.active_candidate.geometry().bottom() < workspace.preview.media_stage.geometry().top()
+        assert workspace.preview.media_stage.geometry().bottom() < workspace.preview.preview_status.geometry().top()
+        assert workspace.preview.preview_status.geometry().bottom() < workspace.preview.controls_host.geometry().top()
+
+        preview_position = workspace.preview.mapTo(workspace._body_host, QPoint(0, 0))
+        assert preview_position.y() + workspace.preview.height() <= workspace._body_host.height()
+        if body_mode == "stacked":
+            assert workspace._list_panel.geometry().bottom() < workspace.preview.geometry().top()
+            assert workspace.preview.geometry().bottom() < workspace._info_panel.geometry().top()
+        elif body_mode == "two_row":
+            assert workspace._list_panel.geometry().bottom() < workspace._info_panel.geometry().top()
+            assert workspace.preview.geometry().bottom() < workspace._info_panel.geometry().top()
+        else:
+            assert workspace._list_panel.geometry().right() < workspace.preview.geometry().left()
+            assert workspace.preview.geometry().right() < workspace._info_panel.geometry().left()
         expected_direction = (
             QBoxLayout.Direction.TopToBottom
             if bottom_stacked else QBoxLayout.Direction.LeftToRight
@@ -139,4 +175,97 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
         host.close()
         workspace.deleteLater()
         host.deleteLater()
+        app.processEvents()
+
+
+def test_vertical_preview_height_for_width_shrinks_and_controls_stay_inside() -> None:
+    existing = QApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(load_theme())
+    preview = VideoPreview()
+    preview.set_vertical_frame_size(172, 306)
+    preview._set_presentation("vertical")
+    preview.open_button.hide()
+    preview.active_candidate.setText("Very long persisted final title " * 20)
+    preview.active_candidate.show()
+    preview._show_status(
+        "Preview unavailable: " + "https://example.test/very-long-error-token/" * 12
+    )
+
+    try:
+        heights: list[int] = []
+        for width in (360, 500, 360):
+            preview.resize(width, max(1, preview.minimumHeight()))
+            preview.show()
+            app.processEvents()
+            app.processEvents()
+            preview._refresh_layout_geometry()
+            app.processEvents()
+            heights.append(preview.minimumHeight())
+
+            assert preview.minimumHeight() == preview.layout().totalHeightForWidth(
+                preview.contentsRect().width()
+            )
+            assert preview.active_candidate.geometry().bottom() < preview.media_stage.geometry().top()
+            assert preview.media_stage.geometry().bottom() < preview.preview_status.geometry().top()
+            assert preview.preview_status.geometry().bottom() < preview.controls_host.geometry().top()
+            for control in (
+                preview.play_button,
+                preview.time_label,
+                preview.seek_slider,
+                preview.volume_button,
+                preview.volume_slider,
+                preview.fullscreen_button,
+            ):
+                position = control.mapTo(preview.controls_host, QPoint(0, 0))
+                assert position.x() >= 0
+                assert position.x() + control.width() <= preview.controls_host.width()
+                assert control.width() >= control.minimumSizeHint().width()
+
+        assert heights[1] < heights[0]
+        assert heights[2] == heights[0]
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
+def test_source_preview_controls_reflow_after_compact_resize() -> None:
+    existing = QApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(load_theme())
+    preview = VideoPreview()
+    preview._set_presentation("source")
+
+    try:
+        for width, compact in (
+            (800, False), (770, True), (760, True), (360, True), (800, False),
+        ):
+            preview.resize(width, 620)
+            preview.show()
+            app.processEvents()
+            app.processEvents()
+            assert preview._compact_controls is compact
+            assert preview._controls_layout.totalMinimumSize().width() <= preview.controls_host.width()
+            for control in (
+                preview.play_button,
+                preview.time_label,
+                preview.seek_slider,
+                preview.volume_button,
+                preview.volume_slider,
+                preview.fullscreen_button,
+                preview.open_button,
+            ):
+                position = control.mapTo(preview.controls_host, QPoint(0, 0))
+                assert position.x() >= 0
+                assert position.x() + control.width() <= preview.controls_host.width()
+                assert control.width() >= control.minimumSizeHint().width()
+        assert preview.open_button.text() == "Открыть в проигрывателе"
+    finally:
+        preview.close()
+        preview.deleteLater()
         app.processEvents()

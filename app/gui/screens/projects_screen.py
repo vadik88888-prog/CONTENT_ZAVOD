@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from app.gui.components import VideoDropZone
 from app.gui.models import DesktopProject
+from app.gui.responsive import set_responsive_text
 from app.gui.services.error_mapping import dialog_message, map_error
 from app.gui.viewmodels import ProjectsViewModel
 
@@ -202,6 +204,13 @@ class ProjectsScreen(QWidget):
         self._render_cards()
 
     def _render_cards(self) -> None:
+        # QGridLayout retains stretch factors after its widgets are removed.
+        # Reset them so a wide -> compact resize cannot leave empty historical
+        # columns consuming part of the new one-column workspace.
+        for row in range(self.list_layout.rowCount()):
+            self.list_layout.setRowStretch(row, 0)
+        for column in range(self.list_layout.columnCount()):
+            self.list_layout.setColumnStretch(column, 0)
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             if item is not None:
@@ -219,14 +228,40 @@ class ProjectsScreen(QWidget):
             self.list_layout.setRowStretch((len(self._projects) - 1) // columns + 1, 1)
         for column in range(columns):
             self.list_layout.setColumnStretch(column, 1)
+        # QScrollArea can retain the old multi-column widget width for one
+        # layout pass after the grid minimum shrinks.  Synchronise on the next
+        # event-loop turn so a wide -> compact transition cannot expose a
+        # stale hidden horizontal range.
+        QTimer.singleShot(0, self._sync_content_width)
+
+    def _sync_content_width(self) -> None:
+        host = self.content_scroll.widget()
+        viewport = self.content_scroll.viewport()
+        if host is None or viewport.width() <= 0:
+            return
+        self.list_layout.activate()
+        host_layout = host.layout()
+        if host_layout is not None:
+            host_layout.activate()
+        if host.minimumSizeHint().width() <= viewport.width() and host.width() != viewport.width():
+            host.resize(viewport.width(), host.height())
 
     def _recent_columns(self) -> int:
-        # Cards collapse before they become cramped on a 1280 px laptop once
-        # the shell sidebar and Windows scaling have taken their share.
-        available = max(0, self.width() - 52)
-        if available >= 960:
+        # Use the real scroll viewport instead of the outer screen width.  A
+        # project card owns three actions and therefore needs substantially
+        # more room than its title alone suggests.  The previous thresholds
+        # placed two or three real persisted cards into columns that could not
+        # contain their minimum action row, while the hidden horizontal
+        # scrollbar made the resulting clipping look like a successful fit.
+        viewport_width = self.content_scroll.viewport().width()
+        available = viewport_width if viewport_width > 0 else max(0, self.width() - 52)
+        # The populated card grid needs 1,188 px for three columns and 788 px
+        # for two with the current action rail.  Keep another scrollbar-sized
+        # margin because a refresh can introduce the vertical scrollbar after
+        # the column count has already been chosen.
+        if available >= 1_198:
             return 3
-        if available >= 620:
+        if available >= 798:
             return 2
         return 1
 
@@ -237,13 +272,20 @@ class ProjectsScreen(QWidget):
         layout.setContentsMargins(14, 13, 14, 13)
         layout.setSpacing(7)
         top = QHBoxLayout()
-        name = QLabel(project.name)
+        name = QLabel()
         name.setStyleSheet("font-size: 15px; font-weight: 600;")
         name.setWordWrap(True)
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        set_responsive_text(name, project.name)
         presentation = self.viewmodel.services.presentation(project)
-        status = QLabel(presentation.status_label)
+        status = QLabel()
         status.setObjectName("status")
         status.setWordWrap(True)
+        # Keep the compact state badge visible while the project title absorbs
+        # the flexible width. Ignored + zero stretch collapses this label to
+        # zero even though the card itself fits.
+        status.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        set_responsive_text(status, presentation.status_label)
         top.addWidget(name, 1)
         top.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(top)
@@ -252,9 +294,11 @@ class ProjectsScreen(QWidget):
             project.source.name if project.source_spec.is_ready
             else str(project.source_metadata.get("title") or "Видео по ссылке")
         )
-        source = QLabel(source_name)
+        source = QLabel()
         source.setObjectName("muted")
         source.setWordWrap(True)
+        source.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        set_responsive_text(source, source_name)
         updated = QLabel(f"Изменён {project.updated_at[:16].replace('T', ' ')}")
         updated.setObjectName("muted")
         layout.addWidget(source)
@@ -305,6 +349,15 @@ class ProjectsScreen(QWidget):
             return
         self._reflow_pending = True
         QTimer.singleShot(0, self._finish_reflow)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # The first refresh normally happens before QScrollArea has a real
+        # viewport. Re-evaluate once the native window publishes that width so
+        # a wide first show does not remain stuck in the fallback one column.
+        if self._projects and not self._reflow_pending:
+            self._reflow_pending = True
+            QTimer.singleShot(0, self._finish_reflow)
 
     def _finish_reflow(self) -> None:
         self._reflow_pending = False

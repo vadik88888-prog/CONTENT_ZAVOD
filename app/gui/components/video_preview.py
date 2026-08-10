@@ -10,8 +10,12 @@ from PySide6.QtCore import QEvent, QProcess, QSignalBlocker, QSize, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLayout, QLabel, QPushButton, QSlider, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame, QGridLayout, QHBoxLayout, QLayout, QLabel, QPushButton, QSlider,
+    QSizePolicy, QVBoxLayout, QWidget,
+)
 
+from app.gui.responsive import make_label_shrinkable, set_responsive_text
 from app.utils import safe_name, stable_text_hash
 
 
@@ -104,12 +108,14 @@ class VideoPreview(QFrame):
     PROXY_RENDER_TIMEOUT_MS = 120_000
 
     preview_error = Signal(str)
+    geometry_requirement_changed = Signal()
     preview_ready = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("preview")
         self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._path: Path | None = None
         self._source_path: Path | None = None
         self._source_range_seconds: tuple[float, float] | None = None
@@ -179,6 +185,7 @@ class VideoPreview(QFrame):
         self._media_load_timer.timeout.connect(self._media_load_timed_out)
 
         layout = QVBoxLayout(self)
+        self._root_layout = layout
         # Do not let a loaded stream's native frame size become a hard
         # minimum for the whole page.
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
@@ -212,52 +219,58 @@ class VideoPreview(QFrame):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.active_candidate = QLabel()
         self.active_candidate.setObjectName("active-candidate")
-        self.active_candidate.setWordWrap(True)
+        make_label_shrinkable(self.active_candidate)
         self.active_candidate.setStyleSheet("font-weight: 600;")
         self.active_candidate.hide()
         layout.addWidget(self.active_candidate)
         layout.addWidget(self.media_stage, 0, Qt.AlignmentFlag.AlignHCenter)
         self.preview_status = QLabel()
         self.preview_status.setObjectName("muted")
-        self.preview_status.setWordWrap(True)
+        make_label_shrinkable(self.preview_status)
         self.preview_status.hide()
         layout.addWidget(self.preview_status)
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
+        self.controls_host = QWidget()
+        self.controls_host.setObjectName("previewControls")
+        self.controls_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._controls_layout = QGridLayout(self.controls_host)
+        self._controls_layout.setContentsMargins(0, 0, 0, 0)
+        self._controls_layout.setHorizontalSpacing(8)
+        self._controls_layout.setVerticalSpacing(6)
+        self._compact_controls: bool | None = None
         self.play_button = QPushButton("▶")
         self.play_button.setToolTip("Воспроизвести")
-        self.play_button.setFixedWidth(40)
+        self.play_button.setProperty("transportControl", True)
+        self.play_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setMinimumWidth(96)
+        self.time_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setRange(0, 1000)
         self.seek_slider.sliderMoved.connect(self._seek_preview)
         self.seek_slider.sliderReleased.connect(self._seek_released)
         self.volume_button = QPushButton("🔊")
         self.volume_button.setToolTip("Выключить звук")
-        self.volume_button.setFixedWidth(40)
+        self.volume_button.setProperty("transportControl", True)
+        self.volume_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(100)
+        self.volume_slider.setMinimumWidth(48)
         self.volume_slider.setMaximumWidth(90)
         self.fullscreen_button = QPushButton("⛶")
         self.fullscreen_button.setToolTip("На весь экран")
-        self.fullscreen_button.setFixedWidth(40)
+        self.fullscreen_button.setProperty("transportControl", True)
+        self.fullscreen_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.open_button = QPushButton("Открыть в проигрывателе")
+        self.open_button.setToolTip("Открыть в системном проигрывателе")
+        self.open_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.play_button.clicked.connect(self._toggle_playback)
         self.volume_button.clicked.connect(self._toggle_mute)
         self.volume_slider.valueChanged.connect(self._set_volume)
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
         self.video.fullScreenChanged.connect(self._fullscreen_changed)
         self.open_button.clicked.connect(self.open_externally)
-        buttons.addWidget(self.play_button)
-        buttons.addWidget(self.time_label)
-        buttons.addWidget(self.seek_slider, 1)
-        buttons.addWidget(self.volume_button)
-        buttons.addWidget(self.volume_slider)
-        buttons.addWidget(self.fullscreen_button)
-        buttons.addWidget(self.open_button)
-        layout.addLayout(buttons)
+        layout.addWidget(self.controls_host)
+        self._apply_controls_layout(force=True)
         self.audio.volumeChanged.connect(self._audio_volume_changed)
         self.audio.mutedChanged.connect(self._audio_muted_changed)
         self.audio.setVolume(1.0)
@@ -301,16 +314,80 @@ class VideoPreview(QFrame):
         if self._presentation == "vertical":
             self._set_presentation("vertical")
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_controls_layout()
+        self._refresh_layout_geometry()
+
+    def _apply_controls_layout(self, *, force: bool = False) -> None:
+        """Reflow transport controls before their themed hints can collide."""
+
+        # The frame/layout consume 26 px before controls receive their row.
+        # With the production Windows font the wide row needs 761 px, so a
+        # 760 px preview still clips the full external-player CTA.  Keep a
+        # small DPI/font-metric safety margin and switch to one row at 800.
+        compact = self._presentation == "vertical" or self.width() < 800
+        if not force and compact == self._compact_controls:
+            return
+        self._compact_controls = compact
+        controls = (
+            self.play_button, self.time_label, self.seek_slider, self.volume_button,
+            self.volume_slider, self.fullscreen_button, self.open_button,
+        )
+        for control in controls:
+            self._controls_layout.removeWidget(control)
+        for column in range(7):
+            self._controls_layout.setColumnStretch(column, 0)
+        if compact:
+            self._controls_layout.addWidget(self.play_button, 0, 0)
+            self._controls_layout.addWidget(self.time_label, 0, 1)
+            self._controls_layout.addWidget(self.seek_slider, 0, 2)
+            self._controls_layout.setColumnStretch(2, 1)
+            self._controls_layout.addWidget(self.volume_button, 1, 0)
+            self._controls_layout.addWidget(self.volume_slider, 1, 1)
+            self._controls_layout.addWidget(self.fullscreen_button, 1, 2)
+            self._controls_layout.addWidget(self.open_button, 1, 3)
+            self.open_button.setText("↗")
+        else:
+            self._controls_layout.addWidget(self.play_button, 0, 0)
+            self._controls_layout.addWidget(self.time_label, 0, 1)
+            self._controls_layout.addWidget(self.seek_slider, 0, 2)
+            self._controls_layout.setColumnStretch(2, 1)
+            self._controls_layout.addWidget(self.volume_button, 0, 3)
+            self._controls_layout.addWidget(self.volume_slider, 0, 4)
+            self._controls_layout.addWidget(self.fullscreen_button, 0, 5)
+            self._controls_layout.addWidget(self.open_button, 0, 6)
+            self.open_button.setText("Открыть в проигрывателе")
+        self._controls_layout.invalidate()
+        QTimer.singleShot(0, self._refresh_layout_geometry)
+
+    def _refresh_layout_geometry(self) -> None:
+        """Reserve current height-for-width so labels never paint over video."""
+
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.invalidate()
+        width = max(1, self.contentsRect().width())
+        required_height = layout.totalHeightForWidth(width)
+        if required_height < 0:
+            required_height = layout.totalSizeHint().height()
+        required_height = max(0, required_height)
+        if self.minimumHeight() != required_height:
+            self.setMinimumHeight(required_height)
+            self.geometry_requirement_changed.emit()
+        self.updateGeometry()
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt API name
         if self._presentation == "vertical":
             width, height = self._vertical_frame_size
-            return QSize(max(360, width + 230), height + 120)
-        return QSize(864, 520)
+            return QSize(max(360, width + 230), max(height + 120, self.minimumHeight()))
+        return QSize(864, max(520, self.minimumHeight()))
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API name
         # QVideoWidget's native frame size can change after media loads.  The
         # outer player must still be allowed to fit a normal desktop window.
-        return QSize(0, 0)
+        return QSize(0, self.minimumHeight())
 
     def show_source(self, path: str | Path | None, *, source_codec: str | None = None) -> None:
         """Show the original landscape source in a normal wide player."""
@@ -360,10 +437,11 @@ class VideoPreview(QFrame):
         candidate = Path(path) if path else None
         self._set_presentation(self._file_presentation(candidate, presentation))
         if title:
-            self.active_candidate.setText(title)
+            set_responsive_text(self.active_candidate, title)
             self.active_candidate.show()
         else:
             self.active_candidate.clear()
+            self.active_candidate.setToolTip("")
             self.active_candidate.hide()
         self._source_path = candidate if self.usable_media_path(candidate) else None
         self._path = self._source_path
@@ -425,7 +503,8 @@ class VideoPreview(QFrame):
         self._force_compatible_proxy = force_compatible_proxy
         self._set_presentation("source")
         self._active_candidate_title = candidate_title or "Выбранный кандидат"
-        self.active_candidate.setText(
+        set_responsive_text(
+            self.active_candidate,
             f"Кандидат: {self._active_candidate_title}\nФрагмент: {start:.1f}–{end:.1f} с"
         )
         self.active_candidate.show()
@@ -726,7 +805,7 @@ class VideoPreview(QFrame):
     def _show_placeholder(self, message: str) -> None:
         self.poster.hide()
         self.video.show()
-        self.placeholder.setText(message)
+        set_responsive_text(self.placeholder, message)
         self._sync_stage_overlays()
         self.placeholder.show()
         self.placeholder.raise_()
@@ -774,10 +853,12 @@ class VideoPreview(QFrame):
             self.media_stage.setObjectName("")
         self.media_stage.style().unpolish(self.media_stage)
         self.media_stage.style().polish(self.media_stage)
+        self._apply_controls_layout()
 
         # Layout geometry is applied asynchronously by Qt after an output
         # changes its native stream size.
         QTimer.singleShot(0, self._sync_stage_overlays)
+        QTimer.singleShot(0, self._refresh_layout_geometry)
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
         if watched in {self.video, self.media_stage} and event.type() in {
@@ -1275,12 +1356,15 @@ class VideoPreview(QFrame):
 
     def _show_status(self, message: str) -> None:
         self.preview_status.setStyleSheet("")
-        self.preview_status.setText(message)
+        set_responsive_text(self.preview_status, message)
         self.preview_status.show()
+        self._refresh_layout_geometry()
 
     def _clear_status(self) -> None:
         self.preview_status.clear()
+        self.preview_status.setToolTip("")
         self.preview_status.hide()
+        self._refresh_layout_geometry()
 
     def _show_error(self, message: str) -> None:
         self._stop_media_load_watchdog()
@@ -1293,14 +1377,15 @@ class VideoPreview(QFrame):
         self._range_seek_target_ms = None
         self._media_ready = False
         self.poster.hide()
-        self.placeholder.setText(message)
+        set_responsive_text(self.placeholder, message)
         self.placeholder.show()
         self.video.show()
         self._sync_stage_overlays()
         self.placeholder.raise_()
         self.preview_status.setStyleSheet("color: #d66;")
-        self.preview_status.setText(message)
+        set_responsive_text(self.preview_status, message)
         self.preview_status.show()
+        self._refresh_layout_geometry()
         self._set_available(False)
         self.preview_error.emit(message)
 
