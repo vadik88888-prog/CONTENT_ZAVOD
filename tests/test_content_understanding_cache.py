@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 from app.cli import main
 from app.config import AppConfig
@@ -120,6 +119,47 @@ def _wire_three_candidate_pipeline(monkeypatch, calls: dict[str, int]) -> None:
     monkeypatch.setattr(pipeline_module, "transcribe", transcribe)
 
 
+def _fake_creative_previews(monkeypatch) -> None:
+    """Replace the current Creative Preview executor, not the removed legacy service."""
+
+    def tts(_self, _tracker, _production, _work, _output):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def render(
+        _self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None,
+        **_kwargs,
+    ):
+        outcomes = []
+        for index, item in enumerate(production["items"], start=1):
+            if item.get("status") != "completed":
+                continue
+            candidate_id = str(item["candidate_id"])
+            root = output / "creative-previews" / f"candidate-{index:02d}"
+            root.mkdir(parents=True, exist_ok=True)
+            preview = root / "creative-preview.mp4"
+            preview.write_bytes(b"creative-preview")
+            write_json(root / "parity-manifest.json", {"candidate_id": candidate_id})
+            write_json(root / "compiled-render-plan.json", {"candidate_id": candidate_id})
+            outcomes.append({
+                "candidate_id": candidate_id,
+                "status": "completed",
+                "output_file": str(preview),
+                "report": {
+                    "render_profile": "creative_preview",
+                    "compiled_plan_hash": f"compiled-{candidate_id}",
+                    "parity_signature": f"parity-{candidate_id}",
+                },
+            })
+        return {"enabled": True, "status": "completed", "items": outcomes}
+
+    monkeypatch.setattr(Pipeline, "_run_tts", tts)
+    monkeypatch.setattr(Pipeline, "_run_audio", audio)
+    monkeypatch.setattr(Pipeline, "_run_production_render", render)
+
+
 def _two_candidate_draft(tmp_path: Path, monkeypatch) -> tuple[Path, PipelineResult, list[str]]:
     """Produce a trusted two-candidate draft artifact, then let tests corrupt one hand-off."""
 
@@ -133,20 +173,7 @@ def _two_candidate_draft(tmp_path: Path, monkeypatch) -> tuple[Path, PipelineRes
     candidate_ids = [item["candidate_id"] for item in read_json(analysis.analysis_path, {})["candidates"][:2]]
     assert len(candidate_ids) == 2
 
-    import app.pipeline as pipeline_module
-
-    def preview(_self, _plan, _source, destination):
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
-        return SimpleNamespace(
-            output_file=output,
-            to_dict=lambda: {
-                "status": "draft_ready", "output_file": str(output),
-                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
-            },
-        )
-
-    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    _fake_creative_previews(monkeypatch)
     config = AppConfig(score_threshold=0)
     config.transformation.enabled = True
     config.production.enabled = True
@@ -166,7 +193,7 @@ def _fake_approved_delivery(monkeypatch) -> None:
     def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
         return {"enabled": False, "status": "skipped", "items": []}
 
-    def render(self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None):
+    def render(self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None, **_kwargs):
         outcomes = []
         for item in production["items"]:
             if item.get("status") != "completed":
@@ -291,20 +318,7 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     requested_ids = list(reversed(candidate_ids))
     before_render = dict(calls)
 
-    import app.pipeline as pipeline_module
-
-    def preview(_self, _plan, _source, destination):
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
-        return SimpleNamespace(
-            output_file=output,
-            to_dict=lambda: {
-                "status": "draft_ready", "output_file": str(output),
-                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
-            },
-        )
-
-    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    _fake_creative_previews(monkeypatch)
     draft_config = AppConfig(score_threshold=0)
     draft_config.transformation.enabled = True
     draft_config.production.enabled = True
@@ -348,20 +362,7 @@ def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_inva
     candidate_ids = [item["candidate_id"] for item in read_json(analysis.analysis_path, {})["candidates"][:3]]
     assert len(candidate_ids) == 3
 
-    import app.pipeline as pipeline_module
-
-    def preview(_self, _plan, _source, destination):
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
-        return SimpleNamespace(
-            output_file=output,
-            to_dict=lambda: {
-                "status": "draft_ready", "output_file": str(output),
-                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
-            },
-        )
-
-    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    _fake_creative_previews(monkeypatch)
     config = AppConfig(score_threshold=0)
     config.transformation.enabled = True
     config.production.enabled = True
@@ -430,20 +431,7 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
     candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
 
-    import app.pipeline as pipeline_module
-
-    def preview(_self, _plan, _source, destination):
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / "draft-preview.mp4"; output.write_bytes(b"preview")
-        return SimpleNamespace(
-            output_file=output,
-            to_dict=lambda: {
-                "status": "draft_ready", "output_file": str(output),
-                "segments": [{"order": 1, "role": "hook"}], "estimated_duration_seconds": 12,
-            },
-        )
-
-    monkeypatch.setattr(pipeline_module.DraftPreviewService, "render", preview)
+    _fake_creative_previews(monkeypatch)
     draft_config = AppConfig(score_threshold=0)
     draft_config.transformation.enabled = True
     draft_config.production.enabled = True
@@ -459,7 +447,7 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
         return {"enabled": False, "status": "skipped", "items": []}
 
-    def render(_self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None):
+    def render(_self, _tracker, production, _audio, _source, _transcript, _work, output, _visual=None, **_kwargs):
         item = production["items"][0]
         result = output / "results" / "final-short-01.mp4"
         result.parent.mkdir(parents=True, exist_ok=True); result.write_bytes(b"mp4")

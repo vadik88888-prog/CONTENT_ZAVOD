@@ -23,27 +23,6 @@ from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
 
 
-_STATUS = {
-    "new": "Источник выбран", "source_ready": "Готов к настройке", "analyzing": "Ищем моменты",
-    "analysis_ready": "Моменты готовы", "reviewing_candidates": "Выбор моментов",
-    "rendering_selected": "Создаём готовые ролики", "partially_rendered": "Готово частично",
-    "draft": "Черновик", "ready": "Готов", "queued": "Ожидает", "processing": "Создаём ролик",
-    "completed": "Готово", "completed_with_warnings": "Готово с предупреждениями",
-    "failed": "Ошибка", "cancelled": "Отменено", "interrupted": "Прервано",
-}
-
-_FLOW_STEPS = (
-    ("source", "Источник"),
-    ("download", "Загрузка"),
-    ("settings", "Настройка"),
-    ("processing", "Обработка"),
-    ("candidates", "Моменты"),
-    ("drafts", "Черновики"),
-    ("finished", "Готовые ролики"),
-)
-_FLOW_STEP_INDEX = {name: index for index, (name, _label) in enumerate(_FLOW_STEPS, start=1)}
-_FLOW_STEP_LABELS = dict(_FLOW_STEPS)
-
 # The persisted workflow keeps more detail than the product navigation.  In
 # particular, URL download is a Source substate and Moments/Drafts/Finals are
 # Results substates.  Retaining the internal names below keeps recovery and the
@@ -300,6 +279,8 @@ class ProjectScreen(QWidget):
         self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
         left.addWidget(self.content_summary)
         self.candidate_detail = self._card("Просмотр момента")
+        self.candidate_detail.setMinimumWidth(0)
+        self.candidate_detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._replace_card_text(self.candidate_detail, ["Выберите момент в списке, чтобы просмотреть исходный фрагмент."])
         left.addWidget(self.candidate_detail)
         self.candidate_review = self._card("Моменты")
@@ -336,6 +317,7 @@ class ProjectScreen(QWidget):
         self.progress = ProcessingProgress()
         self.progress.cancel_requested.connect(self.viewmodel.cancel)
         self.progress.continue_waiting_requested.connect(self.viewmodel.continue_waiting)
+        self.progress.retry_requested.connect(self._retry_processing)
         left.addWidget(self.progress)
         self.history_title = QLabel("История запусков")
         self.history_title.setStyleSheet("font-size: 17px; font-weight: 600;")
@@ -544,15 +526,17 @@ class ProjectScreen(QWidget):
             # The candidate card's layout needs a few pixels beyond its raw
             # size hint for the scroll-frame border; otherwise a hidden two
             # pixel horizontal scrollbar remains even at full HD.
-            self.review_list_panel.setMinimumWidth(704)
-            self.review_list_panel.setMaximumWidth(720)
+            self.review_list_panel.setMinimumWidth(714)
+            self.review_list_panel.setMaximumWidth(730)
             self.review_preview_panel.setMinimumWidth(460)
             self.review_preview_panel.setMaximumWidth(16_777_215)
-            self.review_inspector_panel.setMinimumWidth(300)
+            self.review_inspector_panel.setMinimumWidth(380)
             self.review_inspector_panel.setMaximumWidth(390)
         self.settings_panel.setMaximumWidth(16_777_215 if compact else 300)
         self.setup_summary.setMaximumWidth(16_777_215)
         self.processing_summary.setMaximumWidth(16_777_215)
+        self._review_body_layout.invalidate()
+        self._review_body_layout.activate()
         self.updateGeometry()
         # Candidate cards own an action rail.  Rebuild them only when the
         # breakpoint changes so that the rail can become a full-width block
@@ -869,7 +853,9 @@ class ProjectScreen(QWidget):
             self._active_candidate_range = None
             self._active_preview_kind = "source"
         self.title.setText(project.name)
-        self.status.setText(_STATUS.get(project.status, "Неизвестно"))
+        self.status.setText(self.viewmodel.services.presentation(
+            project, snapshot=self.viewmodel.snapshot,
+        ).status_label)
         self.run_button.setText("Начать поиск моментов")
         if project.source_spec.is_ready and (is_new_project or self.preview.active_media_path is None):
             self.preview.show_source(
@@ -947,7 +933,11 @@ class ProjectScreen(QWidget):
             details += f" · ожидаемый объём: {size}"
         self.download_source.setText(f"{details}\n{message}")
         self.download_button.setText(button)
+        blocked = self.viewmodel.active and not self.viewmodel.owns_active_job
         self.download_button.setDisabled(state == "downloading" or self.viewmodel.active)
+        self.download_button.setToolTip(
+            self._other_project_job_hint() if blocked else ""
+        )
 
     def _update_stage_context(self, project: DesktopProject) -> None:
         """Fill stage summaries from durable project data without exposing IDs.
@@ -1051,51 +1041,11 @@ class ProjectScreen(QWidget):
         return max(runs, key=lambda run: (run.started_at, run.run_id), default=None)
 
     def _derive_flow_step(self, project: DesktopProject) -> str:
-        snapshot = self.viewmodel.snapshot
-        if snapshot.phase in {"preparing", "running", "cancelling"}:
-            return "download" if snapshot.stage == "download" else "processing"
-        if not project.source_spec.is_ready:
-            return "download"
         if self._results_subflow_override == "candidates" and project.analysis_artifact_path:
             return "candidates"
-        # Recovery is derived from the latest persisted run rather than from a
-        # folder scan.  A stale process has already been converted to
-        # ``interrupted`` by the service layer, so reopening it should return
-        # to the stage where a person can safely inspect or retry the work.
-        latest = self._latest_run(project)
-        if latest and latest.status in {"failed", "interrupted", "cancelled", "partially_rendered"}:
-            if latest.run_kind in {"draft"}:
-                return "drafts"
-            if latest.run_kind in {"selected_render", "render_revision"}:
-                return "drafts" if project.candidate_draft_artifacts else "processing"
-            if latest.run_kind in {"analysis", "full"} and not project.analysis_artifact_path:
-                return "processing"
-        # A completed retry must not hide other ready/failed drafts or
-        # approved exports that remain in the project queue.  Those items are
-        # reviewed before the final-result viewer, even if an earlier or
-        # neighbouring output is already available.
-        review_ids = set(project.review_selected_candidate_ids) | set(project.selected_candidate_ids)
-        if any(
-            project.candidate_states.get(candidate_id) in {"draft_ready", "draft_failed", "selected", "production_rendering"}
-            for candidate_id in review_ids
-        ):
-            return "drafts"
-        # A successful delivery remains available, but it must not mask a
-        # later failed, interrupted, or partial render batch. That batch is
-        # recoverable from Drafts and retains all existing artifacts.
-        if self._final_output_records(project):
-            return "finished"
-        states = project.candidate_states.values()
-        if project.candidate_draft_artifacts or project.selected_candidate_ids or any(
-            state in {"draft_planning", "draft_ready", "draft_failed", "selected", "production_rendering"}
-            for state in states
-        ):
-            return "drafts"
-        if any(state == "rendered" for state in states):
-            return "finished"
-        if project.analysis_artifact_path:
-            return "candidates"
-        return "settings"
+        return self.viewmodel.services.presentation(
+            project, snapshot=self.viewmodel.snapshot,
+        ).flow_step
 
     def _flow_hint_for(self, step: str, project: DesktopProject) -> str:
         hints = {
@@ -1112,6 +1062,9 @@ class ProjectScreen(QWidget):
         step = self._derive_flow_step(project)
         self._flow_step = step
         active = self.viewmodel.snapshot.phase in {"preparing", "running", "cancelling"}
+        presentation = self.viewmodel.services.presentation(
+            project, snapshot=self.viewmodel.snapshot,
+        )
         global_step = _GLOBAL_STEP_FOR_FLOW[step]
         global_index = next(index for index, (name, _label) in enumerate(_GLOBAL_FLOW_STEPS, start=1) if name == global_step)
         self.flow_position.setText(f"Этап {global_index} из {len(_GLOBAL_FLOW_STEPS)}")
@@ -1123,8 +1076,18 @@ class ProjectScreen(QWidget):
             "drafts": "Черновики",
             "finished": "Готовые ролики",
         }
-        self.flow_title.setText(screen_titles[step])
-        self.flow_hint.setText(self._flow_hint_for(step, project))
+        title = screen_titles[step]
+        hint = self._flow_hint_for(step, project)
+        latest = presentation.latest_run
+        if step == "processing" and not presentation.active and latest and latest.status in {
+            "failed", "interrupted", "cancelled", "partially_rendered",
+        }:
+            title = presentation.status_label
+            hint = self._recovery_message(latest)
+        self.flow_title.setText(title)
+        self.flow_hint.setText(hint)
+        if self.viewmodel.blocked_by_other_project:
+            self.flow_hint.setText(self._other_project_job_hint())
         for index, (name, label) in enumerate(_GLOBAL_FLOW_STEPS, start=1):
             state = "current" if name == global_step else ("done" if index < global_index else "pending")
             widget = self._global_step_labels[name]
@@ -1143,8 +1106,8 @@ class ProjectScreen(QWidget):
         # review workspace visible instead of showing an empty final screen.
         show_review = (step in {"candidates", "drafts"} or (step == "finished" and not self._final_output_records(project))) and not show_processing
         show_final = step == "finished" and bool(self._final_output_records(project)) and not show_processing
-        for name, widget in self._stage_widgets.items():
-            widget.setVisible(
+        for name, stage_widget in self._stage_widgets.items():
+            stage_widget.setVisible(
                 (name == "source" and show_source)
                 or (name == "settings" and show_setup)
                 or (name == "processing" and show_processing)
@@ -1588,6 +1551,7 @@ class ProjectScreen(QWidget):
                 if export_status == "failed":
                     retry_export = QPushButton("Повторить экспорт")
                     retry_export.setToolTip("Повторно создаст готовый ролик из сохранённого черновика; анализ и предпросмотр не повторяются.")
+                    retry_export.setDisabled(self.viewmodel.blocked_by_other_project)
                     retry_export.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_final_export(value))
                     actions.addWidget(retry_export)
                 reject = QPushButton("Отклонить")
@@ -1597,14 +1561,17 @@ class ProjectScreen(QWidget):
                 if candidate_id in project.review_selected_candidate_ids:
                     retry = QPushButton("Повторить черновик")
                     retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
+                    retry.setDisabled(self.viewmodel.blocked_by_other_project)
                     retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
                     actions.addWidget(retry)
                     skip = QPushButton("Продолжить без этого")
+                    skip.setObjectName(f"skip-candidate-{candidate_id}")
                     skip.setToolTip("Уберёт этот неготовый черновик из текущего набора, не затрагивая готовые ролики.")
                     skip.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
                     actions.addWidget(skip)
                 else:
                     restore = QPushButton("Вернуть в набор")
+                    restore.setObjectName(f"restore-candidate-{candidate_id}")
                     restore.setToolTip("Вернёт этот черновик в текущий набор, после чего его можно повторить отдельно.")
                     restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
                     actions.addWidget(restore)
@@ -1658,6 +1625,9 @@ class ProjectScreen(QWidget):
         self.production_button.hide()
         self.draft_button.setDisabled(True)
         self.production_button.setDisabled(True)
+        if self.viewmodel.blocked_by_other_project:
+            self.workflow_hint.setText(self._other_project_job_hint())
+            return
         if project.status in {"analyzing", "processing", "rendering_selected"} or processing_count:
             self.workflow_hint.setText("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
             return
@@ -2634,6 +2604,7 @@ class ProjectScreen(QWidget):
 
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
+        blocked = self.viewmodel.blocked_by_other_project
         self._update_processing_stages(snapshot)
         if active:
             detail = self._processing_detail(snapshot)
@@ -2647,24 +2618,30 @@ class ProjectScreen(QWidget):
             )
         else:
             message = snapshot.message
+            retry_label = None
             if self.project:
                 latest = self._latest_run(self.project)
                 if latest and latest.status in {"failed", "interrupted", "cancelled"}:
                     message = self._recovery_message(latest)
-            self.progress.set_finished(message)
-        self.run_button.setDisabled(active)
-        self.setup_start_button.setDisabled(active)
+                    if (
+                        latest.run_kind in {"analysis", "full"}
+                        and not self.project.analysis_artifact_path
+                    ):
+                        retry_label = "Повторить поиск моментов"
+            self.progress.set_finished(message, retry_label)
+        self.run_button.setDisabled(active or blocked)
+        self.setup_start_button.setDisabled(active or blocked)
         has_draft_choice = bool(
             self.project
             and (self.project.review_selected_candidate_ids or self._recommended_candidate_ids())
         )
-        self.draft_button.setDisabled(active or not has_draft_choice)
+        self.draft_button.setDisabled(active or blocked or not has_draft_choice)
         self.view_all_button.setDisabled(active)
         selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
             Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in self.project.selected_candidate_ids
         ) if self.project else False
-        self.production_button.setDisabled(active or not selected_drafts_exist)
+        self.production_button.setDisabled(active or blocked or not selected_drafts_exist)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.composition_strategy, self.same_source_broll,
@@ -2672,10 +2649,30 @@ class ProjectScreen(QWidget):
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
         ):
             widget.setDisabled(active)
+        heavy_hint = self._other_project_job_hint() if blocked else ""
+        for button in (self.run_button, self.setup_start_button, self.draft_button, self.production_button):
+            button.setToolTip(heavy_hint)
         if self.project:
+            self.status.setText(self.viewmodel.services.presentation(
+                self.project, snapshot=snapshot,
+            ).status_label)
             self._update_download_card(self.project)
             self._update_stage_context(self.project)
             self._apply_flow_visibility(self.project)
+
+    def _other_project_job_hint(self) -> str:
+        owner = self.viewmodel.active_project_name or "другом проекте"
+        return (
+            f"Сейчас идёт обработка в проекте «{owner}». Этот проект можно просматривать и настраивать, "
+            "но второй тяжёлый запуск станет доступен после завершения текущего."
+        )
+
+    def _retry_processing(self) -> None:
+        if not self.project:
+            return
+        latest = self._latest_run(self.project)
+        if latest and latest.run_kind in {"analysis", "full"}:
+            self.viewmodel.start_analysis()
 
     def _update_processing_stages(self, snapshot: ProcessingSnapshot) -> None:
         """Show stages for the current job, never a stale analysis template."""
@@ -2686,6 +2683,7 @@ class ProjectScreen(QWidget):
             while self._processing_stages_layout.count() > 1:
                 item = self._processing_stages_layout.takeAt(1)
                 if widget := item.widget():
+                    widget.hide()
                     widget.deleteLater()
             self.processing_stage_labels = {}
             for name, label in rows:
@@ -2837,6 +2835,7 @@ class ProjectScreen(QWidget):
             # explanatory copy, never a reason to widen the whole review
             # page or expose a horizontal scrollbar.
             label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             layout.addWidget(label)
 
     def _update_estimate(self, project: DesktopProject) -> None:

@@ -23,26 +23,6 @@ from app.gui.services.error_mapping import dialog_message, map_error
 from app.gui.viewmodels import ProjectsViewModel
 
 
-_STATUS = {
-    "new": "Источник ждёт загрузки",
-    "source_ready": "Готов к настройке",
-    "analyzing": "Ищем моменты",
-    "analysis_ready": "Моменты готовы",
-    "reviewing_candidates": "Выберите моменты",
-    "rendering_selected": "Создаём ролики",
-    "partially_rendered": "Готово частично",
-    "draft": "Черновик",
-    "ready": "Готов",
-    "processing": "Создаём ролик",
-    "completed": "Ролики готовы",
-    "completed_with_warnings": "Готово с замечаниями",
-    "failed": "Нужно внимание",
-    "cancelled": "Остановлено",
-    "interrupted": "Прервано",
-    "queued": "Ожидает",
-}
-
-
 class ProjectsScreen(QWidget):
     """Source onboarding and recent projects without a second navigation state."""
 
@@ -231,9 +211,11 @@ class ProjectsScreen(QWidget):
                     widget.deleteLater()
         columns = self._recent_columns()
         self._rendered_columns = columns
+        active = self.viewmodel.services.active_job()
+        active_project_id = active[0] if active else None
         for index, project in enumerate(self._projects):
             row, column = divmod(index, columns)
-            self.list_layout.addWidget(self._card(project), row, column)
+            self.list_layout.addWidget(self._card(project, active_project_id), row, column)
         if self._projects:
             self.list_layout.setRowStretch((len(self._projects) - 1) // columns + 1, 1)
         for column in range(columns):
@@ -249,7 +231,7 @@ class ProjectsScreen(QWidget):
             return 2
         return 1
 
-    def _card(self, project: DesktopProject) -> QFrame:
+    def _card(self, project: DesktopProject, active_project_id: str | None) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
@@ -259,7 +241,8 @@ class ProjectsScreen(QWidget):
         name = QLabel(project.name)
         name.setStyleSheet("font-size: 15px; font-weight: 600;")
         name.setWordWrap(True)
-        status = QLabel(_STATUS.get(project.status, "В работе"))
+        presentation = self.viewmodel.services.presentation(project)
+        status = QLabel(presentation.status_label)
         status.setObjectName("status")
         status.setWordWrap(True)
         top.addWidget(name, 1)
@@ -289,6 +272,10 @@ class ProjectsScreen(QWidget):
         )
         delete_button = QPushButton("Удалить")
         delete_button.setObjectName("danger")
+        active = active_project_id == project.project_id
+        delete_button.setDisabled(active)
+        if active:
+            delete_button.setToolTip("Проект нельзя удалить, пока его обработка не завершена или не остановлена.")
         delete_button.clicked.connect(lambda _checked=False, value=project: self._delete(value))
         actions.addWidget(open_button)
         actions.addWidget(folder_button)

@@ -526,11 +526,12 @@ class FinalResultsWorkspace(QWidget):
             card.activated.connect(lambda result_id: self._activate(result_id, emit=True, warnings=self._warnings))
             layout = QHBoxLayout(card)
             layout.setContentsMargins(9, 9, 9, 9)
-            thumbnail = QLabel("Первый кадр\nзагружается")
+            thumbnail = QLabel("Кадр…")
             thumbnail.setObjectName("finalThumbnail")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
             thumbnail.setFixedSize(*self._thumbnail_size)
             thumbnail.setWordWrap(True)
+            thumbnail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             layout.addWidget(thumbnail)
             self._thumbnail_labels[output.result_id] = thumbnail
             text = QVBoxLayout()
@@ -626,7 +627,7 @@ class FinalResultsWorkspace(QWidget):
     def _thumbnail_unavailable(self, result_id: str) -> None:
         label = self._thumbnail_labels.get(result_id)
         if label is not None:
-            label.setText("Первый кадр\nнедоступен")
+            label.setText("Нет кадра")
 
     def _open_active_video(self) -> None:
         output = self._output_for(self._active_id)

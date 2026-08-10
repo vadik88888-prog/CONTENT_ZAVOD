@@ -338,6 +338,17 @@ def test_processing_progress_stays_indeterminate_until_a_real_fraction_is_availa
         assert progress.progress.maximum() == 100
         assert progress.progress.value() == 42
         assert progress.progress_note.isHidden()
+        assert progress.detail.isHidden()
+        assert progress.cancel_button.isHidden() is False
+        assert progress.minimumHeight() >= progress.layout().totalSizeHint().height()
+
+        progress.set_finished(
+            "Работа была прервана. Готовые результаты сохранены.",
+            "Повторить поиск моментов",
+        )
+        assert progress.retry_button.isHidden() is False
+        assert progress.cancel_button.isHidden()
+        assert progress.minimumHeight() >= progress.layout().totalSizeHint().height()
     finally:
         progress.deleteLater()
         app.processEvents()

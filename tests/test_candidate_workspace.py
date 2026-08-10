@@ -347,13 +347,15 @@ def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_open
         assert screen.progress.isVisible()
         assert screen.progress.cancel_button.isVisible()
         assert screen._flow_step == "processing"
-        assert all(project.candidate_states[item] == "draft_planning" for item in selected_ids)
+        assert viewmodel.project is not None
+        assert all(viewmodel.project.candidate_states[item] == "draft_planning" for item in selected_ids)
 
         viewmodel._completed(0)
         app.processEvents()
 
         assert screen._flow_step == "drafts"
-        assert all(project.candidate_states[item] == "draft_ready" for item in selected_ids)
+        assert viewmodel.project is not None
+        assert all(viewmodel.project.candidate_states[item] == "draft_ready" for item in selected_ids)
         assert screen.candidate_review.isVisible()
     finally:
         screen.close()
@@ -531,9 +533,10 @@ def test_link_project_reopens_at_download_then_moves_to_settings(monkeypatch, tm
         viewmodel._download_completed(str(downloaded))
         app.processEvents()
 
-        assert project.source == downloaded.resolve()
-        assert project.source_spec.download_state == "downloaded"
-        assert project.status == ProjectStatus.SOURCE_READY
+        assert viewmodel.project is not None
+        assert viewmodel.project.source == downloaded.resolve()
+        assert viewmodel.project.source_spec.download_state == "downloaded"
+        assert viewmodel.project.status == ProjectStatus.SOURCE_READY
         assert screen._flow_step == "settings"
         assert not screen.setup_card.isHidden()
         assert screen.download_card.isHidden()
@@ -721,7 +724,8 @@ def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(
         visible_copy = "\n".join(label.text() for label in screen.findChildren(QLabel))
         assert raw_error not in visible_copy
 
-        skip = next(button for button in screen.findChildren(QPushButton) if button.text() == "Продолжить без этого")
+        skip = screen.findChild(QPushButton, f"skip-candidate-{candidate_id}")
+        assert skip is not None
         QTest.mouseClick(skip, Qt.MouseButton.LeftButton)
         app.processEvents()
         assert candidate_id not in viewmodel.project.review_selected_candidate_ids
@@ -729,7 +733,10 @@ def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(
         assert "Вернуть в набор" in button_texts
         assert "Повторить черновик" not in button_texts
 
-        restore = next(button for button in screen.findChildren(QPushButton) if button.text() == "Вернуть в набор")
+        restore = screen.findChild(QPushButton, f"restore-candidate-{candidate_id}")
+        assert restore is not None
+        screen.review_list_scroll.ensureWidgetVisible(restore)
+        app.processEvents()
         QTest.mouseClick(restore, Qt.MouseButton.LeftButton)
         app.processEvents()
         assert candidate_id in viewmodel.project.review_selected_candidate_ids

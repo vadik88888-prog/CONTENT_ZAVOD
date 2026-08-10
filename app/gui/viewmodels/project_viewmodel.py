@@ -20,6 +20,7 @@ class ProjectViewModel(QObject):
     error_occurred = Signal(object)
     log_received = Signal(str)
     run_finished = Signal(object)
+    project_persisted = Signal(str)
 
     def __init__(self, services: DesktopServices, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -28,6 +29,8 @@ class ProjectViewModel(QObject):
         self.run: ProjectRun | None = None
         self.prepared: PreparedPipelineRun | None = None
         self.snapshot = ProcessingSnapshot()
+        self._job_project: DesktopProject | None = None
+        self._job_snapshot = ProcessingSnapshot()
         self._launching = False
         self._started_at: float | None = None
         self._after_download = "process"
@@ -53,20 +56,39 @@ class ProjectViewModel(QObject):
     def active(self) -> bool:
         return self._launching or self.runner.active or self.source_downloader.busy
 
+    @property
+    def active_project_id(self) -> str | None:
+        return self._job_project.project_id if self.active and self._job_project else None
+
+    @property
+    def active_project_name(self) -> str | None:
+        return self._job_project.name if self.active and self._job_project else None
+
+    @property
+    def owns_active_job(self) -> bool:
+        return bool(self.project and self.active_project_id == self.project.project_id)
+
+    @property
+    def blocked_by_other_project(self) -> bool:
+        return bool(self.active and self.project and self.active_project_id != self.project.project_id)
+
     def open(self, project: DesktopProject) -> None:
+        # Cards are navigation handles, not authoritative project snapshots.
+        # Always reopen by stable identity so Projects and Project cannot drift.
+        project = self.services.projects.load(project.project_id)
         try:
             self.project = self.services.refresh_setup_estimate(project)
         except Exception:
             # An unavailable optional provider tariff must not prevent a person
             # from opening their existing candidates and completed videos.
             self.project = project
-        self.snapshot = ProcessingSnapshot()
+        self.snapshot = self._job_snapshot if self.owns_active_job else ProcessingSnapshot()
         self.project_changed.emit(self.project)
         self.runs_changed.emit(self.services.runs_for(self.project))
         self.processing_changed.emit(self.snapshot)
 
     def save_options(self, **values: object) -> None:
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project = self.services.update_project_options(self.project, **values)
@@ -83,7 +105,7 @@ class ProjectViewModel(QObject):
         return self.services.setup_preflight(self.project)
 
     def start(self) -> None:
-        if not self.project or self.active:
+        if not self.project or not self._can_start_heavy_job():
             return
         self._launching = True
         self._after_download = "process"
@@ -91,12 +113,7 @@ class ProjectViewModel(QObject):
             self._start_source_download()
             return
         try:
-            self.run, self.prepared = self.services.prepare_run(self.project)
-            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Подготавливаем запуск")
-            self.project_changed.emit(self.project)
-            self.runs_changed.emit(self.services.runs_for(self.project))
-            self.processing_changed.emit(self.snapshot)
-            self.runner.start(self.prepared)
+            self._start_prepared_job("full")
         except Exception as error:
             self._launching = False
             self.error_occurred.emit(map_error(error))
@@ -106,7 +123,7 @@ class ProjectViewModel(QObject):
     def start_analysis(self) -> None:
         """Start analysis only; delivery remains unavailable until draft review."""
 
-        if not self.project or self.active:
+        if not self.project or not self._can_start_heavy_job():
             return
         self._launching = True
         self._after_download = "analysis"
@@ -114,12 +131,7 @@ class ProjectViewModel(QObject):
             self._start_source_download()
             return
         try:
-            self.run, self.prepared = self.services.prepare_analysis(self.project)
-            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Анализируем видео")
-            self.project_changed.emit(self.project)
-            self.runs_changed.emit(self.services.runs_for(self.project))
-            self.processing_changed.emit(self.snapshot)
-            self.runner.start(self.prepared)
+            self._start_prepared_job("analysis")
         except Exception as error:
             self._launching = False
             self.error_occurred.emit(map_error(error))
@@ -129,7 +141,7 @@ class ProjectViewModel(QObject):
     def start_download(self) -> None:
         """Download a public source as its own explicit user step."""
 
-        if not self.project or self.active:
+        if not self.project or not self._can_start_heavy_job():
             return
         if self.project.source_spec.kind != "url" or self.project.source_spec.is_ready:
             return
@@ -138,15 +150,17 @@ class ProjectViewModel(QObject):
         self._start_source_download()
 
     def build_drafts(self, candidate_ids: list[str]) -> None:
-        if not self.project or self.active:
+        if not self.project or not self._can_start_heavy_job():
             return
         self._launching = True
         try:
             self.run, self.prepared = self.services.prepare_draft(self.project, candidate_ids)
-            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Собираем быстрые черновики")
-            self.project_changed.emit(self.project)
-            self.runs_changed.emit(self.services.runs_for(self.project))
-            self.processing_changed.emit(self.snapshot)
+            self._bind_job(self.project, ProcessingSnapshot(
+                ProcessingPhase.PREPARING, message="Собираем быстрые черновики",
+            ))
+            self._emit_owner_project()
+            self._emit_owner_runs()
+            self._emit_owner_processing()
             self.runner.start(self.prepared)
         except Exception as error:
             self._launching = False
@@ -154,7 +168,7 @@ class ProjectViewModel(QObject):
             self.project_changed.emit(self.project)
 
     def select_drafts(self, candidate_ids: list[str]) -> None:
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project = self.services.select_draft_candidates(self.project, candidate_ids)
@@ -165,7 +179,7 @@ class ProjectViewModel(QObject):
     def set_draft_approval(self, candidate_id: str, approved: bool) -> None:
         """Record an explicit keep/reject decision for one ready draft."""
 
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project = self.services.set_draft_approval(self.project, candidate_id, approved)
@@ -174,7 +188,7 @@ class ProjectViewModel(QObject):
             self.error_occurred.emit(map_error(error))
 
     def set_review_selection(self, candidate_ids: list[str]) -> None:
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project = self.services.set_review_selection(self.project, candidate_ids)
@@ -185,7 +199,7 @@ class ProjectViewModel(QObject):
     def set_active_preview_candidate(self, candidate_id: str | None) -> None:
         """Persist the card whose source/draft preview is currently in focus."""
 
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project = self.services.set_active_preview_candidate(self.project, candidate_id)
@@ -195,7 +209,7 @@ class ProjectViewModel(QObject):
         self.project_changed.emit(self.project)
 
     def adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
-        if not self.project or self.active:
+        if not self.project or self.owns_active_job:
             return
         try:
             self.project, _validation = self.services.adjust_candidate_boundary(
@@ -208,7 +222,7 @@ class ProjectViewModel(QObject):
     def select_final_output(self, result_id: str) -> None:
         """Persist the exact canonical result currently open in the viewer."""
 
-        if not self.project or self.active or not result_id.strip():
+        if not self.project or self.owns_active_job or not result_id.strip():
             return
         try:
             self.project.last_final_result_id = result_id
@@ -228,22 +242,17 @@ class ProjectViewModel(QObject):
                 "project_not_open",
             ))
             return
-        if self.active:
-            self.error_occurred.emit(UserFacingError(
-                "Экспорт уже запускается",
-                "Нельзя начать второй тяжёлый экспорт, пока текущая обработка не завершена.",
-                "Дождитесь завершения текущего запуска или остановите его перед повторной попыткой.",
-                "render_selected called while another run is active",
-                "render_already_active",
-            ))
+        if not self._can_start_heavy_job(error_code="render_already_active"):
             return
         self._launching = True
         try:
             self.run, self.prepared = self.services.prepare_selected_render(self.project, candidate_ids)
-            self.snapshot = ProcessingSnapshot(ProcessingPhase.PREPARING, message="Создаём итоговые ролики")
-            self.project_changed.emit(self.project)
-            self.runs_changed.emit(self.services.runs_for(self.project))
-            self.processing_changed.emit(self.snapshot)
+            self._bind_job(self.project, ProcessingSnapshot(
+                ProcessingPhase.PREPARING, message="Создаём итоговые ролики",
+            ))
+            self._emit_owner_project()
+            self._emit_owner_runs()
+            self._emit_owner_processing()
             self.runner.start(self.prepared)
         except Exception as error:
             self._launching = False
@@ -251,41 +260,123 @@ class ProjectViewModel(QObject):
             self.project_changed.emit(self.project)
 
     def rerender(self, parent_run: ProjectRun) -> None:
-        if not self.project or self.active:
+        if not self.project or not self._can_start_heavy_job():
             return
         self._launching = True
         try:
             self.run, self.prepared = self.services.prepare_render_revision(self.project, parent_run)
-            self.project_changed.emit(self.project)
-            self.runs_changed.emit(self.services.runs_for(self.project))
+            self._bind_job(self.project, ProcessingSnapshot(
+                ProcessingPhase.PREPARING, message="Повторно создаём итоговые ролики",
+            ))
+            self._emit_owner_project()
+            self._emit_owner_runs()
+            self._emit_owner_processing()
             self.runner.start(self.prepared)
         except Exception as error:
             self._launching = False
             self.error_occurred.emit(map_error(error))
             self.project_changed.emit(self.project)
 
+    def _can_start_heavy_job(self, *, error_code: str = "heavy_job_already_active") -> bool:
+        if not self.active:
+            return True
+        owner = self.active_project_name or "другом проекте"
+        self.error_occurred.emit(UserFacingError(
+            "Обработка уже идёт",
+            f"Сейчас выполняется тяжёлая работа в проекте «{owner}». Второй запуск временно недоступен.",
+            "Можно просматривать и настраивать другие проекты. Дождитесь завершения текущей работы или остановите её в проекте-владельце.",
+            f"heavy job already active for project_id={self.active_project_id or 'unknown'}",
+            error_code,
+        ))
+        return False
+
+    def _start_prepared_job(self, mode: str, project: DesktopProject | None = None) -> None:
+        owner = project or self.project
+        if owner is None:
+            raise RuntimeError("Проект не открыт.")
+        if mode == "analysis":
+            self.run, self.prepared = self.services.prepare_analysis(owner)
+            message = "Анализируем видео"
+        else:
+            self.run, self.prepared = self.services.prepare_run(owner)
+            message = "Подготавливаем запуск"
+        self._bind_job(owner, ProcessingSnapshot(ProcessingPhase.PREPARING, message=message))
+        self._emit_owner_project()
+        self._emit_owner_runs()
+        self._emit_owner_processing()
+        self.runner.start(self.prepared)
+
+    def _bind_job(self, project: DesktopProject, snapshot: ProcessingSnapshot) -> None:
+        self._job_project = project
+        self._job_snapshot = snapshot
+        if self.project and self.project.project_id == project.project_id:
+            self.project = project
+            self.snapshot = snapshot
+
+    def _ensure_job_context(self) -> bool:
+        """Adapt direct callback tests/integrations to the explicit owner model."""
+
+        if self._job_project is None and self.project is not None:
+            self._job_project = self.project
+            self._job_snapshot = self.snapshot
+        return self._job_project is not None
+
+    def _owner_is_open(self) -> bool:
+        return bool(
+            self.project and self._job_project
+            and self.project.project_id == self._job_project.project_id
+        )
+
+    def _emit_owner_project(self) -> None:
+        if not self._job_project:
+            return
+        self.project_persisted.emit(self._job_project.project_id)
+        if self._owner_is_open():
+            self.project = self._job_project
+            self.project_changed.emit(self.project)
+
+    def _emit_owner_runs(self) -> None:
+        if self._job_project and self._owner_is_open():
+            self.runs_changed.emit(self.services.runs_for(self._job_project))
+
+    def _emit_owner_processing(self) -> None:
+        if self._owner_is_open():
+            self.snapshot = self._job_snapshot
+            self.processing_changed.emit(self.snapshot)
+
+    def _release_job(self) -> None:
+        owner_was_open = self._owner_is_open()
+        self._job_project = None
+        self._started_at = None
+        self._launching = False
+        self.prepared = None
+        if not owner_was_open and self.project:
+            # The viewed project was disabled only by the global one-job lock.
+            # Re-emit its own snapshot as soon as the owner reaches a terminal state.
+            self.processing_changed.emit(self.snapshot)
+
     def cancel(self) -> None:
         if self.source_downloader.busy:
-            self.snapshot.phase = ProcessingPhase.CANCELLING
-            self.snapshot.message = "Останавливаем загрузку"
-            self.processing_changed.emit(self.snapshot)
+            self._job_snapshot.phase = ProcessingPhase.CANCELLING
+            self._job_snapshot.message = "Останавливаем загрузку"
+            self._emit_owner_processing()
             self.source_downloader.cancel()
             return
         if not self.active or not self.run:
             return
         self.run.status = RunStatus.CANCELLING
         self.services.runs.save(self.run)
-        self.snapshot.phase = ProcessingPhase.CANCELLING
-        self.snapshot.message = "Останавливаем обработку"
-        self.processing_changed.emit(self.snapshot)
+        self._job_snapshot.phase = ProcessingPhase.CANCELLING
+        self._job_snapshot.message = "Останавливаем обработку"
+        self._emit_owner_processing()
         self.runner.cancel()
 
     def continue_waiting(self) -> None:
         if not self.runner.active:
             return
         self.runner.continue_waiting()
-        self.snapshot.long_stage_warning = None
-        self.processing_changed.emit(self.snapshot)
+        self._job_snapshot.long_stage_warning = None
+        self._emit_owner_processing()
 
     def _start_source_download(self) -> None:
         if not self.project or self.project.source_spec.kind != "url" or not self.project.source_spec.original_url:
@@ -298,73 +389,96 @@ class ProjectViewModel(QObject):
             return
         self._started_at = time.monotonic()
         self._elapsed_timer.start()
-        self.snapshot = ProcessingSnapshot(
+        snapshot = ProcessingSnapshot(
             ProcessingPhase.PREPARING, stage="download", message="Загружаем видео",
             last_activity_reason="yt-dlp launch requested",
         )
-        self.project_changed.emit(self.project)
-        self.processing_changed.emit(self.snapshot)
+        self._bind_job(self.project, snapshot)
+        self._emit_owner_project()
+        self._emit_owner_processing()
         self.source_downloader.download(
             self.project.source_spec.original_url,
             self.project.directory / "sources",
         )
 
     def _download_progress(self, progress) -> None:
-        self.snapshot.phase = ProcessingPhase.RUNNING
-        self.snapshot.stage = "download"
-        self.snapshot.message = "Загружаем видео"
-        self.snapshot.progress_fraction = progress.fraction
-        self.snapshot.transfer_speed = progress.speed
-        self.snapshot.transfer_downloaded = progress.downloaded
-        self.snapshot.transfer_total = progress.total
-        self.snapshot.eta_seconds = progress.eta_seconds
-        self.snapshot.last_activity_reason = "yt-dlp progress updated"
-        self.processing_changed.emit(self.snapshot)
+        if not self._ensure_job_context():
+            return
+        self._job_snapshot.phase = ProcessingPhase.RUNNING
+        self._job_snapshot.stage = "download"
+        self._job_snapshot.message = "Загружаем видео"
+        self._job_snapshot.progress_fraction = progress.fraction
+        self._job_snapshot.transfer_speed = progress.speed
+        self._job_snapshot.transfer_downloaded = progress.downloaded
+        self._job_snapshot.transfer_total = progress.total
+        self._job_snapshot.eta_seconds = progress.eta_seconds
+        self._job_snapshot.last_activity_reason = "yt-dlp progress updated"
+        self._emit_owner_processing()
 
     def _download_completed(self, path: str) -> None:
-        if not self.project:
+        self._ensure_job_context()
+        owner = self._job_project
+        if not owner:
             return
         try:
-            self.project = self.services.complete_url_download(self.project, path)
+            self._job_project = self.services.complete_url_download(owner, path)
         except Exception as error:
             self._download_failed(str(error))
             return
         self._elapsed_timer.stop()
-        self._launching = False
-        self.snapshot = ProcessingSnapshot(message="Видео загружено")
-        self.project_changed.emit(self.project)
-        self.processing_changed.emit(self.snapshot)
+        self._job_snapshot = ProcessingSnapshot(message="Видео загружено")
+        self._emit_owner_project()
+        self._emit_owner_processing()
         next_action = self._after_download
         self._after_download = "none"
-        if next_action == "analysis":
-            self.start_analysis()
-        elif next_action == "process":
-            self.start()
+        try:
+            if next_action == "analysis":
+                self._launching = True
+                self._start_prepared_job("analysis", self._job_project)
+            elif next_action == "process":
+                self._launching = True
+                self._start_prepared_job("full", self._job_project)
+            else:
+                self._release_job()
+        except Exception as error:
+            self._job_snapshot = ProcessingSnapshot(
+                ProcessingPhase.FAILED,
+                message="Видео загружено, но обработку не удалось запустить",
+            )
+            self._emit_owner_processing()
+            self.error_occurred.emit(map_error(error))
+            self._release_job()
 
     def _download_failed(self, message: str) -> None:
-        if not self.project:
+        self._ensure_job_context()
+        if not self._job_project:
             return
         self._elapsed_timer.stop()
         self._launching = False
-        self.services.fail_url_download(self.project, message)
-        self.snapshot = ProcessingSnapshot(ProcessingPhase.FAILED, message="Не удалось загрузить видео")
-        self.project_changed.emit(self.project)
-        self.processing_changed.emit(self.snapshot)
+        self.services.fail_url_download(self._job_project, message)
+        self._job_snapshot = ProcessingSnapshot(ProcessingPhase.FAILED, message="Не удалось загрузить видео")
+        self._emit_owner_project()
+        self._emit_owner_processing()
         self.error_occurred.emit(map_error(message))
+        self._release_job()
 
     def _download_cancelled(self) -> None:
-        if not self.project:
+        self._ensure_job_context()
+        if not self._job_project:
             return
         self._elapsed_timer.stop()
         self._launching = False
-        self.services.fail_url_download(self.project, "Загрузка видео отменена.", cancelled=True)
-        self.snapshot = ProcessingSnapshot(ProcessingPhase.CANCELLED, message="Загрузка отменена")
-        self.project_changed.emit(self.project)
-        self.processing_changed.emit(self.snapshot)
+        self.services.fail_url_download(self._job_project, "Загрузка видео отменена.", cancelled=True)
+        self._job_snapshot = ProcessingSnapshot(ProcessingPhase.CANCELLED, message="Загрузка отменена")
+        self._emit_owner_project()
+        self._emit_owner_processing()
+        self._release_job()
 
     def _run_started(self) -> None:
+        if not self._ensure_job_context():
+            return
         self._started_at = time.monotonic()
-        self.snapshot = ProcessingSnapshot(
+        self._job_snapshot = ProcessingSnapshot(
             ProcessingPhase.PREPARING,
             message="Подготавливаем видео",
             last_activity_at=self.runner.last_activity_at,
@@ -374,34 +488,39 @@ class ProjectViewModel(QObject):
         if self.run:
             self.run.status = RunStatus.RUNNING
             self.services.runs.save(self.run)
-        if self.project:
-            self.runs_changed.emit(self.services.runs_for(self.project))
-        self.processing_changed.emit(self.snapshot)
+        self._emit_owner_runs()
+        self._emit_owner_processing()
 
     def _stage_changed(self, stage: str, label: str) -> None:
-        self.snapshot.phase = ProcessingPhase.RUNNING
-        self.snapshot.stage = stage
-        self.snapshot.message = label
-        self.snapshot.long_stage_warning = None
-        self.processing_changed.emit(self.snapshot)
+        if not self._ensure_job_context():
+            return
+        self._job_snapshot.phase = ProcessingPhase.RUNNING
+        self._job_snapshot.stage = stage
+        self._job_snapshot.message = label
+        self._job_snapshot.long_stage_warning = None
+        self._emit_owner_processing()
 
     def _stage_running_longer_than_usual(self, stage: str, _timeout_ms: int) -> None:
-        self.snapshot.phase = ProcessingPhase.RUNNING
+        if not self._ensure_job_context():
+            return
+        self._job_snapshot.phase = ProcessingPhase.RUNNING
         if stage != "processing":
-            self.snapshot.stage = stage
-            self.snapshot.message = self.snapshot.stage_label
-        self.snapshot.long_stage_warning = "Этап выполняется дольше обычного"
-        self.processing_changed.emit(self.snapshot)
+            self._job_snapshot.stage = stage
+            self._job_snapshot.message = self._job_snapshot.stage_label
+        self._job_snapshot.long_stage_warning = "Этап выполняется дольше обычного"
+        self._emit_owner_processing()
 
     def _activity_changed(self, timestamp: str, reason: str) -> None:
-        self.snapshot.last_activity_at = timestamp
-        self.snapshot.last_activity_reason = reason
-        self.processing_changed.emit(self.snapshot)
+        if not self._ensure_job_context():
+            return
+        self._job_snapshot.last_activity_at = timestamp
+        self._job_snapshot.last_activity_reason = reason
+        self._emit_owner_processing()
 
     def _emit_elapsed(self) -> None:
         if self._started_at is not None:
-            self.snapshot.elapsed_seconds = time.monotonic() - self._started_at
-            self.processing_changed.emit(self.snapshot)
+            self._job_snapshot.elapsed_seconds = time.monotonic() - self._started_at
+            self._emit_owner_processing()
 
     def _log_received(self, line: str) -> None:
         if self.run:
@@ -409,10 +528,11 @@ class ProjectViewModel(QObject):
         self.log_received.emit(line)
 
     def _completed(self, _exit_code: int) -> None:
-        if not self.project or not self.run or not self.prepared:
+        self._ensure_job_context()
+        if not self._job_project or not self.run or not self.prepared:
             return
         try:
-            run = self.services.finish_success(self.project, self.run, self.prepared)
+            run = self.services.finish_success(self._job_project, self.run, self.prepared)
         except Exception as error:
             self._failed(str(error))
             return
@@ -432,10 +552,11 @@ class ProjectViewModel(QObject):
         self._finish(phase, message, run)
 
     def _failed(self, message: str) -> None:
-        if not self.project or not self.run:
+        self._ensure_job_context()
+        if not self._job_project or not self.run:
             return
         if self.prepared:
-            recovered = self.services.recover_failed_process(self.project, self.run, self.prepared)
+            recovered = self.services.recover_failed_process(self._job_project, self.run, self.prepared)
             if recovered:
                 self._finish(
                     ProcessingPhase.COMPLETED_WITH_WARNINGS,
@@ -443,7 +564,7 @@ class ProjectViewModel(QObject):
                     recovered,
                 )
                 return
-            reported = self.services.recover_reported_failure(self.project, self.run, self.prepared)
+            reported = self.services.recover_reported_failure(self._job_project, self.run, self.prepared)
             if reported:
                 self._finish(
                     ProcessingPhase.FAILED,
@@ -452,7 +573,7 @@ class ProjectViewModel(QObject):
                 )
                 self.error_occurred.emit(map_error(reported.error_summary or message))
                 return
-        run = self.services.finish_failure(self.project, self.run, message, self.runner.failure_details or message)
+        run = self.services.finish_failure(self._job_project, self.run, message, self.runner.failure_details or message)
         final_message = (
             "Обработка остановилась и не отвечает."
             if message == "Обработка остановилась и не отвечает."
@@ -462,14 +583,15 @@ class ProjectViewModel(QObject):
         self.error_occurred.emit(map_error(message))
 
     def _cancelled(self) -> None:
-        if not self.project or not self.run:
+        self._ensure_job_context()
+        if not self._job_project or not self.run:
             return
         if self.prepared:
             # A cancellation can race the final persistence step after one or
             # more candidate MP4s were already completed.  Preserve verified
             # canonical outputs instead of replacing that partial success with
             # an opaque cancelled run.
-            recovered = self.services.recover_failed_process(self.project, self.run, self.prepared)
+            recovered = self.services.recover_failed_process(self._job_project, self.run, self.prepared)
             if recovered:
                 self._finish(
                     ProcessingPhase.COMPLETED_WITH_WARNINGS,
@@ -477,19 +599,17 @@ class ProjectViewModel(QObject):
                     recovered,
                 )
                 return
-        run = self.services.finish_cancelled(self.project, self.run)
+        run = self.services.finish_cancelled(self._job_project, self.run)
         self._finish(ProcessingPhase.CANCELLED, "Создание отменено", run)
 
     def _finish(self, phase: ProcessingPhase, message: str, run: ProjectRun) -> None:
         self._elapsed_timer.stop()
-        self.snapshot.phase = phase
-        self.snapshot.stage = None
-        self.snapshot.message = message
-        self.snapshot.elapsed_seconds = 0.0
-        self.processing_changed.emit(self.snapshot)
-        self.project_changed.emit(self.project)
-        self.runs_changed.emit(self.services.runs_for(self.project))
+        self._job_snapshot.phase = phase
+        self._job_snapshot.stage = None
+        self._job_snapshot.message = message
+        self._job_snapshot.elapsed_seconds = 0.0
+        self._emit_owner_processing()
+        self._emit_owner_project()
+        self._emit_owner_runs()
         self.run_finished.emit(run)
-        self._started_at = None
-        self._launching = False
-        self.prepared = None
+        self._release_job()

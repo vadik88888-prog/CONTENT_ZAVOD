@@ -115,7 +115,7 @@ def test_link_download_is_explicit_shows_transfer_details_and_can_restart(monkey
 
     viewmodel.start_download()
 
-    assert project.source_spec.download_state == "downloading"
+    assert viewmodel.project and viewmodel.project.source_spec.download_state == "downloading"
     assert launches == [("https://example.test/video", project.directory / "sources")]
     viewmodel._download_progress(SimpleNamespace(
         fraction=0.25, speed="2MiB/s", downloaded="50MiB", total="200MiB", eta_seconds=75,
@@ -126,11 +126,11 @@ def test_link_download_is_explicit_shows_transfer_details_and_can_restart(monkey
     assert viewmodel.snapshot.eta_seconds == 75
 
     viewmodel._download_cancelled()
-    assert project.source_spec.download_state == "cancelled"
+    assert viewmodel.project and viewmodel.project.source_spec.download_state == "cancelled"
 
     viewmodel.start_download()
     assert len(launches) == 2
-    assert project.source_spec.download_state == "downloading"
+    assert viewmodel.project and viewmodel.project.source_spec.download_state == "downloading"
 
 
 def test_completed_link_download_hands_off_without_redownloading(monkeypatch, tmp_path: Path) -> None:

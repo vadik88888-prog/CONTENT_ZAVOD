@@ -6,7 +6,18 @@ from pathlib import Path
 from typing import Iterable
 
 from app.candidate_review import validate_boundary_override
-from app.gui.models import DesktopProject, DesktopSettings, ProjectRun, ProjectStatus, RunKind, RunStatus
+from app.clip_results import ClipResult, primary_clip_results
+from app.gui.models import (
+    DesktopProject,
+    DesktopSettings,
+    ProcessingSnapshot,
+    ProjectPresentation,
+    ProjectRun,
+    ProjectStatus,
+    RunKind,
+    RunStatus,
+    derive_project_presentation,
+)
 from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError, validate_video_path
 from app.gui.services.error_mapping import redact_secrets
 from app.gui.services.pipeline_facade import (
@@ -66,6 +77,7 @@ class DesktopServices:
         self.save_settings()
         self.recover_interrupted_runs()
         self.recover_ready_analysis_runs()
+        self.recover_interrupted_downloads()
 
     def list_projects(self) -> list[DesktopProject]:
         return self.projects.list()
@@ -85,6 +97,7 @@ class DesktopServices:
         return project
 
     def mark_url_download_started(self, project: DesktopProject) -> None:
+        self._require_idle_heavy_job()
         if project.source_spec.kind != "url":
             raise InputValidationError("Этот проект использует локальный файл.")
         project.source_spec.download_state = "downloading"
@@ -330,7 +343,61 @@ class DesktopServices:
         return project
 
     def delete_project(self, project_id: str) -> None:
+        active = self.active_job()
+        if active and active[0] == project_id:
+            raise InputValidationError(
+                "Нельзя удалить проект, пока в нём идёт работа. Остановите обработку или дождитесь завершения."
+            )
         self.projects.delete(project_id)
+
+    def active_job(self) -> tuple[str, str | None] | None:
+        """Return the persisted owner of the one allowed desktop heavy job."""
+
+        for project in self.projects.list():
+            if project.source_spec.download_state == "downloading":
+                return project.project_id, None
+            for run in self.runs.list(project.project_id):
+                if run.status in RunStatus.ACTIVE:
+                    return project.project_id, run.run_id
+        return None
+
+    def project_has_active_job(self, project_id: str) -> bool:
+        active = self.active_job()
+        return bool(active and active[0] == project_id)
+
+    def _require_idle_heavy_job(self) -> None:
+        if self.active_job() is not None:
+            raise InputValidationError(
+                "На компьютере уже идёт обработка другого проекта. Её можно смотреть в фоне, но второй тяжёлый запуск пока недоступен."
+            )
+
+    def presentation(
+        self, project: DesktopProject, *, snapshot: ProcessingSnapshot | None = None,
+    ) -> ProjectPresentation:
+        runs = self.runs_for(project)
+        return derive_project_presentation(
+            project,
+            runs,
+            snapshot=snapshot,
+            has_final_outputs=self._has_valid_final_outputs(runs),
+        )
+
+    @staticmethod
+    def _has_valid_final_outputs(runs: Iterable[ProjectRun]) -> bool:
+        for run in runs:
+            if not run.report_path:
+                continue
+            report = read_json(Path(run.report_path), {})
+            if not isinstance(report, dict):
+                continue
+            raw_registry = report.get("primary_results")
+            if isinstance(raw_registry, list):
+                registry = [item for raw in raw_registry if (item := ClipResult.from_dict(raw)) is not None]
+            else:
+                registry = primary_clip_results(report.get("production_render"))
+            if any(Path(result.output_file).is_file() for result in registry):
+                return True
+        return False
 
     def runs_for(self, project: DesktopProject) -> list[ProjectRun]:
         return self.runs.list(project.project_id)
@@ -357,6 +424,7 @@ class DesktopServices:
         return project
 
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_idle_heavy_job()
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
         if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
@@ -423,6 +491,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_analysis(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_idle_heavy_job()
         if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
@@ -459,6 +528,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_draft(self, project: DesktopProject, candidate_ids: list[str]) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_idle_heavy_job()
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
         if not project.analysis_artifact_path:
@@ -671,6 +741,7 @@ class DesktopServices:
     def prepare_selected_render(
         self, project: DesktopProject, candidate_ids: list[str] | None = None,
     ) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_idle_heavy_job()
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
         approved_ids = list(dict.fromkeys(project.selected_candidate_ids))
@@ -734,6 +805,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_render_revision(self, project: DesktopProject, parent_run: ProjectRun) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_idle_heavy_job()
         """Create an immutable export revision from existing production/audio artifacts."""
 
         if project.status == ProjectStatus.PROCESSING:

@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QProgressBar, QVBoxLayout
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 
 class ProcessingProgress(QFrame):
@@ -14,15 +22,21 @@ class ProcessingProgress(QFrame):
 
     cancel_requested = Signal()
     continue_waiting_requested = Signal()
+    retry_requested = Signal()
+    # Includes the optional long-stage warning, two action buttons and wrapped
+    # safety hint at the shell's 760 px logical-width regression viewport.
+    _BASE_MINIMUM_HEIGHT = 400
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.eyebrow = QLabel("ОБРАБОТКА")
         self.eyebrow.setObjectName("muted")
@@ -37,6 +51,7 @@ class ProcessingProgress(QFrame):
         self.stage_label.setObjectName("muted")
         self.stage = QLabel("Готово к созданию ролика")
         self.stage.setWordWrap(True)
+        self.stage.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.stage.setStyleSheet("font-size: 20px; font-weight: 700;")
         stage_copy.addWidget(self.stage_label)
         stage_copy.addWidget(self.stage)
@@ -74,18 +89,21 @@ class ProcessingProgress(QFrame):
         self.progress_note = QLabel("")
         self.progress_note.setObjectName("muted")
         self.progress_note.setWordWrap(True)
+        self.progress_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.progress_note.hide()
         layout.addWidget(self.progress_note)
 
         self.detail = QLabel("")
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
+        self.detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.detail.hide()
         layout.addWidget(self.detail)
 
         self.warning = QLabel("")
         self.warning.setObjectName("warning")
         self.warning.setWordWrap(True)
+        self.warning.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.warning.hide()
         layout.addWidget(self.warning)
 
@@ -101,14 +119,58 @@ class ProcessingProgress(QFrame):
         self.cancel_button.clicked.connect(self.cancel_requested)
         self.cancel_button.hide()
         action_row.addWidget(self.cancel_button)
+
+        self.retry_button = QPushButton("Повторить")
+        self.retry_button.setObjectName("primary")
+        self.retry_button.clicked.connect(self.retry_requested)
+        self.retry_button.hide()
+        action_row.addWidget(self.retry_button)
         action_row.addStretch()
         layout.addLayout(action_row)
 
         self.cancel_hint = QLabel("Готовые результаты останутся в проекте.")
         self.cancel_hint.setObjectName("muted")
         self.cancel_hint.setWordWrap(True)
+        self.cancel_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.cancel_hint.hide()
         layout.addWidget(self.cancel_hint)
+        # Reserve the complete ordinary running/recovery surface before this
+        # widget enters ProjectScreen's hidden stage stack.  Otherwise Qt can
+        # cache the compact, all-optional-rows-hidden hint and position the
+        # following cards through rows revealed on the first update.
+        self.setMinimumHeight(self._BASE_MINIMUM_HEIGHT)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh_geometry()
+
+    def _refresh_geometry(self) -> None:
+        """Keep newly revealed wrapped rows inside the progress card."""
+
+        layout = self.layout()
+        if layout is None:
+            return
+        # Visibility changes do not always invalidate a hidden page's cached
+        # size hint before ProjectScreen moves it into the active workspace.
+        # Recompute it synchronously so labels and actions cannot paint over
+        # one another while the outer project page remains scrollable.
+        self.setMinimumHeight(0)
+        self.stage.setMinimumHeight(0)
+        layout.invalidate()
+        layout.activate()
+        # QLabel's wrapped height can remain at a single line when its
+        # horizontal policy is Ignored and this page was laid out while
+        # hidden.  Reserve the actual height-for-width before calculating the
+        # card so recovery messages cannot be painted through their row.
+        stage_width = max(1, self.stage.contentsRect().width())
+        stage_height = self.stage.heightForWidth(stage_width)
+        if stage_height > 0:
+            self.stage.setMinimumHeight(stage_height)
+            layout.invalidate()
+            layout.activate()
+        required_height = max(self._BASE_MINIMUM_HEIGHT, layout.totalSizeHint().height())
+        self.setMinimumHeight(required_height)
+        self.updateGeometry()
 
     def set_running(
         self,
@@ -150,13 +212,15 @@ class ProcessingProgress(QFrame):
         self.cancel_button.setText("Останавливаем…" if cancelling else "Остановить обработку")
         self.cancel_button.setDisabled(cancelling)
         self.cancel_button.show()
+        self.retry_button.hide()
         self.cancel_hint.setText(
             "Останавливаем безопасно: уже готовые результаты сохранятся."
             if cancelling else "Можно перейти к другим проектам — ход работы сохранится автоматически."
         )
         self.cancel_hint.show()
+        self._refresh_geometry()
 
-    def set_finished(self, message: str) -> None:
+    def set_finished(self, message: str, retry_label: str | None = None) -> None:
         self.stage.setText(message)
         self.stage.setToolTip(message)
         self.elapsed.clear()
@@ -174,4 +238,7 @@ class ProcessingProgress(QFrame):
         self.progress_note.hide()
         self.cancel_button.hide()
         self.cancel_button.setDisabled(False)
+        self.retry_button.setText(retry_label or "Повторить")
+        self.retry_button.setVisible(bool(retry_label))
         self.cancel_hint.hide()
+        self._refresh_geometry()

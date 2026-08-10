@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(208)
+        self.sidebar.setFixedWidth(224)
         nav = QVBoxLayout(self.sidebar)
         nav.setContentsMargins(16, 20, 16, 18)
         nav.setSpacing(7)
@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         self.settings_index = self.stack.addWidget(self.settings_screen)
         self.projects_screen.project_opened.connect(self.show_project)
         self.project_screen.back_requested.connect(self.show_projects)
+        self.project_viewmodel.project_persisted.connect(lambda _project_id: self.projects_screen.refresh())
         layout.addWidget(self.stack, 1)
         self._restore_last_screen()
         self._apply_sidebar_layout()
@@ -225,7 +226,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "sidebar"):
             return
         width = self.width()
-        target_width = 156 if width < 920 else 184 if width < 1120 else 208
+        target_width = 156 if width < 920 else 184 if width < 1120 else 224
         if self.sidebar.width() != target_width:
             self.sidebar.setFixedWidth(target_width)
         if width < 920:
@@ -258,10 +259,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.project_viewmodel.active:
+            owner = self.project_viewmodel.active_project_name or "открытом проекте"
             answer = QMessageBox.question(
                 self,
                 "Закрыть приложение?",
-                "Сейчас создаётся ролик. При закрытии запуск будет отмечен как прерванный и его можно будет начать снова.",
+                f"Сейчас идёт работа в проекте «{owner}». При закрытии запуск будет отмечен как прерванный и его можно будет начать снова.",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
             )
             if answer != QMessageBox.StandardButton.Yes:
