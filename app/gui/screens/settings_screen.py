@@ -141,7 +141,7 @@ class SettingsScreen(QWidget):
 
         self.diagnostics_toggle = QPushButton("Диагностика и поддержка")
         self.diagnostics_toggle.setCheckable(True)
-        self.diagnostics_toggle.setToolTip("Проверить FFmpeg, устройство и доступность настроенных сервисов")
+        self.diagnostics_toggle.setToolTip("Проверить компоненты обработки видео и доступность настроенных сервисов")
         self.diagnostics_toggle.toggled.connect(self._set_diagnostics_visible)
         layout.addWidget(self.diagnostics_toggle)
 

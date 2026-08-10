@@ -95,7 +95,9 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         screen.open(project)
 
         assert screen.content_scroll.widget() is screen.content_host
-        assert screen.draft_button.isEnabled() is False
+        assert screen.draft_button.isEnabled() is True
+        assert screen.draft_button.text() == "Создать 1 рекомендованных"
+        assert screen.view_all_button.text() == "Посмотреть все 2"
         assert screen.production_button.isEnabled() is False
 
         # The saved analysis opens directly at the single-purpose moments step;
@@ -153,6 +155,78 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         screen._project_changed(project)
         assert screen._flow_step == "finished"
         assert screen.candidate_review.isVisible()
+    finally:
+        screen.close()
+
+
+def test_top_n_primary_cta_selects_only_recommended_and_starts_drafts_without_analysis(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    launched: list[list[str]] = []
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda candidate_ids: launched.append(list(candidate_ids)))
+    monkeypatch.setattr(viewmodel, "start_analysis", lambda: pytest.fail("Brain/Vision must not run for Top N"))
+
+    try:
+        screen.open(project)
+        app.processEvents()
+        QTest.mouseClick(screen.draft_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+
+        assert viewmodel.project is not None
+        assert viewmodel.project.review_selected_candidate_ids == ["candidate-recommended"]
+        assert launched == [["candidate-recommended"]]
+    finally:
+        screen.close()
+
+
+def test_select_all_accepts_more_than_five_eligible_candidates_without_analysis(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    analysis_path = Path(project.analysis_artifact_path or "")
+    analysis = read_json(analysis_path, {})
+    analysis["candidates"] = [
+        {
+            "candidate_id": f"candidate-{index}", "title": f"Момент {index}",
+            "start_seconds": float(index), "end_seconds": float(index + 10),
+            "potential": "high", "confidence": 0.9 - index / 100,
+            "recommended": index < 3,
+        }
+        for index in range(7)
+    ]
+    write_json(analysis_path, analysis)
+    candidate_ids = [f"candidate-{index}" for index in range(7)]
+    project.candidate_states = {candidate_id: "analyzed" for candidate_id in candidate_ids}
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    monkeypatch.setattr(viewmodel, "start_analysis", lambda: pytest.fail("selection must reuse saved analysis"))
+
+    try:
+        screen.open(project)
+        app.processEvents()
+        screen._select_all_candidates()
+        app.processEvents()
+
+        assert viewmodel.project is not None
+        assert viewmodel.project.review_selected_candidate_ids == candidate_ids
+        screen._view_all_candidates()
+        assert set(screen._candidate_cards) == set(candidate_ids)
     finally:
         screen.close()
 
@@ -562,7 +636,7 @@ def test_workflow_explains_when_only_some_selected_candidates_need_new_drafts(tm
     try:
         screen.open(project)
         app.processEvents()
-        assert "Выбрано 2 из 3. Для 1 из них ещё нужен черновик." in screen.workflow_hint.text()
+        assert "Выбрано 2. Для 1 из них ещё нужен черновик." in screen.workflow_hint.text()
         assert "Черновик не создан." in "\n".join(
             label.text() for label in screen.findChildren(QLabel)
         )
@@ -842,7 +916,7 @@ def test_final_export_viewmodel_reports_unavailable_dispatch(tmp_path: Path) -> 
     assert getattr(errors[-1], "error_code") == "render_already_active"
 
 
-def test_review_selection_limit_uses_only_persisted_clip_count(tmp_path: Path, monkeypatch) -> None:
+def test_review_selection_is_not_capped_by_persisted_top_n(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
@@ -857,12 +931,12 @@ def test_review_selection_limit_uses_only_persisted_clip_count(tmp_path: Path, m
     )
 
     try:
+        candidate_ids = [f"candidate-{index}" for index in range(7)]
+        project.candidate_states = {candidate_id: "analyzed" for candidate_id in candidate_ids}
         project.settings.clip_count = "3"
-        assert screen._selection_limit(project) == 3
-        project.settings.clip_count = "5"
-        assert screen._selection_limit(project) == 5
-        project.settings.clip_count = "auto"
-        assert screen._selection_limit(project) == 5
+        services.set_review_selection(project, candidate_ids)
+        assert project.review_selected_candidate_ids == candidate_ids
+        assert screen._selection_limit(project) == 7
     finally:
         screen.close()
         screen.deleteLater()

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from app.analysis_artifact import new_analysis_artifact
 from app.cli import _apply_render_command_arguments
-from app.config import AppConfig
+from app.config import AppConfig, load_config
 from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -123,6 +123,66 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert project.status == ProjectStatus.RENDERING_SELECTED
     approved_path = Path(production_prepared.arguments[production_prepared.arguments.index("--draft") + 1])
     assert [item["candidate_id"] for item in read_json(approved_path, {})["candidates"]] == ["candidate-b", "candidate-a"]
+
+
+def test_targeted_preview_failure_keeps_previous_valid_candidate_preview(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text("{}", encoding="utf-8")
+    previous_draft = tmp_path / "previous-draft.json"
+    previous_draft.write_text("{}", encoding="utf-8")
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = "analysis-targeted"
+    project.analysis_fingerprint = "fingerprint-targeted"
+    project.status = ProjectStatus.REVIEWING_CANDIDATES
+    project.candidate_states = {"candidate-a": "draft_ready"}
+    project.candidate_draft_statuses = {"candidate-a": "ready"}
+    project.candidate_approval_states = {"candidate-a": "pending"}
+    project.candidate_export_statuses = {"candidate-a": "pending"}
+    project.review_selected_candidate_ids = ["candidate-a"]
+    project.candidate_draft_artifacts = {"candidate-a": str(previous_draft)}
+    services.projects.save(project)
+
+    services.update_project_options(project, same_source_broll_allowed=True)
+    assert project.setup_state.needs_new_analysis is False
+    assert project.candidate_draft_statuses["candidate-a"] == "pending"
+    assert project.candidate_draft_artifacts["candidate-a"] == str(previous_draft)
+
+    run, prepared = services.prepare_draft(project, ["candidate-a"])
+    assert run.settings_snapshot["previous_draft_artifacts"] == {
+        "candidate-a": str(previous_draft),
+    }
+    assert project.candidate_draft_artifacts["candidate-a"] == str(previous_draft)
+
+    failed_artifact = tmp_path / "failed-revision.json"
+    failed_artifact.write_text("{}", encoding="utf-8")
+    write_json(prepared.report_path, {
+        "terminal": {"status": "draft_ready"},
+        "output_files": [],
+        "warnings": [],
+        "run": {"draft_id": "draft-targeted", "draft_artifact_path": str(failed_artifact)},
+        "candidate_flow": {"draft_candidates": [{
+            "candidate_id": "candidate-a", "state": "draft_failed",
+            "error": "new revision failed",
+        }]},
+    })
+    services.finish_success(project, run, prepared)
+
+    assert project.candidate_states["candidate-a"] == "draft_ready"
+    assert project.candidate_draft_artifacts["candidate-a"] == str(previous_draft)
+    assert "Предыдущая готовая версия сохранена" in project.candidate_errors["candidate-a"]
+
+
+def test_same_source_broll_is_explicit_opt_in_in_runtime_config(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    assert project.settings.same_source_broll_allowed is False
+
+    services.update_project_options(project, same_source_broll_allowed=True)
+    _run, prepared = services.prepare_analysis(project)
+    runtime = load_config(prepared.runtime_config_path)
+
+    assert project.settings.same_source_broll_allowed is True
+    assert runtime.production_render.same_source_broll_allowed is True
 
 
 def test_approved_render_enables_the_required_delivery_stages() -> None:

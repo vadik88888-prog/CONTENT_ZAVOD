@@ -8,13 +8,12 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
+from typing import Any, Callable, Iterable, Literal, cast
 
 from app.ai import get_scorer, get_transformer, get_vision_provider, sanitize_api_error
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
-from app.draft_preview import DraftPreviewService
 from app.audio_modes import tts_eligibility
 from app.clip_results import ClipResult, primary_clip_results, result_paths
 from app.diversity import interval_metrics, transcript_similarity
@@ -1417,6 +1416,7 @@ class Pipeline:
         coverage_map = load_reference("coverage_map")
         clip_count_recommendation = load_reference("clip_count_recommendation")
         story_units = load_reference("story_units")
+        multimodal_timeline = load_reference("multimodal_timeline")
         # A saved review override belongs to one candidate.  Do not let one
         # stale/invalid edit discard the otherwise independent draft batch.
         # Keep the original range for a rejected edit so the durable progress
@@ -1487,6 +1487,8 @@ class Pipeline:
             content_profile=content_profile,
             content_map=content_map,
             story_units=story_units,
+            multimodal_timeline=multimodal_timeline,
+            visual_analysis=visual_analysis,
             coverage_map=coverage_map,
             clip_count_recommendation=clip_count_recommendation,
             final_scored=final_scored,
@@ -1583,6 +1585,8 @@ class Pipeline:
         content_profile: dict[str, Any],
         content_map: dict[str, Any],
         story_units: dict[str, Any],
+        multimodal_timeline: dict[str, Any],
+        visual_analysis: dict[str, Any],
         coverage_map: dict[str, Any],
         clip_count_recommendation: dict[str, Any],
         final_scored: list[Any],
@@ -1592,7 +1596,7 @@ class Pipeline:
         work_directory: Path,
         output_directory: Path,
     ) -> PipelineResult:
-        """Create only fast review previews from Draft FinalScript/ProductionPlan."""
+        """Create candidate-owned Creative Previews from the approved plan graph."""
 
         transformations = {
             str(item.get("candidate_id") or ""): item
@@ -1605,6 +1609,23 @@ class Pipeline:
         selected_ranges = {
             item.candidate.id: (float(item.candidate.start), float(item.candidate.end))
             for item in selected
+        }
+        tts = self._run_tts(tracker, production, work_directory, output_directory)
+        audio = self._run_audio(
+            tracker, production, tts, source, transcript, work_directory, output_directory,
+            Path(str(metadata["audio_path"])) if metadata.get("audio_path") else None,
+        )
+        creative_previews = self._run_production_render(
+            tracker, production, audio, source, transcript, work_directory, output_directory,
+            visual_analysis,
+            creative_candidates=final_scored,
+            multimodal_timeline=multimodal_timeline,
+            story_units=story_units,
+            render_profile="creative_preview",
+        )
+        creative_preview_items = {
+            str(item.get("candidate_id") or ""): item
+            for item in creative_previews.get("items", []) if isinstance(item, dict)
         }
         progress_candidates = self._draft_progress_candidates(selected)
         reviewed: list[dict[str, Any]] = []
@@ -1651,28 +1672,52 @@ class Pipeline:
                 continue
             try:
                 plan = ProductionPlan.model_validate(plan_item.get("plan"))
-                tracker.start(f"draft_preview:{candidate_id}", _hash({
-                    "analysis": analysis.analysis_fingerprint, "plan": plan.plan_id,
-                    "preview": {"width": 540, "height": 960, "fps": 24, "version": "1.0"},
-                }))
-                preview = DraftPreviewService().render(plan, source, output_directory / "drafts" / f"{index:02d}-{suffix}")
-                tracker.finish(f"draft_preview:{candidate_id}")
             except Exception as error:
                 safe = sanitize_api_error(error)
-                tracker.finish(f"draft_preview:{candidate_id}", "failed", safe)
                 reviewed.append({
                     **base,
                     "state": "draft_failed",
                     "error": safe,
-                    "stage": f"draft_preview:{candidate_id}",
+                    "stage": f"creative_preview:{candidate_id}",
                 })
-                self.warnings.append(f"Draft preview {candidate_id} failed: {safe}")
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
                     selected=selected, completed=reviewed, base_candidates=progress_candidates,
                 )
                 continue
-            preview_outputs.append(preview.output_file)
+            preview_item = creative_preview_items.get(candidate_id, {})
+            preview_report = preview_item.get("report") if isinstance(preview_item, dict) else None
+            preview_output = Path(str(preview_item.get("output_file") or "")) if isinstance(preview_item, dict) else Path()
+            if (
+                preview_item.get("status") not in {"completed", "warning"}
+                or not isinstance(preview_report, dict)
+                or not preview_output.is_file()
+                or preview_report.get("render_profile") != "creative_preview"
+                or not preview_report.get("compiled_plan_hash")
+                or not preview_report.get("parity_signature")
+            ):
+                preview_error = "Creative Preview не удалось подготовить. Исходный фрагмент остаётся доступным."
+                reviewed.append({
+                    **base, "state": "draft_failed", "error": preview_error,
+                    "stage": f"creative_preview:{candidate_id}",
+                })
+                self._write_draft_progress(
+                    output_directory=output_directory, analysis=analysis, source=source,
+                    selected=selected, completed=reviewed, base_candidates=progress_candidates,
+                )
+                continue
+            creative_root = preview_output.parent
+            preview = {
+                "status": "draft_ready",
+                "kind": "creative",
+                "output_file": str(preview_output),
+                "render_profile": "creative_preview",
+                "compiled_plan_hash": str(preview_report["compiled_plan_hash"]),
+                "parity_signature": str(preview_report["parity_signature"]),
+                "parity_manifest_ref": str(creative_root / "parity-manifest.json"),
+                "creative_identity_root": str(creative_root),
+            }
+            preview_outputs.append(preview_output)
             reviewed.append({
                 **base,
                 "state": "draft_ready",
@@ -1685,8 +1730,9 @@ class Pipeline:
                 "production_plan_fingerprint": str(plan_item.get("production_plan_fingerprint") or ""),
                 "draft_final_script": transformation_item.get("final_script", {}),
                 "draft_production_plan": plan.model_dump(mode="json"),
-                "preview": preview.to_dict(),
-                "output_file": str(preview.output_file),
+                "preview": preview,
+                "creative_identity_root": str(creative_root),
+                "output_file": str(preview_output),
                 "hook": str(transformation_item.get("final_script", {}).get("hook") or ""),
                 "development": str(transformation_item.get("final_script", {}).get("body") or ""),
                 "payoff": str(transformation_item.get("final_script", {}).get("ending") or ""),
@@ -1707,7 +1753,7 @@ class Pipeline:
             "analysis": analysis.analysis_fingerprint,
             "candidate_ids": self.selected_candidate_ids,
             "plans": [item.get("draft_production_plan", {}).get("plan_id") for item in reviewed],
-            "preview_version": "1.0",
+            "preview_version": "creative-preview-7G.3",
         })
         draft_id = f"draft-{draft_fingerprint[:16]}"
         draft_path = output_directory / "draft.json"
@@ -1726,8 +1772,8 @@ class Pipeline:
         tracker.start("draft_artifact", draft_fingerprint)
         draft.write(draft_path)
         tracker.finish("draft_artifact")
-        for stage in (*TTS_STAGES, *AUDIO_COMPOSITION_STAGES, *PRODUCTION_RENDER_STAGES, "render"):
-            tracker.skip(stage, "Draft preview is ready for review; production delivery was not started.")
+        for stage in (*PRODUCTION_RENDER_STAGES, "render"):
+            tracker.skip(stage, "Creative Preview is ready for review; final delivery was not started.")
         terminal = {
             "status": "draft_ready" if ready_count else "failed",
             "error_code": None if ready_count else "NO_DRAFT_PREVIEWS",
@@ -1752,7 +1798,10 @@ class Pipeline:
             },
             content_transformation=transformation,
             production_plan=production,
-            production_render={"enabled": False, "status": "skipped", "reason": "awaiting_user_review"},
+            tts=tts,
+            audio=audio,
+            production_render={"enabled": False, "status": "skipped", "reason": "awaiting_user_approval"},
+            creative_preview=creative_previews,
             candidate_flow={
                 "draft_candidates": reviewed,
                 "production_allowed": False,
@@ -1871,6 +1920,7 @@ class Pipeline:
         requested_count = len(self.selected_candidate_ids)
         plans: list[dict[str, Any]] = []
         plan_outcomes: list[dict[str, Any]] = []
+        candidate_creative_roots: dict[str, Path] = {}
 
         def fail_approved_plan(
             *, candidate_id: str, index: int, stage_name: str, reason: str, error: BaseException | str,
@@ -1930,6 +1980,35 @@ class Pipeline:
                     reason="approved_draft_plan_stale", error=error,
                 )
                 continue
+            preview = record.get("preview")
+            creative_root_value = record.get("creative_identity_root")
+            if (
+                not isinstance(preview, dict)
+                or preview.get("kind") != "creative"
+                or preview.get("render_profile") != "creative_preview"
+                or not creative_root_value
+            ):
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_creative_preview_missing",
+                    error="Approved candidate has no verified Creative Preview.",
+                )
+                continue
+            creative_root = Path(str(creative_root_value)).resolve()
+            preview_output = Path(str(preview.get("output_file") or "")).resolve()
+            if (
+                preview_output.parent != creative_root
+                or not preview_output.is_file()
+                or not (creative_root / "parity-manifest.json").is_file()
+                or not (creative_root / "compiled-render-plan.json").is_file()
+            ):
+                fail_approved_plan(
+                    candidate_id=candidate_id, index=index, stage_name=stage_name,
+                    reason="approved_creative_preview_invalid",
+                    error="Approved Creative Preview is incomplete or unavailable.",
+                )
+                continue
+            candidate_creative_roots[candidate_id] = creative_root
             source_range = _plan_source_range(parsed)
             outcome = {
                 "candidate_id": candidate_id,
@@ -2002,6 +2081,7 @@ class Pipeline:
         self._native_evidence_context = (final_scored, multimodal_timeline, story_units)
         production_render = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory, visual_analysis,
+            candidate_creative_roots=candidate_creative_roots,
         )
         self.warnings.extend(production_render.get("warnings", []))
         render_settings_fingerprint = _hash({
@@ -2609,6 +2689,8 @@ class Pipeline:
         *, creative_candidates: Iterable[Any] = (),
         multimodal_timeline: dict[str, Any] | None = None,
         story_units: dict[str, Any] | None = None,
+        render_profile: Literal["creative_preview", "final"] = "final",
+        candidate_creative_roots: dict[str, Path] | None = None,
     ) -> dict[str, Any]:
         """Run the Goal 3D executor after its upstream artifacts, never through legacy render."""
 
@@ -2640,6 +2722,7 @@ class Pipeline:
             if isinstance(record, dict)
         }
         outcomes: list[dict[str, Any]] = []
+        candidate_creative_roots = candidate_creative_roots or {}
         for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
             identity = _production_item_identity(item)
@@ -2657,15 +2740,55 @@ class Pipeline:
                 outcomes.append({"candidate_id": candidate_id, "status": "failed", "errors": [safe], **identity})
                 self.errors.append(f"production_render:{candidate_id}: {safe}")
                 continue
+            compiled_plan: CompiledRenderPlan | None = None
+            creative_intent: CreativeIntent | None = None
+            creative_handoff: CandidateCreativeHandoff | None = None
+            execution_status: str | None = None
+            execution_reason_codes: tuple[str, ...] = ()
+            execution_diagnostics: tuple[str, ...] = ()
+            creative_root = candidate_creative_roots.get(candidate_id)
+            if creative_root is not None:
+                try:
+                    try:
+                        creative_intent, compiled_plan, creative_handoff, execution = load_candidate_creative_identity(
+                            creative_root, plan,
+                        )
+                    except CreativeArtifactError:
+                        compiled_plan = CompiledRenderPlan.model_validate(
+                            read_json(creative_root / "compiled-render-plan.json", None)
+                        )
+                        if compiled_plan.compatibility_mode != "legacy_adapter":
+                            raise
+                        execution = None
+                    if execution is not None:
+                        execution_status = execution.execution_status
+                        execution_reason_codes = execution.reason_codes
+                        execution_diagnostics = execution.diagnostics
+                    if render_profile == "final":
+                        _copy_creative_preview_for_parity(creative_root, candidate_output / "creative-preview")
+                except (CreativeArtifactError, OSError, ValueError) as error:
+                    safe = sanitize_api_error(error)
+                    outcomes.append({
+                        "candidate_id": candidate_id, "status": "failed", "errors": [safe], **identity,
+                    })
+                    self.errors.append(f"creative_preview:{candidate_id}: {safe}")
+                    continue
             report = self._compose_production_render(
                 tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
                 raise_on_error=False, visual_analysis=visual_analysis,
                 phase6_candidate=candidate_evidence.get(candidate_id),
                 multimodal_timeline=multimodal_timeline,
                 story_units=story_units,
+                render_profile=render_profile,
+                compiled_plan=compiled_plan,
+                creative_intent=creative_intent,
+                creative_handoff=creative_handoff,
+                execution_status=execution_status,
+                execution_reason_codes=execution_reason_codes,
+                execution_diagnostics=execution_diagnostics,
             )
             output_file = str(report.get("output_file") or "")
-            if report.get("status") in {"completed", "warning"} and output_file:
+            if render_profile == "final" and report.get("status") in {"completed", "warning"} and output_file:
                 canonical = self._publish_run_result(Path(output_file), output_directory, requested_index)
                 report = dict(report)
                 report["intermediate_output_file"] = output_file
@@ -2687,7 +2810,10 @@ class Pipeline:
                 "revision_id": f"{self.run_id}:render-{requested_index:02d}",
                 **identity,
             })
-        return _multi_stage_report("production_render", outcomes)
+        return _multi_stage_report(
+            "production_render" if render_profile == "final" else "creative_preview",
+            outcomes,
+        )
 
     def _compose_production_render(
         self, tracker: StageTracker, plan: ProductionPlan, audio_project: AudioProject, source: Source,
@@ -2706,8 +2832,9 @@ class Pipeline:
         parent_creative_intent_hash: str | None = None,
         style_revision: bool = False,
         allow_creative_revision: bool = False,
+        render_profile: Literal["creative_preview", "final"] = "final",
     ) -> dict[str, Any]:
-        stage_name = f"production_render:{plan.plan_id}"
+        stage_name = f"{'creative_preview' if render_profile == 'creative_preview' else 'production_render'}:{plan.plan_id}"
         tracker.start(stage_name, _hash({
             "plan": plan.plan_id, "audio_project": audio_project.project_id,
             "mixed_audio": _file_fingerprint(Path(audio_project.mix.mixed_audio_path or "")),
@@ -2730,6 +2857,7 @@ class Pipeline:
                 parent_creative_intent_hash=parent_creative_intent_hash,
                 style_revision=style_revision,
                 allow_creative_revision=allow_creative_revision,
+                render_profile=render_profile,
             )
         except ProductionRenderError as error:
             safe = sanitize_api_error(error)
@@ -3930,6 +4058,21 @@ def _selection_rejection_message(scored: Any) -> str:
 
 def _candidate_output_directory(root: Path, candidate_id: str, index: int) -> Path:
     return root if index == 1 else root / "candidates" / safe_name(candidate_id, f"clip-{index:02d}")
+
+
+def _copy_creative_preview_for_parity(source_root: Path, destination_root: Path) -> None:
+    """Stage the approved preview beside a new Final revision atomically."""
+
+    source_root = source_root.resolve()
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for name in ("creative-preview.mp4", "parity-manifest.json"):
+        source = source_root / name
+        if not source.is_file():
+            raise CreativeArtifactError(f"CREATIVE_PREVIEW_ARTIFACT_MISSING:{name}")
+        destination = destination_root / name
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
 
 
 def _multi_stage_report(stage: str, outcomes: list[dict[str, Any]]) -> dict[str, Any]:

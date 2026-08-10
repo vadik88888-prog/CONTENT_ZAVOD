@@ -316,6 +316,9 @@ class ProjectScreen(QWidget):
         self.draft_button = QPushButton("Создать черновики")
         self.draft_button.setObjectName("primary")
         self.draft_button.clicked.connect(self._draft_action)
+        self.view_all_button = QPushButton("Посмотреть все моменты")
+        self.view_all_button.setObjectName("secondaryAction")
+        self.view_all_button.clicked.connect(self._view_all_candidates)
         self.production_button = QPushButton("Создать готовые ролики")
         self.production_button.setObjectName("primary")
         # QPushButton.clicked carries a ``bool`` checked argument.  Keep it
@@ -412,6 +415,15 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(composition_strategy=str(self.composition_strategy.currentData()))
         )
         settings.addWidget(self.composition_strategy)
+        self.same_source_broll = QCheckBox("Использовать дополнительные кадры из этого видео")
+        self.same_source_broll.setToolTip(
+            "Разрешает использовать только подходящие фрагменты из загруженного видео. "
+            "Без вашего выбора дополнительные кадры не добавляются."
+        )
+        self.same_source_broll.toggled.connect(
+            lambda value: self.viewmodel.save_options(same_source_broll_allowed=value)
+        )
+        settings.addWidget(self.same_source_broll)
         settings.addWidget(QLabel("Субтитры"))
         self.subtitles = QCheckBox("Показывать субтитры")
         self.subtitles.toggled.connect(lambda value: self.viewmodel.save_options(subtitles_enabled=value))
@@ -783,6 +795,7 @@ class ProjectScreen(QWidget):
         self.review_back_button.clicked.connect(self.back_requested)
         review_action_layout.addWidget(self.review_back_button)
         review_action_layout.addWidget(self.workflow_hint, 1)
+        review_action_layout.addWidget(self.view_all_button)
         review_action_layout.addWidget(self.draft_button)
         review_action_layout.addWidget(self.production_button)
         review_layout.addWidget(self.review_action_bar)
@@ -884,6 +897,9 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.setup_clip_count, str(project.settings.clip_count))
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
         self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
+        self.same_source_broll.blockSignals(True)
+        self.same_source_broll.setChecked(project.settings.same_source_broll_allowed)
+        self.same_source_broll.blockSignals(False)
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
@@ -970,7 +986,8 @@ class ProjectScreen(QWidget):
         count = self._selection_limit(project)
         self.setup_summary_text.setText(
             f"Режим: {mode}\nЧто анализируем: {scope}\nФормат: {platform}\n"
-            f"Черновиков после выбора: до {count}"
+            f"Рекомендуемых черновиков: {count}\n"
+            f"Дополнительные кадры: {'разрешены' if project.settings.same_source_broll_allowed else 'не использовать'}"
         )
         recommendation = {
             "fast": "Рекомендуем быстрый режим для разговорного материала. Он поможет быстрее перейти к просмотру моментов.",
@@ -1012,17 +1029,16 @@ class ProjectScreen(QWidget):
     def _selection_limit(self, project: DesktopProject) -> int:
         """Return only the persisted selection allowance for this project.
 
-        A post-analysis recommendation describes how many moments look strong;
-        it is not permission to lower a creator's explicit 3/5 selection.
-        Auto remains the established five-item review allowance used by the
-        service layer, while the render configuration can still resolve its
-        own mode-specific default later.
+        Once analysis exists, every eligible candidate can be selected.  The
+        requested clip count remains the Top-N recommendation, not a gate.
         """
 
         try:
             requested = project.settings.processing_intent().requested_clip_count
         except (TypeError, ValueError):
             requested = None
+        if project.candidate_states:
+            return len(project.candidate_states)
         return requested if requested is not None and requested > 0 else 5
 
     def _latest_run(self, project: DesktopProject) -> ProjectRun | None:
@@ -1085,7 +1101,7 @@ class ProjectScreen(QWidget):
             "download": "Скачайте видео отдельно. Когда файл будет готов, откроется настройка.",
             "settings": "Выберите основные параметры. Затем начнётся поиск подходящих моментов.",
             "processing": "Мы подготовим видео и перейдём к следующему готовому результату автоматически.",
-            "candidates": f"Посмотрите найденные моменты и выберите до {self._selection_limit(project)} для черновиков.",
+            "candidates": "Создайте рекомендованные варианты сразу или откройте весь список моментов.",
             "drafts": "Посмотрите черновики и подтвердите только те, из которых нужно сделать готовые ролики.",
             "finished": "Готовые ролики можно посмотреть здесь или открыть в папке проекта.",
         }
@@ -1306,13 +1322,13 @@ class ProjectScreen(QWidget):
                 self._draft_preview_paths[candidate_id] = preview_file
         if not candidates:
             self.workflow_hint.setText(
-                f"После поиска здесь появятся моменты, из которых можно выбрать до {self._selection_limit(project)} черновиков."
+                "После поиска здесь появятся подходящие моменты и готовая рекомендация."
             )
             self.workflow_hint.show()
+            self.view_all_button.hide()
             self.draft_button.hide()
             self.production_button.hide()
             return
-        selection_limit = self._selection_limit(project)
         draftable_ids = [
             candidate_id for candidate_id in project.review_selected_candidate_ids
             if self._candidate_needs_draft(project, candidate_id)
@@ -1330,8 +1346,7 @@ class ProjectScreen(QWidget):
             )
         else:
             self.review_metrics_text.setText(
-                f"Найдено: {len(candidates)} · рекомендуем: {recommended_count} · "
-                f"можно выбрать: до {selection_limit}"
+                f"Найдено {len(candidates)} · рекомендуем {recommended_count}"
             )
         if workflow_step == "candidates":
             # Moment selection belongs to the source-moment phase.  Drafts
@@ -1345,19 +1360,24 @@ class ProjectScreen(QWidget):
             )
             selection_toolbar = QFrame()
             toolbar_layout = QHBoxLayout(selection_toolbar)
-            toolbar_layout.setDirection(action_direction)
+            # Three explicit bulk choices must remain readable in the bounded
+            # Moments list column, including the full-HD three-panel layout.
+            toolbar_layout.setDirection(QBoxLayout.Direction.TopToBottom)
             toolbar_layout.setContentsMargins(0, 0, 0, 0)
             summary = QLabel(
-                f"Найдено моментов: {len(candidates)} · рекомендуем: {recommended_count} · "
-                f"выбрано: {len(project.review_selected_candidate_ids)}/{selection_limit}"
+                f"Найдено {len(candidates)} · рекомендуем {recommended_count} · "
+                f"выбрано {len(project.review_selected_candidate_ids)}"
             )
             summary.setWordWrap(True)
             toolbar_layout.addWidget(summary, 0 if compact_actions else 1)
-            recommended_button = QPushButton("Выбрать рекомендованные")
+            recommended_button = QPushButton("Только рекомендованные")
             recommended_button.clicked.connect(self._select_recommended)
-            clear_button = QPushButton("Снять выбор")
+            select_all_button = QPushButton("Выбрать все")
+            select_all_button.clicked.connect(self._select_all_candidates)
+            clear_button = QPushButton("Снять все")
             clear_button.clicked.connect(self._clear_review_selection)
             toolbar_layout.addWidget(recommended_button)
+            toolbar_layout.addWidget(select_all_button)
             toolbar_layout.addWidget(clear_button)
             layout.addWidget(selection_toolbar)
             filters = QFrame()
@@ -1431,6 +1451,12 @@ class ProjectScreen(QWidget):
                 status_label = "Черновик не создан. Его можно повторить отдельно."
             elif export_status == "failed":
                 status_label = "Готовый ролик не создан. Черновик сохранён и остаётся подтверждённым."
+            elif (
+                workflow_step == "drafts"
+                and candidate_id in project.candidate_draft_artifacts
+                and draft_status in {"pending", "running"}
+            ):
+                status_label = "Обновляем предпросмотр. Предыдущая готовая версия остаётся доступной."
             compact_actions = bool(self._compact_action_layout)
             frame = QFrame(); frame.setObjectName("card")
             frame.setMinimumWidth(0)
@@ -1551,7 +1577,7 @@ class ProjectScreen(QWidget):
             elif state == "selected":
                 if export_status == "failed":
                     retry_export = QPushButton("Повторить экспорт")
-                    retry_export.setToolTip("Повторно создаст готовый ролик из сохранённого черновика; анализ и Draft Preview не повторяются.")
+                    retry_export.setToolTip("Повторно создаст готовый ролик из сохранённого черновика; анализ и предпросмотр не повторяются.")
                     retry_export.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_final_export(value))
                     actions.addWidget(retry_export)
                 reject = QPushButton("Отклонить")
@@ -1618,20 +1644,34 @@ class ProjectScreen(QWidget):
         """Expose exactly the next safe pipeline action for the current state."""
 
         self.draft_button.hide()
+        self.view_all_button.hide()
         self.production_button.hide()
         self.draft_button.setDisabled(True)
         self.production_button.setDisabled(True)
         if project.status in {"analyzing", "processing", "rendering_selected"} or processing_count:
             self.workflow_hint.setText("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
             return
+        if self._derive_flow_step(project) == "candidates":
+            recommended_ids = self._recommended_candidate_ids()
+            if not project.review_selected_candidate_ids and recommended_ids:
+                count = len(recommended_ids)
+                self.workflow_hint.setText(
+                    f"Найдено {len(self._review_candidates_by_id)} · рекомендуем {count}. "
+                    "Можно сразу подготовить лучшие варианты или изменить выбор в списке."
+                )
+                self.view_all_button.setText(f"Посмотреть все {len(self._review_candidates_by_id)}")
+                self.view_all_button.show()
+                self.draft_button.setText(f"Создать {count} рекомендованных")
+                self.draft_button.setEnabled(True)
+                self.draft_button.show()
+                return
         if draftable_ids:
             count = len(draftable_ids)
             selected_count = len(project.review_selected_candidate_ids)
-            selection_limit = self._selection_limit(project)
             selection_summary = (
-                f"Выбрано {count} из {selection_limit}."
+                f"Выбрано {count}."
                 if selected_count == count
-                else f"Выбрано {selected_count} из {selection_limit}. Для {count} из них ещё нужен черновик."
+                else f"Выбрано {selected_count}. Для {count} из них ещё нужен черновик."
             )
             self.workflow_hint.setText(
                 f"{selection_summary} Следующий шаг — создать черновики, чтобы посмотреть ролики перед финальной сборкой."
@@ -1658,7 +1698,7 @@ class ProjectScreen(QWidget):
             self.workflow_hint.setText("Готовые ролики можно посмотреть в карточках или открыть в папке проекта.")
             return
         self.workflow_hint.setText(
-            f"Посмотрите моменты и добавьте к черновикам от одного до {self._selection_limit(project)} лучших."
+            "Посмотрите моменты и выберите любое число подходящих фрагментов."
         )
 
     def _runs_for_project(self, project: DesktopProject) -> list[ProjectRun]:
@@ -1863,7 +1903,7 @@ class ProjectScreen(QWidget):
             )
         if cpu_fallback:
             summarized.append(
-                "Для финального рендера использован CPU: NVENC недоступен для установленной версии драйвера NVIDIA."
+                "Аппаратное ускорение было недоступно, поэтому ролик безопасно собран обычным способом."
             )
         return list(dict.fromkeys(summarized))
 
@@ -1922,7 +1962,12 @@ class ProjectScreen(QWidget):
             return
         candidate_ids = list(self.project.review_selected_candidate_ids)
         if not candidate_ids:
-            return
+            candidate_ids = self._recommended_candidate_ids()
+            if not candidate_ids:
+                return
+            self.viewmodel.set_review_selection(candidate_ids)
+            if not self.project:
+                return
         needs_draft = [
             candidate_id for candidate_id in candidate_ids
             if self._candidate_needs_draft(self.project, candidate_id)
@@ -1970,12 +2015,6 @@ class ProjectScreen(QWidget):
         if candidate_id in selected:
             selected.remove(candidate_id)
         else:
-            limit = self._selection_limit(self.project)
-            if len(selected) >= limit:
-                QMessageBox.information(
-                    self, "Достигнут лимит", f"Для этого прохода можно добавить к черновикам не больше {limit} моментов.",
-                )
-                return
             selected.append(candidate_id)
         self.viewmodel.set_review_selection(selected)
 
@@ -1993,24 +2032,32 @@ class ProjectScreen(QWidget):
     def _restore_draft(self, candidate_id: str) -> None:
         if not self.project or candidate_id in self.project.review_selected_candidate_ids:
             return
-        limit = self._selection_limit(self.project)
-        if len(self.project.review_selected_candidate_ids) >= limit:
-            QMessageBox.information(
-                self, "Достигнут лимит", f"Сначала уберите один из {limit} моментов, затем верните этот черновик к проверке.",
-            )
-            return
         self.viewmodel.set_review_selection([*self.project.review_selected_candidate_ids, candidate_id])
+
+    def _recommended_candidate_ids(self) -> list[str]:
+        return [
+            candidate_id
+            for candidate_id, item in self._review_candidates_by_id.items()
+            if item.get("recommended", item.get("selected_by_recommendation"))
+        ]
 
     def _select_recommended(self) -> None:
         if not self.project:
             return
-        path = Path(self.project.analysis_artifact_path) if self.project.analysis_artifact_path else None
-        analysis = read_json(path, {}) if path and path.is_file() else {}
-        candidate_ids = [
-            str(item.get("candidate_id")) for item in analysis.get("candidates", [])
-            if isinstance(item, dict) and item.get("recommended", item.get("selected_by_recommendation")) and item.get("candidate_id")
-        ] if isinstance(analysis, dict) else []
-        self.viewmodel.set_review_selection(candidate_ids[:self._selection_limit(self.project)])
+        self.viewmodel.set_review_selection(self._recommended_candidate_ids())
+
+    def _select_all_candidates(self) -> None:
+        if self.project:
+            self.viewmodel.set_review_selection(list(self._review_candidates_by_id))
+
+    def _view_all_candidates(self) -> None:
+        if not self.project:
+            return
+        self._candidate_filter = "all"
+        self._candidate_visible_limit = max(12, len(self._review_candidates_by_id))
+        self._update_candidate_review(self.project)
+        self.content_scroll.ensureWidgetVisible(self.candidate_review, 0, 16)
+        self.candidate_review.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _clear_review_selection(self) -> None:
         self.viewmodel.set_review_selection([])
@@ -2581,7 +2628,12 @@ class ProjectScreen(QWidget):
             self.progress.set_finished(message)
         self.run_button.setDisabled(active)
         self.setup_start_button.setDisabled(active)
-        self.draft_button.setDisabled(active or not (self.project and self.project.review_selected_candidate_ids))
+        has_draft_choice = bool(
+            self.project
+            and (self.project.review_selected_candidate_ids or self._recommended_candidate_ids())
+        )
+        self.draft_button.setDisabled(active or not has_draft_choice)
+        self.view_all_button.setDisabled(active)
         selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
             Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in self.project.selected_candidate_ids
@@ -2589,7 +2641,8 @@ class ProjectScreen(QWidget):
         self.production_button.setDisabled(active or not selected_drafts_exist)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
-            self.audio_mode, self.composition_strategy, self.subtitles, self.subtitle_style, self.cache,
+            self.audio_mode, self.composition_strategy, self.same_source_broll,
+            self.subtitles, self.subtitle_style, self.cache,
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
         ):
             widget.setDisabled(active)

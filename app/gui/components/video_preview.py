@@ -838,7 +838,7 @@ class VideoPreview(QFrame):
     def _start_proxy(self, request: _ProxyRequest) -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
-            self._show_error("Не найден FFmpeg: совместимый предпросмотр создать нельзя.")
+            self._show_error("Не хватает компонента обработки видео для совместимого предпросмотра.")
             return
         request.destination.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -891,7 +891,7 @@ class VideoPreview(QFrame):
 
     def _complete_proxy_error(self, request: _ProxyRequest) -> None:
         if self._active_proxy is request and self._proxy_process.state() == QProcess.ProcessState.NotRunning:
-            self._complete_proxy(request, False, self._ffmpeg_error_text() or "Не удалось запустить FFmpeg.")
+            self._complete_proxy(request, False, self._ffmpeg_error_text() or "Не удалось подготовить совместимый предпросмотр.")
 
     def _complete_proxy(self, request: _ProxyRequest, success: bool, details: str) -> None:
         if self._active_proxy is not request:
@@ -981,7 +981,7 @@ class VideoPreview(QFrame):
             if self._source_path and self._source_range_seconds and not self._using_proxy:
                 self._request_proxy(self._proxy_cache_directory, "Qt Multimedia не смог открыть исходный формат; создаём совместимый preview.")
             else:
-                self._show_error("Qt Multimedia не смог открыть подготовленный предпросмотр.")
+                self._show_error("Системный проигрыватель не смог открыть подготовленный предпросмотр.")
             return
         if status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
             self._media_loading = False

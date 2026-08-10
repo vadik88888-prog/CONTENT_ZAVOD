@@ -164,14 +164,42 @@ class DesktopServices:
         if not changed:
             return project
         has_analysis = bool(project.analysis_artifact_path)
-        analysis_options = {"processing_mode", "deep_analysis", "clip_count"}
+        # Clip count is a post-analysis Top-N choice over the saved ranking;
+        # changing it must never re-run Brain/Vision.
+        analysis_options = {"processing_mode", "deep_analysis"}
         needs_analysis = has_analysis and bool(analysis_options.intersection(changed))
+        preview_options = {
+            "platform", "subtitles_enabled", "subtitle_style",
+            "composition_strategy", "same_source_broll_allowed", "encoder",
+        }
+        stale_preview_ids = [
+            candidate_id
+            for candidate_id in project.review_selected_candidate_ids
+            if candidate_id in project.candidate_draft_artifacts
+            and project.candidate_states.get(candidate_id) in {"draft_ready", "selected"}
+        ] if preview_options.intersection(changed) else []
+        for candidate_id in stale_preview_ids:
+            # Keep the last valid artifact addressable while the 7G cache
+            # creates a dependency-bounded revision. Approval is intentionally
+            # cleared until the replacement passes parity/QC.
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="pending", approval="pending", export="pending",
+            )
+            project.selected_candidate_ids = [
+                item for item in project.selected_candidate_ids if item != candidate_id
+            ]
         if needs_analysis:
             summary = (
                 "Настройки сохранены для следующего анализа. Текущие найденные моменты и черновики не изменены; "
                 "чтобы применить этот режим, выполните новый анализ видео."
             )
             reused = ["текущие моменты и черновики остаются доступными для просмотра"]
+        elif stale_preview_ids:
+            summary = (
+                "Настройки сохранены. Предпросмотр нужно обновить только для выбранных черновиков; "
+                "предыдущая готовая версия останется доступной до завершения обновления."
+            )
+            reused = ["сохранённый анализ", "найденные моменты", "готовые части предыдущего предпросмотра"]
         elif has_analysis:
             summary = (
                 "Настройки сохранены. Сохранённый анализ и найденные моменты можно использовать повторно; "
@@ -268,13 +296,6 @@ class DesktopServices:
         else:
             project.candidate_states[candidate_id] = "analyzed"
 
-    @staticmethod
-    def _review_selection_limit(project: DesktopProject) -> int:
-        requested = project.settings.processing_intent().requested_clip_count
-        # Auto mode can resolve to up to five clips in the supported creator
-        # flow.  Do not silently impose the former hard-coded three-item cap.
-        return requested if requested is not None else 5
-
     def set_active_preview_candidate(
         self, project: DesktopProject, candidate_id: str | None,
     ) -> DesktopProject:
@@ -291,11 +312,6 @@ class DesktopServices:
         """Persist the user's candidate choice before any draft or render starts."""
 
         unique = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
-        selection_limit = self._review_selection_limit(project)
-        if len(unique) > selection_limit:
-            raise InputValidationError(
-                f"Для одного прохода выберите не больше {selection_limit} моментов."
-            )
         unknown = [item for item in unique if item not in project.candidate_states]
         if unknown:
             raise InputValidationError("Один из выбранных моментов отсутствует в сохранённом анализе.")
@@ -347,7 +363,7 @@ class DesktopServices:
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
             raise InputValidationError(
-                "Готовый analysis.json уже найден. Откройте «Моменты»; повторный анализ не запускался."
+                "Сохранённый анализ уже готов. Откройте «Моменты»; повторный анализ не запускался."
             )
         source = project.source
         if not source.is_file():
@@ -368,6 +384,7 @@ class DesktopServices:
                     "subtitle_style": project.settings.subtitle_style,
                     "audio_mode": project.settings.audio_mode,
                     "composition_strategy": project.settings.composition_strategy,
+                    "same_source_broll_allowed": project.settings.same_source_broll_allowed,
                     "encoder": project.settings.encoder,
                     "use_cache": project.settings.use_cache,
                     "recompute_all": project.settings.recompute_all,
@@ -410,7 +427,7 @@ class DesktopServices:
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
             raise InputValidationError(
-                "Готовый analysis.json уже найден. Откройте «Моменты»; повторный анализ не запускался."
+                "Сохранённый анализ уже готов. Откройте «Моменты»; повторный анализ не запускался."
             )
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
@@ -474,7 +491,7 @@ class DesktopServices:
                     item for item in project.selected_candidate_ids if item != candidate_id
                 ]
                 project.candidate_errors[candidate_id] = (
-                    "Этап проверки черновика: сохранённый Draft Preview больше недоступен; "
+                    "Сохранённый предпросмотр больше недоступен; "
                     "будет создан заново."
                 )
                 stale_ready_ids.append(candidate_id)
@@ -490,7 +507,17 @@ class DesktopServices:
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
         run = self.runs.create(
-            project, {"analysis_id": project.analysis_id, "candidate_ids": list(candidate_ids), "local_test_mode": self.settings.local_test_mode},
+            project, {
+                "analysis_id": project.analysis_id,
+                "candidate_ids": list(candidate_ids),
+                "previous_draft_artifacts": {
+                    candidate_id: project.candidate_draft_artifacts[candidate_id]
+                    for candidate_id in candidate_ids
+                    if candidate_id in project.candidate_draft_artifacts
+                    and Path(project.candidate_draft_artifacts[candidate_id]).is_file()
+                },
+                "local_test_mode": self.settings.local_test_mode,
+            },
             {"kind": project.source_spec.kind, "path": str(source), "name": source.name, "size_bytes": source.stat().st_size},
             "0.1.0", run_kind=RunKind.DRAFT,
         )
@@ -514,7 +541,7 @@ class DesktopServices:
 
     def select_draft_candidates(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
         if not project.candidate_draft_artifacts:
-            raise InputValidationError("Сначала соберите Draft Preview.")
+            raise InputValidationError("Сначала подготовьте предпросмотр черновика.")
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один готовый черновик.")
         eligible: list[str] = []
@@ -527,7 +554,7 @@ class DesktopServices:
                 self._set_candidate_lifecycle(
                     project, candidate_id, draft="failed", approval="pending", export="pending",
                 )
-                project.candidate_errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                project.candidate_errors[candidate_id] = "Сохранённый предпросмотр больше недоступен."
                 continue
             eligible.append(candidate_id)
         if not eligible:
@@ -566,7 +593,7 @@ class DesktopServices:
                 self._set_candidate_lifecycle(
                     project, candidate_id, draft="failed", approval="pending", export="pending",
                 )
-                project.candidate_errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                project.candidate_errors[candidate_id] = "Сохранённый предпросмотр больше недоступен."
                 project.selected_candidate_ids = [
                     item for item in project.selected_candidate_ids if item != candidate_id
                 ]
@@ -636,7 +663,6 @@ class DesktopServices:
         self._set_candidate_lifecycle(
             project, candidate_id, draft="pending", approval="pending", export="pending",
         )
-        project.candidate_draft_artifacts.pop(candidate_id, None)
         project.candidate_errors.pop(candidate_id, None)
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
         self.projects.save(project)
@@ -656,7 +682,7 @@ class DesktopServices:
             if outside_approval:
                 raise InputValidationError("Экспортировать можно только подтверждённые черновики.")
         if not candidate_ids:
-            raise InputValidationError("Сначала подтвердите черновики для production render.")
+            raise InputValidationError("Сначала подтвердите черновики для создания готовых роликов.")
         inspection = self.pipeline.inspect_approved_drafts(project, candidate_ids)
         for candidate_id, message in inspection.errors.items():
             self._set_candidate_lifecycle(
@@ -682,7 +708,7 @@ class DesktopServices:
         if not candidate_ids:
             project.status = ProjectStatus.REVIEWING_CANDIDATES
             self.projects.save(project)
-            raise InputValidationError("Нет проверенных черновиков для production render. Повторите только отмеченные элементы.")
+            raise InputValidationError("Нет готовых подтверждённых черновиков. Повторите только отмеченные элементы.")
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
@@ -696,7 +722,7 @@ class DesktopServices:
                 self.pipeline.prepare_selected_render(project, run, self.settings, candidate_ids), run,
             )
         except Exception:
-            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить production render."
+            run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить создание готовых роликов."
             self.runs.save(run)
             raise
         for candidate_id in candidate_ids:
@@ -728,6 +754,7 @@ class DesktopServices:
             "platform": project.settings.platform,
             "audio_mode": project.settings.audio_mode,
             "composition_strategy": project.settings.composition_strategy,
+            "same_source_broll_allowed": project.settings.same_source_broll_allowed,
             "encoder": project.settings.encoder,
         }
         changed = {name: value for name, value in current.items() if previous.get(name) != value}
@@ -856,7 +883,7 @@ class DesktopServices:
     @classmethod
     def _apply_draft_report(
         cls, project: DesktopProject, report: dict, expected_candidate_ids: list[str],
-        *, fallback: str,
+        *, fallback: str, previous_artifacts: dict[str, str] | None = None,
     ) -> None:
         run_info = report.get("run", {}) if isinstance(report, dict) else {}
         if not isinstance(run_info, dict):
@@ -886,6 +913,17 @@ class DesktopServices:
                 project.candidate_draft_artifacts[candidate_id] = artifact_path
                 project.candidate_errors.pop(candidate_id, None)
             else:
+                previous = str((previous_artifacts or {}).get(candidate_id) or "")
+                if previous and Path(previous).is_file():
+                    cls._set_candidate_lifecycle(
+                        project, candidate_id, draft="ready", approval="pending", export="pending",
+                    )
+                    project.candidate_draft_artifacts[candidate_id] = previous
+                    project.candidate_errors[candidate_id] = (
+                        "Не удалось обновить предпросмотр. Предыдущая готовая версия сохранена; "
+                        "можно повторить обновление."
+                    )
+                    continue
                 cls._set_candidate_lifecycle(
                     project, candidate_id, draft="failed", approval="pending", export="pending",
                 )
@@ -895,6 +933,16 @@ class DesktopServices:
             if candidate_id in reported_ids:
                 continue
             if project.candidate_draft_statuses.get(candidate_id) == "running" or project.candidate_states.get(candidate_id) == "draft_planning":
+                previous = str((previous_artifacts or {}).get(candidate_id) or "")
+                if previous and Path(previous).is_file():
+                    cls._set_candidate_lifecycle(
+                        project, candidate_id, draft="ready", approval="pending", export="pending",
+                    )
+                    project.candidate_draft_artifacts[candidate_id] = previous
+                    project.candidate_errors[candidate_id] = (
+                        "Не удалось обновить предпросмотр. Предыдущая готовая версия сохранена."
+                    )
+                    continue
                 cls._set_candidate_lifecycle(
                     project, candidate_id, draft="failed", approval="pending", export="pending",
                 )
@@ -1000,7 +1048,13 @@ class DesktopServices:
             if str(candidate_id)
         ] or list(project.selected_candidate_ids)
         if run.run_kind == RunKind.DRAFT:
-            self._apply_draft_report(project, reported.report, expected, fallback=message)
+            self._apply_draft_report(
+                project, reported.report, expected, fallback=message,
+                previous_artifacts={
+                    str(key): str(value)
+                    for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
+                },
+            )
             project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
         elif run.run_kind == RunKind.SELECTED_RENDER:
             completed_ids, _failed_ids = self._apply_selected_render_report(
@@ -1108,7 +1162,13 @@ class DesktopServices:
                 str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
                 if str(candidate_id)
             ] or list(project.review_selected_candidate_ids)
-            self._apply_draft_report(project, report, expected, fallback="Не удалось подготовить черновик.")
+            self._apply_draft_report(
+                project, report, expected, fallback="Не удалось подготовить черновик.",
+                previous_artifacts={
+                    str(key): str(value)
+                    for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
+                },
+            )
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.SELECTED_RENDER:
             expected = [
@@ -1196,8 +1256,22 @@ class DesktopServices:
                     project.candidate_errors[candidate_id] = run.error_summary
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.DRAFT:
+            previous_artifacts = {
+                str(key): str(value)
+                for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
+            }
             for candidate_id, state in list(project.candidate_states.items()):
                 if state == "draft_planning":
+                    previous = previous_artifacts.get(candidate_id)
+                    if previous and Path(previous).is_file():
+                        self._set_candidate_lifecycle(
+                            project, candidate_id, draft="ready", approval="pending", export="pending",
+                        )
+                        project.candidate_draft_artifacts[candidate_id] = previous
+                        project.candidate_errors[candidate_id] = (
+                            "Не удалось обновить предпросмотр. Предыдущая готовая версия сохранена."
+                        )
+                        continue
                     self._set_candidate_lifecycle(
                         project, candidate_id, draft="failed", approval="pending", export="pending",
                     )
@@ -1223,8 +1297,19 @@ class DesktopServices:
                     )
             project.status = ProjectStatus.REVIEWING_CANDIDATES
         elif run.run_kind == RunKind.DRAFT:
+            previous_artifacts = {
+                str(key): str(value)
+                for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
+            }
             for candidate_id, state in list(project.candidate_states.items()):
                 if state == "draft_planning":
+                    previous = previous_artifacts.get(candidate_id)
+                    if previous and Path(previous).is_file():
+                        self._set_candidate_lifecycle(
+                            project, candidate_id, draft="ready", approval="pending", export="pending",
+                        )
+                        project.candidate_draft_artifacts[candidate_id] = previous
+                        continue
                     self._set_candidate_lifecycle(
                         project, candidate_id, draft="pending", approval="pending", export="pending",
                     )

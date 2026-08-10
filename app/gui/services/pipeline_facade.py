@@ -261,9 +261,9 @@ class PipelineFacade:
         """Prepare the expensive 1080x1920 job only from reviewed draft.json."""
 
         if not project.candidate_draft_artifacts:
-            raise InputValidationError("Сначала соберите и проверьте Draft Preview.")
+            raise InputValidationError("Сначала подготовьте и проверьте предпросмотр черновика.")
         if not candidate_ids:
-            raise InputValidationError("Выберите черновики для production render.")
+            raise InputValidationError("Выберите черновики, из которых нужно создать готовые ролики.")
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
@@ -304,20 +304,20 @@ class PipelineFacade:
         for candidate_id in dict.fromkeys(str(item) for item in candidate_ids if str(item)):
             raw_path = project.candidate_draft_artifacts.get(candidate_id)
             if not raw_path:
-                errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview не найден."
+                errors[candidate_id] = "Сохранённый предпросмотр черновика не найден."
                 continue
             try:
                 path = Path(str(raw_path)).resolve()
             except OSError:
-                errors[candidate_id] = "Этап проверки черновика: путь к Draft Preview недоступен."
+                errors[candidate_id] = "Не удалось открыть сохранённый предпросмотр черновика."
                 continue
             if not path.is_file():
-                errors[candidate_id] = "Этап проверки черновика: сохранённый Draft Preview больше недоступен."
+                errors[candidate_id] = "Сохранённый предпросмотр черновика больше недоступен."
                 continue
             try:
                 artifact = artifacts.setdefault(path, DraftArtifact.read(path))
             except (DraftArtifactError, OSError, ValueError):
-                errors[candidate_id] = "Этап проверки черновика: файл Draft Preview повреждён."
+                errors[candidate_id] = "Сохранённый предпросмотр черновика повреждён; создайте его заново."
                 continue
             if (
                 artifact.project_id and artifact.project_id != project.project_id
@@ -326,20 +326,20 @@ class PipelineFacade:
             ) or (
                 project.analysis_fingerprint and artifact.analysis_fingerprint != project.analysis_fingerprint
             ):
-                errors[candidate_id] = "Этап проверки черновика: Draft Preview относится к другому анализу."
+                errors[candidate_id] = "Этот предпросмотр создан для другой версии проекта; обновите его."
                 continue
             try:
                 analysis_path = Path(artifact.analysis_artifact_path).resolve()
             except OSError:
-                errors[candidate_id] = "Этап проверки черновика: путь к анализу недоступен."
+                errors[candidate_id] = "Не удалось открыть сохранённый анализ для этого черновика."
                 continue
             if not analysis_path.is_file():
-                errors[candidate_id] = "Этап проверки черновика: исходный анализ для Draft Preview больше недоступен."
+                errors[candidate_id] = "Для этого черновика исходный анализ больше недоступен."
                 continue
             try:
                 analysis = analyses.setdefault(analysis_path, AnalysisArtifact.read(analysis_path))
             except (AnalysisArtifactError, OSError, ValueError):
-                errors[candidate_id] = "Этап проверки черновика: исходный анализ повреждён."
+                errors[candidate_id] = "Сохранённый анализ повреждён; повторите анализ видео."
                 continue
             if (
                 analysis.analysis_id != artifact.analysis_id
@@ -347,19 +347,19 @@ class PipelineFacade:
                 or analysis.source_fingerprint != artifact.source_fingerprint
                 or (analysis.project_id and analysis.project_id != project.project_id)
             ):
-                errors[candidate_id] = "Этап проверки черновика: Draft Preview не совпадает с исходным анализом."
+                errors[candidate_id] = "Этот предпросмотр не совпадает с текущей версией проекта; обновите его."
                 continue
             record = next(
                 (item for item in artifact.candidates if str(item.get("candidate_id") or "") == candidate_id),
                 None,
             )
             if not isinstance(record, dict) or record.get("state") not in {"draft_ready", "selected"}:
-                errors[candidate_id] = "Этап проверки черновика: выбранный черновик ещё не готов к экспорту."
+                errors[candidate_id] = "Выбранный черновик ещё не готов к созданию финального ролика."
                 continue
             if baseline is None:
                 baseline = artifact
             elif not PipelineFacade._same_draft_context(baseline, artifact):
-                errors[candidate_id] = "Этап проверки черновика: черновик относится к другому анализу."
+                errors[candidate_id] = "Черновик создан для другой версии проекта; обновите его."
                 continue
             valid.append(candidate_id)
         return ApprovedDraftSelection(valid, errors)
@@ -394,7 +394,7 @@ class PipelineFacade:
             try:
                 artifact = artifacts.setdefault(path, DraftArtifact.read(path))
             except DraftArtifactError as error:
-                raise InputValidationError("Сохранённый Draft Preview повреждён.") from error
+                raise InputValidationError("Сохранённый предпросмотр черновика повреждён.") from error
             if baseline is None:
                 baseline = artifact
             elif (
@@ -410,7 +410,7 @@ class PipelineFacade:
                 None,
             )
             if not isinstance(record, dict) or record.get("state") not in {"draft_ready", "selected"}:
-                raise InputValidationError("Выбранный черновик ещё не готов к production render.")
+                raise InputValidationError("Выбранный черновик ещё не готов к созданию финального ролика.")
             records.append(dict(record))
         if baseline is None:  # Defensive: caller already rejected an empty selection.
             raise InputValidationError("Выберите хотя бы один готовый черновик.")
@@ -577,10 +577,10 @@ class PipelineFacade:
             try:
                 manifest_value = read_json(manifest_path, {})
             except (OSError, ValueError) as error:
-                return self._failed_completion(prepared, "Не удалось прочитать manifest текущего запуска.", str(error))
+                return self._failed_completion(prepared, "Не удалось проверить результат текущей сборки.", str(error))
             if not isinstance(manifest_value, dict) or manifest_value.get("run_id") != prepared.run_id:
                 return self._failed_completion(
-                    prepared, "Manifest текущего запуска отсутствует или повреждён.",
+                    prepared, "Не удалось проверить результат текущей сборки.",
                     f"Expected run_id={prepared.run_id} in {manifest_path}",
                 )
             manifest = manifest_value
@@ -602,7 +602,7 @@ class PipelineFacade:
             return self._failed_completion(prepared, "Не удалось создать итоговый видеофайл.", validation_error)
         warnings = [str(value) for value in raw.get("warnings", [])]
         if status == "partial":
-            warnings.append("Часть выбранных черновиков не прошла production render; повторный запуск доступен только для них.")
+            warnings.append("Некоторые выбранные черновики не удалось собрать; их можно повторить отдельно.")
         production_warnings = production.get("warnings", [])
         if not isinstance(production_warnings, list):
             production_warnings = [production_warnings]
@@ -633,15 +633,15 @@ class PipelineFacade:
                 )
             if manifest is not None:
                 if any(result.run_id != prepared.run_id for result in registry):
-                    return self._failed_completion(prepared, "Manifest содержит результат другого запуска.", "ClipResult.run_id mismatch.")
+                    return self._failed_completion(prepared, "Результат относится к другой сборке проекта.", "ClipResult.run_id mismatch.")
                 if any(not result.clip_result_id or not result.revision_id for result in registry):
                     return self._failed_completion(
                         prepared,
-                        "Manifest не содержит идентификатор результата или revision.",
+                        "Не удалось проверить готовый ролик.",
                         "Canonical ClipResult must provide clip_result_id and revision_id.",
                     )
                 if any(not is_run_scoped_path(Path(result.output_file), prepared.output_directory) for result in registry):
-                    return self._failed_completion(prepared, "Manifest содержит путь вне текущего запуска.", "Canonical result path escapes run directory.")
+                    return self._failed_completion(prepared, "Готовый ролик сохранён в неожиданном месте.", "Canonical result path escapes run directory.")
             output_files = result_paths(registry, prepared.output_directory)
             for candidate in output_files:
                 artifact_error = self._validate_final_mp4(candidate)
@@ -869,6 +869,36 @@ class PipelineFacade:
         path = Path(output_value)
         if not path.is_absolute():
             path = output_directory / path
+        if preview.get("kind") == "creative":
+            candidate_output = (
+                output_directory
+                if index == 1
+                else output_directory / "candidates" / safe_name(candidate_id, f"clip-{index:02d}")
+            )
+            expected = candidate_output / "creative-preview" / "creative-preview.mp4"
+            try:
+                same_path = path.resolve() == expected.resolve()
+            except OSError:
+                return False
+            if not same_path or not is_run_scoped_path(path, output_directory):
+                return False
+            manifest_path = expected.parent / "parity-manifest.json"
+            compiled_path = expected.parent / "compiled-render-plan.json"
+            manifest = read_json(manifest_path, {}) if manifest_path.is_file() else {}
+            compiled = read_json(compiled_path, {}) if compiled_path.is_file() else {}
+            if (
+                preview.get("render_profile") != "creative_preview"
+                or not isinstance(manifest, dict)
+                or not isinstance(compiled, dict)
+                or str(preview.get("compiled_plan_hash") or "") != str(compiled.get("plan_hash") or "")
+                or str(preview.get("parity_signature") or "") != str(compiled.get("parity_signature") or "")
+                or str(manifest.get("plan_hash") or "") != str(compiled.get("plan_hash") or "")
+                or str(manifest.get("parity_signature") or "") != str(compiled.get("parity_signature") or "")
+                or str(manifest.get("profile_id") or "") != "creative_preview"
+                or str(manifest.get("output_checksum") or "") != stable_file_hash(path)
+            ):
+                return False
+            return self._validate_final_mp4(path) is None
         expected = output_directory / "drafts" / f"{index:02d}-{safe_name(candidate_id, f'candidate-{index:02d}')}" / "draft-preview.mp4"
         try:
             same_path = path.resolve() == expected.resolve()
@@ -1157,6 +1187,7 @@ class PipelineFacade:
         config.production_render.subtitles_enabled = options.subtitles_enabled
         config.production_render.subtitle_style = options.subtitle_style
         config.production_render.crop_strategy = options.composition_strategy
+        config.production_render.same_source_broll_allowed = options.same_source_broll_allowed
         config.production_render.encoder = options.encoder
         config.production_render.cache_enabled = options.use_cache
         config.device = settings.device_preference

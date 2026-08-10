@@ -36,7 +36,7 @@ def map_error(error: object) -> UserFacingError:
     if "no_draft_previews" in lowered or "no candidate draft could be assembled" in lowered:
         return UserFacingError(
             "Не удалось подготовить выбранные черновики",
-            "Ни один из выбранных моментов не прошёл проверку для Draft Preview.",
+            "Ни один из выбранных моментов не удалось подготовить для просмотра.",
             "Откройте отмеченные карточки, скорректируйте границы при необходимости и повторите только неуспешные моменты.",
             detail,
             "draft_candidates_failed",
@@ -44,8 +44,8 @@ def map_error(error: object) -> UserFacingError:
     if "no_renderable_clips" in lowered or "no approved draft could be rendered" in lowered:
         return UserFacingError(
             "Нет готовых черновиков для финального экспорта",
-            "Подтверждённые черновики не прошли проверку ProductionPlan.",
-            "Повторите только отмеченные Draft Preview, затем снова подтвердите готовые черновики.",
+            "Подтверждённые черновики больше не соответствуют сохранённым настройкам.",
+            "Обновите только отмеченные предпросмотры, затем снова подтвердите готовые черновики.",
             detail,
             "approved_drafts_invalid",
         )
