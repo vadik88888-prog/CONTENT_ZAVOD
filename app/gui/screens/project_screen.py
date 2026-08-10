@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from app.analysis_artifact import candidate_is_draftable
 from app.clip_results import ClipResult, primary_clip_results, unique_primary_results
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
@@ -1284,6 +1285,10 @@ class ProjectScreen(QWidget):
         analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
         analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
         candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
+        if workflow_step == "candidates":
+            # Phase 6 owns eligibility. Moments only projects its persisted
+            # decision and never re-runs or reconstructs Brain/Vision evidence.
+            candidates = [item for item in candidates if candidate_is_draftable(item)]
         previews: dict[str, dict] = {}
         for candidate_id, artifact_path in project.candidate_draft_artifacts.items():
             path = Path(artifact_path)
@@ -1331,8 +1336,13 @@ class ProjectScreen(QWidget):
             return
         draftable_ids = [
             candidate_id for candidate_id in project.review_selected_candidate_ids
-            if self._candidate_needs_draft(project, candidate_id)
+            if candidate_id in self._review_candidates_by_id
+            and self._candidate_needs_draft(project, candidate_id)
         ]
+        selected_moment_count = sum(
+            candidate_id in self._review_candidates_by_id
+            for candidate_id in project.review_selected_candidate_ids
+        )
         recommended_count = sum(
             bool(item.get("recommended", item.get("selected_by_recommendation")))
             for item in candidates if isinstance(item, dict)
@@ -1366,7 +1376,7 @@ class ProjectScreen(QWidget):
             toolbar_layout.setContentsMargins(0, 0, 0, 0)
             summary = QLabel(
                 f"Найдено {len(candidates)} · рекомендуем {recommended_count} · "
-                f"выбрано {len(project.review_selected_candidate_ids)}"
+                f"выбрано {selected_moment_count}"
             )
             summary.setWordWrap(True)
             toolbar_layout.addWidget(summary, 0 if compact_actions else 1)
@@ -1653,7 +1663,11 @@ class ProjectScreen(QWidget):
             return
         if self._derive_flow_step(project) == "candidates":
             recommended_ids = self._recommended_candidate_ids()
-            if not project.review_selected_candidate_ids and recommended_ids:
+            selected_ids = [
+                candidate_id for candidate_id in project.review_selected_candidate_ids
+                if candidate_id in self._review_candidates_by_id
+            ]
+            if not selected_ids and recommended_ids:
                 count = len(recommended_ids)
                 self.workflow_hint.setText(
                     f"Найдено {len(self._review_candidates_by_id)} · рекомендуем {count}. "
@@ -1667,7 +1681,10 @@ class ProjectScreen(QWidget):
                 return
         if draftable_ids:
             count = len(draftable_ids)
-            selected_count = len(project.review_selected_candidate_ids)
+            selected_count = sum(
+                candidate_id in self._review_candidates_by_id
+                for candidate_id in project.review_selected_candidate_ids
+            )
             selection_summary = (
                 f"Выбрано {count}."
                 if selected_count == count
@@ -1960,7 +1977,16 @@ class ProjectScreen(QWidget):
     def _draft_action(self) -> None:
         if not self.project:
             return
-        candidate_ids = list(self.project.review_selected_candidate_ids)
+        candidate_ids = [
+            candidate_id for candidate_id in self.project.review_selected_candidate_ids
+            if candidate_id in self._review_candidates_by_id
+        ]
+        if candidate_ids != self.project.review_selected_candidate_ids:
+            # A saved legacy/stale choice must not bypass the current Moments
+            # boundary when the user starts a new draft batch.
+            self.viewmodel.set_review_selection(candidate_ids)
+            if not self.project:
+                return
         if not candidate_ids:
             candidate_ids = self._recommended_candidate_ids()
             if not candidate_ids:
@@ -2009,7 +2035,7 @@ class ProjectScreen(QWidget):
         self._open_folder(Path(latest.log_path).parent if latest and latest.log_path else None)
 
     def _toggle_candidate_selection(self, candidate_id: str) -> None:
-        if not self.project:
+        if not self.project or candidate_id not in self._review_candidates_by_id:
             return
         selected = list(self.project.review_selected_candidate_ids)
         if candidate_id in selected:

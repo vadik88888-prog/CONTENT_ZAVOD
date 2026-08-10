@@ -248,7 +248,12 @@ def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_pat
     first = analysis["candidates"][0]
     assert {"story_unit_id", "chapter_id", "start_seconds", "end_seconds", "duration_seconds"} <= set(first)
     assert {"title", "core_idea", "hook_summary", "payoff_summary", "confidence", "potential"} <= set(first)
-    assert {"reasons", "risks", "feature_profile", "boundary_evidence", "preview", "recommended"} <= set(first)
+    assert {
+        "reasons", "risks", "feature_profile", "eligibility_decision",
+        "boundary_evidence", "preview", "recommended",
+    } <= set(first)
+    assert first["eligibility_decision"]["state"] == "assessed"
+    assert first["eligibility_decision"]["eligible"] is True
     assert first["preview"]["thumbnail"]["kind"] == "lazy_source_frame"
     assert analysis["summary"]["potential_counts"]
     assert analysis["content_profile"]

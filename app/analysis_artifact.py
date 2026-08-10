@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.candidate_quality import EligibilityDecision, legacy_eligibility_decision
 from app.utils import read_json, utc_now, write_json
 
 
@@ -104,12 +105,12 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
     """Expose only review-relevant fields; full evidence remains in cache."""
 
     candidate_id = str(candidate.get("id") or "")
-    viral = candidate.get("virality") if isinstance(candidate.get("virality"), dict) else {}
-    potential = viral.get("viral_potential") if isinstance(viral.get("viral_potential"), dict) else {}
-    eligibility = viral.get("eligibility") if isinstance(viral.get("eligibility"), dict) else {}
-    feature_profile = viral.get("feature_profile") if isinstance(viral.get("feature_profile"), dict) else {}
-    feature_values = feature_profile.get("features") if isinstance(feature_profile.get("features"), dict) else {}
-    confidence_data = potential.get("confidence") if isinstance(potential.get("confidence"), dict) else {}
+    viral = _dict_value(candidate.get("virality"))
+    potential = _dict_value(viral.get("viral_potential"))
+    eligibility = _dict_value(viral.get("eligibility"))
+    feature_profile = _dict_value(viral.get("feature_profile"))
+    feature_values = _dict_value(feature_profile.get("features"))
+    confidence_data = _dict_value(potential.get("confidence"))
     confidence = _confidence(candidate, confidence_data, feature_values)
     potential_level = _potential_level(candidate, potential)
     reasons = _review_reasons(candidate, viral, potential)
@@ -127,8 +128,9 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
             "standalone_strength", "context_dependency", "visual", "audio",
         }
     }
-    boundary = candidate.get("boundary_diagnostics") if isinstance(candidate.get("boundary_diagnostics"), dict) else {}
-    selected = candidate_id in selected_ids
+    boundary = _dict_value(candidate.get("boundary_diagnostics"))
+    eligibility_decision = _eligibility_decision(candidate.get("eligibility_decision"))
+    selected = candidate_id in selected_ids and eligibility_decision.explicitly_eligible
     start = _optional_float(candidate.get("start"))
     end = _optional_float(candidate.get("end"))
     duration = _optional_float(candidate.get("duration"))
@@ -169,6 +171,9 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
             "weakest_factors": list(viral.get("weakest_factors") or []),
             "features": compact_features,
         },
+        # Moments consumes the Phase 6 decision as a persisted boundary.  Keep
+        # legacy/unassessed explicit so an old record cannot become a V2 pass.
+        "eligibility_decision": eligibility_decision.to_dict(),
         "boundary_evidence": {
             "overall_boundary_score": boundary.get("overall_boundary_score"),
             "semantic_completion": boundary.get("semantic_completion"),
@@ -200,6 +205,31 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
     }
 
 
+def candidate_is_draftable(candidate: object) -> bool:
+    """Return only an explicit Phase 6 eligibility pass.
+
+    Missing, malformed and legacy decisions intentionally retain the existing
+    conservative compatibility state: they are unassessed, not eligible.
+    """
+
+    if not isinstance(candidate, dict):
+        return False
+    return _eligibility_decision(candidate.get("eligibility_decision")).explicitly_eligible
+
+
+def _eligibility_decision(value: object) -> EligibilityDecision:
+    if not isinstance(value, dict):
+        return legacy_eligibility_decision()
+    try:
+        return EligibilityDecision.from_dict(value)
+    except (TypeError, ValueError):
+        return legacy_eligibility_decision()
+
+
+def _dict_value(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def potential_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
     """Return a stable UI summary without changing any ranking formula."""
 
@@ -223,7 +253,7 @@ def _potential_level(candidate: dict[str, Any], potential: dict[str, Any]) -> st
 
 
 def _confidence(candidate: dict[str, Any], confidence: dict[str, Any], features: dict[str, Any]) -> float:
-    vector = candidate.get("feature_vector") if isinstance(candidate.get("feature_vector"), dict) else {}
+    vector = _dict_value(candidate.get("feature_vector"))
     values = [_optional_float(confidence.get("score")), _optional_float(vector.get("transcript_confidence"))]
     for value in features.values():
         if isinstance(value, dict):
@@ -259,10 +289,10 @@ def _review_risks(candidate: dict[str, Any], viral: dict[str, Any], potential: d
     }
     risks = [readable.get(value, value.replace("_", " ")) for value in values]
     risks.extend(str(item) for item in confidence.get("warnings", []) if str(item))
-    diagnostics = candidate.get("boundary_diagnostics") if isinstance(candidate.get("boundary_diagnostics"), dict) else {}
+    diagnostics = _dict_value(candidate.get("boundary_diagnostics"))
     if diagnostics.get("fallback_reason"):
         risks.append(str(diagnostics["fallback_reason"]))
-    vector = candidate.get("feature_vector") if isinstance(candidate.get("feature_vector"), dict) else {}
+    vector = _dict_value(candidate.get("feature_vector"))
     if (_optional_float(vector.get("transcript_confidence")) or 1.0) < 0.7:
         risks.append("Уверенность распознавания речи ниже обычной.")
     return _unique(risks)[:4]

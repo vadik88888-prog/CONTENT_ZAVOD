@@ -26,6 +26,19 @@ from app.gui.viewmodels import ProjectViewModel
 from app.utils import read_json, write_json
 
 
+def _eligibility(eligible: bool = True) -> dict[str, object]:
+    return {
+        "schema_version": "6D.1",
+        "config_version": "test",
+        "state": "assessed",
+        "eligible": eligible,
+        "reason_codes": [] if eligible else ["SEMANTIC_INCOMPLETE"],
+        "recoverable_issues": [],
+        "required_boundary_actions": [],
+        "evidence_refs": [],
+    }
+
+
 def _workspace(tmp_path: Path):
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
     data = tmp_path / "desktop-data"
@@ -43,11 +56,13 @@ def _workspace(tmp_path: Path):
             {
                 "candidate_id": "candidate-recommended", "title": "Сильное начало", "start_seconds": 1.0,
                 "end_seconds": 18.0, "potential": "high", "confidence": 0.9, "recommended": True,
+                "eligibility_decision": _eligibility(),
                 "reasons": ["Сильное начало."], "preview": {"thumbnail": {"timestamp_seconds": 2.0}},
             },
             {
                 "candidate_id": "candidate-other", "title": "Другой момент", "start_seconds": 19.0,
                 "end_seconds": 29.0, "potential": "low", "confidence": 0.6, "recommended": False,
+                "eligibility_decision": _eligibility(),
                 "reasons": ["Есть самостоятельная мысль."], "preview": {"thumbnail": {"timestamp_seconds": 20.0}},
             },
         ],
@@ -188,7 +203,7 @@ def test_top_n_primary_cta_selects_only_recommended_and_starts_drafts_without_an
         screen.close()
 
 
-def test_select_all_accepts_more_than_five_eligible_candidates_without_analysis(
+def test_moments_view_all_and_select_all_exclude_ineligible_and_legacy_candidates_without_analysis(
     tmp_path: Path, monkeypatch,
 ) -> None:
     existing = QCoreApplication.instance()
@@ -198,35 +213,64 @@ def test_select_all_accepts_more_than_five_eligible_candidates_without_analysis(
     services, project = _workspace(tmp_path)
     analysis_path = Path(project.analysis_artifact_path or "")
     analysis = read_json(analysis_path, {})
-    analysis["candidates"] = [
+    eligible_candidates = [
         {
             "candidate_id": f"candidate-{index}", "title": f"Момент {index}",
             "start_seconds": float(index), "end_seconds": float(index + 10),
             "potential": "high", "confidence": 0.9 - index / 100,
             "recommended": index < 3,
+            "eligibility_decision": _eligibility(),
         }
         for index in range(7)
     ]
+    ineligible_id = "candidate-ineligible"
+    legacy_id = "candidate-legacy"
+    analysis["candidates"] = [
+        *eligible_candidates,
+        {
+            "candidate_id": ineligible_id, "title": "Ineligible", "start_seconds": 20.0,
+            "end_seconds": 30.0, "potential": "high", "confidence": 0.99,
+            "recommended": True, "eligibility_decision": _eligibility(False),
+        },
+        {
+            "candidate_id": legacy_id, "title": "Legacy unassessed", "start_seconds": 31.0,
+            "end_seconds": 41.0, "potential": "high", "confidence": 0.98,
+            "recommended": True,
+        },
+    ]
     write_json(analysis_path, analysis)
     candidate_ids = [f"candidate-{index}" for index in range(7)]
-    project.candidate_states = {candidate_id: "analyzed" for candidate_id in candidate_ids}
+    project.candidate_states = {
+        candidate_id: "analyzed" for candidate_id in [*candidate_ids, ineligible_id, legacy_id]
+    }
     services.projects.save(project)
     viewmodel = ProjectViewModel(services)
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
-    monkeypatch.setattr(viewmodel, "start_analysis", lambda: pytest.fail("selection must reuse saved analysis"))
+    monkeypatch.setattr(viewmodel, "start_analysis", lambda: pytest.fail("Brain/Vision must not run for Moments selection"))
 
     try:
         screen.open(project)
         app.processEvents()
+        screen._toggle_candidate_selection(ineligible_id)
+        assert viewmodel.project is not None
+        assert viewmodel.project.review_selected_candidate_ids == []
+        screen._view_all_candidates()
+        app.processEvents()
+
+        assert set(screen._candidate_cards) == set(candidate_ids)
+        assert ineligible_id not in screen._candidate_selection_buttons
+        assert legacy_id not in screen._candidate_selection_buttons
+        recommended_ids = screen._recommended_candidate_ids()
+        assert recommended_ids == candidate_ids[:3]
+        assert set(recommended_ids) < set(candidate_ids)
+
         screen._select_all_candidates()
         app.processEvents()
 
         assert viewmodel.project is not None
         assert viewmodel.project.review_selected_candidate_ids == candidate_ids
-        screen._view_all_candidates()
-        assert set(screen._candidate_cards) == set(candidate_ids)
     finally:
         screen.close()
 
@@ -242,6 +286,7 @@ def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_open
     third_candidate = {
         "candidate_id": "candidate-third", "title": "Третий момент", "start_seconds": 5.0,
         "end_seconds": 16.0, "potential": "medium", "confidence": 0.7, "recommended": True,
+        "eligibility_decision": _eligibility(),
         "reasons": ["Подходит для черновика."], "preview": {"thumbnail": {"timestamp_seconds": 6.0}},
     }
     analysis["candidates"].append(third_candidate)
