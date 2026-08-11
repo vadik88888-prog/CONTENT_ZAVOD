@@ -5,6 +5,8 @@ import pytest
 from app.composition_planning import (
     CompositionPlannerConfig,
     TargetObservation,
+    _AtomicState,
+    _calibrate_layout_timeline,
     build_composition_plan,
 )
 from app.creative_contracts import (
@@ -210,6 +212,81 @@ def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:
     assert plan.segments[1].crop != NormalizedRect(x=0, y=0, width=1, height=1)
     assert plan.quality_report.metrics.suppressed_switch_count == 1
     assert any(value.startswith("SWITCH_SUPPRESSED_HYSTERESIS") for value in plan.diagnostics)
+
+
+def test_story_short_fit_wide_fit_island_uses_safe_fit_without_dropping_evidence() -> None:
+    target = _target(
+        "story-group", AttentionTarget.GROUP, 120, 138, "story-group-evidence",
+        target_ref=None, layouts=(LayoutFamily.WIDE_GROUP,),
+    )
+    observations = (
+        _observation(
+            "story-person-left", 126, AttentionTarget.GROUP, "person-left",
+            "story-group-evidence", 0.05, width=0.22,
+        ),
+        _observation(
+            "story-person-right", 132, AttentionTarget.GROUP, "person-right",
+            "story-group-evidence", 0.73, width=0.22,
+        ),
+    )
+
+    plan = build_composition_plan(
+        _intent((target,)), observations, source_width=1920, source_height=1080,
+    )
+
+    assert plan.segments
+    assert all(segment.layout == LayoutFamily.FIT_BACKGROUND for segment in plan.segments)
+    evidence_segment = next(segment for segment in plan.segments if segment.target == AttentionTarget.GROUP)
+    assert evidence_segment.evidence_refs == ("story-group-evidence",)
+    assert evidence_segment.protected_regions
+    assert evidence_segment.geometry is not None
+    assert plan.quality_report.metrics.clipped_target_count == 0
+    assert plan.quality_report.metrics.layout_switch_count == 0
+    assert "SHORT_LAYOUT_ISLAND_REMOVED:120" in plan.diagnostics
+
+
+def test_layout_edge_fragments_and_local_switch_bursts_are_calibrated() -> None:
+    full = NormalizedRect(x=0, y=0, width=1, height=1)
+
+    def state(start: int, end: int, layout: LayoutFamily) -> _AtomicState:
+        return _AtomicState(
+            output=OutputInterval(start_frame=start, end_frame=end),
+            state=None,
+            layout=layout,
+            desired_crop=full,
+            target=AttentionTarget.STABLE_SOURCE,
+            target_ref=None,
+            confidence=0,
+            evidence_refs=(),
+            fallback="fit_background",
+            reason="safe_fallback",
+            punch_event=None,
+        )
+
+    edge, edge_diagnostics = _calibrate_layout_timeline(
+        (state(0, 5, LayoutFamily.WIDE_GROUP), state(5, 100, LayoutFamily.FIT_BACKGROUND)),
+        CompositionPlannerConfig(maximum_local_layout_switches=10),
+    )
+    assert [item.layout for item in edge] == [
+        LayoutFamily.FIT_BACKGROUND, LayoutFamily.FIT_BACKGROUND,
+    ]
+    assert "EDGE_LAYOUT_FRAGMENT_REMOVED:0" in edge_diagnostics
+
+    burst, burst_diagnostics = _calibrate_layout_timeline(
+        (
+            state(0, 30, LayoutFamily.FIT_BACKGROUND),
+            state(30, 60, LayoutFamily.WIDE_GROUP),
+            state(60, 90, LayoutFamily.SCREEN_PRIORITY),
+        ),
+        CompositionPlannerConfig(
+            minimum_layout_dwell_frames=10,
+            minimum_edge_fragment_frames=10,
+            local_burst_window_frames=90,
+            maximum_local_layout_switches=1,
+        ),
+    )
+    assert len({item.layout for item in burst}) == 1
+    assert "LOCAL_LAYOUT_BURST_CALMED:0-90" in burst_diagnostics
 
 
 def test_sparse_target_crop_is_held_without_extending_target_evidence() -> None:

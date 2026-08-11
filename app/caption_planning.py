@@ -50,8 +50,12 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "7C.caption-planner.2"
+CAPTION_PLANNER_VERSION = "7J.1.caption-calibration.1"
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
+CAPTION_TARGET_CPS_MIN = 13.0
+CAPTION_TARGET_CPS_MAX = 17.0
+SEMANTIC_PRESENTATION_MIN_CONFIDENCE = 0.70
+MAX_SEMANTIC_EMPHASIS_WORDS = 2
 
 _SAFE_INSETS: dict[str, tuple[float, float, float, float]] = {
     "universal": (0.03, 0.03, 0.03, 0.03),
@@ -726,10 +730,11 @@ def _cue_groups(
         tuple(_normalise(part) for part in emphasis.text_span.split() if _normalise(part))
         for emphasis in intent.semantic_emphasis
     )
-    # end -> (unreadable groups, crossed semantic boundaries, overlapping
-    #         cue boundaries, cue count, negative boundary score, ranges)
-    best: dict[int, tuple[int, int, int, int, float, tuple[tuple[int, int], ...]]] = {
-        0: (0, 0, 0, 0, 0.0, ()),
+    # end -> (hard-ceiling failures, crossed semantic boundaries, overlapping
+    #         cue boundaries, target-CPS shortfall, cue count, negative
+    #         boundary score, ranges)
+    best: dict[int, tuple[int, int, int, int, int, float, tuple[tuple[int, int], ...]]] = {
+        0: (0, 0, 0, 0, 0, 0.0, ()),
     }
     for end in range(1, len(words) + 1):
         if end < len(words) and _splits_protected_phrase(words, end, protected_phrases):
@@ -759,6 +764,11 @@ def _cue_groups(
                     words[start:end], _maximum_caption_cps(words[start:end]),
                 ) <= slot_end - slot_start
             )
+            target_shortfall = max(
+                0,
+                _minimum_caption_frames(words[start:end], _target_caption_cps(config))
+                - (slot_end - slot_start),
+            )
             candidate = (
                 previous[0] + (0 if readable else 1),
                 previous[1] + _crossed_semantic_boundaries(words, start, end, intent),
@@ -766,17 +776,18 @@ def _cue_groups(
                     1 if end < len(words) and words[end].output.start_frame < words[end - 1].output.end_frame
                     else 0
                 ),
-                previous[3] + 1,
-                previous[4] - _cue_boundary_score(words, start, end, intent),
-                (*previous[5], (start, end)),
+                previous[3] + target_shortfall,
+                previous[4] + 1,
+                previous[5] - _cue_boundary_score(words, start, end, intent),
+                (*previous[6], (start, end)),
             )
             current = best.get(end)
-            if current is None or candidate[:5] < current[:5]:
+            if current is None or candidate[:6] < current[:6]:
                 best[end] = candidate
     partition = best.get(len(words))
     if partition is None:
         return [words]
-    return [words[start:end] for start, end in partition[5]]
+    return [words[start:end] for start, end in partition[6]]
 
 
 def _crossed_semantic_boundaries(
@@ -1022,7 +1033,7 @@ def _cue_outputs(
                 max(output.end_frame, raw[index + 1].start_frame) if index + 1 < run_end
                 else chain_end
             )
-            target_cps = 17.0 if _contains_cyrillic(" ".join(word.text for word in layouts[index].words)) else 19.0
+            target_cps = _target_caption_cps(config)
             target_frames = _minimum_caption_frames(layouts[index].words, target_cps)
             maximum_frames = _minimum_caption_frames(
                 layouts[index].words, _maximum_caption_cps(layouts[index].words),
@@ -1116,6 +1127,13 @@ def _maximum_caption_cps(words: tuple[_MappedWord, ...]) -> float:
     return 20.0 if _contains_cyrillic(" ".join(word.text for word in words)) else 22.0
 
 
+def _target_caption_cps(config: ProductionRenderConfig) -> float:
+    return max(
+        CAPTION_TARGET_CPS_MIN,
+        min(CAPTION_TARGET_CPS_MAX, float(config.subtitle_reading_speed_cps)),
+    )
+
+
 def _minimum_caption_frames(words: tuple[_MappedWord, ...], cps: float) -> int:
     text = " ".join(word.text for word in words)
     return math.ceil(len(text.replace(" ", "")) / cps * 30)
@@ -1166,7 +1184,11 @@ def _semantic_event(
     if not candidates:
         return None
     threshold = {Intensity.LOW: 0.78, Intensity.BALANCED: 0.58, Intensity.HIGH: 0.42}[intent.policy.intensity]
-    candidates = [item for item in candidates if item.confidence * item.importance >= threshold]
+    candidates = [
+        item for item in candidates
+        if item.confidence >= SEMANTIC_PRESENTATION_MIN_CONFIDENCE
+        and item.confidence * item.importance >= threshold
+    ]
     if not candidates:
         return None
     chosen = max(
@@ -1212,6 +1234,8 @@ def _semantic_emphasis_event(
             _overlaps(word.output, emphasis.output) for word in words
         ):
             continue
+        if emphasis.confidence < SEMANTIC_PRESENTATION_MIN_CONFIDENCE:
+            continue
         if emphasis.confidence * emphasis.importance < threshold:
             continue
         candidates.append(_SemanticEvent(
@@ -1255,7 +1279,12 @@ def _emphasis_plan(
     event: _SemanticEvent | None, words: tuple[_MappedWord, ...], cue: OutputInterval,
     primitive: str, timing_mode: str,
 ) -> CaptionEmphasisPlan | None:
-    if event is None or event.emphasis is None:
+    if (
+        event is None
+        or event.emphasis is None
+        or timing_mode != "word"
+        or event.confidence < SEMANTIC_PRESENTATION_MIN_CONFIDENCE
+    ):
         return None
     normalised = [_normalise(word.text) for word in words]
     phrase = [_normalise(value) for value in event.emphasis.text_span.split() if _normalise(value)]
@@ -1264,6 +1293,7 @@ def _emphasis_plan(
         indexes = tuple(range(found, found + len(phrase)))
     else:
         indexes = tuple(index for index, word in enumerate(words) if _overlaps(word.output, event.output))
+    indexes = indexes[:MAX_SEMANTIC_EMPHASIS_WORDS]
     if not indexes:
         return None
     start = max(cue.start_frame, min(words[index].output.start_frame for index in indexes))

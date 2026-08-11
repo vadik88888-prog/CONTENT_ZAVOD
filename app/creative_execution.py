@@ -17,7 +17,6 @@ from app.creative_contracts import (
     CreativeIntent,
     CreativePolicy,
     ImmutableProductionPlanLink,
-    Intensity,
     LayoutFamily,
     MotionDomain,
     MotionPlan,
@@ -28,6 +27,7 @@ from app.creative_contracts import (
     compile_render_plan,
     seconds_to_output_frame,
 )
+from app.creative_policy import preset_family_policy
 from app.motion_planning import build_motion_plan
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence, build_source_broll_plan
@@ -58,27 +58,16 @@ def default_native_creative_intent(
 
     envelope = plan.envelope
     assert envelope is not None
-    style = {
-        "minimal": "minimal",
-        "documentary": "editorial",
-        "dynamic": "emphasis",
-        "clean": "clean",
-    }[config.product_flow.subtitle_preset]
-    intensity = {
-        "minimal": Intensity.LOW,
-        "documentary": Intensity.BALANCED,
-        "dynamic": Intensity.HIGH,
-        "clean": Intensity.LOW,
-    }[config.product_flow.subtitle_preset]
+    family_policy = preset_family_policy(config.product_flow.subtitle_preset)  # type: ignore[arg-type]
     policy = CreativePolicy(
         preset_id=envelope.preset.preset_id,
         preset_version=envelope.preset.preset_version,
         platform=envelope.preset.platform,
-        caption_style_family=style,
+        caption_style_family=family_policy.caption_style_family,
         caption_density="balanced",
-        intensity=intensity,
+        intensity=family_policy.intensity_ceiling,
         reduced_motion=False,
-        source_broll_enabled=False,
+        source_broll_enabled=family_policy.source_extra_shots_default,
     )
     identity = {
         "production_plan": plan.reference().model_dump(mode="json"),

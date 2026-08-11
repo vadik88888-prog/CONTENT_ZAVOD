@@ -1300,7 +1300,7 @@ class MotionEventPlan(FrozenContract):
     reduced_motion_fallback: bool = False
     fallback_reason: Literal[
         "reduced_motion", "readability", "cooldown", "concurrency",
-        "animation_budget", "unsupported_primitive", "missing_domain_target",
+        "animation_budget", "unsupported_primitive", "missing_domain_target", "short_event",
     ] | None = None
 
     @model_validator(mode="after")
@@ -1344,7 +1344,7 @@ class MotionQualityFinding(FrozenContract):
         "MOTION_COOLDOWN_SUPPRESSED", "MOTION_CONCURRENCY_SUPPRESSED",
         "MOTION_BUDGET_SUPPRESSED", "MOTION_READABILITY_SUPPRESSED",
         "MOTION_PRIMITIVE_FALLBACK", "MOTION_DOMAIN_TARGET_MISSING",
-        "MOTION_REDUCED_MOTION_FALLBACK",
+        "MOTION_REDUCED_MOTION_FALLBACK", "MOTION_SHORT_EVENT_FALLBACK",
     ]
     severity: Literal["warning", "blocker"]
     event_id: str | None = Field(default=None, pattern=ID_PATTERN)

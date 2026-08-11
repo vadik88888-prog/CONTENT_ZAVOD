@@ -8,7 +8,7 @@ all geometry, switching, smoothing and fallbacks are resolved deterministically
 here before a renderer sees the plan.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import Iterable, Literal, Sequence
 
@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7D.composition-planner.3"
+COMPOSITION_PLANNER_VERSION = "7J.1.composition-calibration.1"
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
 MovementReason = Literal[
@@ -76,6 +76,10 @@ class CompositionPlannerConfig:
     minimum_hold_frames: int = 45
     switch_cooldown_frames: int = 30
     maximum_switches_per_minute: float = 18.0
+    minimum_layout_dwell_frames: int = 60
+    minimum_edge_fragment_frames: int = 18
+    local_burst_window_frames: int = 90
+    maximum_local_layout_switches: int = 1
     target_margin_ratio: float = 0.16
     minimum_fill_crop_width: float = 0.18
     transition_frames: int = 18
@@ -92,6 +96,12 @@ class CompositionPlannerConfig:
             raise ValueError("composition switch advantage must be normalized")
         if self.minimum_hold_frames < 1 or self.switch_cooldown_frames < 0:
             raise ValueError("composition hold and cooldown must be non-negative")
+        if self.minimum_layout_dwell_frames < 1 or self.minimum_edge_fragment_frames < 1:
+            raise ValueError("composition layout dwell limits must be positive")
+        if self.local_burst_window_frames < self.minimum_layout_dwell_frames:
+            raise ValueError("composition burst window must cover minimum layout dwell")
+        if self.maximum_local_layout_switches < 0:
+            raise ValueError("composition local switch limit must be non-negative")
         if self.transition_frames < 1:
             raise ValueError("composition transition must contain at least one frame")
         if self.maximum_velocity_per_frame <= 0 or self.maximum_acceleration_per_frame_sq <= 0:
@@ -169,6 +179,8 @@ class CompositionPlanner:
         atomic, suppressed = self._resolve_state_machine(
             intent, intervals, raw_states, cuts, source_width, source_height, diagnostics,
         )
+        atomic, calibration_diagnostics = _calibrate_layout_timeline(atomic, self.config)
+        diagnostics.extend(calibration_diagnostics)
         segments, track_diagnostics = self._smooth_and_freeze(
             atomic, trusted, source_width, source_height,
         )
@@ -396,6 +408,137 @@ class CompositionPlanner:
             ))
             previous_end = item.output.end_frame
         return tuple(result), tuple(diagnostics)
+
+
+def _calibrate_layout_timeline(
+    atomic: Sequence[_AtomicState], config: CompositionPlannerConfig,
+) -> tuple[tuple[_AtomicState, ...], tuple[str, ...]]:
+    """Remove short visible layout fragments only when the replacement is safe.
+
+    Target/evidence identity stays attached to its original interval.  This
+    pass changes presentation geometry only, and only when the adopted crop
+    contains every protected observation of that interval.
+    """
+
+    if len(atomic) < 2:
+        return tuple(atomic), ()
+    calibrated = list(atomic)
+    diagnostics: list[str] = []
+
+    # A -> B -> A is perceived as a flash even when B is evidence-backed.  A
+    # full-frame A crop can safely present B without discarding B's evidence.
+    index = 1
+    while index < len(calibrated) - 1:
+        run_start = index
+        run_layout = calibrated[index].layout
+        run_end = index + 1
+        while run_end < len(calibrated) and calibrated[run_end].layout == run_layout:
+            run_end += 1
+        if run_end >= len(calibrated):
+            break
+        left, right = calibrated[run_start - 1], calibrated[run_end]
+        duration = calibrated[run_end - 1].output.end_frame - calibrated[run_start].output.start_frame
+        if (
+            left.output.end_frame == calibrated[run_start].output.start_frame
+            and calibrated[run_end - 1].output.end_frame == right.output.start_frame
+            and left.layout == right.layout != run_layout
+            and duration < config.minimum_layout_dwell_frames
+        ):
+            donor = max((left, right), key=lambda item: _crop_area(item.desired_crop))
+            replacements = [
+                _adopt_layout_if_safe(item, donor) for item in calibrated[run_start:run_end]
+            ]
+            if all(item is not None for item in replacements):
+                calibrated[run_start:run_end] = [
+                    item for item in replacements if item is not None
+                ]
+                diagnostics.append(
+                    f"SHORT_LAYOUT_ISLAND_REMOVED:{calibrated[run_start].output.start_frame}"
+                )
+        index = run_end
+
+    # Tiny leading/trailing fragments are handled separately because they do
+    # not form an A -> B -> A triple.
+    edge_pairs = ((0, 1), (len(calibrated) - 1, len(calibrated) - 2))
+    for edge_index, neighbor_index in edge_pairs:
+        edge = calibrated[edge_index]
+        neighbor = calibrated[neighbor_index]
+        duration = edge.output.end_frame - edge.output.start_frame
+        if edge.layout == neighbor.layout or duration >= config.minimum_edge_fragment_frames:
+            continue
+        replacement = _adopt_layout_if_safe(edge, neighbor)
+        if replacement is not None:
+            calibrated[edge_index] = replacement
+            diagnostics.append(f"EDGE_LAYOUT_FRAGMENT_REMOVED:{edge.output.start_frame}")
+
+    # Detect bursts in local time rather than relying only on a per-minute
+    # average.  Collapse a burst only when one of its existing crops safely
+    # contains every protected target across the window.
+    start = 0
+    while start < len(calibrated) - 1:
+        end = start + 1
+        while (
+            end < len(calibrated)
+            and calibrated[end].output.end_frame - calibrated[start].output.start_frame
+            <= config.local_burst_window_frames
+        ):
+            end += 1
+        window = calibrated[start:end]
+        switches = sum(left.layout != right.layout for left, right in zip(window, window[1:]))
+        if switches > config.maximum_local_layout_switches:
+            donors = sorted(window, key=lambda item: _crop_area(item.desired_crop), reverse=True)
+            donor = next(
+                (
+                    candidate for candidate in donors
+                    if all(_adopt_layout_if_safe(item, candidate) is not None for item in window)
+                ),
+                None,
+            )
+            if donor is not None:
+                calibrated[start:end] = [
+                    _adopt_layout_if_safe(item, donor) or item for item in window
+                ]
+                diagnostics.append(
+                    f"LOCAL_LAYOUT_BURST_CALMED:{window[0].output.start_frame}-{window[-1].output.end_frame}"
+                )
+                start = end
+                continue
+        start += 1
+    return tuple(calibrated), tuple(diagnostics)
+
+
+def _adopt_layout_if_safe(item: _AtomicState, donor: _AtomicState) -> _AtomicState | None:
+    if item.punch_event is not None:
+        return None
+    crop = donor.desired_crop
+    if (
+        item.state is not None
+        and item.desired_crop != crop
+        and any(observation.protected for observation in item.state.observations)
+    ):
+        # Containment alone is not permission to discard an evidence-backed
+        # close framing decision.  Calibration may remove a layout flash when
+        # geometry is already equivalent, but protected evidence owns its crop.
+        return None
+    if item.state is not None and any(
+        _containment(observation.bounds, crop) < 0.98
+        for observation in item.state.observations if observation.protected
+    ):
+        return None
+    fallback: CompositionFallback = (
+        "fit_background" if donor.layout == LayoutFamily.FIT_BACKGROUND else "stable_source"
+    )
+    return replace(
+        item,
+        layout=donor.layout,
+        desired_crop=crop,
+        fallback=fallback if item.fallback == "none" else item.fallback,
+        reason="safe_fallback" if item.reason == "none" else item.reason,
+    )
+
+
+def _crop_area(crop: NormalizedRect) -> float:
+    return crop.width * crop.height
 
 
 def build_composition_plan(

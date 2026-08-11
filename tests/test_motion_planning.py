@@ -167,6 +167,19 @@ def test_calm_timeline_has_no_periodic_or_random_motion() -> None:
     assert plan.quality_report.metrics.requested_event_count == 0
 
 
+def test_high_intensity_is_a_ceiling_not_an_animation_quota() -> None:
+    intent = _intent((), intensity=Intensity.HIGH)
+
+    plan = build_motion_plan(
+        intent, _captions(intent, _cue("gameplay-calm", 0, 300)),
+        _composition(intent), _broll(intent),
+    )
+
+    assert plan.events == ()
+    assert plan.animation_budget.points_used == 0
+    assert plan.animation_budget.animated_frames_used == 0
+
+
 def test_reduced_motion_is_reported_even_when_intent_compiler_removed_all_animation_requests() -> None:
     intent = _intent((), reduced_motion=True)
 
@@ -222,6 +235,27 @@ def test_controlled_punch_in_uses_existing_composition_geometry() -> None:
     assert motion.scale_from == 1 and motion.scale_to == 1.06
     assert motion.output == event.output
     assert motion.duration_frames == 14
+
+
+def test_gameplay_one_or_two_frame_motion_is_static_not_flicker() -> None:
+    event = _event(
+        "gameplay-hit", 120, 122, MotionPurpose.EVIDENCE_REVEAL, MotionDomain.COMPOSITION,
+    )
+    intent = _intent((event,), intensity=Intensity.HIGH)
+
+    plan = build_motion_plan(
+        intent, _captions(intent), _composition(intent, (event,)), _broll(intent),
+    )
+
+    assert len(plan.events) == 1
+    assert plan.events[0].primitive_id == "static"
+    assert plan.events[0].duration_frames == 0
+    assert plan.events[0].fallback_reason == "short_event"
+    assert plan.animation_budget.points_used == 0
+    assert plan.animation_budget.animated_frames_used == 0
+    assert "MOTION_SHORT_EVENT_FALLBACK" in {
+        finding.code for finding in plan.quality_report.findings
+    }
 
 
 def test_broll_transition_policy_uses_cut_for_low_and_short_dissolve_otherwise() -> None:

@@ -36,7 +36,7 @@ from app.creative_contracts import (
 )
 
 
-MOTION_PLANNER_VERSION = "7F.motion-planner.1"
+MOTION_PLANNER_VERSION = "7J.1.motion-calibration.1"
 CAPABILITY_REGISTRY_VERSION: Literal["7B.capability-registry.1"] = "7B.capability-registry.1"
 
 MotionPrimitive = Literal[
@@ -137,10 +137,13 @@ _INTENSITY_POLICIES: dict[Intensity, _IntensityPolicy] = {
 @dataclass(frozen=True, slots=True)
 class MotionPlannerConfig:
     dense_caption_cps: float = 17.0
+    minimum_animated_event_frames: int = 3
 
     def __post_init__(self) -> None:
         if self.dense_caption_cps <= 0:
             raise ValueError("dense caption threshold must be positive")
+        if self.minimum_animated_event_frames < 3:
+            raise ValueError("motion events shorter than three frames must not animate")
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +161,7 @@ class _Candidate:
     opacity_from: float = 1
     opacity_to: float = 1
     reduced_motion: bool = False
-    fallback_reason: Literal["reduced_motion", "unsupported_primitive"] | None = None
+    fallback_reason: Literal["reduced_motion", "unsupported_primitive", "short_event"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +233,20 @@ class MotionPlanner:
                 ))
                 continue
             candidate, finding = self._apply_registry(candidate)
+            if (
+                candidate.primitive != "static"
+                and candidate.duration_frames < self.config.minimum_animated_event_frames
+            ):
+                requested = candidate.primitive
+                candidate = _fallback_candidate(candidate, "static", "short_event")
+                fallback_findings.append(MotionQualityFinding(
+                    code="MOTION_SHORT_EVENT_FALLBACK",
+                    severity="warning",
+                    event_id=request.decision_id,
+                    measured_value=f"{requested}:{request.output.end_frame - request.output.start_frame}_frames",
+                    threshold=f">={self.config.minimum_animated_event_frames}_frames",
+                    message="An event too short for stable animation retained its semantic timing as static.",
+                ))
             candidates.append(candidate)
             if finding is not None:
                 fallback_findings.append(finding)
@@ -619,7 +636,7 @@ def _reduced_candidate(candidate: _Candidate) -> _Candidate:
 def _fallback_candidate(
     candidate: _Candidate,
     primitive: Literal["static", "fade"],
-    reason: Literal["reduced_motion", "unsupported_primitive"],
+    reason: Literal["reduced_motion", "unsupported_primitive", "short_event"],
 ) -> _Candidate:
     return _Candidate(
         request=candidate.request,

@@ -16,9 +16,9 @@ from app.creative_contracts import (
     FrozenContract,
     HASH_PATTERN,
     ImmutableProductionPlanLink,
-    Intensity,
     canonical_hash,
 )
+from app.creative_policy import preset_family_policy
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 from app.utils import read_json, utc_now, write_json
@@ -203,24 +203,13 @@ def load_candidate_creative_identity(
 
 
 def creative_policy_for_config(parent: CreativePolicy, config: AppConfig) -> CreativePolicy:
-    style = {
-        "minimal": "minimal",
-        "documentary": "editorial",
-        "dynamic": "emphasis",
-        "clean": "clean",
-    }[config.product_flow.subtitle_preset]
-    intensity = {
-        "minimal": Intensity.LOW,
-        "documentary": Intensity.BALANCED,
-        "dynamic": Intensity.HIGH,
-        "clean": Intensity.LOW,
-    }[config.product_flow.subtitle_preset]
+    family_policy = preset_family_policy(config.product_flow.subtitle_preset)  # type: ignore[arg-type]
     return parent.model_copy(update={
         "preset_id": config.product_flow.subtitle_preset,
         "preset_version": config.product_flow.preset_version,
         "platform": config.product_flow.platform,
-        "caption_style_family": style,
-        "intensity": intensity,
+        "caption_style_family": family_policy.caption_style_family,
+        "intensity": family_policy.intensity_ceiling,
         # Rights and evidence do not become stronger during a style revision.
         "source_broll_enabled": parent.source_broll_enabled,
     })

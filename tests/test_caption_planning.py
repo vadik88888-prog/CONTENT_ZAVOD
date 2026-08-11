@@ -123,7 +123,7 @@ def _plain_intent(mapping: SourceOutputTimeMap) -> CreativeIntent:
     })
 
 
-def test_contiguous_micro_cuts_share_complete_output_run_for_readability() -> None:
+def test_interview_contiguous_micro_cuts_repartition_to_real_cps_fit() -> None:
     mapping = SourceOutputTimeMap(segments=(
         EditMapSegment(
             map_id="micro-lead", source=SourceInterval.from_seconds(0, 0.25),
@@ -179,7 +179,7 @@ def test_contiguous_micro_cuts_share_complete_output_run_for_readability() -> No
     assert "CAPTION_CPS_HIGH" not in {finding.code for finding in plan.quality_report.findings}
     assert [len(cue.words) for cue in plan.cues] == [2, 9, 4]
     assert [(cue.output.start_frame, cue.output.end_frame) for cue in plan.cues] == [
-        (2, 28), (28, 95), (95, 131),
+        (2, 28), (28, 95), (95, 135),
     ]
     assert all(left.output.end_frame <= right.output.start_frame for left, right in zip(plan.cues, plan.cues[1:]))
     expected_word_outputs = [
@@ -259,6 +259,7 @@ def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() ->
     assert emphasized[0].primitive_id == "karaoke"
     assert emphasized[0].emphasis is not None
     assert emphasized[0].emphasis.word_indexes
+    assert len(emphasized[0].emphasis.word_indexes) <= 2
     assert any("три шага" in line.casefold() for line in emphasized[0].resolved_lines)
     assert all(cue.evidence_refs for cue in plan.cues if cue.primitive_id != "static")
     assert sum(cue.primitive_id == "karaoke" for cue in plan.cues) == 1
@@ -305,6 +306,20 @@ def test_weak_phrase_timing_degrades_to_phrase_static_without_per_word_effects()
     assert "WEAK_TIMING_DEGRADED_TO_PHRASE_STATIC" in plan.diagnostics
     assert "CAPTION_TIMING_WEAK" in {finding.code for finding in plan.quality_report.findings}
     assert plan.quality_report.status == "PASS_WITH_WARNINGS"
+
+
+def test_weak_semantic_confidence_uses_static_safe_treatment() -> None:
+    intent = _intent(Intensity.HIGH).model_copy(update={
+        "beats": tuple(item.model_copy(update={"confidence": 0.55}) for item in _intent().beats),
+        "semantic_emphasis": tuple(
+            item.model_copy(update={"confidence": 0.55}) for item in _intent().semantic_emphasis
+        ),
+    })
+
+    plan = build_caption_plan(intent, _word_transcript(), _config())
+
+    assert all(cue.primitive_id == "static" for cue in plan.cues)
+    assert all(cue.emphasis is None for cue in plan.cues)
 
 
 def test_collision_resolver_avoids_lower_screen_region_and_holds_a_stable_lane() -> None:

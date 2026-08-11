@@ -141,7 +141,7 @@ def test_quality_report_warning_preserves_machine_readable_evidence(tmp_path: Pa
     assert {"evidence", "measured_value", "threshold", "provenance"} <= finding.keys()
 
 
-def test_low_confidence_published_dialogue_is_a_quality_blocker(tmp_path: Path) -> None:
+def test_corrupt_food_low_confidence_dialogue_remains_a_quality_blocker(tmp_path: Path) -> None:
     artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
     plan["dialogue_mappings"] = [{
         "segment_id": "dialogue-001", "fact_id": "fact-001",

@@ -41,6 +41,7 @@ from app.source_broll_planning import SourceSceneEvidence
 
 
 NATIVE_EVIDENCE_HANDOFF_VERSION = "7G.3"
+MAX_NATIVE_EMPHASIS_WORDS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,10 @@ class NativeEvidenceHandoff:
     execution_status: Literal["native_rich", "native_fallback"] = "native_fallback"
     reason_codes: tuple[str, ...] = ()
     diagnostics: tuple[str, ...] = ()
+
+
+def _short_emphasis_text(value: str) -> str:
+    return " ".join(value.split()[:MAX_NATIVE_EMPHASIS_WORDS])[:240]
 
 
 def build_native_evidence_handoff(
@@ -319,7 +324,7 @@ def _append_edge_decisions(
             output=resolved_output,
             confidence=confidence,
             evidence_refs=(evidence_ref,),
-            text_span=" ".join(text.split()[:8])[:240],
+            text_span=_short_emphasis_text(text),
             semantic_class=semantic,
             importance=0.9,
         ))
@@ -551,7 +556,7 @@ def _append_audio_decisions(
             output=output,
             confidence=confidence,
             evidence_refs=(evidence_ref,),
-            text_span=text[:240],
+            text_span=_short_emphasis_text(text),
             semantic_class=SemanticClass.ACTION if event_type == "reaction_label" else SemanticClass.CLAIM,
             importance=0.82 if event_type == "reaction_label" else 0.72,
         ))
