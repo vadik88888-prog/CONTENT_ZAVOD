@@ -174,6 +174,17 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
     ]
     assert all(segment.geometry is not None for segment in plan.segments)
     assert all(segment.protected_regions for segment in plan.segments)
+    assert plan.quality_report.metrics.layout_switch_count == 2
+    assert plan.quality_report.metrics.layout_switches_per_minute == 12.0
+
+    strict = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(maximum_switches_per_minute=10.0),
+    )
+    assert any(
+        item.code == "COMPOSITION_LAYOUT_SWITCH_RATE_HIGH"
+        for item in strict.quality_report.findings
+    )
 
 
 def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:

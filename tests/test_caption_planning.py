@@ -174,7 +174,7 @@ def test_contiguous_micro_cuts_share_complete_output_run_for_readability() -> No
 
     assert plan.quality_report.status == "PASS"
     assert plan.quality_report.metrics.max_cps <= 20.0
-    assert "CAPTION_READABILITY_COALESCED" in plan.diagnostics
+    assert "CAPTION_READABILITY_COALESCED" not in plan.diagnostics
     assert "CAPTION_PRESENTATION_WINDOW_EXTENDED" in plan.diagnostics
     assert "CAPTION_CPS_HIGH" not in {finding.code for finding in plan.quality_report.findings}
     assert [len(cue.words) for cue in plan.cues] == [2, 9, 4]
@@ -215,6 +215,35 @@ def test_infeasible_micro_cut_keeps_reading_speed_ceiling_blocker() -> None:
     ]
     assert blockers
     assert blockers[0].threshold == 20.0
+
+
+def test_frame_overlap_does_not_create_false_cps_blocker() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="overlap-quantized", source=SourceInterval.from_seconds(0, 5),
+        output=OutputInterval(start_frame=0, end_frame=150),
+    ),))
+    specs = (
+        ("АА,", 7, 20), ("А", 26, 36), ("АА", 35, 40), ("А", 39, 48), ("ААА", 47, 53),
+        ("АААААА", 52, 67), ("ААА", 66, 76), ("АА", 75, 80), ("ААА", 79, 84),
+        ("АА", 83, 87), ("АААААААА", 86, 96), ("АААААА.", 95, 102),
+        ("АА,", 104, 108), ("ААА", 107, 111), ("АА", 110, 114), ("ААААА,", 113, 123),
+    )
+    transcript = {"words": [
+        {
+            "text": text, "start": start / 30, "end": end / 30,
+            "confidence": 0.99, "timing_source": "verified",
+        }
+        for text, start, end in specs
+    ]}
+    config = _config()
+    config.subtitle_max_words_per_cue = 9
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, config)
+
+    assert plan.quality_report.status != "BLOCKED"
+    assert plan.quality_report.metrics.max_cps <= 20.0
+    assert "CAPTION_PRESENTATION_WINDOW_EXTENDED" in plan.diagnostics
+    assert not any(item.code == "CAPTION_CPS_HIGH" for item in plan.quality_report.findings)
 
 
 def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() -> None:

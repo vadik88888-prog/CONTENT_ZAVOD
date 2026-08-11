@@ -126,7 +126,7 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert {item["code"] for item in data["checks"]} == {
         "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "PLAN_IDENTITY", "COMPOSITION",
         "SOURCE_BROLL", "EDITORIAL_MOTION", "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE",
-        "ARTIFACT_IDENTITY",
+        "ARTIFACT_IDENTITY", "SEMANTIC_CONTENT",
     }
     assert data["artifact_id"] and data["artifact_sha256"]
 
@@ -139,6 +139,27 @@ def test_quality_report_warning_preserves_machine_readable_evidence(tmp_path: Pa
     assert finding["code"] == "DURATION_VARIANCE_LOW"
     assert finding["severity"] == "warning"
     assert {"evidence", "measured_value", "threshold", "provenance"} <= finding.keys()
+
+
+def test_low_confidence_published_dialogue_is_a_quality_blocker(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    plan["dialogue_mappings"] = [{
+        "segment_id": "dialogue-001", "fact_id": "fact-001",
+        "transcript_segment_id": 227, "confidence": 0.463,
+        "source_start_seconds": 682.0, "source_end_seconds": 684.0,
+    }]
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    blocker = next(item for item in report.findings if item.code == "AUDIO_UNINTELLIGIBLE")
+    assert blocker.provenance["producer"] == "semantic_content_quality"
+    assert next(item for item in report.checks if item["code"] == "SEMANTIC_CONTENT")["status"] == "blocked"
 
 
 def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_report(tmp_path: Path) -> None:

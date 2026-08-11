@@ -250,6 +250,16 @@ def build_production_plan(
     for segment in segments:
         if isinstance(segment, NarrationSegment):
             segment.linked_segment_ids = narration_to_dialogue[segment.segment_id]
+    _register_grounded_dialogue_boundaries(
+        dialogue_mappings, boundary_decision=boundary_decision, evidence=evidence,
+    )
+    story_continuity_warnings = _preserve_story_continuity(
+        dialogue_mappings,
+        source_audio_mode=source_audio_mode,
+        content_type=str(semantic.get("content_type") or ""),
+        context=context,
+        boundary_decision=boundary_decision,
+    )
     boundary_padding_warnings = _apply_boundary_padding(dialogue_mappings, boundary_decision)
     timeline = _build_timeline(segments)
     subtitle_track = _build_subtitle_track(segments, timeline, language)
@@ -275,6 +285,10 @@ def build_production_plan(
     if native_envelope is not None and boundary_padding_warnings:
         native_envelope = native_envelope.model_copy(update={
             "warnings": [*native_envelope.warnings, *boundary_padding_warnings],
+        })
+    if native_envelope is not None and story_continuity_warnings:
+        native_envelope = native_envelope.model_copy(update={
+            "warnings": [*native_envelope.warnings, *story_continuity_warnings],
         })
     try:
         return ProductionPlan(
@@ -306,6 +320,37 @@ def build_production_plan(
         )
     except ValueError as error:
         raise ProductionPlanError(str(error)) from error
+
+
+def _register_grounded_dialogue_boundaries(
+    dialogue_mappings: list[DialogueSegment],
+    *,
+    boundary_decision: BoundaryDecision | None,
+    evidence: dict[int, dict[str, Any]],
+) -> None:
+    """Promote only exact transcript evidence edges to safe edit points."""
+
+    if boundary_decision is None:
+        return
+    safe_starts = set(boundary_decision.safe_start_points)
+    safe_ends = set(boundary_decision.safe_end_points)
+    for dialogue in dialogue_mappings:
+        source = evidence.get(dialogue.transcript_segment_id)
+        if not isinstance(source, dict):
+            continue
+        try:
+            evidence_start = float(source["start"])
+            evidence_end = float(source["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            abs(dialogue.source_start_seconds - evidence_start) <= 0.001
+            and abs(dialogue.source_end_seconds - evidence_end) <= 0.001
+        ):
+            safe_starts.add(dialogue.source_start_seconds)
+            safe_ends.add(dialogue.source_end_seconds)
+    boundary_decision.safe_start_points = sorted(safe_starts)
+    boundary_decision.safe_end_points = sorted(safe_ends)
 
 
 def production_summary(plan: ProductionPlan) -> str:
@@ -394,6 +439,78 @@ def _apply_boundary_padding(
         warnings.append(
             ("MULTIMODAL_PAYOFF_POST_ROLL_APPLIED:" if target_end > refined.end_seconds else "BOUNDARY_POST_ROLL_APPLIED:") +
             f"{last.segment_id}:{previous:.3f}->{last.source_end_seconds:.3f}"
+        )
+    return warnings
+
+
+def _preserve_story_continuity(
+    dialogue_mappings: list[DialogueSegment],
+    *,
+    source_audio_mode: bool,
+    content_type: str,
+    context: dict[str, Any],
+    boundary_decision: BoundaryDecision | None,
+) -> list[str]:
+    """Keep causal source bridges instead of concatenating story islands.
+
+    Semantic facts prove what may be used, but their evidence spans are not an
+    edit decision to remove everything between setup and payoff.  In original
+    audio modes a story therefore keeps the source interval between consecutive
+    grounded facts.  This is bounded by the already-approved candidate and
+    BoundaryDecision; no new source material is introduced outside that range.
+    """
+
+    if not source_audio_mode or len(dialogue_mappings) < 2:
+        return []
+    gaps = [
+        max(0.0, right.source_start_seconds - left.source_end_seconds)
+        for left, right in zip(dialogue_mappings, dialogue_mappings[1:])
+    ]
+    candidate_duration = max(
+        0.0, float(context.get("end_time", 0)) - float(context.get("start_time", 0)),
+    )
+    multimodal = context.get("multimodal_context")
+    scene_boundaries = context.get("scene_boundaries")
+    visual_story_bridge = (
+        max(gaps, default=0.0) >= max(3.0, candidate_duration * 0.35)
+        and (
+            isinstance(multimodal, dict)
+            and multimodal.get("multimodal_payoff_grounded") is True
+            or isinstance(scene_boundaries, list) and len(scene_boundaries) >= 2
+        )
+    )
+    if content_type != "story" and not visual_story_bridge:
+        return []
+    warnings: list[str] = []
+    for left, right in zip(dialogue_mappings, dialogue_mappings[1:]):
+        if right.source_end_seconds < left.source_start_seconds - 0.001:
+            raise ProductionPlanError(
+                "STORY_SOURCE_ORDER_INVALID: source-audio story facts must remain chronological."
+            )
+        if right.source_start_seconds <= left.source_end_seconds + 0.001:
+            continue
+        previous = left.source_end_seconds
+        left.source_end_seconds = right.source_start_seconds
+        left.estimated_duration_seconds = max(
+            0.0, left.source_end_seconds - left.source_start_seconds,
+        )
+        # The adjacent mappings now meet at the already-approved start of the
+        # next complete word.  Since no source time is skipped at that join,
+        # the same point is also a valid end boundary for the preceding bridge.
+        if (
+            boundary_decision is not None
+            and any(
+                abs(right.source_start_seconds - point) <= 0.001
+                for point in boundary_decision.safe_start_points
+            )
+        ):
+            boundary_decision.safe_end_points = sorted({
+                *boundary_decision.safe_end_points,
+                right.source_start_seconds,
+            })
+        warnings.append(
+            "STORY_CAUSAL_BRIDGE_PRESERVED:"
+            f"{left.segment_id}:{previous:.3f}->{left.source_end_seconds:.3f}"
         )
     return warnings
 

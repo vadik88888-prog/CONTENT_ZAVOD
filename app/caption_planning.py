@@ -50,7 +50,7 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "7C.caption-planner.1"
+CAPTION_PLANNER_VERSION = "7C.caption-planner.2"
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
 
 _SAFE_INSETS: dict[str, tuple[float, float, float, float]] = {
@@ -700,7 +700,12 @@ def _word_runs(words: list[_MappedWord]) -> list[tuple[_MappedWord, ...]]:
     runs: list[list[_MappedWord]] = []
     current: list[_MappedWord] = []
     for word in words:
-        if current and (word.map_id != current[-1].map_id or word.output.start_frame - current[-1].output.end_frame > 18):
+        # Consecutive ProductionPlan dialogue mappings frequently divide one
+        # sentence into evidence-sized fragments.  Their output clock is still
+        # continuous, so treating every map_id change as a caption hard stop
+        # can make an otherwise feasible CPS partition impossible.  A real
+        # presentation gap remains the run boundary.
+        if current and word.output.start_frame - current[-1].output.end_frame > 18:
             runs.append(current)
             current = []
         current.append(word)
@@ -712,24 +717,87 @@ def _word_runs(words: list[_MappedWord]) -> list[tuple[_MappedWord, ...]]:
 def _cue_groups(
     words: tuple[_MappedWord, ...], config: ProductionRenderConfig, intent: CreativeIntent,
 ) -> list[tuple[_MappedWord, ...]]:
-    groups: list[tuple[_MappedWord, ...]] = []
-    cursor = 0
-    while cursor < len(words):
-        maximum = min(len(words), cursor + config.subtitle_max_words_per_cue)
-        choices = list(range(cursor + 1, maximum + 1))
-        viable = [index for index in choices if index - cursor >= config.subtitle_min_words_per_cue]
-        if viable:
-            choices = viable
-        duration_choices = [
-            index for index in choices
-            if words[index - 1].output.end_frame - words[cursor].output.start_frame <= round(config.subtitle_max_duration * 30)
-        ]
-        if duration_choices:
-            choices = duration_choices
-        end = max(choices, key=lambda index: _cue_boundary_score(words, cursor, index, intent))
-        groups.append(words[cursor:end])
-        cursor = end
-    return groups
+    # Partition the whole word run, rather than committing greedily at the
+    # first punctuation mark.  A locally attractive split can leave the next
+    # cue physically unable to meet CPS even though a neighbouring 3/9/6/6
+    # partition is fully readable with the same frozen word timings.
+    maximum_frames = round(config.subtitle_max_duration * 30)
+    protected_phrases = tuple(
+        tuple(_normalise(part) for part in emphasis.text_span.split() if _normalise(part))
+        for emphasis in intent.semantic_emphasis
+    )
+    # end -> (unreadable groups, crossed semantic boundaries, overlapping
+    #         cue boundaries, cue count, negative boundary score, ranges)
+    best: dict[int, tuple[int, int, int, int, float, tuple[tuple[int, int], ...]]] = {
+        0: (0, 0, 0, 0, 0.0, ()),
+    }
+    for end in range(1, len(words) + 1):
+        if end < len(words) and _splits_protected_phrase(words, end, protected_phrases):
+            continue
+        for start in range(max(0, end - config.subtitle_max_words_per_cue), end):
+            previous = best.get(start)
+            if previous is None:
+                continue
+            size = end - start
+            if size < config.subtitle_min_words_per_cue and end != len(words):
+                continue
+            raw = _words_output(words[start:end])
+            if raw.end_frame - raw.start_frame > maximum_frames:
+                continue
+            slot_start = (
+                _mapping_chain_bounds(intent, words[start].map_id)[0] if start == 0
+                else words[start - 1].output.end_frame - 2
+            )
+            slot_end = (
+                max(raw.end_frame, words[end].output.start_frame)
+                if end < len(words)
+                else _mapping_chain_bounds(intent, words[end - 1].map_id)[1]
+            )
+            readable = (
+                _timing_mode(words[start:end])[0] != "word"
+                or _minimum_caption_frames(
+                    words[start:end], _maximum_caption_cps(words[start:end]),
+                ) <= slot_end - slot_start
+            )
+            candidate = (
+                previous[0] + (0 if readable else 1),
+                previous[1] + _crossed_semantic_boundaries(words, start, end, intent),
+                previous[2] + (
+                    1 if end < len(words) and words[end].output.start_frame < words[end - 1].output.end_frame
+                    else 0
+                ),
+                previous[3] + 1,
+                previous[4] - _cue_boundary_score(words, start, end, intent),
+                (*previous[5], (start, end)),
+            )
+            current = best.get(end)
+            if current is None or candidate[:5] < current[:5]:
+                best[end] = candidate
+    partition = best.get(len(words))
+    if partition is None:
+        return [words]
+    return [words[start:end] for start, end in partition[5]]
+
+
+def _crossed_semantic_boundaries(
+    words: tuple[_MappedWord, ...], start: int, end: int, intent: CreativeIntent,
+) -> int:
+    if end - start < 2:
+        return 0
+    internal_splits = tuple(
+        (words[index - 1].output.end_frame + words[index].output.start_frame) / 2
+        for index in range(start + 1, end)
+    )
+    boundaries = {
+        frame
+        for event in (*intent.beats, *intent.semantic_emphasis)
+        for frame in (event.output.start_frame, event.output.end_frame)
+        if words[start].output.start_frame < frame < words[end - 1].output.end_frame
+    }
+    return sum(
+        min(abs(split - boundary) for split in internal_splits) <= 3
+        for boundary in boundaries
+    )
 
 
 def _cue_boundary_score(words: tuple[_MappedWord, ...], start: int, end: int, intent: CreativeIntent) -> float:
@@ -849,7 +917,12 @@ def _coalesce_layouts_for_readability(
     hard CPS ceiling even when a neighbouring, semantically neutral phrase
     makes a readable two-line cue.  The dynamic partition below only combines
     truly contiguous output-map runs, respects the configured word/duration
-    limits, and never combines a hook/payoff/emphasis/caption-motion cue.
+    limits, and never combines two protected hook/payoff/emphasis/motion cues.
+    One protected cue may absorb a neutral neighbour: its frozen word timing
+    and semantic event remain intact while the combined reading window fixes
+    an otherwise artificial local CPS spike. Adjacent Whisper word intervals
+    commonly overlap by one frame; the two-frame boundary allowance below
+    prevents that quantisation artifact from stealing readable cue time.
     """
 
     if not layouts:
@@ -871,10 +944,10 @@ def _coalesce_layouts_for_readability(
                 words = (*words, *layouts[end - 1].words)
                 if len(words) > config.subtitle_max_words_per_cue:
                     break
-                if end - start > 1 and any(
+                if end - start > 1 and sum(
                     _layout_has_protected_semantic_event(layouts[index], intent)
                     for index in range(start, end)
-                ):
+                ) > 1:
                     break
                 raw = _words_output(words)
                 if raw.end_frame - raw.start_frame > round(config.subtitle_max_duration * 30):
@@ -894,10 +967,14 @@ def _coalesce_layouts_for_readability(
                         break
                     candidate = fitted[0]
                 slot_start = (
-                    chain_start if start == run_start else raw.start_frame
+                    chain_start if start == run_start
+                    else max(
+                        chain_start,
+                        _words_output(layouts[start - 1].words).end_frame - 2,
+                    )
                 )
                 slot_end = (
-                    _words_output(layouts[end].words).start_frame
+                    max(raw.end_frame, _words_output(layouts[end].words).start_frame)
                     if end < run_end else chain_end
                 )
                 timing_mode, _confidence = _timing_mode(words)
@@ -938,10 +1015,11 @@ def _cue_outputs(
         for index in range(run_start, run_end):
             output = raw[index]
             slot_start = (
-                chain_start if index == run_start else output.start_frame
+                chain_start if index == run_start
+                else max(chain_start, raw[index - 1].end_frame - 2)
             )
             slot_end = (
-                raw[index + 1].start_frame if index + 1 < run_end
+                max(output.end_frame, raw[index + 1].start_frame) if index + 1 < run_end
                 else chain_end
             )
             target_cps = 17.0 if _contains_cyrillic(" ".join(word.text for word in layouts[index].words)) else 19.0

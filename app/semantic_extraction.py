@@ -56,6 +56,12 @@ def build_source_context(
         if not text:
             continue
         identifier = int(raw.get("id", index))
+        raw_confidence = feature_by_id.get(identifier, {}).get("transcript_confidence")
+        try:
+            confidence = float(raw_confidence) if raw_confidence is not None else 1.0
+        except (TypeError, ValueError):
+            confidence = 1.0
+        confidence = max(0.0, min(1.0, confidence))
         belongs_to_candidate = identifier in candidate_ids or (end > candidate.start and start < candidate.end)
         if belongs_to_candidate:
             # Candidate boundaries are resolved before transformation.  Keep the
@@ -65,9 +71,15 @@ def build_source_context(
             primary_start = max(start, candidate.start)
             primary_end = min(end, candidate.end)
             if primary_start < primary_end:
-                primary.append(EvidenceSegment(identifier, primary_start, primary_end, text, FactSourceScope.PRIMARY_CANDIDATE))
+                primary.append(EvidenceSegment(
+                    identifier, primary_start, primary_end, text,
+                    FactSourceScope.PRIMARY_CANDIDATE, confidence,
+                ))
         elif end > before_start and start < after_end:
-            supporting.append(EvidenceSegment(identifier, start, end, text, FactSourceScope.SUPPORTING_CONTEXT))
+            supporting.append(EvidenceSegment(
+                identifier, start, end, text,
+                FactSourceScope.SUPPORTING_CONTEXT, confidence,
+            ))
     if not primary and candidate.text.strip():
         # The source candidate is still primary evidence when a legacy transcript
         # has no per-segment overlap information.
@@ -169,7 +181,7 @@ def extract_semantic_representation(context: SourceContext) -> SemanticRepresent
                 evidence_quote=evidence.text,
                 evidence_start=evidence.start,
                 evidence_end=evidence.end,
-                confidence=1.0,
+                confidence=evidence.confidence,
                 source_scope=FactSourceScope.PRIMARY_CANDIDATE,
                 factuality_type=factuality,
             ))
@@ -194,7 +206,7 @@ def extract_semantic_representation(context: SourceContext) -> SemanticRepresent
         removable_details=[],
         risky_claims=[item.statement for item in facts if UNCERTAIN_RE.search(item.statement)],
         source_evidence_map={item.fact_id: item.evidence_segment_ids for item in facts},
-        confidence=1.0 if facts else 0.0,
+        confidence=min((item.confidence for item in facts), default=0.0),
     )
     semantic.validate(context)
     return semantic

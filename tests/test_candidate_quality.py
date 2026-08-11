@@ -8,7 +8,7 @@ from app.candidate_quality import (
     assess_context_debt,
 )
 from app.config import AppConfig
-from app.content_understanding import select_with_coverage
+from app.content_understanding import ensure_candidate_boundary_decision, select_with_coverage
 from app.intelligence import local_rank, merge_ai_ranking
 from app.local_scoring import score_candidates
 from app.models import Candidate, ScoredCandidate, candidate_from_dict, scored_from_dict
@@ -65,6 +65,41 @@ def test_eligible_candidate_persists_versioned_decision_score_and_evidence() -> 
     assert serialized["candidate_score_v2"]["component_scores"]
     assert serialized["candidate_score_v2"]["penalties"] == []
     assert candidate_from_dict(serialized).eligibility_decision is not None
+
+
+def test_complete_legacy_boundary_evidence_is_promoted_to_typed_decision() -> None:
+    candidate = _candidate("candidate-legacy-boundary")
+    candidate.boundary_diagnostics.update({
+        "schema_version": "5A.1",
+        "requested_range": {"start": 0.0, "end": 30.0},
+        "resolved_range": {"start": 0.0, "end": 30.0},
+        "start_boundary": {
+            "timestamp": 0.2, "transcript_segment_id": 1,
+            "reason": "complete first word", "silence_before": 0.2,
+        },
+        "end_boundary": {
+            "timestamp": 29.8, "transcript_segment_id": 2,
+            "reason": "complete final thought", "silence_after": 0.2,
+        },
+        "head_padding_seconds": 0.2, "tail_padding_seconds": 0.2,
+        "continuation_risk": 0.1, "overall_boundary_score": 0.9,
+    })
+
+    decision = ensure_candidate_boundary_decision(candidate)
+
+    assert decision is not None and decision["schema_version"] == "5C.1"
+    assert decision["candidate_id"] == candidate.id
+    assert {item["requirement_type"] for item in decision["required_evidence"]} == {
+        "hook", "completion", "payoff",
+    }
+    requirements = {item["requirement_type"]: item for item in decision["required_evidence"]}
+    assert requirements["hook"]["source_range"] == {
+        "start_seconds": 0.2, "end_seconds": 0.201,
+    }
+    assert requirements["completion"]["source_range"] == {
+        "start_seconds": 29.799, "end_seconds": 29.8,
+    }
+    assert candidate.boundary_diagnostics["boundary_decision_migration"].startswith("legacy_5A")
 
 
 def test_high_score_explicitly_ineligible_candidate_cannot_enter_coverage_selection() -> None:

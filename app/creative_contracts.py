@@ -1153,7 +1153,8 @@ class CompositionQualityFinding(FrozenContract):
     code: Literal[
         "COMPOSITION_JITTER", "COMPOSITION_TARGET_CLIPPED", "COMPOSITION_UNSAFE_CROP",
         "COMPOSITION_VELOCITY_LIMIT", "COMPOSITION_ACCELERATION_LIMIT",
-        "COMPOSITION_SWITCH_RATE_HIGH", "COMPOSITION_MINIMUM_HOLD_VIOLATION",
+        "COMPOSITION_SWITCH_RATE_HIGH", "COMPOSITION_LAYOUT_SWITCH_RATE_HIGH",
+        "COMPOSITION_MINIMUM_HOLD_VIOLATION",
         "COMPOSITION_LOW_CONFIDENCE", "COMPOSITION_SAFE_FALLBACK",
     ]
     severity: Literal["warning", "blocker"]
@@ -1166,6 +1167,7 @@ class CompositionQualityFinding(FrozenContract):
 class CompositionQualityMetrics(FrozenContract):
     segment_count: int = Field(default=0, ge=0)
     target_switch_count: int = Field(default=0, ge=0)
+    layout_switch_count: int = Field(default=0, ge=0)
     suppressed_switch_count: int = Field(default=0, ge=0)
     fallback_count: int = Field(default=0, ge=0)
     punch_in_count: int = Field(default=0, ge=0)
@@ -1176,6 +1178,7 @@ class CompositionQualityMetrics(FrozenContract):
     max_velocity_per_frame: float = Field(default=0, ge=0)
     max_acceleration_per_frame_sq: float = Field(default=0, ge=0)
     switches_per_minute: float = Field(default=0, ge=0)
+    layout_switches_per_minute: float = Field(default=0, ge=0)
     minimum_target_containment: float = Field(default=1, ge=0, le=1)
 
 

@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7D.composition-planner.2"
+COMPOSITION_PLANNER_VERSION = "7D.composition-planner.3"
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
 MovementReason = Literal[
@@ -746,6 +746,9 @@ def _quality_report(
 ) -> CompositionQualityReport:
     findings: list[CompositionQualityFinding] = []
     switch_count = sum(item.movement_reason == "target_switch" for item in segments)
+    layout_switch_count = sum(
+        left.layout != right.layout for left, right in zip(segments, segments[1:])
+    )
     fallback_segments = [item for item in segments if item.fallback != "none"]
     punch_count = sum(item.punch_in is not None for item in segments)
     maximum_velocity = max((key.velocity_per_frame for item in segments for key in item.crop_keyframes), default=0)
@@ -762,6 +765,9 @@ def _quality_report(
     ]
     duration_frames = sum(item.output.end_frame - item.output.start_frame for item in segments)
     switches_per_minute = switch_count * 1800 / duration_frames if duration_frames else 0
+    layout_switches_per_minute = (
+        layout_switch_count * 1800 / duration_frames if duration_frames else 0
+    )
     jitter = _jitter_events(segments)
     if clipped:
         findings.append(CompositionQualityFinding(
@@ -799,6 +805,13 @@ def _quality_report(
             measured_value=round(switches_per_minute, 4), threshold=config.maximum_switches_per_minute,
             message="Evidence-backed target switches are more frequent than the calm-framing budget.",
         ))
+    if layout_switches_per_minute > config.maximum_switches_per_minute:
+        findings.append(CompositionQualityFinding(
+            code="COMPOSITION_LAYOUT_SWITCH_RATE_HIGH", severity="warning",
+            measured_value=round(layout_switches_per_minute, 4),
+            threshold=config.maximum_switches_per_minute,
+            message="Visible layout/framing changes are more frequent than the calm-framing budget.",
+        ))
     if suppressed_switches:
         findings.append(CompositionQualityFinding(
             code="COMPOSITION_MINIMUM_HOLD_VIOLATION", severity="warning",
@@ -829,6 +842,7 @@ def _quality_report(
         metrics=CompositionQualityMetrics(
             segment_count=len(segments),
             target_switch_count=switch_count,
+            layout_switch_count=layout_switch_count,
             suppressed_switch_count=suppressed_switches,
             fallback_count=len(fallback_segments),
             punch_in_count=punch_count,
@@ -839,6 +853,7 @@ def _quality_report(
             max_velocity_per_frame=round(maximum_velocity, 9),
             max_acceleration_per_frame_sq=round(maximum_acceleration, 9),
             switches_per_minute=round(switches_per_minute, 6),
+            layout_switches_per_minute=round(layout_switches_per_minute, 6),
             minimum_target_containment=round(min(containments), 7) if containments else 1,
         ),
         provenance=CompositionQualityProvenance(

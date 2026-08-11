@@ -85,6 +85,7 @@ class EvidenceSegment:
     end: float
     text: str
     scope: FactSourceScope
+    confidence: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +94,7 @@ class EvidenceSegment:
             "end": round(self.end, 3),
             "text": self.text,
             "scope": self.scope.value,
+            "confidence": round(self.confidence, 6),
         }
 
 
@@ -740,4 +742,5 @@ def _evidence_from_dict(data: dict[str, Any]) -> EvidenceSegment:
         end=float(data.get("end", 0)),
         text=str(data.get("text", "")),
         scope=FactSourceScope(str(data.get("scope", FactSourceScope.PRIMARY_CANDIDATE.value))),
+        confidence=max(0.0, min(1.0, float(data.get("confidence", 1.0)))),
     )

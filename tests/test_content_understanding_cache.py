@@ -349,6 +349,44 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert report["run"]["analysis_id"] == analysis.analysis_id
 
 
+def test_draft_preflight_rejects_stale_overlong_candidate_before_transformation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+    ).run(input_path=str(source))
+    artifact = read_json(analysis.analysis_path, {})
+    candidate_id = artifact["candidates"][0]["candidate_id"]
+    candidate_path = Path(artifact["candidate_data_ref"])
+    candidate_data = read_json(candidate_path, {})
+    candidate = next(item for item in candidate_data["candidates"] if item["id"] == candidate_id)
+    candidate["end"] = float(candidate["start"]) + 106.94
+    write_json(candidate_path, candidate_data)
+    transformed: list[list[str]] = []
+
+    def transform(_self, _tracker, _source, _metadata, selected, *_args, **_kwargs):
+        transformed.append([item.candidate.id for item in selected])
+        return {"enabled": True, "status": "failed", "items": [], "warnings": []}
+
+    monkeypatch.setattr(Pipeline, "_transform_selected", transform)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+    ).run(input_path=str(source))
+
+    assert transformed == [[]]
+    report = read_json(result.report_path, {})
+    failed = report["candidate_flow"]["draft_candidates"][0]
+    assert failed["stage"] == f"candidate_preflight:{candidate_id}"
+    assert "DURATION_OUT_OF_RANGE" in failed["error"]
+
+
 def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_invalid(tmp_path: Path, monkeypatch) -> None:
     """One bad review edit must be a candidate retry, never a batch code-2 loss."""
 

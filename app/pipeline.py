@@ -38,7 +38,9 @@ from app.content_understanding import (
     recommend_clip_count,
     select_with_coverage,
     story_units_artifact,
+    ensure_candidate_boundary_decision,
 )
+from app.candidate_quality import build_eligibility_decision
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -1425,6 +1427,10 @@ class Pipeline:
         selected, boundary_failures = self._apply_boundary_overrides(
             selected, metadata, transcript_features, scenes, tracker,
         )
+        selected, preflight_failures = self._preflight_selected_candidates(
+            selected, visual_analysis, tracker,
+        )
+        candidate_failures = {**boundary_failures, **preflight_failures}
         self._write_draft_progress(
             output_directory=output_directory,
             analysis=analysis,
@@ -1435,13 +1441,13 @@ class Pipeline:
         tracker.start("analysis_handoff", analysis.analysis_fingerprint, cache_hit=True)
         tracker.finish("analysis_handoff")
         transformable = [
-            item for item in selected if item.candidate.id not in boundary_failures
+            item for item in selected if item.candidate.id not in candidate_failures
         ]
         transformation = self._transform_selected(
             tracker, source_data, metadata, transformable, transcript, transcript_features,
             audio_features, scenes, work_directory, output_directory,
         )
-        if boundary_failures:
+        if candidate_failures:
             # ``_finish_draft_preview`` owns the item-level draft report.  Give
             # it an ordinary failed transformation outcome for every rejected
             # boundary so it writes the same retryable record/progress shape as
@@ -1453,12 +1459,16 @@ class Pipeline:
             transformed_items: list[dict[str, Any]] = []
             for item in selected:
                 candidate_id = item.candidate.id
-                if candidate_id in boundary_failures:
+                if candidate_id in candidate_failures:
                     transformed_items.append({
                         "candidate_id": candidate_id,
                         "status": "failed",
-                        "error": boundary_failures[candidate_id],
-                        "stage": f"boundary_override:{candidate_id}",
+                        "error": candidate_failures[candidate_id],
+                        "stage": (
+                            f"boundary_override:{candidate_id}"
+                            if candidate_id in boundary_failures
+                            else f"candidate_preflight:{candidate_id}"
+                        ),
                     })
                 elif candidate_id in by_candidate:
                     transformed_items.append(by_candidate[candidate_id])
@@ -1498,6 +1508,50 @@ class Pipeline:
             work_directory=work_directory,
             output_directory=output_directory,
         )
+
+    def _preflight_selected_candidates(
+        self,
+        selected: list[Any],
+        visual_analysis: dict[str, Any],
+        tracker: StageTracker,
+    ) -> tuple[list[Any], dict[str, str]]:
+        """Recheck production eligibility and BoundaryDecision before transform."""
+
+        failures: dict[str, str] = {}
+        for scored in selected:
+            candidate = scored.candidate
+            stage_name = f"candidate_preflight:{candidate.id}"
+            fingerprint = _hash({
+                "candidate": candidate.to_dict(),
+                "minimum_duration": self.config.candidate_generation.min_duration_seconds,
+                "maximum_duration": self.config.candidate_generation.max_duration_seconds,
+                "quality_config": self.config.scoring.candidate_quality_config_version,
+            })
+            tracker.start(stage_name, fingerprint)
+            decision = build_eligibility_decision(
+                candidate,
+                candidate.feature_vector,
+                config_version=self.config.scoring.candidate_quality_config_version,
+                min_duration_seconds=self.config.candidate_generation.min_duration_seconds,
+                max_duration_seconds=self.config.candidate_generation.max_duration_seconds,
+                visual_analysis=visual_analysis,
+            )
+            candidate.eligibility_decision = decision
+            if not decision.eligible:
+                codes = ",".join(item.value for item in decision.reason_codes) or "UNKNOWN"
+                message = f"CANDIDATE_NOT_PRODUCTION_ELIGIBLE: {codes}."
+                failures[candidate.id] = message
+                tracker.finish(stage_name, "failed", message)
+                continue
+            boundary = ensure_candidate_boundary_decision(candidate)
+            if boundary is None:
+                message = "BOUNDARY_DECISION_REQUIRED: complete validated boundary evidence is unavailable."
+                failures[candidate.id] = message
+                tracker.finish(stage_name, "failed", message)
+                continue
+            tracker.finish(stage_name)
+        return selected, failures
+
     def _apply_boundary_overrides(
         self,
         selected: list[Any],

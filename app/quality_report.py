@@ -207,6 +207,7 @@ def build_quality_report(
     _collect_eligibility(finding, candidate_data)
     _collect_diversity(finding, diversity_decision, result.candidate_id)
     _collect_plan_and_boundary(finding, plan_data, result, project_id, source_id)
+    _collect_semantic_content(finding, plan_data)
     _collect_creative_execution(finding, render)
     _collect_composition_and_subtitles(finding, render)
     _collect_audio(finding, audio)
@@ -412,6 +413,48 @@ def _collect_diversity(finding: Any, decision: dict[str, Any] | None, candidate_
         )
 
 
+def _collect_semantic_content(finding: Any, plan: dict[str, Any]) -> None:
+    """Block source dialogue whose semantic confidence is not publishable.
+
+    Candidate-level averages can hide a corrupted sentence.  ProductionPlan
+    carries the grounded per-fact confidence, so the final gate evaluates the
+    exact dialogue that reached the MP4 instead of trusting the aggregate ASR
+    score used during ranking.
+    """
+
+    mappings = plan.get("dialogue_mappings") if isinstance(plan, dict) else None
+    if not isinstance(mappings, list):
+        return
+    threshold = 0.5
+    low_confidence = []
+    for item in mappings:
+        if not isinstance(item, dict):
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < threshold:
+            low_confidence.append({
+                "segment_id": item.get("segment_id"),
+                "fact_id": item.get("fact_id"),
+                "transcript_segment_id": item.get("transcript_segment_id"),
+                "confidence": round(confidence, 6),
+                "source_start_seconds": item.get("source_start_seconds"),
+                "source_end_seconds": item.get("source_end_seconds"),
+            })
+    if low_confidence:
+        finding(
+            "AUDIO_UNINTELLIGIBLE", "blocker",
+            {"low_confidence_dialogue": low_confidence},
+            measured_value=min(item["confidence"] for item in low_confidence),
+            threshold=f">={threshold}", producer="semantic_content_quality",
+            message="Published dialogue contains low-confidence ASR/semantic content.",
+            details=(
+                "At least one exact dialogue/fact mapping is below the semantic "
+                "confidence floor; aggregate candidate confidence cannot override it."
+            ),
+        )
 def _collect_plan_and_boundary(
     finding: Any,
     plan: dict[str, Any],
@@ -793,6 +836,10 @@ def _check_catalog(
         ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),
+        (
+            "SEMANTIC_CONTENT", "semantic_content_quality", plan.get("dialogue_mappings"),
+            "every published dialogue mapping has grounded confidence >= 0.5",
+        ),
         ("PLAN_IDENTITY", "production_plan_envelope", plan.get("envelope"), "plan parents match output"),
         (
             "COMPOSITION", composition_producer, composition_evidence,

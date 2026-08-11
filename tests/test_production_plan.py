@@ -161,6 +161,64 @@ def test_multimodal_boundary_context_and_composition_intent_survive_plan_handoff
     assert plan.composition_intent["reaction"]["value"] == "surprise"
 
 
+def test_source_audio_story_preserves_causal_bridge_between_grounded_facts() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["boundary_decision"]["safe_start_points"] = [4.0]
+    outcome["source_context"]["boundary_decision"]["safe_end_points"] = [20.0]
+    outcome["semantic_representation"].update({
+        "content_type": "story",
+        "supporting_facts": [
+            {
+                "fact_id": "fact-setup", "statement": "The car stopped.",
+                "evidence_segment_ids": [10], "evidence_quote": "The car stopped.",
+                "evidence_start": 4.0, "evidence_end": 6.0, "confidence": 0.9,
+                "source_scope": "primary_candidate", "factuality_type": "explicit",
+            },
+            {
+                "fact_id": "fact-payoff", "statement": "A helper fixed it.",
+                "evidence_segment_ids": [11], "evidence_quote": "A helper fixed it.",
+                "evidence_start": 18.0, "evidence_end": 20.0, "confidence": 0.9,
+                "source_scope": "primary_candidate", "factuality_type": "explicit",
+            },
+        ],
+        "source_evidence_map": {"fact-setup": [10], "fact-payoff": [11]},
+    })
+    outcome["source_context"]["primary_evidence"] = [
+        {"segment_id": 10, "start": 4.0, "end": 6.0, "text": "The car stopped.", "scope": "primary_candidate", "confidence": 0.9},
+        {"segment_id": 11, "start": 18.0, "end": 20.0, "text": "A helper fixed it.", "scope": "primary_candidate", "confidence": 0.9},
+    ]
+    outcome["final_script"].update({
+        "sentences": [
+            {
+                "sentence_id": "sentence-setup", "text": "The car stopped.", "role": "hook",
+                "supported_by_fact_ids": ["fact-setup"], "source_segment_ids": [10],
+                "confidence": 0.9,
+            },
+            {
+                "sentence_id": "sentence-payoff", "text": "A helper fixed it.", "role": "payoff",
+                "supported_by_fact_ids": ["fact-payoff"], "source_segment_ids": [11],
+                "confidence": 0.9,
+            },
+        ],
+        "full_text": "The car stopped. A helper fixed it.",
+        "used_fact_ids": ["fact-setup", "fact-payoff"],
+    })
+
+    plan = build_production_plan(
+        outcome, AppConfig().production, envelope_context=_native_envelope_context(),
+    )
+
+    assert [(item.source_start_seconds, item.source_end_seconds) for item in plan.dialogue_mappings] == [
+        (4.0, 18.0), (18.0, 20.0),
+    ]
+    assert sum(item.estimated_duration_seconds for item in plan.dialogue_mappings) == 16.0
+    assert 18.0 in plan.boundary_decision.safe_start_points
+    assert 18.0 in plan.boundary_decision.safe_end_points
+    assert plan.envelope and any(
+        warning.startswith("STORY_CAUSAL_BRIDGE_PRESERVED") for warning in plan.envelope.warnings
+    )
+
+
 def test_native_envelope_is_deterministic_and_binds_v2_identity_contract() -> None:
     first = _native_plan()
     second = _native_plan()

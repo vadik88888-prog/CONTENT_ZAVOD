@@ -26,6 +26,7 @@ from app.diversity import (
 )
 from app.models import Candidate, ScoredCandidate
 from app.multimodal_evidence import evidence_for_range, validate_multimodal_timeline
+from app.production_models import BoundaryDecision
 from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
@@ -1466,6 +1467,118 @@ def _has_complete_boundary_evidence(diagnostics: dict[str, Any]) -> bool:
         isinstance(diagnostics.get(name), dict)
         for name in ("requested_range", "resolved_range", "allowed_source_range", "start_boundary", "end_boundary")
     )
+
+
+def ensure_candidate_boundary_decision(candidate: Candidate) -> dict[str, Any] | None:
+    """Validate or deterministically promote complete legacy 5A diagnostics.
+
+    Old AnalysisArtifacts persisted the same word/sentence boundary evidence
+    used by 5C, but not the typed BoundaryDecision wrapper.  A Draft may reuse
+    that evidence only when the legacy diagnostics are complete and internally
+    valid; otherwise production must stop before transformation.
+    """
+
+    diagnostics = dict(candidate.boundary_diagnostics or {})
+    existing = diagnostics.get("boundary_decision")
+    if isinstance(existing, dict):
+        try:
+            decision = BoundaryDecision.model_validate(existing)
+        except ValueError:
+            return None
+        if decision.candidate_id != candidate.id:
+            return None
+        if (
+            abs(decision.refined_range.start_seconds - candidate.start) > 0.001
+            or abs(decision.refined_range.end_seconds - candidate.end) > 0.001
+        ):
+            return None
+        return decision.model_dump(mode="json")
+
+    required = ("requested_range", "resolved_range", "start_boundary", "end_boundary")
+    if not all(isinstance(diagnostics.get(name), dict) for name in required):
+        return None
+    try:
+        resolved_start = float(diagnostics["resolved_range"]["start"])
+        resolved_end = float(diagnostics["resolved_range"]["end"])
+        start_boundary = diagnostics["start_boundary"]
+        end_boundary = diagnostics["end_boundary"]
+        start_timestamp = max(resolved_start, min(resolved_end, float(start_boundary["timestamp"])))
+        end_timestamp = max(resolved_start, min(resolved_end, float(end_boundary["timestamp"])))
+        start_segment_id = int(start_boundary["transcript_segment_id"])
+        end_segment_id = int(end_boundary["transcript_segment_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if resolved_end <= resolved_start:
+        return None
+
+    # Padding belongs to the allowed candidate range, not to the required
+    # spoken evidence.  Bind the migrated hook/completion requirements to a
+    # tiny interval at the proven first/last transcript boundary; otherwise
+    # pre-roll or post-roll silence would be impossible for dialogue mappings
+    # to cover.
+    hook_start = start_timestamp
+    hook_end = min(resolved_end, start_timestamp + 0.001)
+    completion_start = max(resolved_start, end_timestamp - 0.001)
+    completion_end = end_timestamp
+    diagnostics.update({
+        "allowed_source_range": {
+            "start_seconds": resolved_start,
+            "end_seconds": resolved_end,
+        },
+        "pause_evidence": {
+            "head_silence_seconds": float(start_boundary.get("silence_before", 0) or 0),
+            "tail_silence_seconds": float(end_boundary.get("silence_after", 0) or 0),
+            "pre_roll_seconds": float(diagnostics.get("head_padding_seconds", 0) or 0),
+            "post_roll_seconds": float(diagnostics.get("tail_padding_seconds", 0) or 0),
+            "intentional_pause_preserved": bool(
+                float(diagnostics.get("head_padding_seconds", 0) or 0)
+                or float(diagnostics.get("tail_padding_seconds", 0) or 0)
+            ),
+        },
+        "question_context": {
+            "start_is_question": False,
+            "end_is_question": False,
+            "answer_or_completion_included": bool(diagnostics.get("sentence_integrity", False)),
+        },
+        "required_evidence": [
+            {
+                "requirement_type": "hook", "required": True,
+                "source_range": {"start_seconds": hook_start, "end_seconds": hook_end},
+                "transcript_segment_id": start_segment_id,
+                "reason": "Legacy 5A opening boundary evidence must survive production.",
+                "evidence": dict(start_boundary),
+            },
+            {
+                "requirement_type": "completion", "required": True,
+                "source_range": {"start_seconds": completion_start, "end_seconds": completion_end},
+                "transcript_segment_id": end_segment_id,
+                "reason": "Legacy 5A completion boundary evidence must survive production.",
+                "evidence": dict(end_boundary),
+            },
+            {
+                "requirement_type": "payoff", "required": bool(diagnostics.get("payoff_preserved", False)),
+                "source_range": {"start_seconds": completion_start, "end_seconds": completion_end},
+                "transcript_segment_id": end_segment_id,
+                "reason": "Legacy 5A payoff evidence must survive production.",
+                "evidence": dict(end_boundary),
+            },
+        ],
+        "safe_start_points": [resolved_start],
+        "safe_end_points": [resolved_end],
+    })
+    try:
+        decision = BoundaryDecision.model_validate(
+            _boundary_decision_payload(candidate.id, diagnostics)
+        )
+    except ValueError:
+        return None
+    payload = decision.model_dump(mode="json")
+    candidate.boundary_diagnostics = {
+        **diagnostics,
+        "boundary_decision": payload,
+        "boundary_decision_migration": "legacy_5A_evidence_promoted_at_draft_preflight",
+    }
+    return payload
 
 
 def _boundary_decision_payload(candidate_id: str, diagnostics: dict[str, Any]) -> dict[str, Any]:

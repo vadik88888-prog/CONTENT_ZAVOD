@@ -134,6 +134,31 @@ def _set_sentence_text(draft, text: str) -> None:
     recompute_script_metrics(draft, 2.4)
 
 
+def test_semantic_facts_preserve_segment_asr_confidence() -> None:
+    candidate = Candidate(
+        "candidate-low-asr", 10.0, 16.0, "Garbled semantic sentence.",
+        transcript_segment_ids=[7],
+    )
+    context = build_source_context(
+        {"id": "source-1", "path": "source.mp4"}, {}, candidate,
+        {"language": "en", "segments": [{
+            "id": 7, "start": 10.0, "end": 16.0,
+            "text": "Garbled semantic sentence.",
+        }]},
+        {"segments": [{
+            "id": 7, "transcript_confidence": 0.41,
+            "sentence_start": True, "sentence_end": True,
+        }]},
+        {}, {"boundaries": []}, AppConfig().transformation,
+    )
+
+    semantic = extract_semantic_representation(context)
+
+    assert context.primary_evidence[0].confidence == 0.41
+    assert semantic.supporting_facts[0].confidence == 0.41
+    assert semantic.confidence == 0.41
+
+
 def test_transformation_duplicate_collapse_is_downgraded_before_production() -> None:
     first = {
         "candidate_id": "first", "status": "completed",

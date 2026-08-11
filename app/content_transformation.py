@@ -33,7 +33,7 @@ from app.transformation_models import (
 from app.transformation_prompts import PROMPT_VERSIONS
 
 
-TRANSFORMATION_ENGINE_VERSION = "2.1.0"
+TRANSFORMATION_ENGINE_VERSION = "2.2.0"
 
 
 def run_content_transformation(
@@ -397,7 +397,8 @@ def _restore_semantic_evidence_map(
 ) -> None:
     """Recover only direct, real candidate segment references; never invent evidence."""
 
-    known = set(context.evidence_by_id())
+    evidence_by_id = context.evidence_by_id()
+    known = set(evidence_by_id)
     raw_map = semantic.get("source_evidence_map")
     direct_map = raw_map if isinstance(raw_map, dict) else {}
     normalized_map: dict[str, list[int]] = {}
@@ -418,6 +419,17 @@ def _restore_semantic_evidence_map(
             current_ids = []
         if set(current_ids) != set(source_ids):
             warnings.append(f"AI source_evidence_map was restored from real candidate segments for {fact_id}.")
+        source_confidence = min(evidence_by_id[item].confidence for item in source_ids)
+        try:
+            proposed_confidence = float(fact.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            proposed_confidence = 0.0
+        grounded_confidence = max(0.0, min(1.0, min(proposed_confidence, source_confidence)))
+        if grounded_confidence != proposed_confidence:
+            warnings.append(
+                f"AI confidence was capped by transcript evidence for {fact_id}."
+            )
+        fact["confidence"] = grounded_confidence
         normalized_map[fact_id] = source_ids
     semantic["source_evidence_map"] = normalized_map
 
