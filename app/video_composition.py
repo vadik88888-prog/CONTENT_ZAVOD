@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -181,7 +182,15 @@ class VideoCompositionService:
             ).model_copy(update={
                 "plan_reference": plan_reference,
             })
-        mapping = source_output_map_from_legacy_timeline(timeline)
+        try:
+            mapping = source_output_map_from_legacy_timeline(timeline)
+        except ValueError as error:
+            # Mapping is a render contract, so surface its strict invariant as
+            # a candidate-scoped production failure instead of leaking a raw
+            # validation exception past the fan-out runner.
+            raise ProductionRenderError(
+                f"SOURCE_OUTPUT_TIME_MAP_REJECTED: {_safe_error(error)}"
+            ) from error
         if compiled_plan is not None and creative_intent is not None and (
             compiled_plan.intent_hash != creative_intent.canonical_hash()
             or compiled_plan.intent_id != creative_intent.intent_id
@@ -254,15 +263,9 @@ class VideoCompositionService:
                     target_observations=target_observations,
                     source_scenes=source_scenes,
                 )
-            if status is None:
-                status = (
-                    "native_rich"
-                    if compiled_plan.source_broll_plan.segments
-                    and any(item.target.value != "stable_source" for item in compiled_plan.composition_plan.segments)
-                    else "native_fallback"
-                )
-                if status == "native_fallback":
-                    reason_codes = (*reason_codes, "NATIVE_EXECUTION_STATUS_INFERRED_FALLBACK")
+            status, reason_codes, diagnostics = _reconcile_native_execution_status(
+                status, reason_codes, diagnostics, compiled_plan,
+            )
             timeline = apply_native_visual_plan(
                 timeline,
                 compiled_plan,
@@ -519,7 +522,17 @@ class VideoCompositionService:
         base_key = runtime_cache_key(
             nodes["base-visual"].cache_key,
             profile=visual_profile_payload,
-            inputs={"source_checksum": project.source_checksum},
+            inputs={
+                "source_checksum": project.source_checksum,
+                "timeline_fingerprint": stable_text_hash(
+                    json.dumps(
+                        project.timeline.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                ),
+            },
         )
         base_dependencies = {
             "composition": plan_artifacts["composition"].checksum,
@@ -751,12 +764,13 @@ class VideoCompositionService:
             label = f"[base{index}]"
             labels.append(label)
             if isinstance(clip, FillClip):
+                frame_count = _clip_frame_count(clip, canvas.fps)
                 inputs.extend([
-                    "-f", "lavfi", "-t", f"{clip.duration_seconds:.6f}",
+                    "-f", "lavfi", "-t", f"{frame_count / canvas.fps:.9f}",
                     "-i", f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}",
                 ])
                 filters.append(
-                    f"[{index}:v]fps={canvas.fps},trim=duration={clip.duration_seconds:.6f},"
+                    f"[{index}:v]fps={canvas.fps},trim=end_frame={frame_count},"
                     f"setpts=PTS-STARTPTS,format={canvas.pixel_format}{label}"
                 )
                 continue
@@ -2447,9 +2461,10 @@ def _visual_filter(
     fg_label = f"[{label_prefix}_fg]"
     blur_label = f"[{label_prefix}_blur]"
     fit_label = f"[{label_prefix}_fit]"
+    frame_count = _clip_frame_count(clip, canvas.fps)
     tail = (
-        f",fps={canvas.fps},tpad=stop_mode=clone:stop_duration={clip.freeze_duration_seconds:.6f},"
-        f"trim=duration={clip.duration_seconds:.6f},setpts=PTS-STARTPTS,format={canvas.pixel_format}{output_label}"
+        f",fps={canvas.fps},tpad=stop_mode=clone:stop=-1,"
+        f"trim=end_frame={frame_count},setpts=PTS-STARTPTS,format={canvas.pixel_format}{output_label}"
     )
     if crop.strategy == "fit_blur_background":
         return (
@@ -2475,6 +2490,17 @@ def _visual_filter(
         f"{input_label}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
         f"scale={canvas.width}:{canvas.height},setsar=1" + tail
     )
+
+
+def _clip_frame_count(clip: VideoClipModel, fps: int) -> int:
+    duration_frames = clip.duration_seconds * fps
+    timeline_frames = (
+        round(clip.timeline_end_seconds * fps)
+        - round(clip.timeline_start_seconds * fps)
+    )
+    if abs(duration_frames - timeline_frames) <= 1e-6:
+        return max(1, timeline_frames)
+    return max(1, math.ceil(duration_frames - 1e-9))
 
 
 def _tracking_crop_expression(
@@ -2905,6 +2931,67 @@ def _even_down(value: float) -> int:
 def _temporary_path(directory: Path, suffix: str) -> Path:
     with tempfile.NamedTemporaryFile(dir=directory, delete=False, suffix=suffix) as temporary:
         return Path(temporary.name)
+
+
+def _reconcile_native_execution_status(
+    status: Literal["native_rich", "native_fallback", "legacy"] | None,
+    reason_codes: Iterable[str],
+    diagnostics: Iterable[str],
+    compiled_plan: CompiledRenderPlan,
+) -> tuple[
+    Literal["native_rich", "native_fallback", "legacy"],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Make the persisted status describe layers that survived compilation.
+
+    Source B-roll is intentionally absent from this gate: it is optional and
+    default-off.  A claimed rich execution must, however, still contain the
+    concrete caption, semantic, hook/payoff, reframing, and motion outputs that
+    the renderer will consume.
+    """
+
+    cue_roles = {
+        cue.beat_role.value for cue in compiled_plan.caption_plan.cues
+        if cue.beat_role is not None
+    }
+    animated_motion_purposes = {
+        event.purpose.value for event in compiled_plan.motion_plan.events
+        if event.primitive_id != "static"
+    }
+    presented_roles = cue_roles | animated_motion_purposes
+    missing: list[str] = []
+    if not compiled_plan.caption_plan.cues:
+        missing.append("CAPTION_LAYER_NOT_EXECUTED")
+    if not any(cue.emphasis is not None for cue in compiled_plan.caption_plan.cues):
+        missing.append("SEMANTIC_EMPHASIS_NOT_EXECUTED")
+    if "hook" not in presented_roles:
+        missing.append("HOOK_PRESENTATION_NOT_EXECUTED")
+    if "payoff" not in presented_roles:
+        missing.append("PAYOFF_PRESENTATION_NOT_EXECUTED")
+    if not any(
+        segment.target.value != "stable_source"
+        for segment in compiled_plan.composition_plan.segments
+    ):
+        missing.append("COMPOSITION_REFRAME_NOT_EXECUTED")
+    if not any(
+        event.primitive_id != "static"
+        for event in compiled_plan.motion_plan.events
+    ):
+        missing.append("MOTION_LAYER_NOT_EXECUTED")
+
+    codes = tuple(reason_codes)
+    notes = tuple(diagnostics)
+    if missing:
+        status = "native_fallback"
+        codes = tuple(dict.fromkeys((*codes, "NATIVE_REQUIRED_LAYER_FALLBACK", *missing)))
+        notes = tuple(dict.fromkeys((
+            *notes,
+            "Native execution status was reconciled against the compiled renderer inputs.",
+        )))
+    elif status is None:
+        status = "native_rich"
+    return status, codes, notes
 
 
 def _safe_error(error: BaseException) -> str:

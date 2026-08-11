@@ -201,6 +201,108 @@ def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:
     assert any(value.startswith("SWITCH_SUPPRESSED_HYSTERESIS") for value in plan.diagnostics)
 
 
+def test_sparse_target_crop_is_held_without_extending_target_evidence() -> None:
+    target = _target(
+        "speaker-glimpse", AttentionTarget.SPEAKER, 8, 9, "speaker-evidence",
+        target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
+    )
+    observation = _observation(
+        "speaker-frame", 8, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.55,
+    )
+    config = CompositionPlannerConfig(minimum_hold_frames=45)
+
+    plan = build_composition_plan(
+        _intent((target,)), (observation,), source_width=1920, source_height=1080,
+        config=config,
+    )
+
+    assert [(item.output.start_frame, item.output.end_frame) for item in plan.segments] == [
+        (0, 8), (8, 9), (9, 53), (53, 300),
+    ]
+    acquired = plan.segments[1]
+    held = plan.segments[2]
+    released = plan.segments[3]
+    assert acquired.target == AttentionTarget.SPEAKER
+    assert acquired.evidence_refs == ("speaker-evidence",)
+    assert held.target == AttentionTarget.STABLE_SOURCE
+    assert held.target_ref is None
+    assert held.target_bounds is None
+    assert held.evidence_refs == ()
+    assert held.fallback == "stable_source"
+    assert held.crop != NormalizedRect(x=0, y=0, width=1, height=1)
+    assert held.geometry is not None
+    assert held.geometry.target_regions == ()
+    assert released.fallback == "fit_background"
+    assert any(item == "STABLE_CROP_HELD:9" for item in plan.diagnostics)
+
+
+def test_sparse_target_hold_stops_at_scene_cut() -> None:
+    target = _target(
+        "speaker-glimpse", AttentionTarget.SPEAKER, 8, 9, "speaker-evidence",
+        target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
+    )
+    before_cut = _observation(
+        "speaker-frame", 8, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.55,
+    )
+    cut_marker = _observation(
+        "new-scene-frame", 9, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.55,
+    ).model_copy(update={"scene_id": "scene-002"})
+
+    plan = build_composition_plan(
+        _intent((target,)), (before_cut, cut_marker), source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(minimum_hold_frames=45),
+    )
+
+    after_cut = next(item for item in plan.segments if item.output.start_frame == 9)
+    assert after_cut.movement_reason == "scene_reset"
+    assert after_cut.fallback == "fit_background"
+    assert after_cut.crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].frame == 9
+    assert after_cut.crop_keyframes[0].crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].reason == "scene_reset"
+    assert "STABLE_CROP_HELD:9" not in plan.diagnostics
+
+
+def test_sparse_target_hold_stops_at_edit_map_boundary() -> None:
+    target = _target(
+        "speaker-glimpse", AttentionTarget.SPEAKER, 8, 9, "speaker-evidence",
+        target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
+    )
+    intent = _intent((target,)).model_copy(update={
+        "source_output_mapping": SourceOutputTimeMap(segments=(
+            EditMapSegment(
+                map_id="edit-before-cut",
+                source=SourceInterval.from_seconds(0, 0.3),
+                output=OutputInterval(start_frame=0, end_frame=9),
+            ),
+            EditMapSegment(
+                map_id="edit-after-cut",
+                source=SourceInterval.from_seconds(0.3, 10),
+                output=OutputInterval(start_frame=9, end_frame=300),
+            ),
+        )),
+    })
+
+    plan = build_composition_plan(
+        intent,
+        (_observation(
+            "speaker-frame", 8, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.55,
+        ),),
+        source_width=1920,
+        source_height=1080,
+        config=CompositionPlannerConfig(minimum_hold_frames=45),
+    )
+
+    after_cut = next(item for item in plan.segments if item.output.start_frame == 9)
+    assert after_cut.movement_reason == "scene_reset"
+    assert after_cut.fallback == "fit_background"
+    assert after_cut.crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].frame == 9
+    assert after_cut.crop_keyframes[0].crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].reason == "scene_reset"
+    assert "STABLE_CROP_HELD:9" not in plan.diagnostics
+
+
 def test_punch_in_exists_only_inside_confirmed_editorial_composition_event() -> None:
     target = _target(
         "product-target", AttentionTarget.PRODUCT, 0, 300, "product-evidence",

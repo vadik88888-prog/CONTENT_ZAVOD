@@ -26,21 +26,22 @@ def estimate_duration_seconds(text: str, words_per_second: float) -> float:
 def generate_script_draft(
     semantic: SemanticRepresentation, plan: NarrativePlan, words_per_second: float,
 ) -> ScriptDraft:
-    """Deterministic, nearly verbatim generation used by local and mock modes."""
+    """Deterministic, nearly verbatim generation used by local and mock modes.
+
+    ``target_word_count`` is a soft planning preference. Every fact marked as
+    required remains in the draft; silently truncating that list can discard the
+    approved completion/payoff and produce a structurally valid unfinished
+    FinalScript.
+    """
 
     facts = semantic.fact_map()
     selected = []
-    used_words = 0
     for fact_id in plan.required_fact_ids:
         fact = facts[fact_id]
         text = _normalise_source_sentence(fact.statement)
         if not text:
             continue
-        count = word_count(text)
-        if selected and used_words + count > plan.target_word_count:
-            break
         selected.append((fact, text))
-        used_words += count
     if not selected and plan.required_fact_ids:
         fact = facts[plan.required_fact_ids[0]]
         selected = [(fact, _normalise_source_sentence(fact.statement))]

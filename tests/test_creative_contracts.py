@@ -48,7 +48,15 @@ from app.production_models import (
     ProductionPlanPreset,
     ProductionPlanTarget,
 )
-from app.video_models import CropPlan, SourceVideoClip, SubtitleCue, SubtitleProject, SubtitleStyle, VideoTimeline
+from app.video_models import (
+    CropPlan,
+    FillClip,
+    SourceVideoClip,
+    SubtitleCue,
+    SubtitleProject,
+    SubtitleStyle,
+    VideoTimeline,
+)
 
 
 def _reference() -> ImmutableProductionPlanLink:
@@ -207,6 +215,99 @@ def test_source_output_mapping_handles_cuts_reorder_and_rejects_ambiguous_destin
     adapted = source_output_map_from_legacy_timeline(timeline)
     assert adapted.segments[0].source == SourceInterval.from_seconds(10, 12)
     assert adapted.segments[1].output == OutputInterval(start_frame=60, end_frame=180)
+
+
+def test_legacy_time_map_assigns_a_non_frame_aligned_cut_frame_once() -> None:
+    crop = CropPlan(strategy="center_crop", source_width=1920, source_height=1080)
+    timeline = VideoTimeline(
+        clips=[
+            SourceVideoClip(
+                clip_id="left",
+                order=1,
+                timeline_start_seconds=0,
+                timeline_end_seconds=2.02,
+                duration_seconds=2.02,
+                source_path="source.mp4",
+                source_start_seconds=10,
+                source_end_seconds=12.02,
+                visual_strategy="mapped_source",
+                crop_plan=crop,
+                status="ready",
+            ),
+            SourceVideoClip(
+                clip_id="right",
+                order=2,
+                timeline_start_seconds=2.02,
+                timeline_end_seconds=4,
+                duration_seconds=1.98,
+                source_path="source.mp4",
+                source_start_seconds=20,
+                source_end_seconds=21.98,
+                visual_strategy="mapped_source",
+                crop_plan=crop,
+                status="ready",
+            ),
+        ],
+        duration_seconds=4,
+    )
+
+    adapted = source_output_map_from_legacy_timeline(timeline)
+
+    assert adapted.segments[0].output == OutputInterval(start_frame=0, end_frame=61)
+    assert adapted.segments[1].output == OutputInterval(start_frame=61, end_frame=120)
+    assert not adapted.segments[0].output.overlaps(adapted.segments[1].output)
+
+
+def test_legacy_time_map_cursor_reserves_source_less_clip_frames() -> None:
+    crop = CropPlan(strategy="center_crop", source_width=1920, source_height=1080)
+    timeline = VideoTimeline(
+        clips=[
+            SourceVideoClip(
+                clip_id="mapped-before-fill",
+                order=1,
+                timeline_start_seconds=0,
+                timeline_end_seconds=1.02,
+                duration_seconds=1.02,
+                source_path="source.mp4",
+                source_start_seconds=10,
+                source_end_seconds=11.02,
+                visual_strategy="mapped_source",
+                crop_plan=crop,
+                status="ready",
+            ),
+            FillClip(
+                clip_id="unmapped-fill",
+                order=2,
+                timeline_start_seconds=1.02,
+                timeline_end_seconds=1.52,
+                duration_seconds=0.5,
+                fallback_reason="regression fixture",
+            ),
+            SourceVideoClip(
+                clip_id="mapped-after-fill",
+                order=3,
+                timeline_start_seconds=1.52,
+                timeline_end_seconds=2.52,
+                duration_seconds=1,
+                source_path="source.mp4",
+                source_start_seconds=20,
+                source_end_seconds=21,
+                visual_strategy="mapped_source",
+                crop_plan=crop,
+                status="ready",
+            ),
+        ],
+        duration_seconds=2.52,
+    )
+
+    adapted = source_output_map_from_legacy_timeline(timeline)
+
+    assert [segment.map_id for segment in adapted.segments] == [
+        "legacy-mapped-before-fill",
+        "legacy-mapped-after-fill",
+    ]
+    assert adapted.segments[0].output == OutputInterval(start_frame=0, end_frame=31)
+    assert adapted.segments[1].output == OutputInterval(start_frame=46, end_frame=76)
 
 
 def test_evidence_resolver_drops_missing_evidence_with_typed_safe_fallback() -> None:

@@ -387,6 +387,170 @@ def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_inva
     assert any("partial success" in warning for warning in report["warnings"])
 
 
+def test_failed_creative_preview_reports_candidate_level_executor_reason(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+        run_id="analysis-run", project_id="project",
+    ).run(input_path=str(source))
+    candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
+
+    def tts(_self, _tracker, _production, _work, _output):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def audio(_self, _tracker, _production, _tts, _source, _transcript, _work, _output, _prepared=None):
+        return {"enabled": False, "status": "skipped", "items": []}
+
+    def render(_self, _tracker, _production, _audio, _source, _transcript, _work, _output, _visual=None, **_kwargs):
+        return {
+            "enabled": True,
+            "status": "failed",
+            "items": [{
+                "candidate_id": candidate_id,
+                "status": "failed",
+                "stage": f"creative_execution:{candidate_id}",
+                "report": {"errors": ["SOURCE_OUTPUT_TIME_MAP_REJECTED: destination frame 61 overlaps"]},
+            }],
+        }
+
+    monkeypatch.setattr(Pipeline, "_run_tts", tts)
+    monkeypatch.setattr(Pipeline, "_run_audio", audio)
+    monkeypatch.setattr(Pipeline, "_run_production_render", render)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+        run_id="draft-run", project_id="project",
+    ).run(input_path=str(source))
+
+    report = read_json(result.report_path, {})
+    failed = report["candidate_flow"]["draft_candidates"][0]
+    assert failed["state"] == "draft_failed"
+    assert failed["stage"] == f"creative_execution:{candidate_id}"
+    assert "SOURCE_OUTPUT_TIME_MAP_REJECTED" in failed["error"]
+    assert report["terminal"]["error_code"] == "NO_DRAFT_PREVIEWS"
+    assert report["terminal"]["candidate_failures"] == [{
+        "candidate_id": candidate_id,
+        "stage": f"creative_execution:{candidate_id}",
+        "error": failed["error"],
+    }]
+    assert "SOURCE_OUTPUT_TIME_MAP_REJECTED" in report["terminal"]["message"]
+
+
+def test_failed_transformation_reports_nested_candidate_validation_reason(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+        run_id="analysis-run", project_id="project",
+    ).run(input_path=str(source))
+    candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
+    cause = "FinalScript contract validation failed: required payoff evidence is missing"
+
+    def transform(_self, *_args, **_kwargs):
+        return {
+            "enabled": True,
+            "status": "failed",
+            "items": [{
+                "candidate_id": candidate_id,
+                "status": "failed",
+                "validation": {
+                    "final_script": {"passed": False, "errors": [cause]},
+                },
+            }],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(Pipeline, "_transform_selected", transform)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+        run_id="draft-run", project_id="project",
+    ).run(input_path=str(source))
+
+    draft = read_json(result.draft_path, {})
+    failed = draft["candidates"][0]
+    report = read_json(result.report_path, {})
+    assert failed["state"] == "draft_failed"
+    assert failed["error"] == cause
+    assert report["terminal"]["candidate_failures"] == [{
+        "candidate_id": candidate_id,
+        "stage": f"transformation_result:{candidate_id}",
+        "error": cause,
+    }]
+    assert cause in report["terminal"]["message"]
+
+
+def test_failed_tts_reason_survives_audio_and_render_skips_to_terminal(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+        run_id="analysis-run", project_id="project",
+    ).run(input_path=str(source))
+    candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
+    cause = "TTS provider rejected the candidate voice request"
+    stage = f"tts_generation:{candidate_id}"
+
+    def tts(_self, _tracker, _production, _work, _output):
+        return {
+            "enabled": True,
+            "status": "failed",
+            "items": [{
+                "candidate_id": candidate_id,
+                "status": "failed",
+                "stage": stage,
+                "error": cause,
+                "errors": [cause],
+            }],
+        }
+
+    monkeypatch.setattr(Pipeline, "_run_tts", tts)
+    monkeypatch.setattr("app.pipeline.tts_eligibility", lambda _plan: (True, "test"))
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    config.production.audio_mode = "voiceover"
+    config.audio_composition.enabled = True
+    config.production_render.enabled = True
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+        run_id="draft-run", project_id="project",
+    ).run(input_path=str(source))
+
+    draft = read_json(result.draft_path, {})
+    failed = draft["candidates"][0]
+    report = read_json(result.report_path, {})
+    assert failed["state"] == "draft_failed"
+    assert failed["stage"] == stage
+    assert failed["error"] == cause
+    assert report["terminal"]["candidate_failures"] == [{
+        "candidate_id": candidate_id,
+        "stage": stage,
+        "error": cause,
+    }]
+    assert cause in report["terminal"]["message"]
+
+
 def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
     calls = {"profile": 0, "map": 0, "boundaries": 0}

@@ -162,6 +162,14 @@ def run_content_transformation(
                 )
             step = time.perf_counter()
             try:
+                # A provider-owned semantic representation is only valid for the
+                # provider draft that was checked against it. If that draft and
+                # its bounded repair both fail, rebuild the final fallback from
+                # the current SourceContext. Otherwise a structurally valid but
+                # paraphrased provider semantic can leak into the supposedly
+                # local fallback and invent terms or lose the approved ending.
+                semantic = extract_semantic_representation(context)
+                plan = build_narrative_plan(semantic, config)
                 draft = build_local_fallback(context, semantic, config, fallback_reason)
                 grounding = validate_script_grounding(draft, semantic, context, config.allow_cta)
                 quality_validation, quality = validate_script_quality(draft, semantic, grounding, config)
@@ -420,9 +428,10 @@ def _contract_error(validation: Any) -> str:
 
 
 def _failed_usage(provider: Any | None, error: BaseException) -> dict[str, Any]:
+    ai_config = getattr(getattr(provider, "config", None), "ai", None)
     return {
         "provider": getattr(provider, "name", "unavailable"),
-        "model": getattr(getattr(provider, "config", None), "ai", None).model if getattr(getattr(provider, "config", None), "ai", None) else None,
+        "model": getattr(ai_config, "model", None),
         "input_tokens": 0,
         "output_tokens": 0,
         "retries": 0,

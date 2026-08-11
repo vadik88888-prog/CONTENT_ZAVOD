@@ -1267,7 +1267,7 @@ class Pipeline:
             *AUDIO_COMPOSITION_STAGES, *PRODUCTION_RENDER_STAGES, "render",
         ):
             tracker.skip(stage, "Analysis-only run: delivery stage was not started.")
-        terminal = {
+        terminal: dict[str, Any] = {
             "status": "analysis_ready",
             "error_code": None,
             "message": "Analysis completed. Select candidates before rendering.",
@@ -1650,7 +1650,10 @@ class Pipeline:
                 stage = str(transformation_item.get("stage") or f"transformation_result:{candidate_id}")
                 reviewed.append({
                     **base, "state": "draft_failed",
-                    "error": str(transformation_item.get("error") or "Draft FinalScript was not created."),
+                    "error": _candidate_stage_error(
+                        transformation_item,
+                        "Draft FinalScript was not created.",
+                    ),
                     "stage": stage,
                 })
                 self._write_draft_progress(
@@ -1696,10 +1699,13 @@ class Pipeline:
                 or not preview_report.get("compiled_plan_hash")
                 or not preview_report.get("parity_signature")
             ):
-                preview_error = "Creative Preview не удалось подготовить. Исходный фрагмент остаётся доступным."
+                preview_error = _candidate_stage_error(
+                    preview_item,
+                    "Creative Preview не удалось подготовить. Исходный фрагмент остаётся доступным.",
+                )
                 reviewed.append({
                     **base, "state": "draft_failed", "error": preview_error,
-                    "stage": f"creative_preview:{candidate_id}",
+                    "stage": str(preview_item.get("stage") or f"creative_preview:{candidate_id}"),
                 })
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
@@ -1774,11 +1780,26 @@ class Pipeline:
         tracker.finish("draft_artifact")
         for stage in (*PRODUCTION_RENDER_STAGES, "render"):
             tracker.skip(stage, "Creative Preview is ready for review; final delivery was not started.")
-        terminal = {
+        candidate_failures = [
+            {
+                "candidate_id": str(item.get("candidate_id") or ""),
+                "stage": str(item.get("stage") or ""),
+                "error": str(item.get("error") or "Draft preview failed."),
+            }
+            for item in reviewed if item.get("state") != "draft_ready"
+        ]
+        terminal_failure_message = "; ".join(
+            f"{item['candidate_id']}: {item['error']}" for item in candidate_failures
+        )
+        terminal: dict[str, Any] = {
             "status": "draft_ready" if ready_count else "failed",
             "error_code": None if ready_count else "NO_DRAFT_PREVIEWS",
-            "message": "Draft previews are ready for user review." if ready_count else "No candidate draft could be assembled.",
+            "message": (
+                "Draft previews are ready for user review."
+                if ready_count else f"No candidate draft could be assembled. {terminal_failure_message}"
+            ),
             "draft_id": draft_id,
+            "candidate_failures": candidate_failures,
         }
         terminal_status = str(terminal["status"])
         terminal_message = str(terminal.get("message") or "")
@@ -2449,60 +2470,63 @@ class Pipeline:
         seen_plan_ids: set[str] = set()
         seen_source_ranges: list[tuple[float, float]] = []
         for index, transformation_item in enumerate(items, start=1):
-            final = transformation_item.get("final_script", {}) if isinstance(transformation_item, dict) else {}
+            raw_final = transformation_item.get("final_script", {})
+            final = raw_final if isinstance(raw_final, dict) else {}
             candidate_id = str(final.get("candidate_id") or transformation_item.get("candidate_id") or f"candidate-{index:03d}")
             suffix = safe_name(candidate_id, f"clip-{index:02d}")
             artifact = work_directory / f"production-plan-{suffix}.json"
-            cache_key = _hash({
-                "version": PRODUCTION_PLAN_VERSION,
-                "final_script": final,
-                "source_context": transformation_item.get("source_context", {}),
-                "semantic": transformation_item.get("semantic_representation", {}),
-                "production": self.config.production,
-                "envelope": envelope_context,
-            })
             stage_name = f"production_plan:{candidate_id}"
-            use_cache = self.config.production.cache_enabled and tracker.completed(stage_name, artifact, cache_key)
-            final_validation = validate_final_script(
-                final,
-                transformation_item.get("source_context", {}),
-                transformation_item.get("semantic_representation", {}),
-                str(transformation_item.get("candidate_id") or ""),
-            )
-            if use_cache and not final_validation.passed:
-                tracker.invalidate("Cached ProductionPlan has an invalid FinalScript contract.", (stage_name,))
-                self.warnings.append(
-                    f"Production plan cache for {candidate_id} was invalidated by FinalScript contract validation."
+            outcome: dict[str, Any]
+            try:
+                cache_key = _hash({
+                    "version": PRODUCTION_PLAN_VERSION,
+                    "final_script": final,
+                    "source_context": transformation_item.get("source_context", {}),
+                    "semantic": transformation_item.get("semantic_representation", {}),
+                    "production": self.config.production,
+                    "envelope": envelope_context,
+                })
+                use_cache = self.config.production.cache_enabled and tracker.completed(
+                    stage_name, artifact, cache_key,
                 )
-                use_cache = False
-            if use_cache:
-                plan_data = read_json(artifact, {})
-                try:
-                    plan = ProductionPlan.model_validate(plan_data)
-                except Exception as error:
-                    tracker.invalidate("Повреждён production plan cache.", (stage_name,))
+                final_validation = validate_final_script(
+                    final,
+                    transformation_item.get("source_context", {}),
+                    transformation_item.get("semantic_representation", {}),
+                    str(transformation_item.get("candidate_id") or ""),
+                )
+                if use_cache and not final_validation.passed:
+                    tracker.invalidate("Cached ProductionPlan has an invalid FinalScript contract.", (stage_name,))
+                    self.warnings.append(
+                        f"Production plan cache for {candidate_id} was invalidated by FinalScript contract validation."
+                    )
                     use_cache = False
-                    plan_data = {}
-                else:
-                    outcomes.append({"status": "completed", "candidate_id": candidate_id, "plan": plan.model_dump(mode="json"), "cache_hit": True})
-            if not use_cache:
-                tracker.start(stage_name, cache_key)
-                try:
+                if use_cache:
+                    plan_data = read_json(artifact, {})
+                    try:
+                        plan = ProductionPlan.model_validate(plan_data)
+                    except Exception:
+                        tracker.invalidate("Повреждён production plan cache.", (stage_name,))
+                        use_cache = False
+                    else:
+                        outcome = {
+                            "status": "completed", "candidate_id": candidate_id,
+                            "plan": plan.model_dump(mode="json"), "cache_hit": True,
+                        }
+                if not use_cache:
+                    tracker.start(stage_name, cache_key)
                     plan = build_production_plan(
                         transformation_item,
                         self.config.production,
                         envelope_context=envelope_context,
                     )
-                except (ProductionPlanError, ValueError) as error:
-                    tracker.finish(stage_name, "failed", str(error))
-                    outcomes.append({"status": "failed", "candidate_id": candidate_id, "error": str(error), "cache_hit": False})
-                    continue
-                plan_data = plan.model_dump(mode="json")
-                write_json(artifact, plan_data)
-                tracker.finish(stage_name)
-                outcomes.append({"status": "completed", "candidate_id": candidate_id, "plan": plan_data, "cache_hit": False})
-            outcome = outcomes[-1]
-            if outcome.get("status") == "completed":
+                    plan_data = plan.model_dump(mode="json")
+                    write_json(artifact, plan_data)
+                    tracker.finish(stage_name)
+                    outcome = {
+                        "status": "completed", "candidate_id": candidate_id,
+                        "plan": plan_data, "cache_hit": False,
+                    }
                 outcome["production_plan_fingerprint"] = cache_key
                 plan = ProductionPlan.model_validate(outcome["plan"])
                 source_range = _plan_source_range(plan)
@@ -2516,18 +2540,31 @@ class Pipeline:
                         f"Production plan {candidate_id} исключён: он дублирует уже выбранный ролик ({duplicate_reason})."
                     )
                     tracker.finish(stage_name, "skipped", duplicate_reason)
-                    continue
-                seen_candidate_ids.add(candidate_id)
-                seen_plan_ids.add(plan.plan_id)
-                if source_range is not None:
-                    seen_source_ranges.append(source_range)
-                outcome.update({
-                    "requested_index": index,
-                    "production_plan_id": plan.plan_id,
-                    "source_start_seconds": source_range[0] if source_range else None,
-                    "source_end_seconds": source_range[1] if source_range else None,
-                })
-                artifacts.extend(self._write_production_artifacts(output_directory, suffix, index, outcome["plan"]))
+                else:
+                    outcome.update({
+                        "requested_index": index,
+                        "production_plan_id": plan.plan_id,
+                        "source_start_seconds": source_range[0] if source_range else None,
+                        "source_end_seconds": source_range[1] if source_range else None,
+                    })
+                    artifacts.extend(
+                        self._write_production_artifacts(
+                            output_directory, suffix, index, outcome["plan"],
+                        )
+                    )
+                    seen_candidate_ids.add(candidate_id)
+                    seen_plan_ids.add(plan.plan_id)
+                    if source_range is not None:
+                        seen_source_ranges.append(source_range)
+            except Exception as error:
+                safe = _finish_candidate_stage_failure(tracker, stage_name, error)
+                outcome = {
+                    "status": "failed", "candidate_id": candidate_id,
+                    "requested_index": index, "stage": stage_name,
+                    "error": safe, "errors": [safe], "cache_hit": False,
+                }
+                self.errors.append(f"production_plan:{candidate_id}: {safe}")
+            outcomes.append(outcome)
         completed = [item for item in outcomes if item.get("status") == "completed"]
         if not completed:
             return {"enabled": True, "status": "failed", "items": outcomes, "artifacts": artifacts}
@@ -2569,14 +2606,22 @@ class Pipeline:
         outcomes: list[dict[str, Any]] = []
         eligible: list[tuple[int, str, ProductionPlan, dict[str, Any]]] = []
         for default_index, item in enumerate(plan_items, start=1):
-            candidate_id, plan_data = item["candidate_id"], item["plan"]
-            index = int(item.get("requested_index") or default_index)
+            candidate_id = str(item.get("candidate_id") or f"candidate-{default_index:03d}")
+            stage_name = f"tts_generation:{candidate_id}"
             try:
+                plan_data = item["plan"]
+                index = int(item.get("requested_index") or default_index)
                 plan = ProductionPlan.model_validate(plan_data)
+                stage_name = f"tts_generation:{plan.plan_id}"
+                allowed, reason = tts_eligibility(plan)
             except Exception as error:
-                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
+                safe = _finish_candidate_stage_failure(tracker, stage_name, error)
+                outcomes.append({
+                    "candidate_id": candidate_id, "status": "failed",
+                    "stage": stage_name, "error": safe, "errors": [safe],
+                })
+                self.errors.append(f"tts:{candidate_id}: {safe}")
                 continue
-            allowed, reason = tts_eligibility(plan)
             if not allowed:
                 outcomes.append({
                     "candidate_id": candidate_id, "status": "skipped", "reason": reason,
@@ -2585,6 +2630,8 @@ class Pipeline:
                 continue
             eligible.append((index, candidate_id, plan, item))
         if not eligible:
+            if any(item.get("status") == "failed" for item in outcomes):
+                return _multi_stage_report("tts", outcomes)
             reason = str(outcomes[0].get("reason", "no_eligible_narration")) if outcomes else "no_eligible_narration"
             tracker.skip("tts_generation", f"TTS skipped: {reason}.")
             return {
@@ -2593,29 +2640,41 @@ class Pipeline:
                 "items": outcomes,
             }
         for index, candidate_id, plan, plan_item in eligible:
-            candidate_output = _candidate_output_directory(output_directory, candidate_id, index)
             stage_name = f"tts_generation:{plan.plan_id}"
-            tracker.start(stage_name, _hash({"plan": plan.plan_id, "tts": self.config.tts, "recompute": self.recompute_tts}))
             try:
+                candidate_output = _candidate_output_directory(
+                    output_directory, candidate_id, index,
+                )
+                tracker.start(stage_name, _hash({
+                    "plan": plan.plan_id,
+                    "tts": self.config.tts,
+                    "recompute": self.recompute_tts,
+                }))
                 result = TTSService(self.root, self.config).generate(
                     plan, work_directory, candidate_output, force_recompute=self.recompute_tts,
                 )
-            except TTSError as error:
-                safe = sanitize_api_error(error)
-                tracker.finish(stage_name, "failed", safe)
-                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": safe})
+                tracker.finish(
+                    stage_name,
+                    "completed" if result.status in {"completed", "partial", "fallback"} else result.status,
+                )
+                report = tts_report_section(result)
+                outcome = {
+                    "candidate_id": candidate_id, "status": result.status,
+                    "output_directory": str(candidate_output), "report": report,
+                    "tts_invoked": bool(report.get("tts_invoked", True)),
+                    **_production_item_identity(plan_item),
+                }
+                self.warnings.extend(result.warnings)
+                self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
+            except Exception as error:
+                safe = _finish_candidate_stage_failure(tracker, stage_name, error)
+                outcome = {
+                    "candidate_id": candidate_id, "status": "failed",
+                    "stage": stage_name, "error": safe, "errors": [safe],
+                    **_production_item_identity(plan_item),
+                }
                 self.errors.append(f"tts:{candidate_id}: {safe}")
-                continue
-            tracker.finish(stage_name, "completed" if result.status in {"completed", "partial", "fallback"} else result.status)
-            report = tts_report_section(result)
-            outcomes.append({
-                "candidate_id": candidate_id, "status": result.status,
-                "output_directory": str(candidate_output), "report": report,
-                "tts_invoked": bool(report.get("tts_invoked", True)),
-                **_production_item_identity(plan_item),
-            })
-            self.warnings.extend(result.warnings)
-            self.errors.extend([f"tts:{candidate_id}: {entry.message}" for entry in result.api_errors])
+            outcomes.append(outcome)
         return _multi_stage_report("tts", outcomes)
 
     def _run_audio(
@@ -2636,51 +2695,82 @@ class Pipeline:
         tts_items = {str(item.get("candidate_id")): item for item in tts.get("items", []) if isinstance(item, dict)}
         outcomes: list[dict[str, Any]] = []
         for default_index, item in enumerate(plan_items, start=1):
-            candidate_id, plan_data = item["candidate_id"], item["plan"]
-            index = int(item.get("requested_index") or default_index)
+            candidate_id = str(item.get("candidate_id") or f"candidate-{default_index:03d}")
+            stage_name = f"audio_composition:{candidate_id}"
             try:
+                plan_data = item["plan"]
+                index = int(item.get("requested_index") or default_index)
                 plan = ProductionPlan.model_validate(plan_data)
-            except Exception as error:
-                outcomes.append({"candidate_id": candidate_id, "status": "failed", "error": sanitize_api_error(error)})
-                continue
-            tts_allowed, _reason = tts_eligibility(plan)
-            tts_item = tts_items.get(candidate_id)
-            if tts_allowed and (not tts_item or tts_item.get("status") not in {"completed", "partial", "fallback"}):
-                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "tts_unavailable"})
-                continue
-            candidate_output_value = tts_item.get("output_directory") if isinstance(tts_item, dict) else None
-            candidate_output = Path(str(candidate_output_value)) if candidate_output_value else _candidate_output_directory(output_directory, candidate_id, index)
-            stage_name = f"audio_composition:{plan.plan_id}"
-            tracker.start(stage_name, _hash({
-                "plan": plan.plan_id,
-                "audio": self.config.audio_composition,
-                "audio_mode": plan.audio_mode,
-                "tts_result": _file_fingerprint(candidate_output / "tts" / "tts-result.json") if tts_allowed else None,
-                "recompute": self.recompute_audio,
-            }))
-            try:
+                stage_name = f"audio_composition:{plan.plan_id}"
+                tts_allowed, _reason = tts_eligibility(plan)
+                tts_item = tts_items.get(candidate_id)
+                if tts_allowed and (
+                    not tts_item
+                    or tts_item.get("status") not in {"completed", "partial", "fallback"}
+                ):
+                    upstream_stage = (
+                        str(tts_item.get("stage") or f"tts_generation:{candidate_id}")
+                        if isinstance(tts_item, dict)
+                        else f"tts_generation:{candidate_id}"
+                    )
+                    outcomes.append({
+                        "candidate_id": candidate_id, "status": "skipped",
+                        "reason": "tts_unavailable",
+                        "stage": upstream_stage,
+                        "error": _candidate_stage_error(
+                            tts_item,
+                            "TTS output is unavailable for this candidate.",
+                        ),
+                    })
+                    continue
+                candidate_output_value = (
+                    tts_item.get("output_directory") if isinstance(tts_item, dict) else None
+                )
+                candidate_output = (
+                    Path(str(candidate_output_value))
+                    if candidate_output_value
+                    else _candidate_output_directory(output_directory, candidate_id, index)
+                )
+                tracker.start(stage_name, _hash({
+                    "plan": plan.plan_id,
+                    "audio": self.config.audio_composition,
+                    "audio_mode": plan.audio_mode,
+                    "tts_result": (
+                        _file_fingerprint(candidate_output / "tts" / "tts-result.json")
+                        if tts_allowed else None
+                    ),
+                    "recompute": self.recompute_audio,
+                }))
                 project = AudioCompositionService(self.root, self.config).compose(
                     plan, source, transcript, read_json(candidate_output / "tts" / "tts-result.json", {}) if tts_allowed else None,
                     work_directory, candidate_output, force_recompute=self.recompute_audio,
                     prepared_source_audio_path=prepared_source_audio_path,
                 )
-            except AudioCompositionError as error:
-                safe = sanitize_api_error(error)
-                tracker.finish(stage_name, "failed", safe)
-                outcomes.append({
-                    "candidate_id": candidate_id, "status": "failed", "error": safe,
-                    **_audio_handoff_failure_details(error),
-                })
+                tracker.finish(
+                    stage_name,
+                    "completed" if project.status in {"completed", "partial"} else project.status,
+                )
+                outcome = {
+                    "candidate_id": candidate_id, "status": project.status,
+                    "output_directory": str(candidate_output),
+                    "report": audio_report_section(project),
+                    **_production_item_identity(item),
+                }
+                self.warnings.extend(project.warnings)
+                self.errors.extend([f"audio:{candidate_id}: {entry}" for entry in project.errors])
+            except Exception as error:
+                safe = _finish_candidate_stage_failure(tracker, stage_name, error)
+                outcome = {
+                    "candidate_id": candidate_id, "status": "failed",
+                    "stage": stage_name, "error": safe, "errors": [safe],
+                    **(
+                        _audio_handoff_failure_details(error)
+                        if isinstance(error, AudioCompositionError) else {}
+                    ),
+                    **_production_item_identity(item),
+                }
                 self.errors.append(f"audio:{candidate_id}: {safe}")
-                continue
-            tracker.finish(stage_name, "completed" if project.status in {"completed", "partial"} else project.status)
-            outcomes.append({
-                "candidate_id": candidate_id, "status": project.status,
-                "output_directory": str(candidate_output), "report": audio_report_section(project),
-                **_production_item_identity(item),
-            })
-            self.warnings.extend(project.warnings)
-            self.errors.extend([f"audio:{candidate_id}: {entry}" for entry in project.errors])
+            outcomes.append(outcome)
         return _multi_stage_report("audio", outcomes)
 
     def _run_production_render(
@@ -2726,13 +2816,38 @@ class Pipeline:
         for default_index, item in enumerate(plan_items, start=1):
             candidate_id, plan_data = item["candidate_id"], item["plan"]
             identity = _production_item_identity(item)
-            requested_index = int(identity.get("requested_index") or default_index)
+            try:
+                requested_index = int(identity.get("requested_index") or default_index)
+            except (TypeError, ValueError) as error:
+                safe = sanitize_api_error(error)
+                outcomes.append({
+                    "candidate_id": candidate_id, "status": "failed",
+                    "stage": f"{render_profile}:{candidate_id}",
+                    "error": safe, "errors": [safe], **identity,
+                })
+                self.errors.append(f"{render_profile}:{candidate_id}: {safe}")
+                continue
             audio_item = audio_items.get(candidate_id)
             if not audio_item or audio_item.get("status") not in {"completed", "partial"}:
-                outcomes.append({"candidate_id": candidate_id, "status": "skipped", "reason": "audio_unavailable", **identity})
+                upstream_stage = (
+                    str(audio_item.get("stage") or f"audio_composition:{candidate_id}")
+                    if isinstance(audio_item, dict)
+                    else f"audio_composition:{candidate_id}"
+                )
+                outcomes.append({
+                    "candidate_id": candidate_id,
+                    "status": "skipped",
+                    "reason": "audio_unavailable",
+                    "stage": upstream_stage,
+                    "error": _candidate_stage_error(
+                        audio_item,
+                        "Audio output is unavailable for this candidate.",
+                    ),
+                    **identity,
+                })
                 continue
-            candidate_output = Path(str(audio_item["output_directory"]))
             try:
+                candidate_output = Path(str(audio_item["output_directory"]))
                 plan = ProductionPlan.model_validate(plan_data)
                 audio_project = AudioProject.model_validate(read_json(candidate_output / "audio" / "audio-project.json", {}))
             except Exception as error:
@@ -2766,50 +2881,79 @@ class Pipeline:
                         execution_diagnostics = execution.diagnostics
                     if render_profile == "final":
                         _copy_creative_preview_for_parity(creative_root, candidate_output / "creative-preview")
-                except (CreativeArtifactError, OSError, ValueError) as error:
+                except Exception as error:
                     safe = sanitize_api_error(error)
                     outcomes.append({
                         "candidate_id": candidate_id, "status": "failed", "errors": [safe], **identity,
                     })
                     self.errors.append(f"creative_preview:{candidate_id}: {safe}")
                     continue
-            report = self._compose_production_render(
-                tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
-                raise_on_error=False, visual_analysis=visual_analysis,
-                phase6_candidate=candidate_evidence.get(candidate_id),
-                multimodal_timeline=multimodal_timeline,
-                story_units=story_units,
-                render_profile=render_profile,
-                compiled_plan=compiled_plan,
-                creative_intent=creative_intent,
-                creative_handoff=creative_handoff,
-                execution_status=execution_status,
-                execution_reason_codes=execution_reason_codes,
-                execution_diagnostics=execution_diagnostics,
-            )
-            output_file = str(report.get("output_file") or "")
-            if render_profile == "final" and report.get("status") in {"completed", "warning"} and output_file:
-                canonical = self._publish_run_result(Path(output_file), output_directory, requested_index)
-                report = dict(report)
-                report["intermediate_output_file"] = output_file
-                report["output_file"] = str(canonical)
-                output_file = str(canonical)
-            outcomes.append({
-                "clip_result_id": f"{candidate_id}:{plan.plan_id}",
-                "candidate_id": candidate_id,
-                "status": report.get("status", "failed"),
-                "output_directory": str(candidate_output),
-                "report": report,
-                "output_file": output_file,
-                "production_plan_id": plan.plan_id,
-                "source_start_seconds": identity.get("source_start_seconds"),
-                "source_end_seconds": identity.get("source_end_seconds"),
-                "source_fingerprint": _source_range_fingerprint(source.id, identity),
-                "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
-                "run_id": self.run_id,
-                "revision_id": f"{self.run_id}:render-{requested_index:02d}",
-                **identity,
-            })
+            try:
+                report = self._compose_production_render(
+                    tracker, plan, audio_project, source, transcript, work_directory, candidate_output,
+                    raise_on_error=False, visual_analysis=visual_analysis,
+                    phase6_candidate=candidate_evidence.get(candidate_id),
+                    multimodal_timeline=multimodal_timeline,
+                    story_units=story_units,
+                    render_profile=render_profile,
+                    compiled_plan=compiled_plan,
+                    creative_intent=creative_intent,
+                    creative_handoff=creative_handoff,
+                    execution_status=execution_status,
+                    execution_reason_codes=execution_reason_codes,
+                    execution_diagnostics=execution_diagnostics,
+                )
+                output_file = str(report.get("output_file") or "")
+                if render_profile == "final" and report.get("status") in {"completed", "warning"} and output_file:
+                    canonical = self._publish_run_result(Path(output_file), output_directory, requested_index)
+                    report = dict(report)
+                    report["intermediate_output_file"] = output_file
+                    report["output_file"] = str(canonical)
+                    output_file = str(canonical)
+            except Exception as error:
+                # A render is a candidate-scoped fan-out unit. Contract,
+                # renderer, and publication failures remain local to it.
+                safe = sanitize_api_error(error)
+                outcomes.append({
+                    "candidate_id": candidate_id,
+                    "status": "failed",
+                    "stage": f"{render_profile}:{candidate_id}",
+                    "error": safe,
+                    "errors": [safe],
+                    **identity,
+                })
+                self.errors.append(f"{render_profile}:{candidate_id}: {safe}")
+                continue
+            try:
+                outcome = {
+                    "clip_result_id": f"{candidate_id}:{plan.plan_id}",
+                    "candidate_id": candidate_id,
+                    "status": report.get("status", "failed"),
+                    "output_directory": str(candidate_output),
+                    "report": report,
+                    "output_file": output_file,
+                    "production_plan_id": plan.plan_id,
+                    "source_start_seconds": identity.get("source_start_seconds"),
+                    "source_end_seconds": identity.get("source_end_seconds"),
+                    "source_fingerprint": _source_range_fingerprint(source.id, identity),
+                    "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
+                    "run_id": self.run_id,
+                    "revision_id": f"{self.run_id}:render-{requested_index:02d}",
+                    **identity,
+                }
+            except Exception as error:
+                safe = sanitize_api_error(error)
+                outcomes.append({
+                    "candidate_id": candidate_id,
+                    "status": "failed",
+                    "stage": f"{render_profile}:{candidate_id}",
+                    "error": safe,
+                    "errors": [safe],
+                    **identity,
+                })
+                self.errors.append(f"{render_profile}:{candidate_id}: {safe}")
+                continue
+            outcomes.append(outcome)
         return _multi_stage_report(
             "production_render" if render_profile == "final" else "creative_preview",
             outcomes,
@@ -2859,7 +3003,25 @@ class Pipeline:
                 allow_creative_revision=allow_creative_revision,
                 render_profile=render_profile,
             )
-        except ProductionRenderError as error:
+            report = production_render_report_section(project)
+            report["audio_mode"] = plan.audio_mode
+            source_range = _plan_source_range(plan)
+            identity = {
+                "source_start_seconds": source_range[0] if source_range else None,
+                "source_end_seconds": source_range[1] if source_range else None,
+            }
+            report.update({
+                "clip_result_id": f"{plan.metadata.candidate_id}:{plan.plan_id}",
+                "candidate_id": plan.metadata.candidate_id,
+                "production_plan_id": plan.plan_id,
+                **identity,
+                "source_fingerprint": _source_range_fingerprint(source.id, identity),
+                "content_fingerprint": _render_content_fingerprint(
+                    Path(str(report.get("output_file") or "")), report,
+                ),
+                "primary": True,
+            })
+        except Exception as error:
             safe = sanitize_api_error(error)
             tracker.finish(stage_name, "failed", safe)
             self.errors.append(f"production_render: {safe}")
@@ -2867,22 +3029,6 @@ class Pipeline:
                 raise ProductionRenderError(f"Production render не завершён: {safe}") from error
             return {"enabled": True, "status": "failed", "errors": [safe], "ai_called": False}
         tracker.finish(stage_name, "completed" if project.status in {"completed", "warning"} else project.status)
-        report = production_render_report_section(project)
-        report["audio_mode"] = plan.audio_mode
-        source_range = _plan_source_range(plan)
-        identity = {
-            "source_start_seconds": source_range[0] if source_range else None,
-            "source_end_seconds": source_range[1] if source_range else None,
-        }
-        report.update({
-            "clip_result_id": f"{plan.metadata.candidate_id}:{plan.plan_id}",
-            "candidate_id": plan.metadata.candidate_id,
-            "production_plan_id": plan.plan_id,
-            **identity,
-            "source_fingerprint": _source_range_fingerprint(source.id, identity),
-            "content_fingerprint": _render_content_fingerprint(Path(str(report.get("output_file") or "")), report),
-            "primary": True,
-        })
         self.warnings.extend(project.warnings)
         return report
 
@@ -3487,78 +3633,105 @@ class Pipeline:
         outcomes: list[dict[str, Any]] = []
         artifacts: list[str] = []
         for index, scored in enumerate(selected, start=1):
-            candidate = scored.candidate
-            context = build_source_context(
-                source, metadata, candidate, transcript, transcript_features, audio_features,
-                scenes, self.config.transformation,
-            )
-            suffix = safe_name(candidate.id, f"clip-{index:02d}")
-            artifact = work_directory / f"transformation-{suffix}.json"
-            cache_key = _hash({
-                "engine": TRANSFORMATION_ENGINE_VERSION,
-                "final_script_contract": FINAL_SCRIPT_CONTRACT_VERSION,
-                "source": source.get("id"),
-                "candidate": candidate.to_dict(),
-                "transcript": _hash(transcript),
-                "supporting_context": [item.to_dict() for item in context.supporting_context],
-                "transformation": self.config.transformation,
-                "provider": "mock" if self.mock_ai else self.config.ai.provider,
-                "model": self.config.ai.model,
-                "prompt_versions": PROMPT_VERSIONS,
-                "no_ai": self.no_ai_transformation,
-            })
-            stage_name = f"transformation_result:{candidate.id}"
-            use_cache = self.config.transformation.cache_enabled and tracker.completed(stage_name, artifact, cache_key)
-            if use_cache:
-                outcome = read_json(artifact, {})
-                final_validation = validate_transformation_outcome(outcome, context)
-                if final_validation.passed:
-                    outcome["cache_hit"] = True
-                    outcome.setdefault("validation", {})["final_script"] = final_validation.to_dict()
-                    outcome["final_script_source"] = "cache"
-                else:
-                    tracker.invalidate("Cached FinalScript does not satisfy the current contract.", (stage_name,))
-                    self.warnings.append(
-                        f"Transformation cache for {candidate.id} was invalidated by FinalScript contract validation."
+            candidate = getattr(scored, "candidate", None)
+            candidate_id = str(getattr(candidate, "id", None) or f"candidate-{index:03d}")
+            stage_name = f"transformation_result:{candidate_id}"
+            try:
+                if candidate is None:
+                    raise ValueError("Selected item has no candidate payload.")
+                context = build_source_context(
+                    source, metadata, candidate, transcript, transcript_features, audio_features,
+                    scenes, self.config.transformation,
+                )
+                suffix = safe_name(candidate_id, f"clip-{index:02d}")
+                artifact = work_directory / f"transformation-{suffix}.json"
+                cache_key = _hash({
+                    "engine": TRANSFORMATION_ENGINE_VERSION,
+                    "final_script_contract": FINAL_SCRIPT_CONTRACT_VERSION,
+                    "source": source.get("id"),
+                    "candidate": candidate.to_dict(),
+                    "transcript": _hash(transcript),
+                    "supporting_context": [item.to_dict() for item in context.supporting_context],
+                    "transformation": self.config.transformation,
+                    "provider": "mock" if self.mock_ai else self.config.ai.provider,
+                    "model": self.config.ai.model,
+                    "prompt_versions": PROMPT_VERSIONS,
+                    "no_ai": self.no_ai_transformation,
+                })
+                use_cache = self.config.transformation.cache_enabled and tracker.completed(
+                    stage_name, artifact, cache_key,
+                )
+                if use_cache:
+                    outcome = read_json(artifact, {})
+                    final_validation = validate_transformation_outcome(outcome, context)
+                    if final_validation.passed:
+                        outcome["cache_hit"] = True
+                        outcome.setdefault("validation", {})["final_script"] = final_validation.to_dict()
+                        outcome["final_script_source"] = "cache"
+                    else:
+                        tracker.invalidate("Cached FinalScript does not satisfy the current contract.", (stage_name,))
+                        self.warnings.append(
+                            f"Transformation cache for {candidate_id} was invalidated by FinalScript contract validation."
+                        )
+                        use_cache = False
+                if not use_cache:
+                    tracker.start(stage_name, cache_key)
+                    actual_provider = provider
+                    if provider_error is not None:
+                        actual_provider = _UnavailableTransformer(provider_error)
+                    outcome = run_content_transformation(
+                        context, self.config.transformation, actual_provider,
+                        force_local=self.no_ai_transformation,
                     )
-                    use_cache = False
-            if not use_cache:
-                tracker.start(stage_name, cache_key)
-                actual_provider = provider
-                if provider_error is not None:
-                    actual_provider = _UnavailableTransformer(provider_error)
-                outcome = run_content_transformation(
-                    context, self.config.transformation, actual_provider,
-                    force_local=self.no_ai_transformation,
+                    outcome["cache_hit"] = False
+                    write_json(artifact, outcome)
+                    self._write_transformation_work_artifacts(work_directory, suffix, outcome)
+                    outcome_status = str(outcome.get("status", "failed"))
+                    tracker.finish(
+                        stage_name,
+                        outcome_status if outcome_status in {"completed", "fallback", "failed"} else "failed",
+                        _outcome_detail(outcome) if outcome_status == "failed" else None,
+                    )
+                    self._record_transformation_substages(
+                        tracker, candidate_id, cache_key, outcome,
+                    )
+                outcome["transformation_fingerprint"] = cache_key
+                outcome_artifacts = self._write_transformation_artifacts(
+                    output_directory, suffix, index, outcome,
                 )
-                outcome["cache_hit"] = False
-                write_json(artifact, outcome)
-                self._write_transformation_work_artifacts(work_directory, suffix, outcome)
-                outcome_status = str(outcome.get("status", "failed"))
-                tracker.finish(
-                    stage_name,
-                    outcome_status if outcome_status in {"completed", "fallback", "failed"} else "failed",
-                    _outcome_detail(outcome) if outcome_status == "failed" else None,
-                )
-                self._record_transformation_substages(tracker, candidate.id, cache_key, outcome)
-            outcome["transformation_fingerprint"] = cache_key
+                usage = outcome.get("ai_usage", {})
+                raw_errors = usage.get("api_errors", []) if isinstance(usage, dict) else []
+                if raw_errors:
+                    self.errors.extend([f"transformation: {sanitize_api_error(value)}" for value in raw_errors])
+                normalization = outcome.get("normalization", {}) if isinstance(outcome.get("normalization"), dict) else {}
+                for warning in normalization.get("warnings", []) if isinstance(normalization.get("warnings"), list) else []:
+                    self.warnings.append(f"Transformation {candidate_id}: {warning}")
+                if outcome.get("fallback", {}).get("used"):
+                    reason = outcome.get("fallback", {}).get("reason")
+                    self.warnings.append(
+                        "Local-only transformation used conservative fallback."
+                        if reason == "ai_disabled"
+                        else "AI transformation failed -> local fallback used."
+                    )
+            except Exception as error:
+                safe = _finish_candidate_stage_failure(tracker, stage_name, error)
+                outcome = {
+                    "enabled": True,
+                    "status": "failed",
+                    "candidate_id": candidate_id,
+                    "stage": stage_name,
+                    "error": safe,
+                    "validation": {
+                        "errors": [safe],
+                        "final_script": {"passed": False, "errors": [safe]},
+                    },
+                    "final_script": {"production_ready_for_tts": False},
+                    "cacheable": False,
+                }
+                outcome_artifacts = []
+                self.errors.append(f"transformation:{candidate_id}: {safe}")
             outcomes.append(outcome)
-            outcome_artifacts = self._write_transformation_artifacts(output_directory, suffix, index, outcome)
             artifacts.extend(outcome_artifacts)
-            usage = outcome.get("ai_usage", {})
-            raw_errors = usage.get("api_errors", []) if isinstance(usage, dict) else []
-            if raw_errors:
-                self.errors.extend([f"transformation: {sanitize_api_error(value)}" for value in raw_errors])
-            normalization = outcome.get("normalization", {}) if isinstance(outcome.get("normalization"), dict) else {}
-            for warning in normalization.get("warnings", []) if isinstance(normalization.get("warnings"), list) else []:
-                self.warnings.append(f"Transformation {candidate.id}: {warning}")
-            if outcome.get("fallback", {}).get("used"):
-                reason = outcome.get("fallback", {}).get("reason")
-                self.warnings.append(
-                    "Local-only transformation used conservative fallback."
-                    if reason == "ai_disabled"
-                    else "AI transformation failed -> local fallback used."
-                )
         outcomes, diversity_warnings = _deduplicate_transformation_outcomes(outcomes)
         statuses = [str(item.get("status", "failed")) for item in outcomes]
         overall = "failed" if all(item == "failed" for item in statuses) else "fallback" if "fallback" in statuses else "completed"
@@ -3694,7 +3867,11 @@ def _deduplicate_transformation_outcomes(
         if outcome.get("status") not in {"completed", "fallback"}:
             accepted.append(outcome)
             continue
-        duplicate_of = next((chosen for chosen in accepted if _transformation_duplicate(outcome, chosen)), None)
+        duplicate_of = next((
+            chosen for chosen in accepted
+            if chosen.get("status") in {"completed", "fallback"}
+            and _transformation_duplicate(outcome, chosen)
+        ), None)
         if duplicate_of is None:
             accepted.append(outcome)
             continue
@@ -4018,22 +4195,48 @@ def _items_by_candidate(stage: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _outcome_detail(item: dict[str, Any] | None) -> str:
+def _outcome_detail(
+    item: dict[str, Any] | None,
+    fallback: str = "Неизвестная причина.",
+) -> str:
+    """Extract one candidate-owned failure reason from every stage result shape."""
+
     if not isinstance(item, dict):
-        return "Неизвестная причина."
-    error = str(item.get("error") or "").strip()
-    if error:
-        return error
-    validation = item.get("validation", {})
-    if isinstance(validation, dict):
-        errors = validation.get("errors", [])
+        return fallback
+    report = item.get("report")
+    sources = (item, report if isinstance(report, dict) else {})
+    for source in sources:
+        error = str(source.get("error") or "").strip()
+        if error:
+            return error
+        validation = source.get("validation")
+        validation_sources = (
+            (validation, validation.get("final_script", {}))
+            if isinstance(validation, dict)
+            else ()
+        )
+        for validation_source in validation_sources:
+            if not isinstance(validation_source, dict):
+                continue
+            errors = validation_source.get("errors")
+            if isinstance(errors, list) and errors:
+                detail = "; ".join(str(value) for value in errors[:3] if str(value))
+                if detail:
+                    return detail
+            if errors:
+                return str(errors)
+        errors = source.get("errors")
         if isinstance(errors, list) and errors:
-            return "; ".join(str(value) for value in errors[:3] if str(value))
-    errors = item.get("errors", [])
-    if isinstance(errors, list) and errors:
-        return "; ".join(str(value) for value in errors[:3] if str(value))
-    reason = str(item.get("reason") or "").strip()
-    return reason or "Неизвестная причина."
+            detail = "; ".join(str(value) for value in errors[:3] if str(value))
+            if detail:
+                return detail
+        if errors:
+            return str(errors)
+        for key in ("reason", "message"):
+            detail = str(source.get(key) or "").strip()
+            if detail:
+                return detail
+    return fallback
 
 
 def _selection_rejection_reason(scored: Any) -> str:
@@ -4095,6 +4298,28 @@ def _multi_stage_report(stage: str, outcomes: list[dict[str, Any]]) -> dict[str,
         if len(successful) != len(outcomes):
             primary.setdefault("warnings", []).append("Не все ролики удалось экспортировать; готовые результаты сохранены.")
     return primary
+
+
+def _candidate_stage_error(item: object, fallback: str) -> str:
+    """Return the sanitized candidate-level failure carried by a stage item."""
+
+    detail = _outcome_detail(item if isinstance(item, dict) else None, fallback)
+    return sanitize_api_error(RuntimeError(detail))
+
+
+def _finish_candidate_stage_failure(
+    tracker: StageTracker,
+    stage_name: str,
+    error: BaseException,
+) -> str:
+    """Close a candidate-owned stage after any ordinary unexpected exception."""
+
+    safe = sanitize_api_error(error)
+    stage = tracker.data.get("stages", {}).get(stage_name, {})
+    if not isinstance(stage, dict) or stage.get("status") != "running":
+        tracker.start(stage_name)
+    tracker.finish(stage_name, "failed", safe)
+    return safe
 
 
 def _prepared_source_audio_path(work_directory: Path) -> Path | None:

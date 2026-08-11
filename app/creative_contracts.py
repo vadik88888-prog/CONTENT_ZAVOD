@@ -217,7 +217,22 @@ def source_output_map_from_legacy_timeline(timeline: VideoTimeline) -> SourceOut
     """Adapt the current VideoTimeline's persisted clip decisions to 30 fps."""
 
     segments: list[EditMapSegment] = []
+    destination_cursor = 0
     for clip in timeline.clips:
+        # ``OutputInterval.from_seconds`` deliberately widens an isolated
+        # interval (floor start / ceil end).  Applying that conversion to both
+        # sides of a non-frame-aligned cut assigns the boundary frame twice.
+        # Quantise the complete timeline as one ordered partition instead, and
+        # reserve frames for source-less clips before omitting them from the map.
+        output_start = max(
+            destination_cursor,
+            seconds_to_output_frame(clip.timeline_start_seconds),
+        )
+        output_end = max(
+            output_start + 1,
+            seconds_to_output_frame(clip.timeline_end_seconds, end=True),
+        )
+        destination_cursor = output_end
         if clip.source_start_seconds is None or clip.source_end_seconds is None:
             continue
         if clip.source_end_seconds <= clip.source_start_seconds:
@@ -228,10 +243,7 @@ def source_output_map_from_legacy_timeline(timeline: VideoTimeline) -> SourceOut
                 clip.source_start_seconds,
                 clip.source_end_seconds,
             ),
-            output=OutputInterval.from_seconds(
-                clip.timeline_start_seconds,
-                clip.timeline_end_seconds,
-            ),
+            output=OutputInterval(start_frame=output_start, end_frame=output_end),
         ))
     if not segments:
         raise ValueError("LEGACY_TIMELINE_HAS_NO_SOURCE_MAPPING")

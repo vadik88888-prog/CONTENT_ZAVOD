@@ -22,9 +22,11 @@ from app.creative_contracts import (
     MotionDomain,
     MotionPlan,
     NormalizedRect,
+    OutputInterval,
     SourceOutputTimeMap,
     canonical_hash,
     compile_render_plan,
+    seconds_to_output_frame,
 )
 from app.motion_planning import build_motion_plan
 from app.production_models import ProductionPlan
@@ -213,8 +215,9 @@ def apply_native_visual_plan(
 ) -> VideoTimeline:
     """Execute normalized 7D geometry and 7E source cutaways on the visual track."""
 
+    fps = compiled_plan.source_output_mapping.output_fps
     boundaries = {
-        frame / 30
+        frame
         for segment in (
             *compiled_plan.composition_plan.segments,
             *compiled_plan.source_broll_plan.segments,
@@ -224,26 +227,54 @@ def apply_native_visual_plan(
             segment.output.end_frame if hasattr(segment, "output") else segment.destination.end_frame,
         )
     }
-    expanded: list[VideoClipModel] = []
+    mapped_outputs = {
+        segment.map_id: segment.output
+        for segment in compiled_plan.source_output_mapping.segments
+    }
+    expanded: list[tuple[VideoClipModel, OutputInterval]] = []
+    destination_cursor = 0
     for clip in timeline.clips:
+        output_start = max(
+            destination_cursor,
+            seconds_to_output_frame(clip.timeline_start_seconds),
+        )
+        output_end = max(
+            output_start + 1,
+            seconds_to_output_frame(clip.timeline_end_seconds, end=True),
+        )
+        destination_cursor = output_end
+        output = OutputInterval(start_frame=output_start, end_frame=output_end)
+        if (
+            clip.source_start_seconds is not None
+            and clip.source_end_seconds is not None
+            and clip.source_end_seconds > clip.source_start_seconds
+        ):
+            authoritative = mapped_outputs.get(f"legacy-{clip.clip_id}")
+            if authoritative is None or authoritative != output:
+                raise ValueError("NATIVE_TIMELINE_MAPPING_PARTITION_MISMATCH")
+
+        if not isinstance(clip, SourceVideoClip):
+            expanded.append((_slice_clip_frames(clip, output, output, None, fps), output))
+            continue
         cuts = sorted(
-            point for point in boundaries
-            if clip.timeline_start_seconds + 0.001 < point < clip.timeline_end_seconds - 0.001
+            frame for frame in boundaries
+            if output.start_frame < frame < output.end_frame
         )
         if not cuts:
-            expanded.append(clip)
+            expanded.append((_slice_clip_frames(clip, output, output, None, fps), output))
             continue
-        points = [clip.timeline_start_seconds, *cuts, clip.timeline_end_seconds]
+        points = [output.start_frame, *cuts, output.end_frame]
         for index, (start, end) in enumerate(zip(points, points[1:]), start=1):
-            expanded.append(_slice_clip(clip, start, end, index))
+            interval = OutputInterval(start_frame=start, end_frame=end)
+            expanded.append((_slice_clip_frames(clip, output, interval, index, fps), interval))
 
-    rendered: list[VideoClipModel] = []
-    for clip in expanded:
+    rendered: list[tuple[VideoClipModel, OutputInterval]] = []
+    for clip, output in expanded:
         if not isinstance(clip, SourceVideoClip):
-            rendered.append(clip)
+            rendered.append((clip, output))
             continue
-        start_frame = round(clip.timeline_start_seconds * 30)
-        end_frame = round(clip.timeline_end_seconds * 30)
+        start_frame = output.start_frame
+        end_frame = output.end_frame
         composition = next((
             item for item in compiled_plan.composition_plan.segments
             if item.output.start_frame <= start_frame and end_frame <= item.output.end_frame
@@ -303,15 +334,18 @@ def apply_native_visual_plan(
                 "fallback_reason": None,
                 "crop_plan": crop,
             })
-        rendered.append(clip.model_copy(update=updates))
+        rendered.append((clip.model_copy(update=updates), output))
 
-    normalized = [
-        clip.model_copy(update={"order": order})
-        for order, clip in enumerate(rendered, start=1)
+    normalized_with_outputs = [
+        (clip.model_copy(update={"order": order}), output)
+        for order, (clip, output) in enumerate(rendered, start=1)
     ]
+    normalized = [clip for clip, _ in normalized_with_outputs]
     transitions = []
-    for left, right in zip(normalized, normalized[1:]):
-        boundary_frame = round(right.timeline_start_seconds * 30)
+    for (left, _), (right, right_output) in zip(
+        normalized_with_outputs, normalized_with_outputs[1:],
+    ):
+        boundary_frame = right_output.start_frame
         broll = next((
             item for item in compiled_plan.source_broll_plan.segments
             if boundary_frame in {item.destination.start_frame, item.destination.end_frame}
@@ -323,22 +357,33 @@ def apply_native_visual_plan(
             to_clip_id=right.clip_id,
             duration_seconds=0.15 if transition_type == "short_crossfade" else 0,
         ))
-    return timeline.model_copy(update={"clips": normalized, "transitions": transitions})
+    return timeline.model_copy(update={
+        "clips": normalized,
+        "transitions": transitions,
+        "duration_seconds": round(destination_cursor / fps, 9),
+    })
 
 
-def _slice_clip(clip: VideoClipModel, start: float, end: float, index: int) -> VideoClipModel:
-    duration = round(end - start, 6)
+def _slice_clip_frames(
+    clip: VideoClipModel,
+    source_output: OutputInterval,
+    output: OutputInterval,
+    index: int | None,
+    fps: int,
+) -> VideoClipModel:
+    duration_frames = output.end_frame - output.start_frame
     updates: dict[str, object] = {
-        "clip_id": f"{clip.clip_id}-native-{index:02d}",
-        "timeline_start_seconds": round(start, 6),
-        "timeline_end_seconds": round(end, 6),
-        "duration_seconds": duration,
+        "timeline_start_seconds": round(output.start_frame / fps, 9),
+        "timeline_end_seconds": round(output.end_frame / fps, 9),
+        "duration_seconds": round(duration_frames / fps, 9),
     }
+    if index is not None:
+        updates["clip_id"] = f"{clip.clip_id}-native-{index:02d}"
     if isinstance(clip, SourceVideoClip):
         source_span = clip.source_end_seconds - clip.source_start_seconds
-        output_span = clip.timeline_end_seconds - clip.timeline_start_seconds
-        left_ratio = (start - clip.timeline_start_seconds) / output_span
-        right_ratio = (end - clip.timeline_start_seconds) / output_span
+        output_span = source_output.end_frame - source_output.start_frame
+        left_ratio = (output.start_frame - source_output.start_frame) / output_span
+        right_ratio = (output.end_frame - source_output.start_frame) / output_span
         source_start = clip.source_start_seconds + source_span * left_ratio
         source_end = clip.source_start_seconds + source_span * right_ratio
         updates.update({

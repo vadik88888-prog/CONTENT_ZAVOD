@@ -652,17 +652,76 @@ def _collect_creative_execution(finding: Any, render: dict[str, Any]) -> None:
             message="Native render used declared evidence-bounded fallbacks.",
         )
     if status == "native_rich":
-        raw_broll = render.get("source_broll_plan")
-        segments = raw_broll.get("segments") if isinstance(raw_broll, dict) else None
-        if not isinstance(segments, list) or not segments:
+        missing, layer_evidence = _missing_native_rich_layers(render)
+        if missing:
             finding(
                 "NATIVE_RICH_EVIDENCE_MISSING", "blocker",
-                {"execution_status": status, "source_broll_plan": raw_broll},
-                measured_value="empty source B-roll",
-                threshold="evidence-backed rich domain plans",
+                {
+                    "execution_status": status,
+                    "missing_required_layers": missing,
+                    "required_layer_evidence": layer_evidence,
+                },
+                measured_value=missing,
+                threshold="all required native creative layers executed",
                 producer="creative_execution",
-                message="native_rich cannot mask an empty rich creative plan.",
+                message="native_rich cannot mask missing required creative layers.",
             )
+
+
+def _missing_native_rich_layers(render: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Mirror the compiled-plan rich gate without requiring optional B-roll."""
+
+    caption_plan = render.get("caption_plan")
+    raw_cues = caption_plan.get("cues") if isinstance(caption_plan, dict) else None
+    cues = [item for item in raw_cues if isinstance(item, dict)] if isinstance(raw_cues, list) else []
+
+    motion_plan = render.get("motion_plan")
+    raw_events = motion_plan.get("events") if isinstance(motion_plan, dict) else None
+    events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
+    animated_events = [
+        item for item in events
+        if str(item.get("primitive_id") or "") not in {"", "static"}
+    ]
+    presented_roles = {
+        str(item.get("beat_role") or "") for item in cues
+        if str(item.get("beat_role") or "")
+    } | {
+        str(item.get("purpose") or "") for item in animated_events
+        if str(item.get("purpose") or "")
+    }
+
+    composition_plan = render.get("composition_plan")
+    raw_segments = composition_plan.get("segments") if isinstance(composition_plan, dict) else None
+    segments = [
+        item for item in raw_segments if isinstance(item, dict)
+    ] if isinstance(raw_segments, list) else []
+    reframed_segments = [
+        item for item in segments
+        if str(item.get("target") or "") not in {"", "stable_source"}
+    ]
+    emphasis_count = sum(item.get("emphasis") is not None for item in cues)
+
+    missing: list[str] = []
+    if not cues:
+        missing.append("CAPTION_LAYER_NOT_EXECUTED")
+    if not emphasis_count:
+        missing.append("SEMANTIC_EMPHASIS_NOT_EXECUTED")
+    if "hook" not in presented_roles:
+        missing.append("HOOK_PRESENTATION_NOT_EXECUTED")
+    if "payoff" not in presented_roles:
+        missing.append("PAYOFF_PRESENTATION_NOT_EXECUTED")
+    if not reframed_segments:
+        missing.append("COMPOSITION_REFRAME_NOT_EXECUTED")
+    if not animated_events:
+        missing.append("MOTION_LAYER_NOT_EXECUTED")
+
+    return missing, {
+        "caption_cue_count": len(cues),
+        "semantic_emphasis_count": emphasis_count,
+        "presented_roles": sorted(presented_roles),
+        "reframed_composition_segment_count": len(reframed_segments),
+        "animated_motion_event_count": len(animated_events),
+    }
 
 
 def _collect_audio(finding: Any, audio: dict[str, Any]) -> None:

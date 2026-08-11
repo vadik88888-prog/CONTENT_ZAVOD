@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7D.composition-planner.1"
+COMPOSITION_PLANNER_VERSION = "7D.composition-planner.2"
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
 MovementReason = Literal[
@@ -198,9 +198,37 @@ class CompositionPlanner:
         suppressed = 0
         previous_punch = False
         result: list[_AtomicState] = []
-        for interval, candidate in zip(intervals, candidates):
+        work: list[tuple[OutputInterval, _TargetState | None]] = list(zip(intervals, candidates))
+        index = 0
+        while index < len(work):
+            interval, candidate = work[index]
             frame = interval.start_frame
             cut = frame in cuts
+
+            # A target may disappear before the minimum hold has elapsed.
+            # Split the otherwise-atomic interval at the exact hold boundary
+            # so a stable crop cannot be kept beyond the configured limit.
+            # Scene/edit-map cuts are hard resets and never inherit this hold.
+            hold_end = held_since + self.config.minimum_hold_frames
+            needs_hold_boundary = (
+                current is not None
+                and not cut
+                and candidate is None
+                and frame < hold_end < interval.end_frame
+            )
+            if needs_hold_boundary:
+                work[index:index + 1] = [
+                    (
+                        OutputInterval(start_frame=frame, end_frame=hold_end),
+                        candidate,
+                    ),
+                    (
+                        OutputInterval(start_frame=hold_end, end_frame=interval.end_frame),
+                        candidate,
+                    ),
+                ]
+                interval, candidate = work[index]
+
             reason: MovementReason = "none"
             fallback: CompositionFallback = "none"
             selected: _TargetState | None = None
@@ -247,6 +275,17 @@ class CompositionPlanner:
                     current = candidate
                 else:
                     current = None
+            elif (
+                current is not None
+                and not cut
+                and frame - held_since < self.config.minimum_hold_frames
+            ):
+                # Preserve visual continuity after sparse evidence ends, but do
+                # not extend the semantic target claim.  The emitted segment
+                # below is an evidence-free stable_source fallback whose crop
+                # is inherited from the last acquired state.
+                fallback = "stable_source"
+                reason = "safe_fallback"
             else:
                 current = None
 
@@ -270,9 +309,11 @@ class CompositionPlanner:
                 result.append(_AtomicState(
                     output=interval, state=None, layout=layout, desired_crop=crop,
                     target=AttentionTarget.STABLE_SOURCE, target_ref=None, confidence=0,
-                    evidence_refs=(), fallback=fallback, reason="safe_fallback",
+                    evidence_refs=(), fallback=fallback,
+                    reason="scene_reset" if cut else "safe_fallback",
                     punch_event=None,
                 ))
+                index += 1
                 continue
 
             crop, crop_fallback = _target_crop(
@@ -291,6 +332,7 @@ class CompositionPlanner:
                 confidence=selected.confidence, evidence_refs=selected.decision.evidence_refs,
                 fallback=fallback, reason=reason, punch_event=punch_event,
             ))
+            index += 1
         return tuple(result), suppressed
 
     def _smooth_and_freeze(

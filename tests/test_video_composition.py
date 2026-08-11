@@ -14,7 +14,10 @@ from app.creative_contracts import (
     AttentionTarget,
     BeatRole,
     CanvasPlan,
+    CaptionPlan,
     CompiledRenderPlan,
+    CompositionPlan,
+    CompositionSegmentPlan,
     CreativeIntent,
     CreativePolicy,
     EvidenceItem,
@@ -22,6 +25,7 @@ from app.creative_contracts import (
     ImmutableProductionPlanLink,
     LayoutFamily,
     MotionDomain,
+    MotionPlan,
     MotionPurpose,
     NormalizedRect,
     OutputInterval,
@@ -34,6 +38,7 @@ from app.creative_contracts import (
     SemanticClass,
     SourceBRollSemanticKind,
     SourceInterval,
+    SourceBRollPlan,
     assert_preview_final_parity,
     compile_render_plan,
     source_output_map_from_legacy_timeline,
@@ -47,6 +52,7 @@ from app.sources import local_source
 from app.source_broll_planning import SourceSceneEvidence
 from app.video_composition import (
     VideoCompositionService,
+    apply_native_visual_plan,
     apply_composition_segments,
     build_composition_segments,
     build_reframe_plan,
@@ -253,6 +259,102 @@ def test_fit_background_filters_center_the_foreground_instead_of_bottom_aligning
     graph = _visual_filter(clip, canvas)
 
     assert "overlay=(W-w)/2:(H-h)/2" in graph
+
+
+def test_native_visual_boundary_is_half_open_on_the_output_frame_lattice(tmp_path: Path) -> None:
+    executable = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not executable or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for frame-boundary regression")
+    source_path = tmp_path / "split-colors.mp4"
+    subprocess.run([
+        executable, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "color=c=blue:size=320x180:rate=30,drawbox=x=0:y=0:w=160:h=180:color=red:t=fill",
+        "-t", "1.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_path),
+    ], check=True)
+    fit = CropPlan(strategy="fit_blur_background", source_width=320, source_height=180)
+    clips = [
+        SourceVideoClip(
+            clip_id=f"visual-{index:03d}", order=index,
+            timeline_start_seconds=start, timeline_end_seconds=end,
+            duration_seconds=end - start, source_path=str(source_path),
+            source_start_seconds=start, source_end_seconds=end,
+            visual_strategy="mapped_source", crop_plan=fit, status="ready",
+        )
+        for index, (start, end) in enumerate(((0.0, 0.24), (0.24, 0.93), (0.93, 1.43)), start=1)
+    ]
+    timeline = VideoTimeline(clips=clips, duration_seconds=1.43)
+    mapping = source_output_map_from_legacy_timeline(timeline)
+    plan = _plan()
+    intent = CreativeIntent(
+        intent_id="intent-frame-boundary", revision=1,
+        production_plan=ImmutableProductionPlanLink.from_reference(plan.reference()),
+        source_output_mapping=mapping, evidence_fingerprint="7" * 64,
+        proposal_hash="8" * 64,
+        policy=CreativePolicy(
+            preset_id="documentary", preset_version="1", platform="universal",
+            caption_style_family="clean", intensity=Intensity.LOW,
+            source_broll_enabled=False,
+        ),
+        confidence=0, provenance=("frame-boundary-regression",),
+    )
+    full = NormalizedRect(x=0, y=0, width=1, height=1)
+    close_left = NormalizedRect(x=0, y=0, width=0.5, height=1)
+    composition = CompositionPlan(intent_id=intent.intent_id, segments=(
+        CompositionSegmentPlan(
+            segment_id="composition-wide-before", output=OutputInterval(start_frame=0, end_frame=9),
+            layout=LayoutFamily.FIT_BACKGROUND, crop=full,
+        ),
+        CompositionSegmentPlan(
+            segment_id="composition-close", output=OutputInterval(start_frame=9, end_frame=28),
+            layout=LayoutFamily.SINGLE_SUBJECT, crop=close_left,
+        ),
+        CompositionSegmentPlan(
+            segment_id="composition-wide-after", output=OutputInterval(start_frame=28, end_frame=43),
+            layout=LayoutFamily.FIT_BACKGROUND, crop=full,
+        ),
+    ))
+    compiled = compile_render_plan(
+        intent,
+        CaptionPlan(intent_id=intent.intent_id),
+        composition,
+        MotionPlan(intent_id=intent.intent_id),
+        SourceBRollPlan(intent_id=intent.intent_id),
+        CanvasPlan(width=180, height=320),
+    )
+
+    applied = apply_native_visual_plan(
+        timeline, compiled, source_width=320, source_height=180,
+    )
+    intervals = [
+        (round(clip.timeline_start_seconds * 30), round(clip.timeline_end_seconds * 30))
+        for clip in applied.clips
+    ]
+    assert intervals == [(0, 8), (8, 9), (9, 28), (28, 43)]
+    assert all(end > start for start, end in intervals)
+
+    rendered = tmp_path / "frame-boundary.mp4"
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    VideoCompositionService(tmp_path, _audio_config())._render_base_visual(
+        applied.clips, canvas, rendered, applied.transitions,
+    )
+    frame_count = subprocess.run([
+        ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_frames", "-of", "default=nw=1:nk=1", str(rendered),
+    ], capture_output=True, check=True, text=True).stdout.strip()
+    assert frame_count == "43"
+
+    def sample(frame: int) -> bytes:
+        return subprocess.run([
+            executable, "-hide_banner", "-loglevel", "error", "-i", str(rendered),
+            "-vf", f"select=eq(n\\,{frame}),crop=2:2:140:160,scale=1:1,format=rgb24",
+            "-frames:v", "1", "-f", "rawvideo", "-",
+        ], capture_output=True, check=True).stdout[:3]
+
+    close_pixel = sample(27)
+    reset_pixel = sample(28)
+    assert close_pixel[0] > close_pixel[2] + 80
+    assert reset_pixel[2] > reset_pixel[0] + 80
 
 
 def test_missing_or_invalid_mapping_is_reported_without_random_clip_selection(tmp_path: Path) -> None:

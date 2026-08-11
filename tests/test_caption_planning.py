@@ -115,6 +115,108 @@ def _word_transcript(confidence: float = 0.98) -> dict:
     ]}
 
 
+def _plain_intent(mapping: SourceOutputTimeMap) -> CreativeIntent:
+    return _intent().model_copy(update={
+        "source_output_mapping": mapping,
+        "beats": (),
+        "semantic_emphasis": (),
+    })
+
+
+def test_contiguous_micro_cuts_share_complete_output_run_for_readability() -> None:
+    mapping = SourceOutputTimeMap(segments=(
+        EditMapSegment(
+            map_id="micro-lead", source=SourceInterval.from_seconds(0, 0.25),
+            output=OutputInterval(start_frame=0, end_frame=8),
+        ),
+        EditMapSegment(
+            map_id="micro-001", source=SourceInterval.from_seconds(0.25, 0.93),
+            output=OutputInterval(start_frame=8, end_frame=28),
+        ),
+        EditMapSegment(
+            map_id="micro-002", source=SourceInterval.from_seconds(1, 1.5),
+            output=OutputInterval(start_frame=28, end_frame=43),
+        ),
+        EditMapSegment(
+            map_id="micro-003", source=SourceInterval.from_seconds(2, 2.44),
+            output=OutputInterval(start_frame=43, end_frame=57),
+        ),
+        EditMapSegment(
+            map_id="micro-004", source=SourceInterval.from_seconds(3, 4.26),
+            output=OutputInterval(start_frame=57, end_frame=95),
+        ),
+        EditMapSegment(
+            map_id="micro-005", source=SourceInterval.from_seconds(5, 6.75),
+            output=OutputInterval(start_frame=95, end_frame=148),
+        ),
+    ))
+    word_specs = (
+        ("\u0433" * 8, 0.25, 0.70), ("\u0433" * 9, 0.70, 0.93),
+        ("\u0433" * 2, 1.000, 1.125), ("\u0433" * 3, 1.125, 1.250),
+        ("\u0433" * 3, 1.250, 1.375), ("\u0433" * 4, 1.375, 1.500),
+        ("\u0433" * 6, 2.00, 2.22), ("\u0433" * 7, 2.22, 2.44),
+        ("\u0433" * 7, 3.00, 3.42), ("\u0433" * 2, 3.42, 3.84),
+        ("\u0433" * 9, 3.84, 4.26),
+        ("\u0433", 5.00, 5.20), ("\u0433" * 7, 5.20, 5.50),
+        ("\u0433" * 2, 5.50, 5.80), ("\u0433" * 10, 5.80, 6.10),
+    )
+    transcript = {"words": [
+        {
+            "text": text, "start": start, "end": end,
+            "confidence": 0.99, "timing_source": "verified",
+        }
+        for text, start, end in word_specs
+    ]}
+
+    config = _config()
+    config.subtitle_max_words_per_cue = 9
+    plan = build_caption_plan(_plain_intent(mapping), transcript, config)
+
+    assert plan.quality_report.status == "PASS"
+    assert plan.quality_report.metrics.max_cps <= 20.0
+    assert "CAPTION_READABILITY_COALESCED" in plan.diagnostics
+    assert "CAPTION_PRESENTATION_WINDOW_EXTENDED" in plan.diagnostics
+    assert "CAPTION_CPS_HIGH" not in {finding.code for finding in plan.quality_report.findings}
+    assert [len(cue.words) for cue in plan.cues] == [2, 9, 4]
+    assert [(cue.output.start_frame, cue.output.end_frame) for cue in plan.cues] == [
+        (2, 28), (28, 95), (95, 131),
+    ]
+    assert all(left.output.end_frame <= right.output.start_frame for left, right in zip(plan.cues, plan.cues[1:]))
+    expected_word_outputs = [
+        mapping.map_interval(SourceInterval.from_seconds(start, end))
+        for _text, start, end in word_specs
+    ]
+    assert [word.output for cue in plan.cues for word in cue.words] == expected_word_outputs
+    assert all(cue.fallback_reason is None for cue in plan.cues)
+
+
+def test_infeasible_micro_cut_keeps_reading_speed_ceiling_blocker() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="micro-infeasible", source=SourceInterval.from_seconds(0, 0.5),
+        output=OutputInterval(start_frame=0, end_frame=15),
+    ),))
+    transcript = {"words": [
+        {
+            "text": "\u0410" * 15, "start": 0, "end": 0.25,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+        {
+            "text": "\u0411" * 15, "start": 0.25, "end": 0.5,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+    ]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+
+    assert plan.quality_report.status == "BLOCKED"
+    blockers = [
+        finding for finding in plan.quality_report.findings
+        if finding.code == "CAPTION_CPS_HIGH" and finding.severity == "blocker"
+    ]
+    assert blockers
+    assert blockers[0].threshold == 20.0
+
+
 def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() -> None:
     plan = build_caption_plan(_intent(), _word_transcript(), _config())
 
@@ -134,6 +236,24 @@ def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() ->
     assert plan.quality_report.metrics.semantic_emphasis_count == 1
     with pytest.raises(ValidationError, match="Instance is frozen"):
         plan.quality_report.metrics.cue_count = 99  # type: ignore[misc]
+
+
+def test_payoff_presentation_keeps_independent_semantic_emphasis() -> None:
+    intent = _intent()
+    payoff = intent.beats[1].model_copy(update={
+        "source": SourceInterval.from_seconds(2, 3),
+        "output": OutputInterval(start_frame=60, end_frame=90),
+    })
+    intent = intent.model_copy(update={"beats": (intent.beats[0], payoff)})
+
+    plan = build_caption_plan(intent, _word_transcript(), _config())
+
+    cue = next(item for item in plan.cues if item.beat_role == BeatRole.PAYOFF)
+    assert cue.primitive_id == "scale"
+    assert cue.emphasis is not None
+    assert cue.emphasis.treatment == "bounded_scale"
+    assert {"evidence-claim", "evidence-payoff"} <= set(cue.evidence_refs)
+    assert plan.quality_report.metrics.semantic_emphasis_count == 1
 
 
 def test_native_7c_plan_cannot_omit_font_geometry_or_quality_contracts() -> None:

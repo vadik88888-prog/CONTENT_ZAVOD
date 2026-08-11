@@ -77,6 +77,45 @@ def _report(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
     return artifact, result, report
 
 
+def _set_native_rich_render(render: dict) -> None:
+    def passed_quality() -> dict:
+        return {"status": "PASS", "findings": [], "metrics": {}}
+
+    render.update({
+        "compatibility_mode": "native",
+        "execution_status": "native_rich",
+        "execution_reason_codes": ["SOURCE_BROLL_USAGE_NOT_AUTHORIZED"],
+        "creative_qc_source": "compiled_render_plan",
+        "compiled_render_plan": {"schema_version": "7G.compiled-render-plan.1", "plan_hash": "a" * 64},
+        "caption_plan": {
+            "cues": [{
+                "cue_id": "caption-001",
+                "beat_role": None,
+                "emphasis": {"emphasis_id": "emphasis-001"},
+            }],
+            "quality_report": passed_quality(),
+        },
+        "composition_plan": {
+            "segments": [{"segment_id": "composition-001", "target": "person"}],
+            "quality_report": passed_quality(),
+        },
+        "source_broll_plan": {
+            "segments": [],
+            "quality_report": {
+                **passed_quality(),
+                "metrics": {"proposal_count": 0, "selected_count": 0},
+            },
+        },
+        "motion_plan": {
+            "events": [
+                {"event_id": "motion-hook", "purpose": "hook", "primitive_id": "slide"},
+                {"event_id": "motion-payoff", "purpose": "payoff", "primitive_id": "scale"},
+            ],
+            "quality_report": passed_quality(),
+        },
+    })
+
+
 def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     _artifact, _result, report = _report(tmp_path)
 
@@ -250,6 +289,49 @@ def test_native_creative_qc_ignores_legacy_subtitle_and_reframe_decisions(tmp_pa
     assert not any(item.provenance.get("producer") in {
         "composition_quality_decision", "subtitle_quality_decision",
     } for item in report.findings)
+
+
+def test_native_rich_accepts_optional_broll_off_when_required_layers_executed(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    _set_native_rich_render(render)
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    assert report.status == "PASS"
+    assert report.metrics["source_broll"]["metrics"]["selected_count"] == 0
+    assert not any(item.code == "NATIVE_RICH_EVIDENCE_MISSING" for item in report.findings)
+
+
+def test_native_rich_blocks_truly_empty_required_layers(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    _set_native_rich_render(render)
+    render["caption_plan"]["cues"] = []
+    render["composition_plan"]["segments"] = []
+    render["motion_plan"]["events"] = []
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    finding = next(item for item in report.findings if item.code == "NATIVE_RICH_EVIDENCE_MISSING")
+    assert report.status == "BLOCKED"
+    assert set(finding.measured_value) == {
+        "CAPTION_LAYER_NOT_EXECUTED",
+        "SEMANTIC_EMPHASIS_NOT_EXECUTED",
+        "HOOK_PRESENTATION_NOT_EXECUTED",
+        "PAYOFF_PRESENTATION_NOT_EXECUTED",
+        "COMPOSITION_REFRAME_NOT_EXECUTED",
+        "MOTION_LAYER_NOT_EXECUTED",
+    }
+    assert "source_broll_plan" not in finding.evidence
 
 
 def test_legacy_adapter_keeps_legacy_subtitle_and_reframe_qc(tmp_path: Path) -> None:

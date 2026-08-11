@@ -13,6 +13,7 @@ from app.creative_contracts import (
     SourceOutputTimeMap,
 )
 from app.creative_evidence import build_native_evidence_handoff
+from app.creative_execution import compile_native_creative_plan
 from app.pipeline import Pipeline, StageTracker, _hash
 from app.production_models import BoundaryDecision, ProductionPlan
 from app.production_plan import ProductionPlanEnvelopeContext
@@ -20,6 +21,7 @@ from app.sources import Source
 from app.tts_providers import MockTTSProvider
 from app.tts_service import TTSService
 from app.utils import stable_file_hash
+from app.video_composition import _reconcile_native_execution_status
 from tests.test_audio_composition import _audio_config, _plan
 from tests.test_video_composition import _source_video
 
@@ -218,7 +220,106 @@ def test_phase6_artifacts_build_rich_native_handoff_without_analysis_calls() -> 
     assert handoff.source_scenes[0].story_unit_ids == ("story-native-1",)
 
 
-def test_same_source_cutaway_without_explicit_usage_contract_falls_back_to_a_roll() -> None:
+def test_discontiguous_story_edges_follow_authoritative_boundary_ranges() -> None:
+    legacy = _plan()
+    boundary = BoundaryDecision.model_validate({
+        "schema_version": "5C.1",
+        "decision_id": "boundary-discontiguous-native",
+        "candidate_id": legacy.metadata.candidate_id,
+        "rough_range": {"start_seconds": 1.0, "end_seconds": 10.0},
+        "refined_range": {"start_seconds": 1.0, "end_seconds": 10.0},
+        "allowed_source_range": {"start_seconds": 1.0, "end_seconds": 10.0},
+        "start_reason": "Complete hook boundary.",
+        "end_reason": "Complete payoff boundary.",
+        "word_integrity": True,
+        "sentence_integrity": True,
+        "semantic_completion": True,
+        "payoff_preserved": True,
+        "continuation_risk": 0.0,
+        "continuation_risk_threshold": 0.65,
+        "pre_roll_seconds": 0.0,
+        "post_roll_seconds": 0.0,
+        "confidence": 0.95,
+        "start_evidence": {},
+        "end_evidence": {},
+        "pause_evidence": {},
+        "required_evidence": [{
+            "requirement_type": "hook",
+            "required": True,
+            "source_range": {"start_seconds": 1.2, "end_seconds": 1.8},
+            "transcript_segment_id": 0,
+            "reason": "The opening question must remain present.",
+            "evidence": {"text": "Source dialogue"},
+        }, {
+            "requirement_type": "completion",
+            "required": True,
+            "source_range": {"start_seconds": 9.1, "end_seconds": 9.7},
+            "transcript_segment_id": 1,
+            "reason": "The ending must remain complete.",
+            "evidence": {"text": "remains audible"},
+        }, {
+            "requirement_type": "payoff",
+            "required": False,
+            "source_range": {"start_seconds": 9.1, "end_seconds": 9.7},
+            "transcript_segment_id": 1,
+            "reason": "The detected payoff is presented at the ending.",
+            "evidence": {"text": "remains audible"},
+        }],
+        "safe_start_points": [1.0],
+        "safe_end_points": [10.0],
+        "fallback_used": False,
+        "fallback_reason": None,
+        "multimodal_context": {
+            "audio_or_visual_payoff_times": [1.25],
+            "confidence": 0.0,
+        },
+    })
+    plan = legacy.model_copy(update={"boundary_decision": boundary})
+    mapping = SourceOutputTimeMap(segments=(
+        EditMapSegment(
+            map_id="opening-map",
+            source=SourceInterval.from_seconds(1.0, 2.0),
+            output=OutputInterval(start_frame=0, end_frame=30),
+        ),
+        EditMapSegment(
+            map_id="ending-map",
+            source=SourceInterval.from_seconds(9.0, 10.0),
+            output=OutputInterval(start_frame=30, end_frame=60),
+        ),
+    ))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    stories["story_units"][0]["end"] = 10.0
+
+    handoff = build_native_evidence_handoff(
+        plan, mapping, AppConfig(), candidate=candidate,
+        multimodal_timeline=timeline, story_units=stories,
+    )
+
+    hook = next(item for item in handoff.intent.beats if item.role.value == "hook")
+    payoff = next(item for item in handoff.intent.beats if item.role.value == "payoff")
+    hook_emphasis = next(
+        item for item in handoff.intent.semantic_emphasis
+        if item.semantic_class.value == "claim"
+    )
+    payoff_emphasis = next(
+        item for item in handoff.intent.semantic_emphasis
+        if item.semantic_class.value == "payoff"
+    )
+
+    assert hook.source == SourceInterval.from_seconds(1.2, 1.8)
+    assert hook.output == OutputInterval(start_frame=6, end_frame=24)
+    assert payoff.source == SourceInterval.from_seconds(9.1, 9.7)
+    assert payoff.output == OutputInterval(start_frame=33, end_frame=51)
+    assert hook_emphasis.output == hook.output
+    assert payoff_emphasis.output == payoff.output
+    assert payoff.output.start_frame >= mapping.segments[1].output.start_frame
+    assert not any(
+        item.decision_id.startswith("motion-boundary-payoff")
+        for item in handoff.intent.motion_events
+    )
+
+
+def test_optional_broll_off_does_not_demote_other_native_creative_layers() -> None:
     plan = _plan()
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="candidate-map",
@@ -232,10 +333,117 @@ def test_same_source_cutaway_without_explicit_usage_contract_falls_back_to_a_rol
         multimodal_timeline=timeline, story_units=stories,
     )
 
-    assert handoff.execution_status == "native_fallback"
+    assert handoff.execution_status == "native_rich"
     assert not handoff.intent.source_broll
     assert "SOURCE_BROLL_USAGE_NOT_AUTHORIZED" in handoff.reason_codes
+    assert "SAFE_A_ROLL_FALLBACK" not in handoff.reason_codes
     assert all(scene.rights_status == "uncertain" for scene in handoff.source_scenes)
+
+
+def test_native_rich_status_is_demoted_when_compilation_drops_required_layers() -> None:
+    plan = _plan()
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="candidate-map",
+        source=SourceInterval.from_seconds(1.0, 2.0),
+        output=OutputInterval.from_seconds(0.0, 1.0),
+    ),))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    config = AppConfig()
+    handoff = build_native_evidence_handoff(
+        plan, mapping, config, candidate=candidate,
+        multimodal_timeline=timeline, story_units=stories,
+    )
+    assert handoff.execution_status == "native_rich"
+
+    compiled = compile_native_creative_plan(
+        handoff.intent,
+        {"segments": [], "words": []},
+        config,
+        source_width=1920,
+        source_height=1080,
+        target_observations=handoff.target_observations,
+        source_scenes=handoff.source_scenes,
+    )
+    status, codes, diagnostics = _reconcile_native_execution_status(
+        handoff.execution_status,
+        handoff.reason_codes,
+        handoff.diagnostics,
+        compiled,
+    )
+
+    assert status == "native_fallback"
+    assert "NATIVE_REQUIRED_LAYER_FALLBACK" in codes
+    assert "CAPTION_LAYER_NOT_EXECUTED" in codes
+    assert "MOTION_LAYER_NOT_EXECUTED" in codes
+    assert diagnostics
+
+
+def test_compiled_hook_motion_can_present_hook_alongside_semantic_emphasis_without_broll() -> None:
+    plan = _plan()
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="candidate-map",
+        source=SourceInterval.from_seconds(1.0, 11.0),
+        output=OutputInterval.from_seconds(0.0, 10.0),
+    ),))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    stories["story_units"][0]["end"] = 11.0
+    stories["story_units"][0]["duration"] = 10.0
+    config = AppConfig()
+    handoff = build_native_evidence_handoff(
+        plan, mapping, config, candidate=candidate,
+        multimodal_timeline=timeline, story_units=stories,
+    )
+    words = (
+        "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
+        "nu xi omicron pi rho sigma tau omega"
+    ).split()
+    transcript = {
+        "segments": [{
+            "id": 0, "start": 1.0, "end": 11.0, "text": " ".join(words),
+        }],
+        "words": [
+            {
+                "start": 1.0 + index * 0.5,
+                "end": 1.0 + (index + 1) * 0.5,
+                "text": word,
+            }
+            for index, word in enumerate(words)
+        ],
+    }
+    compiled = compile_native_creative_plan(
+        handoff.intent,
+        transcript,
+        config,
+        source_width=1920,
+        source_height=1080,
+        target_observations=handoff.target_observations,
+        source_scenes=handoff.source_scenes,
+    )
+
+    assert handoff.execution_status == "native_rich"
+    assert not compiled.source_broll_plan.segments
+    assert any(cue.emphasis is not None for cue in compiled.caption_plan.cues)
+    assert {
+        event.purpose.value
+        for event in compiled.motion_plan.events
+        if event.primitive_id != "static"
+    }.issuperset({"hook", "payoff"})
+    assert any(
+        segment.target.value != "stable_source"
+        for segment in compiled.composition_plan.segments
+    )
+
+    status, codes, diagnostics = _reconcile_native_execution_status(
+        handoff.execution_status,
+        handoff.reason_codes,
+        handoff.diagnostics,
+        compiled,
+    )
+
+    assert status == "native_rich"
+    assert "NATIVE_REQUIRED_LAYER_FALLBACK" not in codes
+    assert "SOURCE_BROLL_USAGE_NOT_AUTHORIZED" in codes
+    assert not diagnostics
 
 
 def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(
@@ -330,7 +538,13 @@ def test_pipeline_production_runner_hands_phase6_evidence_to_native_mp4(
     assert item_report["quality"]["source_of_truth"] == "compiled_render_plan"
     assert item_report["caption_plan"]["intent_id"] == compiled.intent_id
     assert item_report["composition_plan"]["intent_id"] == compiled.intent_id
-    assert item_report["execution_status"] == "native_rich"
+    # This one-second fixture intentionally collapses hook, emphasis, and
+    # payoff onto one cue. The compiler keeps the higher-priority payoff
+    # motion, so the post-compile status must describe the missing hook layer
+    # instead of inheriting the richer evidence-only label.
+    assert item_report["execution_status"] == "native_fallback"
+    assert "NATIVE_REQUIRED_LAYER_FALLBACK" in item_report["execution_reason_codes"]
+    assert "HOOK_PRESENTATION_NOT_EXECUTED" in item_report["execution_reason_codes"]
     assert (candidate_output / "production-render" / "creative-intent.json").is_file()
     assert (candidate_output / "production-render" / "creative-handoff.json").is_file()
     assert (candidate_output / "production-render" / "creative-execution.json").is_file()

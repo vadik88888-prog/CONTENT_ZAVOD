@@ -9,6 +9,7 @@ from app.transformation_models import (
     FallbackReason,
     ScriptDraft,
     ScriptSentence,
+    SemanticFact,
     SemanticRepresentation,
     SentenceRole,
     SourceContext,
@@ -23,25 +24,32 @@ def build_local_fallback(
     context: SourceContext, semantic: SemanticRepresentation, config: TransformationConfig,
     reason: FallbackReason,
 ) -> ScriptDraft:
-    """Build a conservative artifact from original primary sentences only."""
+    """Build a conservative artifact from original primary sentences only.
 
-    target_words = max(1, round(config.target_duration_seconds * config.target_words_per_second))
-    selected: list[tuple[object, str]] = []
+    The target duration is a soft preference here. A fallback must not turn an
+    approved complete candidate into an unfinished prefix merely to hit a word
+    budget; all non-duplicate source facts stay in source order. Facts carrying
+    required boundary evidence are retained even when their wording is close to
+    an earlier fact.
+    """
+
+    required_boundary_facts = _required_boundary_fact_ids(context, semantic)
+    selected: list[tuple[SemanticFact, str]] = []
     selected_tokens: list[set[str]] = []
-    total_words = 0
     for fact in semantic.supporting_facts:
         text = LEADING_FILLER_RE.sub("", fact.statement.strip())
         if not text:
             continue
         tokens = _tokens(text)
-        if not tokens or any(_near_duplicate(tokens, prior) for prior in selected_tokens):
+        if not tokens:
             continue
-        count = word_count(text)
-        if selected and total_words + count > target_words:
-            break
+        if (
+            fact.fact_id not in required_boundary_facts
+            and any(_near_duplicate(tokens, prior) for prior in selected_tokens)
+        ):
+            continue
         selected.append((fact, text))
         selected_tokens.append(tokens)
-        total_words += count
     if not selected:
         raise TransformationFallbackError("Local fallback не нашёл безопасного предложения в selected transcript.")
     sentences: list[ScriptSentence] = []
@@ -81,3 +89,41 @@ def _near_duplicate(current: set[str], prior: set[str]) -> bool:
     if not current or not prior:
         return False
     return len(current & prior) / len(current | prior) >= 0.75
+
+
+def _required_boundary_fact_ids(
+    context: SourceContext, semantic: SemanticRepresentation,
+) -> set[str]:
+    """Resolve required hook/completion/payoff ranges to their source facts."""
+
+    raw_requirements = context.boundary_decision.get("required_evidence", [])
+    if not isinstance(raw_requirements, list):
+        return set()
+    required_ranges: list[tuple[float, float, int | None]] = []
+    for item in raw_requirements:
+        if not isinstance(item, dict) or not item.get("required"):
+            continue
+        raw_range = item.get("source_range")
+        if not isinstance(raw_range, dict):
+            continue
+        try:
+            start = float(raw_range["start_seconds"])
+            end = float(raw_range["end_seconds"])
+            segment_id = (
+                int(item["transcript_segment_id"])
+                if item.get("transcript_segment_id") is not None else None
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            required_ranges.append((start, end, segment_id))
+
+    result: set[str] = set()
+    for fact in semantic.supporting_facts:
+        for start, end, segment_id in required_ranges:
+            segment_match = segment_id is not None and segment_id in fact.evidence_segment_ids
+            range_match = fact.evidence_start < end and start < fact.evidence_end
+            if segment_match or range_match:
+                result.add(fact.fact_id)
+                break
+    return result

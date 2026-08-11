@@ -15,6 +15,7 @@ from app.errors import NarrativePlanningError, SemanticExtractionError, Transfor
 from app.models import Candidate, ScoredCandidate
 from app.narrative_planning import build_narrative_plan
 from app.pipeline import Pipeline, StageTracker, _deduplicate_transformation_outcomes
+from app.production_plan import build_production_plan
 from app.script_generation import generate_script_draft, recompute_script_metrics
 from app.script_validation import score_script_quality, validate_script_grounding
 from app.semantic_extraction import build_source_context, extract_semantic_representation
@@ -58,6 +59,76 @@ def _draft(text: str | None = None):
     return context, semantic, plan, draft
 
 
+def _complete_boundary_context():
+    segments = [
+        {"id": 0, "start": 10.0, "end": 12.0, "text": "A complete opening establishes the question clearly."},
+        {"id": 1, "start": 12.0, "end": 14.0, "text": "Several grounded details explain why the mechanism matters."},
+        {"id": 2, "start": 14.0, "end": 16.0, "text": "The final complete answer resolves the question naturally."},
+    ]
+    text = " ".join(str(item["text"]) for item in segments)
+    boundary_decision = {
+        "schema_version": "5C.1",
+        "decision_id": "boundary-candidate-complete",
+        "candidate_id": "candidate-complete",
+        "rough_range": {"start_seconds": 10.0, "end_seconds": 16.0},
+        "refined_range": {"start_seconds": 10.0, "end_seconds": 16.0},
+        "allowed_source_range": {"start_seconds": 10.0, "end_seconds": 16.0},
+        "start_reason": "complete opening",
+        "end_reason": "complete ending",
+        "word_integrity": True,
+        "sentence_integrity": True,
+        "semantic_completion": True,
+        "payoff_preserved": True,
+        "continuation_risk": 0.1,
+        "continuation_risk_threshold": 0.65,
+        "pre_roll_seconds": 0.0,
+        "post_roll_seconds": 0.0,
+        "confidence": 0.95,
+        "start_evidence": {"reason": "sentence_start"},
+        "end_evidence": {"reason": "sentence_end"},
+        "pause_evidence": {},
+        "question_context": {"end_is_question": False, "answer_or_completion_included": True},
+        "required_evidence": [
+            {
+                "requirement_type": "hook", "required": True,
+                "source_range": {"start_seconds": 10.0, "end_seconds": 12.0},
+                "transcript_segment_id": 0, "reason": "keep hook", "evidence": {},
+            },
+            {
+                "requirement_type": "completion", "required": True,
+                "source_range": {"start_seconds": 14.0, "end_seconds": 16.0},
+                "transcript_segment_id": 2, "reason": "keep completion", "evidence": {},
+            },
+        ],
+        "safe_start_points": [10.0, 12.0, 14.0],
+        "safe_end_points": [12.0, 14.0, 16.0],
+        "fallback_used": False,
+    }
+    candidate = Candidate(
+        "candidate-complete", 10.0, 16.0, text,
+        transcript_segment_ids=[0, 1, 2],
+        boundary_diagnostics={"eligible": True, "boundary_decision": boundary_decision},
+    )
+    features = {"segments": [
+        {
+            **item,
+            "sentence_start": True,
+            "sentence_end": True,
+            "speech_density": 0.7,
+            "pause_before_seconds": 0.2,
+            "pause_after_seconds": 0.2,
+            "filler_word_ratio": 0.0,
+            "repetition_score": 0.0,
+        }
+        for item in segments
+    ]}
+    return build_source_context(
+        {"id": "source-1", "path": "source.mp4"}, {}, candidate,
+        {"language": "en", "segments": segments}, features, {}, {"boundaries": []},
+        AppConfig().transformation,
+    )
+
+
 def _set_sentence_text(draft, text: str) -> None:
     draft.sentences[0].text = text
     recompute_script_metrics(draft, 2.4)
@@ -81,6 +152,33 @@ def test_transformation_duplicate_collapse_is_downgraded_before_production() -> 
     assert outcomes[1]["status"] == "skipped"
     assert outcomes[1]["reason"] == "transformation_duplicate"
     assert warnings and "копий" in warnings[0]
+
+
+def test_failed_transformation_does_not_suppress_overlapping_success() -> None:
+    failed = {
+        "candidate_id": "failed-first",
+        "status": "failed",
+        "source_context": {
+            "start_time": 10.0,
+            "end_time": 30.0,
+            "transcript_text": "The same candidate source range.",
+        },
+    }
+    successful = {
+        "candidate_id": "successful-second",
+        "status": "completed",
+        "source_context": {
+            "start_time": 10.0,
+            "end_time": 30.0,
+            "transcript_text": "The same candidate source range.",
+        },
+        "final_script": {"full_text": "A valid completed candidate script."},
+    }
+
+    outcomes, warnings = _deduplicate_transformation_outcomes([failed, successful])
+
+    assert [item["status"] for item in outcomes] == ["failed", "completed"]
+    assert warnings == []
 
 
 def test_semantic_facts_require_evidence_and_known_segments() -> None:
@@ -170,6 +268,54 @@ def test_local_fallback_preserves_order_removes_duplicates_and_handles_empty() -
         build_local_fallback(empty, extract_semantic_representation(empty), AppConfig().transformation, FallbackReason.EMPTY_RESULT)
 
 
+def test_local_generation_keeps_complete_boundary_when_required_facts_exceed_word_budget() -> None:
+    context = _complete_boundary_context()
+    config = AppConfig()
+    config.transformation.target_duration_seconds = 20.0
+    config.transformation.target_words_per_second = 0.5
+
+    semantic = extract_semantic_representation(context)
+    fallback = build_local_fallback(
+        context, semantic, config.transformation, FallbackReason.AI_DISABLED,
+    )
+    assert fallback.word_count > 10
+    assert {
+        source_id
+        for sentence in fallback.sentences
+        for source_id in sentence.source_segment_ids
+    } == {0, 1, 2}
+
+    result = run_content_transformation(
+        context, config.transformation, None, force_local=True,
+    )
+
+    assert result["status"] == "fallback"
+    assert result["final_script"]["word_count"] > 10
+    assert result["final_script"]["ending"].endswith("naturally.")
+    assert {
+        source_id
+        for sentence in result["final_script"]["sentences"]
+        for source_id in sentence["source_segment_ids"]
+    } == {0, 1, 2}
+    plan = build_production_plan(result, config.production)
+    assert {item.transcript_segment_id for item in plan.dialogue_mappings} == {0, 1, 2}
+
+
+def test_local_fallback_does_not_deduplicate_required_completion_evidence() -> None:
+    context = _complete_boundary_context()
+    context.primary_evidence[-1].text = context.primary_evidence[0].text
+    context.transcript_text = context.primary_text()
+    semantic = extract_semantic_representation(context)
+
+    fallback = build_local_fallback(
+        context, semantic, AppConfig().transformation, FallbackReason.AI_DISABLED,
+    )
+
+    assert fallback.sentences[0].text == fallback.sentences[-1].text
+    assert fallback.sentences[-1].source_segment_ids == [2]
+    assert semantic.supporting_facts[-1].fact_id in fallback.used_fact_ids
+
+
 def test_mock_modes_repair_and_provider_failure_are_safe_and_deterministic() -> None:
     config = AppConfig()
     context = _context()
@@ -215,6 +361,40 @@ def _provider_payload() -> tuple[object, dict]:
         "narrative_plan": plan.to_dict(),
         "script_draft": draft.to_dict(),
     }
+
+
+def test_failed_provider_draft_rebuilds_final_fallback_from_local_source_semantics() -> None:
+    context = _context(
+        "Original source premise is grounded. The final source sentence completes the idea."
+    )
+    provider_semantic = extract_semantic_representation(context)
+    provider_semantic.supporting_facts[0].statement = "Zanzibar fabricated premise."
+    provider_semantic.main_idea = provider_semantic.supporting_facts[0].statement
+    provider_semantic.core_claim = provider_semantic.supporting_facts[0].statement
+    provider_semantic.target_viewer_takeaway = provider_semantic.supporting_facts[0].statement
+    provider_plan = build_narrative_plan(provider_semantic, AppConfig().transformation)
+    provider_draft = generate_script_draft(provider_semantic, provider_plan, 2.4)
+    payload = {
+        "semantic_representation": provider_semantic.to_dict(),
+        "narrative_plan": provider_plan.to_dict(),
+        "script_draft": provider_draft.to_dict(),
+    }
+
+    result = run_content_transformation(
+        context, AppConfig().transformation, _StaticTransformer(payload),
+    )
+
+    assert result["status"] == "fallback"
+    assert result["fallback"]["reason"] == "repair_failed"
+    assert result["repair_attempts"]
+    assert result["validation"]["grounding"]["passed"]
+    assert result["validation"]["final_script"]["passed"]
+    assert "Zanzibar" not in result["final_script"]["full_text"]
+    assert result["final_script"]["full_text"] == context.primary_text()
+    assert all(
+        fact["statement"] in context.primary_text()
+        for fact in result["semantic_representation"]["supporting_facts"]
+    )
 
 
 @pytest.mark.parametrize("returned_candidate_id", ["", "candidate-other"])

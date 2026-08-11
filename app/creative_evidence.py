@@ -36,7 +36,7 @@ from app.creative_contracts import (
     canonical_hash,
 )
 from app.creative_execution import default_native_creative_intent
-from app.production_models import ProductionPlan
+from app.production_models import BoundaryDecision, ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 
 
@@ -121,7 +121,8 @@ def build_native_evidence_handoff(
         )
         beats.append(claim)
         _append_edge_decisions(
-            candidate_id, story_id, story, source, output, confidence, evidence_ref,
+            candidate_id, story_id, story, mapping, story_source, plan.boundary_decision,
+            confidence, evidence_ref,
             beats, emphasis, motion,
         )
 
@@ -253,7 +254,19 @@ def build_native_evidence_handoff(
         reason_codes.append("SOURCE_BROLL_RELEVANCE_UNPROVEN")
     if not motion:
         reason_codes.append("STATIC_MOTION_FALLBACK")
-    rich = bool(composition and observations and source_broll)
+    # Same-source B-roll is an optional, default-off layer. Rich native
+    # execution is defined by the required evidence-backed creative domains;
+    # withholding an optional cutaway must not demote captions, emphasis,
+    # hook/payoff presentation, reframing, and motion to a fallback result.
+    beat_roles = {item.role for item in beats}
+    motion_purposes = {item.purpose for item in motion}
+    rich = bool(
+        {BeatRole.HOOK, BeatRole.PAYOFF}.issubset(beat_roles)
+        and emphasis
+        and composition
+        and observations
+        and {MotionPurpose.HOOK, MotionPurpose.PAYOFF}.issubset(motion_purposes)
+    )
     if not rich:
         reason_codes.append("SAFE_A_ROLL_FALLBACK")
         diagnostics.append("Native execution retained only evidence-backed domains and used safe fallbacks elsewhere.")
@@ -271,25 +284,26 @@ def _append_edge_decisions(
     candidate_id: str,
     story_id: str,
     story: Mapping[str, Any],
-    source: SourceInterval,
-    output: OutputInterval,
+    mapping: SourceOutputTimeMap,
+    story_source: SourceInterval,
+    boundary: BoundaryDecision | None,
     confidence: float,
     evidence_ref: str,
     beats: list[ResolvedBeat],
     emphasis: list[ResolvedEmphasis],
     motion: list[ResolvedMotionEvent],
 ) -> None:
-    duration = output.end_frame - output.start_frame
-    edge = max(1, min(45, duration // 3))
     decisions = (
-        ("hook", BeatRole.HOOK, MotionPurpose.HOOK, SemanticClass.CLAIM, str(story.get("hook_seed") or ""), output.start_frame, min(output.end_frame, output.start_frame + edge)),
-        ("payoff", BeatRole.PAYOFF, MotionPurpose.PAYOFF, SemanticClass.PAYOFF, str(story.get("payoff") or story.get("ending") or ""), max(output.start_frame, output.end_frame - edge), output.end_frame),
+        ("hook", BeatRole.HOOK, MotionPurpose.HOOK, SemanticClass.CLAIM, str(story.get("hook_seed") or "")),
+        ("payoff", BeatRole.PAYOFF, MotionPurpose.PAYOFF, SemanticClass.PAYOFF, str(story.get("payoff") or story.get("ending") or "")),
     )
-    for name, role, purpose, semantic, text, start, end in decisions:
-        if not text.strip() or end <= start:
+    for name, role, purpose, semantic, text in decisions:
+        if not text.strip():
             continue
-        resolved_output = OutputInterval(start_frame=start, end_frame=end)
-        resolved_source = _source_for_output_slice(source, output, resolved_output)
+        resolved = _edge_decision_interval(mapping, story_source, boundary, role)
+        if resolved is None:
+            continue
+        resolved_source, resolved_output = resolved
         beats.append(ResolvedBeat(
             decision_id=_id(f"beat-{name}", candidate_id, story_id),
             source=resolved_source,
@@ -319,6 +333,94 @@ def _append_edge_decisions(
             domain=MotionDomain.CAPTION,
             intensity=Intensity.BALANCED,
         ))
+
+
+def _edge_decision_interval(
+    mapping: SourceOutputTimeMap,
+    story_source: SourceInterval,
+    boundary: BoundaryDecision | None,
+    role: BeatRole,
+) -> tuple[SourceInterval, OutputInterval] | None:
+    """Resolve hook/payoff against persisted boundary evidence when available.
+
+    A selected story may be represented by several discontiguous edit-map
+    segments.  Mapping both editorial edges through the first intersection
+    places the payoff on the hook frames.  The Phase 5 boundary decision is
+    already the authoritative source range, so use its hook/payoff ranges and
+    fall back to the first/last mapped story edge only for legacy plans.
+    """
+
+    requirement_kind = "hook" if role == BeatRole.HOOK else "payoff"
+    requirements = []
+    if boundary is not None:
+        requirements = [
+            item for item in boundary.required_evidence
+            if item.requirement_type == requirement_kind
+        ]
+        if role == BeatRole.PAYOFF and not requirements:
+            requirements = [
+                item for item in boundary.required_evidence
+                if item.requirement_type == "completion"
+            ]
+    if requirements:
+        ordered = sorted(
+            requirements,
+            key=lambda item: (item.source_range.start_seconds, item.source_range.end_seconds),
+        )
+        requirement = ordered[0] if role == BeatRole.HOOK else ordered[-1]
+        required_source = _source_interval(
+            requirement.source_range.start_seconds,
+            requirement.source_range.end_seconds,
+        )
+        resolved = _mapped_parts(
+            mapping,
+            _intersection(story_source, required_source) if required_source is not None else None,
+        )
+        if resolved:
+            return resolved[0] if role == BeatRole.HOOK else resolved[-1]
+
+    parts = _mapped_parts(mapping, story_source)
+    if not parts:
+        return None
+    source, output = parts[0] if role == BeatRole.HOOK else parts[-1]
+    duration = output.end_frame - output.start_frame
+    edge = max(1, min(45, duration // 3))
+    if role == BeatRole.HOOK:
+        sliced = OutputInterval(
+            start_frame=output.start_frame,
+            end_frame=min(output.end_frame, output.start_frame + edge),
+        )
+    else:
+        sliced = OutputInterval(
+            start_frame=max(output.start_frame, output.end_frame - edge),
+            end_frame=output.end_frame,
+        )
+    return _source_for_output_slice(source, output, sliced), sliced
+
+
+def _mapped_parts(
+    mapping: SourceOutputTimeMap,
+    source: SourceInterval | None,
+) -> list[tuple[SourceInterval, OutputInterval]]:
+    if source is None:
+        return []
+    result: list[tuple[SourceInterval, OutputInterval]] = []
+    for segment in mapping.segments:
+        part = _intersection(source, segment.source)
+        if part is None:
+            continue
+        output = mapping.map_interval(part)
+        if output is not None:
+            result.append((part, output))
+    return sorted(result, key=lambda item: (item[1].start_frame, item[1].end_frame))
+
+
+def _intersection(left: SourceInterval, right: SourceInterval) -> SourceInterval | None:
+    start = max(left.start_tick, right.start_tick)
+    end = min(left.end_tick, right.end_tick)
+    if end <= start:
+        return None
+    return SourceInterval(start_tick=start, end_tick=end)
 
 
 def _source_scenes(
@@ -477,6 +579,8 @@ def _append_audio_decisions(
         if output is None:
             continue
         confidence = _confidence(context.get("confidence"), default=0.0)
+        if confidence < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE:
+            continue
         evidence_ref = _id("boundary", candidate_id, str(index))
         manifest.append(EvidenceItem(
             evidence_ref=evidence_ref,

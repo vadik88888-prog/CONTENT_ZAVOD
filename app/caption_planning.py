@@ -35,6 +35,7 @@ from app.creative_contracts import (
     CompositionPlan,
     CreativeIntent,
     Intensity,
+    MotionDomain,
     NormalizedRect,
     OutputInterval,
     ResolvedBeat,
@@ -234,20 +235,34 @@ class CaptionPlanner:
                     protected_phrases,
                 ))
 
-        cue_outputs = _cue_outputs(layouts, intent)
+        layouts, readability_coalesced = _coalesce_layouts_for_readability(
+            layouts,
+            intent,
+            self.config,
+            measurer,
+            base_size,
+            minimum_size,
+            max_width,
+            protected_phrases,
+        )
+        cue_outputs, readability_extended = _cue_outputs(layouts, intent, self.config)
         cues: list[CaptionCuePlan] = []
         previous_lane: CaptionLane | None = None
         last_motion_frame = -100_000
         intensity_degraded: set[str] = set()
         for index, (layout, output) in enumerate(zip(layouts, cue_outputs), start=1):
             timing_mode, timing_confidence = _timing_mode(layout.words)
-            event = _semantic_event(intent, layout.words, output, last_motion_frame)
+            semantic_output = _words_output(layout.words)
+            event = _semantic_event(intent, layout.words, semantic_output, last_motion_frame)
+            emphasis_event = _semantic_emphasis_event(intent, layout.words, semantic_output)
             primitive = _primitive(intent, timing_mode, event)
             if event is not None and primitive != "static":
                 last_motion_frame = output.start_frame
             elif event is not None and timing_mode != "word":
                 intensity_degraded.add(f"caption-{index:03d}")
-            emphasis = _emphasis_plan(event, layout.words, output, primitive, timing_mode)
+            emphasis = _emphasis_plan(
+                emphasis_event, layout.words, output, primitive, timing_mode,
+            )
             bounds_by_lane: dict[CaptionLane, NormalizedRect] = {
                 lane: _caption_bounds(layout, lane, measurer, self.config, typography, platform)
                 for lane in _LANES
@@ -257,7 +272,7 @@ class CaptionPlanner:
             )
             cue_id = f"caption-{index:03d}"
             words_plan = tuple(CaptionWordPlan(
-                word_id=word.word_id, text=word.text, output=_clamp_interval(word.output, output),
+                word_id=word.word_id, text=word.text, output=word.output,
                 timing_source=word.timing_source, confidence=word.confidence,
             ) for word in layout.words)
             fallback_reason: CaptionFallbackReason | None = None
@@ -280,7 +295,10 @@ class CaptionPlanner:
                 lane=lane,
                 typography_token_id=typography.token_id,
                 semantic_class=emphasis.semantic_class if emphasis is not None else None,
-                evidence_refs=event.evidence_refs if event is not None else (),
+                evidence_refs=tuple(dict.fromkeys((
+                    *(event.evidence_refs if event is not None else ()),
+                    *(emphasis_event.evidence_refs if emphasis_event is not None else ()),
+                ))),
                 primitive_id=primitive,
                 easing_id="ease_in_out" if primitive in {"fade", "scale", "slide"} else "linear" if primitive == "karaoke" else "none",
                 normalized_bounds=bounds,
@@ -303,6 +321,10 @@ class CaptionPlanner:
         findings = _assess_plan(cues, manifest, measurer, intent, self.config, intensity_degraded)
         report = _quality_report(cues, findings, manifest, measurer, intent)
         diagnostics.extend(_diagnostics(cues, manifest, measurer))
+        if readability_coalesced:
+            diagnostics.append("CAPTION_READABILITY_COALESCED")
+        if readability_extended:
+            diagnostics.append("CAPTION_PRESENTATION_WINDOW_EXTENDED")
         return CaptionPlan(
             schema_version=CAPTION_PLAN_SCHEMA_VERSION,
             intent_id=intent.intent_id,
@@ -810,33 +832,215 @@ def _safe_caption_width(
     return config.output_width * min(typography.max_width_ratio, 1 - left - right)
 
 
-def _cue_outputs(
-    layouts: list[_Layout], intent: CreativeIntent,
-) -> list[OutputInterval]:
-    raw = [OutputInterval(
-        start_frame=min(word.output.start_frame for word in layout.words),
-        end_frame=max(word.output.end_frame for word in layout.words),
-    ) for layout in layouts]
-    result: list[OutputInterval] = []
-    for index, (layout, output) in enumerate(zip(layouts, raw)):
-        text = " ".join(word.text for word in layout.words)
-        target_cps = 17.0 if _contains_cyrillic(text) else 19.0
-        desired = max(output.end_frame, output.start_frame + math.ceil(len(text.replace(" ", "")) / target_cps * 30))
-        map_end = next(
-            segment.output.end_frame for segment in intent.source_output_mapping.segments
-            if segment.map_id == layout.words[0].map_id
+def _coalesce_layouts_for_readability(
+    layouts: list[_Layout],
+    intent: CreativeIntent,
+    config: ProductionRenderConfig,
+    measurer: _FontMeasurer,
+    base_size: int,
+    minimum_size: int,
+    maximum_width: float,
+    protected_phrases: tuple[tuple[str, ...], ...],
+) -> tuple[list[_Layout], set[int]]:
+    """Find a readable cue partition without changing mapped word frames.
+
+    A source-preserving edit can contain several very short adjacent dialogue
+    segments.  Treating every segment as a standalone caption can exceed the
+    hard CPS ceiling even when a neighbouring, semantically neutral phrase
+    makes a readable two-line cue.  The dynamic partition below only combines
+    truly contiguous output-map runs, respects the configured word/duration
+    limits, and never combines a hook/payoff/emphasis/caption-motion cue.
+    """
+
+    if not layouts:
+        return layouts, set()
+    result: list[_Layout] = []
+    coalesced: set[int] = set()
+    for run_start, run_end in _layout_run_ranges(layouts, intent):
+        chain_start, chain_end = _mapping_chain_bounds(
+            intent, layouts[run_start].words[0].map_id,
         )
-        next_start = raw[index + 1].start_frame if index + 1 < len(raw) else map_end
-        cap = min(map_end, next_start, output.end_frame + 23)
-        end = max(output.end_frame, min(desired, cap))
-        if result and output.start_frame < result[-1].end_frame:
-            start = result[-1].end_frame
-        else:
-            start = output.start_frame
-        if end <= start:
-            end = start + 1
-        result.append(OutputInterval(start_frame=start, end_frame=end))
-    return result
+        # Each entry is the highest-fidelity readable partition from this
+        # source index to the end of the contiguous run.  More cues win so the
+        # repair combines only what the hard ceiling actually requires.
+        best: dict[int, tuple[tuple[_Layout, bool], ...]] = {run_end: ()}
+        for start in range(run_end - 1, run_start - 1, -1):
+            selected: tuple[tuple[_Layout, bool], ...] | None = None
+            words: tuple[_MappedWord, ...] = ()
+            for end in range(start + 1, run_end + 1):
+                words = (*words, *layouts[end - 1].words)
+                if len(words) > config.subtitle_max_words_per_cue:
+                    break
+                if end - start > 1 and any(
+                    _layout_has_protected_semantic_event(layouts[index], intent)
+                    for index in range(start, end)
+                ):
+                    break
+                raw = _words_output(words)
+                if raw.end_frame - raw.start_frame > round(config.subtitle_max_duration * 30):
+                    break
+                if end - start == 1:
+                    candidate = layouts[start]
+                else:
+                    fitted = _fit_layout(
+                        words,
+                        measurer,
+                        base_size,
+                        minimum_size,
+                        maximum_width,
+                        protected_phrases,
+                    )
+                    if len(fitted) != 1:
+                        break
+                    candidate = fitted[0]
+                slot_start = (
+                    chain_start if start == run_start else raw.start_frame
+                )
+                slot_end = (
+                    _words_output(layouts[end].words).start_frame
+                    if end < run_end else chain_end
+                )
+                timing_mode, _confidence = _timing_mode(words)
+                readable = (
+                    timing_mode != "word"
+                    or _minimum_caption_frames(words, _maximum_caption_cps(words))
+                    <= slot_end - slot_start
+                )
+                tail = best.get(end)
+                if not readable or tail is None:
+                    continue
+                option = ((candidate, end - start > 1), *tail)
+                if selected is None or len(option) > len(selected):
+                    selected = option
+            if selected is not None:
+                best[start] = selected
+        partition = best.get(run_start)
+        if partition is None:
+            partition = tuple((layout, False) for layout in layouts[run_start:run_end])
+        for layout, was_coalesced in partition:
+            output_index = len(result)
+            result.append(layout)
+            if was_coalesced:
+                coalesced.add(output_index)
+    return result, coalesced
+
+
+def _cue_outputs(
+    layouts: list[_Layout], intent: CreativeIntent, config: ProductionRenderConfig,
+) -> tuple[list[OutputInterval], set[int]]:
+    raw = [_words_output(layout.words) for layout in layouts]
+    result = list(raw)
+    extended: set[int] = set()
+    for run_start, run_end in _layout_run_ranges(layouts, intent):
+        chain_start, chain_end = _mapping_chain_bounds(
+            intent, layouts[run_start].words[0].map_id,
+        )
+        for index in range(run_start, run_end):
+            output = raw[index]
+            slot_start = (
+                chain_start if index == run_start else output.start_frame
+            )
+            slot_end = (
+                raw[index + 1].start_frame if index + 1 < run_end
+                else chain_end
+            )
+            target_cps = 17.0 if _contains_cyrillic(" ".join(word.text for word in layouts[index].words)) else 19.0
+            target_frames = _minimum_caption_frames(layouts[index].words, target_cps)
+            maximum_frames = _minimum_caption_frames(
+                layouts[index].words, _maximum_caption_cps(layouts[index].words),
+            )
+            available = min(
+                slot_end - slot_start,
+                round(config.subtitle_max_duration * 30),
+            )
+            requested = (
+                target_frames if target_frames <= available
+                else maximum_frames if maximum_frames <= available
+                else output.end_frame - output.start_frame
+            )
+            duration = max(output.end_frame - output.start_frame, requested)
+            end = min(slot_end, max(output.end_frame, output.start_frame + duration))
+            start = max(slot_start, min(output.start_frame, end - duration))
+            resolved = OutputInterval(start_frame=start, end_frame=end)
+            # The presentation window may grow into otherwise unused frames,
+            # but the frozen word activation frames remain byte-for-byte exact.
+            if not resolved.contains(output):
+                resolved = output
+            result[index] = resolved
+            if resolved != output:
+                extended.add(index)
+    return result, extended
+
+
+def _layout_run_ranges(
+    layouts: list[_Layout], intent: CreativeIntent,
+) -> list[tuple[int, int]]:
+    if not layouts:
+        return []
+    mapping = intent.source_output_mapping.segments
+    mapping_order = {segment.map_id: index for index, segment in enumerate(mapping)}
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for index in range(1, len(layouts)):
+        previous_id = layouts[index - 1].words[-1].map_id
+        current_id = layouts[index].words[0].map_id
+        previous_index = mapping_order[previous_id]
+        current_index = mapping_order[current_id]
+        contiguous = previous_id == current_id or (
+            current_index > previous_index
+            and all(
+                mapping[position].output.end_frame == mapping[position + 1].output.start_frame
+                for position in range(previous_index, current_index)
+            )
+        )
+        if not contiguous:
+            ranges.append((start, index))
+            start = index
+    ranges.append((start, len(layouts)))
+    return ranges
+
+
+def _mapping_chain_bounds(intent: CreativeIntent, map_id: str) -> tuple[int, int]:
+    mapping = intent.source_output_mapping.segments
+    index = next(position for position, segment in enumerate(mapping) if segment.map_id == map_id)
+    start = index
+    end = index
+    while start > 0 and mapping[start - 1].output.end_frame == mapping[start].output.start_frame:
+        start -= 1
+    while end + 1 < len(mapping) and mapping[end].output.end_frame == mapping[end + 1].output.start_frame:
+        end += 1
+    return mapping[start].output.start_frame, mapping[end].output.end_frame
+
+
+def _layout_has_protected_semantic_event(layout: _Layout, intent: CreativeIntent) -> bool:
+    output = _words_output(layout.words)
+    return (
+        any(_overlaps(output, emphasis.output) for emphasis in intent.semantic_emphasis)
+        or any(
+            beat.role in {BeatRole.HOOK, BeatRole.PAYOFF} and _overlaps(output, beat.output)
+            for beat in intent.beats
+        )
+        or any(
+            motion.domain == MotionDomain.CAPTION and _overlaps(output, motion.output)
+            for motion in intent.motion_events
+        )
+    )
+
+
+def _words_output(words: tuple[_MappedWord, ...]) -> OutputInterval:
+    return OutputInterval(
+        start_frame=min(word.output.start_frame for word in words),
+        end_frame=max(word.output.end_frame for word in words),
+    )
+
+
+def _maximum_caption_cps(words: tuple[_MappedWord, ...]) -> float:
+    return 20.0 if _contains_cyrillic(" ".join(word.text for word in words)) else 22.0
+
+
+def _minimum_caption_frames(words: tuple[_MappedWord, ...], cps: float) -> int:
+    text = " ".join(word.text for word in words)
+    return math.ceil(len(text.replace(" ", "")) / cps * 30)
 
 
 def _timing_mode(words: tuple[_MappedWord, ...]) -> tuple[Literal["word", "phrase", "static"], float]:
@@ -902,6 +1106,49 @@ def _semantic_event(
     ):
         return None
     return chosen
+
+
+def _semantic_emphasis_event(
+    intent: CreativeIntent, words: tuple[_MappedWord, ...], output: OutputInterval,
+) -> _SemanticEvent | None:
+    """Resolve caption emphasis independently from beat/motion presentation.
+
+    A payoff may own the cue's entrance primitive while an evidence-backed
+    phrase still owns its color/karaoke treatment.  Selecting a single event
+    for both concerns silently discarded the emphasis whenever both occupied
+    the same cue.
+    """
+
+    cue_text = [_normalise(word.text) for word in words]
+    threshold = {
+        Intensity.LOW: 0.78,
+        Intensity.BALANCED: 0.58,
+        Intensity.HIGH: 0.42,
+    }[intent.policy.intensity]
+    candidates: list[_SemanticEvent] = []
+    for emphasis in intent.semantic_emphasis:
+        if not _overlaps(output, emphasis.output):
+            continue
+        phrase = [_normalise(value) for value in emphasis.text_span.split() if _normalise(value)]
+        if _find_phrase(cue_text, phrase) is None and not any(
+            _overlaps(word.output, emphasis.output) for word in words
+        ):
+            continue
+        if emphasis.confidence * emphasis.importance < threshold:
+            continue
+        candidates.append(_SemanticEvent(
+            "emphasis",
+            emphasis.output,
+            emphasis.confidence,
+            emphasis.importance,
+            emphasis.evidence_refs,
+            emphasis=emphasis,
+        ))
+    return max(
+        candidates,
+        key=lambda item: (item.importance * item.confidence, -item.output.start_frame),
+        default=None,
+    )
 
 
 def _primitive(
@@ -1302,12 +1549,6 @@ def _format_plan_text(cue: CaptionCuePlan, typography: CaptionTypographyToken) -
         elif index + 1 < len(cue.words):
             pieces.append(" ")
     return "".join(pieces)
-
-
-def _clamp_interval(value: OutputInterval, container: OutputInterval) -> OutputInterval:
-    start = max(value.start_frame, container.start_frame)
-    end = min(value.end_frame, container.end_frame)
-    return OutputInterval(start_frame=start, end_frame=max(start + 1, end))
 
 
 def _overlaps(left: OutputInterval, right: OutputInterval) -> bool:
