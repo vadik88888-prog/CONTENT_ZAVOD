@@ -114,6 +114,15 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     assert loaded_handoff.candidate_id == loaded_execution.candidate_id == plan.metadata.candidate_id
 
     assert not creative_policy_changed(loaded_intent, config)
+    assert "creative_policy:7J.1" in loaded_intent.provenance
+    parent_hash = loaded_intent.canonical_hash()
+    monkeypatch.setattr("app.creative_lifecycle.CREATIVE_POLICY_VERSION", "7J.2")
+    unchanged = revise_creative_intent(loaded_intent, config)
+    assert unchanged is loaded_intent
+    assert unchanged.canonical_hash() == parent_hash
+    assert "creative_policy:7J.1" in unchanged.provenance
+    assert "creative_policy:7J.2" not in unchanged.provenance
+
     legacy_intent = loaded_intent.model_copy(update={
         "provenance": tuple(
             item for item in loaded_intent.provenance
@@ -143,6 +152,20 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     assert revised.evidence_fingerprint == loaded_intent.evidence_fingerprint
     assert revised.source_output_mapping.fingerprint == loaded_intent.source_output_mapping.fingerprint
     assert revised.source_broll == loaded_intent.source_broll
+    assert "creative_policy:7J.2" in revised.provenance
+    assert "creative_policy:7J.1" not in revised.provenance
+    assert revised.canonical_hash() != parent_hash
+    revised_compiled = compile_native_creative_plan(
+        revised, transcript, config, source_width=320, source_height=180,
+        target_observations=evidence.target_observations,
+        source_scenes=evidence.source_scenes,
+    )
+    assert revised_compiled.intent_hash != loaded_compiled.intent_hash
+    assert {
+        item.node_id: item.cache_key for item in revised_compiled.render_graph_nodes
+    } != {
+        item.node_id: item.cache_key for item in loaded_compiled.render_graph_nodes
+    }
 
     # Policy version is persisted in creative provenance and feeds both the
     # intent hash and every downstream cache key for new drafts.

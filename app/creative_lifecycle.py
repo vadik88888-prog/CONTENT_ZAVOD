@@ -18,7 +18,7 @@ from app.creative_contracts import (
     ImmutableProductionPlanLink,
     canonical_hash,
 )
-from app.creative_policy import preset_family_policy
+from app.creative_policy import CREATIVE_POLICY_VERSION, preset_family_policy
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 from app.utils import read_json, utc_now, write_json
@@ -237,6 +237,7 @@ def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> Creativ
     identity = canonical_hash({
         "parent_intent_hash": parent.canonical_hash(),
         "revision": revision,
+        "creative_policy_version": CREATIVE_POLICY_VERSION,
         "policy": policy.model_dump(mode="json"),
         "evidence_fingerprint": parent.evidence_fingerprint,
         "mapping_fingerprint": parent.source_output_mapping.fingerprint,
@@ -249,10 +250,12 @@ def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> Creativ
             *tuple(
                 item for item in parent.provenance
                 if not item.startswith((
+                    "creative_policy:",
                     "preset_selection:", "preset_provenance:",
                     "preset_effective:", "preset_recommendation:",
                 ))
             ),
+            f"creative_policy:{CREATIVE_POLICY_VERSION}",
             f"preset_selection:{requested_mode}",
             f"preset_provenance:{config.product_flow.preset_provenance}",
             f"preset_effective:{policy.preset_id}",
