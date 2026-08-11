@@ -150,7 +150,21 @@ class PipelineFacade:
         # estimate without hiding an eventual prepare-time configuration error.
         config = load_config(base_config if base_config.is_file() else None)
         intent = project.settings.processing_intent()
-        resolved = resolve_processing_intent(intent, project.source_metadata)
+        source_metadata = dict(project.source_metadata)
+        analysis_path = Path(str(project.analysis_artifact_path or ""))
+        if analysis_path.is_file():
+            try:
+                artifact = AnalysisArtifact.read(analysis_path)
+            except (AnalysisArtifactError, OSError):
+                artifact = None
+            if artifact is not None and (
+                not project.analysis_id or artifact.analysis_id == project.analysis_id
+            ):
+                # Draft/render planning happens after content understanding.
+                # Feed that persisted evidence into auto selection instead of
+                # relying only on a filename heuristic.
+                source_metadata.update(artifact.content_profile)
+        resolved = resolve_processing_intent(intent, source_metadata)
         ai_available = not settings.local_test_mode and config.ai.provider != "mock"
         tts_available = not settings.local_test_mode and config.tts.provider == "openai"
         pricing = CostPricing(

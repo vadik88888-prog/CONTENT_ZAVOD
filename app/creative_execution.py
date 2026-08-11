@@ -27,7 +27,7 @@ from app.creative_contracts import (
     compile_render_plan,
     seconds_to_output_frame,
 )
-from app.creative_policy import preset_family_policy
+from app.creative_policy import CREATIVE_POLICY_VERSION, preset_family_policy
 from app.motion_planning import build_motion_plan
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence, build_source_broll_plan
@@ -73,6 +73,14 @@ def default_native_creative_intent(
         "production_plan": plan.reference().model_dump(mode="json"),
         "mapping": mapping.model_dump(mode="json"),
         "policy": policy.model_dump(mode="json"),
+        "creative_policy_version": CREATIVE_POLICY_VERSION,
+        "preset_selection": {
+            "mode": config.product_flow.preset_selection_mode,
+            "provenance": config.product_flow.preset_provenance,
+            "configured": config.product_flow.configured_subtitle_preset,
+            "recommended": config.product_flow.recommended_subtitle_preset,
+            "effective": config.product_flow.subtitle_preset,
+        },
         "version": NATIVE_CREATIVE_EXECUTION_VERSION,
     }
     digest = canonical_hash(identity)
@@ -85,7 +93,14 @@ def default_native_creative_intent(
         proposal_hash=digest,
         policy=policy,
         confidence=0,
-        provenance=("native_production_default",),
+        provenance=(
+            "native_production_default",
+            f"creative_policy:{CREATIVE_POLICY_VERSION}",
+            f"preset_selection:{config.product_flow.preset_selection_mode}",
+            f"preset_provenance:{config.product_flow.preset_provenance}",
+            f"preset_effective:{config.product_flow.subtitle_preset}",
+            f"preset_recommendation:{config.product_flow.recommended_subtitle_preset}",
+        ),
     )
 
 

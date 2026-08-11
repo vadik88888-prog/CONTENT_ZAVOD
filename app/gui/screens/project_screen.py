@@ -455,7 +455,10 @@ class ProjectScreen(QWidget):
         self.subtitle_style.addItem("Минималистичный", "minimal")
         self.subtitle_style.addItem("Динамичный", "dynamic")
         self.subtitle_style.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(subtitle_style=str(self.subtitle_style.currentData()))
+            lambda _index: self.viewmodel.save_options(
+                subtitle_style=str(self.subtitle_style.currentData()),
+                preset_selection_mode="explicit",
+            )
         )
         settings.addWidget(self.subtitle_style)
         self.cache = QCheckBox(self._CACHE_TEXT)

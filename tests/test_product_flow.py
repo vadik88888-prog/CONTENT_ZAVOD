@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.analysis_artifact import AnalysisArtifact
 from app.config import load_config
 from app.gui.models import DesktopSettings, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -111,6 +112,55 @@ def test_auto_recommendation_uses_available_content_signals_and_stays_conservati
     assert unknown.deep_analysis.estimated_benefit == "unknown"
 
 
+def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(
+            subtitle_preset="documentary",
+            preset_selection_mode="auto",
+        ),
+        _metadata(detected_content_type="gameplay"),
+    )
+
+    assert resolved.configured_subtitle_preset == "documentary"
+    assert resolved.recommended_subtitle_preset == "minimal"
+    assert resolved.subtitle_preset == "minimal"
+    assert resolved.preset_selection_mode == "auto"
+    assert resolved.preset_provenance == "content_recommendation"
+    assert resolved.to_dict()["effective_subtitle_preset"] == "minimal"
+
+
+def test_explicit_preset_beats_content_recommendation_and_is_applied_to_runtime() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(
+            subtitle_preset="dynamic",
+            preset_selection_mode="explicit",
+        ),
+        _metadata(detected_content_type="podcast"),
+    )
+    config = load_config()
+    apply_resolved_processing_config(config, resolved)
+
+    assert resolved.recommended_subtitle_preset == "clean"
+    assert resolved.subtitle_preset == "dynamic"
+    assert resolved.preset_provenance == "explicit_selection"
+    assert config.production_render.subtitle_style == "dynamic"
+    assert config.product_flow.configured_subtitle_preset == "dynamic"
+    assert config.product_flow.subtitle_preset == "dynamic"
+    assert config.product_flow.preset_selection_mode == "explicit"
+
+
+def test_legacy_processing_intent_without_mode_remains_explicit_and_pinned() -> None:
+    intent = ProcessingIntent.from_dict({"subtitle_preset": "clean"})
+    resolved = resolve_processing_intent(
+        intent,
+        _metadata(detected_content_type="gameplay"),
+    )
+
+    assert intent.preset_selection_mode == "explicit"
+    assert resolved.recommended_subtitle_preset == "minimal"
+    assert resolved.subtitle_preset == "clean"
+
+
 def test_estimate_calibrates_from_persisted_completed_run_history() -> None:
     resolved = resolve_processing_intent(ProcessingIntent(processing_mode="standard", clip_count="3"), _metadata())
     base = estimate_processing(resolved, _metadata(), paid_ai_available=False)
@@ -147,6 +197,7 @@ def test_legacy_project_migrates_to_product_flow_defaults(tmp_path: Path) -> Non
     assert migrated.schema_version == 3
     assert migrated.settings.processing_mode == "standard"
     assert migrated.settings.subtitle_style == "clean"
+    assert migrated.settings.preset_selection_mode == "explicit"
 
 
 def test_desktop_run_persists_intent_resolved_config_and_estimate(tmp_path: Path, monkeypatch) -> None:
@@ -154,7 +205,13 @@ def test_desktop_run_persists_intent_resolved_config_and_estimate(tmp_path: Path
     source.write_bytes(b"source")
     data = tmp_path / "desktop-data"
     projects = DesktopProjectStore(data)
-    project = projects.create(source, source_metadata=_metadata(visual_activity_score=0.8))
+    project = projects.create(
+        source,
+        source_metadata=_metadata(
+            visual_activity_score=0.8,
+            detected_content_type="vlog",
+        ),
+    )
     project.settings.processing_mode = "maximum"
     project.settings.deep_analysis = "auto"
     project.settings.platform = "shorts"
@@ -179,11 +236,85 @@ def test_desktop_run_persists_intent_resolved_config_and_estimate(tmp_path: Path
     flow = run.settings_snapshot["product_flow"]
     assert flow["user_intent"]["processing_mode"] == "maximum"
     assert flow["resolved_config"]["platform"]["platform"] == "shorts"
+    assert flow["resolved_config"]["effective_subtitle_preset"] == "dynamic"
+    assert flow["resolved_config"]["preset_provenance"] == "content_recommendation"
     assert flow["estimate"]["estimated_ai_cost_max"] is None
     runtime = prepared.runtime_config_path.read_text(encoding="utf-8")
     assert "processing_mode: maximum" in runtime
     assert "platform: shorts" in runtime
+    assert "subtitle_style: dynamic" in runtime
+    assert "preset_selection_mode: auto" in runtime
     assert "final_clip_count: 5" in runtime
+
+
+def test_manual_desktop_preset_choice_persists_explicit_override(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(
+        source,
+        source_metadata=_metadata(detected_content_type="podcast"),
+    )
+    settings = DesktopSettings.defaults(data)
+    settings.local_test_mode = True
+    root = Path(__file__).resolve().parents[1]
+    services = DesktopServices(
+        engine_root=root, settings_store=SettingsStore(data), settings=settings,
+        projects=projects, runs=RunHistoryStore(projects),
+        pipeline=PipelineFacade(root), system=SystemService(root),
+    )
+
+    services.update_project_options(project, subtitle_style="minimal")
+    _intent, resolved, _estimate = services.pipeline.plan_processing(project, settings)
+    reloaded = projects.load(project.project_id)
+
+    assert project.settings.preset_selection_mode == "explicit"
+    assert resolved.recommended_subtitle_preset == "clean"
+    assert resolved.subtitle_preset == "minimal"
+    assert reloaded.settings.preset_selection_mode == "explicit"
+
+
+def test_normal_draft_planning_uses_persisted_content_profile_for_auto_preset(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    data = tmp_path / "desktop-data"
+    projects = DesktopProjectStore(data)
+    project = projects.create(
+        source,
+        source_metadata=_metadata(title="gameplay filename"),
+    )
+    analysis_path = tmp_path / "analysis.json"
+    artifact = AnalysisArtifact(
+        analysis_id="analysis-preset",
+        project_id=project.project_id,
+        created_at="2026-08-12T00:00:00+00:00",
+        source={"id": "source-preset"},
+        source_fingerprint="source-fingerprint",
+        analysis_fingerprint="analysis-fingerprint",
+        work_directory=str(tmp_path / "work"),
+        candidate_data_ref=str(tmp_path / "candidates.json"),
+        references={},
+        candidates=[],
+        recommendation={},
+        summary={},
+        content_profile={"detected_content_type": "podcast"},
+        duration_seconds=600.0,
+    )
+    artifact.write(analysis_path)
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = artifact.analysis_id
+    projects.save(project)
+    settings = DesktopSettings.defaults(data)
+    settings.local_test_mode = True
+    root = Path(__file__).resolve().parents[1]
+    pipeline = PipelineFacade(root)
+
+    _intent, resolved, _estimate = pipeline.plan_processing(project, settings)
+
+    assert resolved.recommended_subtitle_preset == "clean"
+    assert resolved.subtitle_preset == "clean"
+    assert resolved.preset_provenance == "content_recommendation"
 
 
 def test_setup_changes_explain_when_analysis_is_reused_or_needed_again(tmp_path: Path) -> None:

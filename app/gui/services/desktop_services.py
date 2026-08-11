@@ -166,6 +166,8 @@ class DesktopServices:
         describes whether a later analysis is needed for a changed option.
         """
 
+        if "subtitle_style" in values and "preset_selection_mode" not in values:
+            values = {**values, "preset_selection_mode": "explicit"}
         changed: list[str] = []
         for name, value in values.items():
             if not hasattr(project.settings, name):
@@ -182,7 +184,7 @@ class DesktopServices:
         analysis_options = {"processing_mode", "deep_analysis"}
         needs_analysis = has_analysis and bool(analysis_options.intersection(changed))
         preview_options = {
-            "platform", "subtitles_enabled", "subtitle_style",
+            "platform", "subtitles_enabled", "subtitle_style", "preset_selection_mode",
             "composition_strategy", "same_source_broll_allowed", "encoder",
         }
         stale_preview_ids = [
@@ -450,6 +452,7 @@ class DesktopServices:
                     "clip_count": project.settings.clip_count,
                     "subtitles_enabled": project.settings.subtitles_enabled,
                     "subtitle_style": project.settings.subtitle_style,
+                    "preset_selection_mode": project.settings.preset_selection_mode,
                     "audio_mode": project.settings.audio_mode,
                     "composition_strategy": project.settings.composition_strategy,
                     "same_source_broll_allowed": project.settings.same_source_broll_allowed,
@@ -817,11 +820,14 @@ class DesktopServices:
             raise InputValidationError("Исходный видеофайл больше недоступен.")
         intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
         previous = parent_run.settings_snapshot.get("project_options", {})
+        previous = dict(previous) if isinstance(previous, dict) else {}
+        previous.setdefault("preset_selection_mode", "explicit")
         previous_audio_mode = str(previous.get("audio_mode", "original"))
         if previous_audio_mode != project.settings.audio_mode:
             raise InputValidationError("Для изменения аудиорежима запустите полное создание ролика.")
         current = {
             "subtitle_style": project.settings.subtitle_style,
+            "preset_selection_mode": project.settings.preset_selection_mode,
             "subtitles_enabled": project.settings.subtitles_enabled,
             "platform": project.settings.platform,
             "audio_mode": project.settings.audio_mode,

@@ -7,7 +7,7 @@ import pytest
 
 from app.audio_service import AudioCompositionService
 from app.creative_evidence import build_native_evidence_handoff
-from app.creative_execution import compile_native_creative_plan
+from app.creative_execution import compile_native_creative_plan, default_native_creative_intent
 from app.creative_lifecycle import (
     CreativeArtifactError,
     build_creative_execution,
@@ -101,8 +101,10 @@ def _parent_candidate(tmp_path: Path):
     return config, source, transcript, plan, audio, upstream, candidate_root, evidence, compiled
 
 
-def test_candidate_creative_identity_is_stable_revisionable_and_corruption_blocking(tmp_path: Path) -> None:
-    config, _source, _transcript, plan, _audio, _upstream, root, evidence, compiled = _parent_candidate(tmp_path)
+def test_candidate_creative_identity_is_stable_revisionable_and_corruption_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _source, transcript, plan, _audio, _upstream, root, evidence, compiled = _parent_candidate(tmp_path)
 
     loaded_intent, loaded_compiled, loaded_handoff, loaded_execution = load_candidate_creative_identity(
         root / "production-render", plan,
@@ -112,12 +114,62 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     assert loaded_handoff.candidate_id == loaded_execution.candidate_id == plan.metadata.candidate_id
 
     assert not creative_policy_changed(loaded_intent, config)
+    legacy_intent = loaded_intent.model_copy(update={
+        "provenance": tuple(
+            item for item in loaded_intent.provenance
+            if not item.startswith(("creative_policy:", "preset_"))
+        ),
+    })
+    config.product_flow.preset_selection_mode = "explicit"
+    config.product_flow.preset_provenance = "legacy_pinned"
+    config.product_flow.subtitle_preset = legacy_intent.policy.preset_id
+    assert revise_creative_intent(legacy_intent, config) is legacy_intent
+
+    # A new recommendation must not rewrite an already approved auto draft.
+    config.product_flow.preset_selection_mode = "auto"
+    config.product_flow.preset_provenance = "content_recommendation"
     config.product_flow.subtitle_preset = "dynamic"
+    config.product_flow.recommended_subtitle_preset = "dynamic"
+    pinned = revise_creative_intent(loaded_intent, config)
+    assert pinned is loaded_intent
+    assert pinned.canonical_hash() == loaded_intent.canonical_hash()
+
+    # A manual selection is a real revision, even after an auto-selected draft.
+    config.product_flow.preset_selection_mode = "explicit"
+    config.product_flow.preset_provenance = "explicit_selection"
+    config.product_flow.configured_subtitle_preset = "dynamic"
     revised = revise_creative_intent(loaded_intent, config)
     assert revised.revision == loaded_intent.revision + 1
     assert revised.evidence_fingerprint == loaded_intent.evidence_fingerprint
     assert revised.source_output_mapping.fingerprint == loaded_intent.source_output_mapping.fingerprint
     assert revised.source_broll == loaded_intent.source_broll
+
+    # Policy version is persisted in creative provenance and feeds both the
+    # intent hash and every downstream cache key for new drafts.
+    config.product_flow.preset_selection_mode = "auto"
+    config.product_flow.preset_provenance = "content_recommendation"
+    baseline_intent = default_native_creative_intent(
+        plan, evidence.intent.source_output_mapping, config,
+    )
+    baseline_compiled = compile_native_creative_plan(
+        baseline_intent, transcript, config, source_width=320, source_height=180,
+    )
+    monkeypatch.setattr("app.creative_execution.CREATIVE_POLICY_VERSION", "7J.2")
+    updated_intent = default_native_creative_intent(
+        plan, evidence.intent.source_output_mapping, config,
+    )
+    updated_compiled = compile_native_creative_plan(
+        updated_intent, transcript, config, source_width=320, source_height=180,
+    )
+    assert "creative_policy:7J.1" in baseline_intent.provenance
+    assert "creative_policy:7J.2" in updated_intent.provenance
+    assert updated_intent.canonical_hash() != baseline_intent.canonical_hash()
+    assert updated_compiled.intent_hash != baseline_compiled.intent_hash
+    assert {
+        item.node_id: item.cache_key for item in updated_compiled.render_graph_nodes
+    } != {
+        item.node_id: item.cache_key for item in baseline_compiled.render_graph_nodes
+    }
 
     compiled_path = root / "production-render" / "compiled-render-plan.json"
     corrupted = json.loads(compiled_path.read_text(encoding="utf-8"))

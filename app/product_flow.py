@@ -11,13 +11,20 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
+
+from app.creative_policy import (
+    PresetFamily,
+    recommend_preset_family,
+    resolve_preset_family,
+)
 
 
 PROCESSING_MODES = frozenset({"fast", "standard", "maximum"})
 DEEP_ANALYSIS_MODES = frozenset({"auto", "on", "off"})
 PLATFORMS = frozenset({"tiktok", "reels", "shorts", "universal"})
 SUBTITLE_PRESETS = frozenset({"minimal", "documentary", "dynamic", "clean"})
+PRESET_SELECTION_MODES = frozenset({"auto", "explicit"})
 CLIP_COUNTS = frozenset({"auto", "1", "3", "5"})
 AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
 PRESET_RESOLVER_VERSION = "4B.1"
@@ -59,6 +66,7 @@ class ProcessingIntent:
     platform: str = "universal"
     clip_count: str = "3"
     subtitle_preset: str = "documentary"
+    preset_selection_mode: str = "auto"
     audio_mode: str = "original"
 
     def validate(self) -> None:
@@ -72,6 +80,8 @@ class ProcessingIntent:
             raise ValueError("Unsupported clip count.")
         if self.subtitle_preset not in SUBTITLE_PRESETS:
             raise ValueError("Unsupported subtitle preset.")
+        if self.preset_selection_mode not in PRESET_SELECTION_MODES:
+            raise ValueError("Unsupported preset selection mode.")
         if self.audio_mode not in AUDIO_MODES:
             raise ValueError("Unsupported audio mode.")
 
@@ -87,6 +97,7 @@ class ProcessingIntent:
             "platform": self.platform,
             "clip_count": str(self.clip_count),
             "subtitle_preset": self.subtitle_preset,
+            "preset_selection_mode": self.preset_selection_mode,
             "audio_mode": self.audio_mode,
         }
 
@@ -98,6 +109,9 @@ class ProcessingIntent:
             platform=str(value.get("platform", "universal")),
             clip_count=str(value.get("clip_count", "3")),
             subtitle_preset=str(value.get("subtitle_preset", "documentary")),
+            # Payloads without provenance predate automatic selection. Their
+            # stored preset is user-owned/pinned and must remain effective.
+            preset_selection_mode=str(value.get("preset_selection_mode", "explicit")),
             audio_mode=str(value.get("audio_mode", "original")),
         )
         intent.validate()
@@ -124,7 +138,11 @@ class ResolvedProcessingConfig:
     deep_analysis: DeepAnalysisDecision
     platform: PlatformPreset
     clip_count: int
+    configured_subtitle_preset: str
     subtitle_preset: str
+    recommended_subtitle_preset: str
+    preset_selection_mode: str
+    preset_provenance: str
     audio_mode: str
     candidate_limit: int
     shortlist_size: int
@@ -141,7 +159,12 @@ class ResolvedProcessingConfig:
             "deep_analysis": self.deep_analysis.to_dict(),
             "platform": self.platform.to_dict(),
             "clip_count": self.clip_count,
+            "configured_subtitle_preset": self.configured_subtitle_preset,
             "subtitle_preset": self.subtitle_preset,
+            "effective_subtitle_preset": self.subtitle_preset,
+            "recommended_subtitle_preset": self.recommended_subtitle_preset,
+            "preset_selection_mode": self.preset_selection_mode,
+            "preset_provenance": self.preset_provenance,
             "audio_mode": self.audio_mode,
             "candidate_limit": self.candidate_limit,
             "shortlist_size": self.shortlist_size,
@@ -272,12 +295,31 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         "maximum": {"clips": 5, "candidates": 160, "shortlist": 30, "reranking": True, "strategy": "staged", "bitrate": "8M", "crop": "center_crop"},
     }[intent.processing_mode]
     clip_count = requested_count or int(defaults["clips"])
+    content_type = _preset_content_type(source_metadata)
+    recommended_preset = recommend_preset_family(content_type)
+    explicit_choice = (
+        cast(PresetFamily, intent.subtitle_preset)
+        if intent.preset_selection_mode == "explicit"
+        else None
+    )
+    effective_preset = resolve_preset_family(
+        user_choice=explicit_choice,
+        content_type=content_type,
+    )
     return ResolvedProcessingConfig(
         processing_mode=intent.processing_mode,
         deep_analysis=deep_analysis,
         platform=platform,
         clip_count=clip_count,
-        subtitle_preset=intent.subtitle_preset,
+        configured_subtitle_preset=intent.subtitle_preset,
+        subtitle_preset=effective_preset,
+        recommended_subtitle_preset=recommended_preset,
+        preset_selection_mode=intent.preset_selection_mode,
+        preset_provenance=(
+            "explicit_selection"
+            if intent.preset_selection_mode == "explicit"
+            else "content_recommendation"
+        ),
         audio_mode=intent.audio_mode,
         candidate_limit=int(defaults["candidates"]),
         shortlist_size=max(clip_count, int(defaults["shortlist"])),
@@ -447,9 +489,27 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     flow.deep_analysis_reason = resolved.deep_analysis.reason
     flow.platform = resolved.platform.platform
     flow.clip_count = resolved.clip_count
+    flow.configured_subtitle_preset = resolved.configured_subtitle_preset
     flow.subtitle_preset = resolved.subtitle_preset
+    flow.recommended_subtitle_preset = resolved.recommended_subtitle_preset
+    flow.preset_selection_mode = resolved.preset_selection_mode
+    flow.preset_provenance = resolved.preset_provenance
     flow.audio_mode = resolved.audio_mode
     flow.preset_version = resolved.resolver_version
+
+
+def _preset_content_type(source_metadata: dict[str, Any] | None) -> str:
+    metadata = source_metadata or {}
+    structured = " ".join(
+        str(metadata.get(key) or "")
+        for key in ("detected_content_type", "content_type", "content_kind", "dominant_format")
+    ).strip()
+    if structured:
+        return structured
+    return " ".join(
+        str(metadata.get(key) or "")
+        for key in ("genre", "title", "filename")
+    ).strip()
 
 
 def _number(value: Any) -> float | None:

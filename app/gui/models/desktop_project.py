@@ -47,6 +47,7 @@ class ProjectOptions:
     clip_count: str = "3"
     subtitles_enabled: bool = True
     subtitle_style: str = "documentary"
+    preset_selection_mode: str = "auto"
     audio_mode: str = "original"
     composition_strategy: str = "safe_auto"
     same_source_broll_allowed: bool = False
@@ -72,6 +73,7 @@ class ProjectOptions:
             platform=self.platform,
             clip_count=str(self.clip_count),
             subtitle_preset=self.subtitle_style,
+            preset_selection_mode=self.preset_selection_mode,
             audio_mode=self.audio_mode,
         )
 
@@ -243,10 +245,14 @@ class DesktopProject:
             raise ValueError("Project settings are corrupted.")
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
-            "subtitles_enabled", "subtitle_style", "audio_mode", "composition_strategy",
+            "subtitles_enabled", "subtitle_style", "preset_selection_mode", "audio_mode", "composition_strategy",
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
+        if "preset_selection_mode" not in settings:
+            # Before this contract every persisted subtitle style was the
+            # effective pinned value. Never reinterpret it as automatic.
+            migrated_settings["preset_selection_mode"] = "explicit"
         source_metadata = dict(value.get("source_metadata") or {})
         draft_artifact_path = str(value["draft_artifact_path"]) if value.get("draft_artifact_path") else None
         candidate_states = {str(key): str(item) for key, item in dict(value.get("candidate_states") or {}).items()}

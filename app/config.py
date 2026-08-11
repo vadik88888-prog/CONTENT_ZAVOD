@@ -776,7 +776,11 @@ class ProductFlowConfig:
     deep_analysis_reason: str = "Не запрашивался."
     platform: str = "universal"
     clip_count: int = 3
+    configured_subtitle_preset: str = "documentary"
     subtitle_preset: str = "documentary"
+    recommended_subtitle_preset: str = "documentary"
+    preset_selection_mode: str = "auto"
+    preset_provenance: str = "content_recommendation"
     audio_mode: str = "original"
     preset_version: str = "4B.1"
 
@@ -797,6 +801,14 @@ class ProductFlowConfig:
             raise ClipEngineError("product_flow.clip_count должен быть от 1 до 5.")
         if self.subtitle_preset not in {"minimal", "documentary", "dynamic", "clean"}:
             raise ClipEngineError("product_flow.subtitle_preset содержит неподдерживаемый стиль.")
+        if self.configured_subtitle_preset not in {"minimal", "documentary", "dynamic", "clean"}:
+            raise ClipEngineError("product_flow.configured_subtitle_preset must be a supported style.")
+        if self.recommended_subtitle_preset not in {"minimal", "documentary", "dynamic", "clean"}:
+            raise ClipEngineError("product_flow.recommended_subtitle_preset must be a supported style.")
+        if self.preset_selection_mode not in {"auto", "explicit"}:
+            raise ClipEngineError("product_flow.preset_selection_mode must be auto or explicit.")
+        if self.preset_provenance not in {"content_recommendation", "explicit_selection", "legacy_pinned"}:
+            raise ClipEngineError("product_flow.preset_provenance is unsupported.")
         if not isinstance(self.preset_version, str) or not self.preset_version.strip():
             raise ClipEngineError("product_flow.preset_version не должен быть пустым.")
 
@@ -936,6 +948,16 @@ def load_config(path: Path | None = None) -> AppConfig:
                 raise ClipEngineError(
                     f"Неизвестные параметры {name} в config.yaml: {', '.join(nested_unknown)}"
                 )
+            if name == "product_flow" and "preset_selection_mode" not in nested_values:
+                # Legacy runtime configs persisted an effective preset without
+                # auto/explicit provenance. Keep that choice pinned.
+                nested_values = {
+                    **nested_values,
+                    "preset_selection_mode": "explicit",
+                    "preset_provenance": "legacy_pinned",
+                    "configured_subtitle_preset": nested_values.get("subtitle_preset", "documentary"),
+                    "recommended_subtitle_preset": nested_values.get("subtitle_preset", "documentary"),
+                }
             values[name] = config_type(**nested_values)
     config = AppConfig(**values)
     config.validate()

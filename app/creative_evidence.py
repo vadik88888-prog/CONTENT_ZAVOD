@@ -209,6 +209,7 @@ def build_native_evidence_handoff(
     evidence_fingerprint = canonical_hash([item.model_dump(mode="json") for item in manifest])
     proposal_hash = canonical_hash({
         "version": NATIVE_EVIDENCE_HANDOFF_VERSION,
+        "creative_identity": list(fallback.provenance),
         "candidate_id": candidate_id,
         "evidence_fingerprint": evidence_fingerprint,
         "beats": [item.model_dump(mode="json") for item in beats],
@@ -239,6 +240,7 @@ def build_native_evidence_handoff(
             "phase6:multimodal_timeline",
             "phase6:story_units",
             NATIVE_EVIDENCE_HANDOFF_VERSION,
+            *fallback.provenance,
         ),
         "policy": policy,
         "beats": tuple(sorted(beats, key=lambda item: (item.output.start_frame, item.decision_id))),

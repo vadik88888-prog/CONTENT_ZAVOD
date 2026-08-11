@@ -202,7 +202,19 @@ def load_candidate_creative_identity(
     return intent, compiled, handoff, execution
 
 
-def creative_policy_for_config(parent: CreativePolicy, config: AppConfig) -> CreativePolicy:
+def creative_policy_for_config(
+    parent: CreativePolicy, config: AppConfig, *, parent_selection_mode: str = "explicit",
+) -> CreativePolicy:
+    parent_mode = parent_selection_mode
+    requested_mode = config.product_flow.preset_selection_mode
+    if parent_mode == requested_mode and (
+        requested_mode == "auto"
+        or config.product_flow.subtitle_preset == parent.preset_id
+    ):
+        # An approved policy is pinned. Automatic recommendations and later
+        # policy-table changes may affect new drafts, never a rerender of this
+        # identity. Platform is still an explicit render revision input.
+        return parent.model_copy(update={"platform": config.product_flow.platform})
     family_policy = preset_family_policy(config.product_flow.subtitle_preset)  # type: ignore[arg-type]
     return parent.model_copy(update={
         "preset_id": config.product_flow.subtitle_preset,
@@ -216,8 +228,10 @@ def creative_policy_for_config(parent: CreativePolicy, config: AppConfig) -> Cre
 
 
 def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> CreativeIntent:
-    policy = creative_policy_for_config(parent.policy, config)
-    if policy == parent.policy:
+    parent_mode = _intent_preset_selection_mode(parent)
+    requested_mode = config.product_flow.preset_selection_mode
+    policy = _creative_policy_for_intent(parent, config)
+    if policy == parent.policy and requested_mode == parent_mode:
         return parent
     revision = parent.revision + 1
     identity = canonical_hash({
@@ -231,9 +245,42 @@ def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> Creativ
         "intent_id": f"intent-revision-{identity[:16]}",
         "revision": revision,
         "policy": policy,
-        "provenance": (*parent.provenance, f"style_revision:{revision}"),
+        "provenance": (
+            *tuple(
+                item for item in parent.provenance
+                if not item.startswith((
+                    "preset_selection:", "preset_provenance:",
+                    "preset_effective:", "preset_recommendation:",
+                ))
+            ),
+            f"preset_selection:{requested_mode}",
+            f"preset_provenance:{config.product_flow.preset_provenance}",
+            f"preset_effective:{policy.preset_id}",
+            f"preset_recommendation:{config.product_flow.recommended_subtitle_preset}",
+            f"style_revision:{revision}",
+        ),
     })
 
 
 def creative_policy_changed(intent: CreativeIntent, config: AppConfig) -> bool:
-    return creative_policy_for_config(intent.policy, config) != intent.policy
+    return (
+        _creative_policy_for_intent(intent, config) != intent.policy
+        or _intent_preset_selection_mode(intent) != config.product_flow.preset_selection_mode
+    )
+
+
+def _intent_preset_selection_mode(intent: CreativeIntent) -> str:
+    marker = next(
+        (item for item in reversed(intent.provenance) if item.startswith("preset_selection:")),
+        None,
+    )
+    # Creative intents written before 7J.1 stored an effective pinned preset.
+    return marker.partition(":")[2] if marker is not None else "explicit"
+
+
+def _creative_policy_for_intent(parent: CreativeIntent, config: AppConfig) -> CreativePolicy:
+    return creative_policy_for_config(
+        parent.policy,
+        config,
+        parent_selection_mode=_intent_preset_selection_mode(parent),
+    )
