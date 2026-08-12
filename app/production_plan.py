@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.errors import ProductionPlanError
+from app.continuity import build_continuity_decision
 from app.production_models import (
     AudioLayer,
     BoundaryDecision,
+    ContinuityDecision,
     DialogueSegment,
     NarrationSegment,
     ProductionPlanEnvelope,
@@ -56,9 +58,12 @@ class ProductionPlanEnvelopeContext:
     def build(
         self, *, candidate_id: str, source_id: str, final_script_hash: str,
         boundary_decision: BoundaryDecision | None,
+        continuity_decision: ContinuityDecision | None,
     ) -> ProductionPlanEnvelope:
         if boundary_decision is None:
             raise ProductionPlanError("EDIT_PLAN_SCHEMA_INVALID: native ProductionPlan requires a BoundaryDecision.")
+        if continuity_decision is None:
+            raise ProductionPlanError("EDIT_PLAN_SCHEMA_INVALID: native ProductionPlan requires a ContinuityDecision.")
         return ProductionPlanEnvelope(
             identity=ProductionPlanIdentity(
                 project_id=self.project_id,
@@ -68,6 +73,7 @@ class ProductionPlanEnvelopeContext:
                 source_id=source_id,
             ),
             boundary_decision_ref=boundary_decision.decision_id,
+            continuity_decision_ref=continuity_decision.decision_id,
             preset=ProductionPlanPreset(
                 preset_id=self.preset_id,
                 preset_version=self.preset_version,
@@ -84,6 +90,7 @@ class ProductionPlanEnvelopeContext:
                 analysis_sha256=self.analysis_fingerprint,
                 final_script_sha256=final_script_hash,
                 boundary_decision_sha256=stable_text_hash(boundary_decision.model_dump_json()),
+                continuity_decision_sha256=continuity_decision.fingerprint(),
             ),
             created_at=self.created_at or utc_now(),
         )
@@ -253,12 +260,12 @@ def build_production_plan(
     _register_grounded_dialogue_boundaries(
         dialogue_mappings, boundary_decision=boundary_decision, evidence=evidence,
     )
-    story_continuity_warnings = _preserve_story_continuity(
+    continuity_decision = _continuity_decision_from_context(
+        context, candidate_id, boundary_decision,
+    )
+    continuity_warnings = _apply_continuity_required_spans(
         dialogue_mappings,
-        source_audio_mode=source_audio_mode,
-        content_type=str(semantic.get("content_type") or ""),
-        context=context,
-        boundary_decision=boundary_decision,
+        continuity_decision=continuity_decision,
     )
     boundary_padding_warnings = _apply_boundary_padding(dialogue_mappings, boundary_decision)
     timeline = _build_timeline(segments)
@@ -270,6 +277,7 @@ def build_production_plan(
         source_id=str(source.get("id", "")),
         final_script_hash=final_script_hash,
         boundary_decision=boundary_decision,
+        continuity_decision=continuity_decision,
     ) if envelope_context is not None else None
     if native_envelope is not None and suppressed_duplicate_dialogue_ranges:
         native_envelope = native_envelope.model_copy(update={
@@ -286,9 +294,9 @@ def build_production_plan(
         native_envelope = native_envelope.model_copy(update={
             "warnings": [*native_envelope.warnings, *boundary_padding_warnings],
         })
-    if native_envelope is not None and story_continuity_warnings:
+    if native_envelope is not None and continuity_warnings:
         native_envelope = native_envelope.model_copy(update={
-            "warnings": [*native_envelope.warnings, *story_continuity_warnings],
+            "warnings": [*native_envelope.warnings, *continuity_warnings],
         })
     try:
         return ProductionPlan(
@@ -316,6 +324,7 @@ def build_production_plan(
             tts_eligible=not dialogue_only and audio_mode in {"voiceover", "replace_voice", "mixed"},
             audio_mode_reason="source_audio_mode" if source_audio_mode else "explicit_voiceover_intent",
             boundary_decision=boundary_decision,
+            continuity_decision=continuity_decision,
             composition_intent=dict(context.get("composition_intent") or {}),
         )
     except ValueError as error:
@@ -443,76 +452,69 @@ def _apply_boundary_padding(
     return warnings
 
 
-def _preserve_story_continuity(
+def _apply_continuity_required_spans(
     dialogue_mappings: list[DialogueSegment],
     *,
-    source_audio_mode: bool,
-    content_type: str,
-    context: dict[str, Any],
-    boundary_decision: BoundaryDecision | None,
+    continuity_decision: ContinuityDecision | None,
 ) -> list[str]:
-    """Keep causal source bridges instead of concatenating story islands.
+    """Retain only explicitly evidence-backed spans, never a whole boundary.
 
-    Semantic facts prove what may be used, but their evidence spans are not an
-    edit decision to remove everything between setup and payoff.  In original
-    audio modes a story therefore keeps the source interval between consecutive
-    grounded facts.  This is bounded by the already-approved candidate and
-    BoundaryDecision; no new source material is introduced outside that range.
+    The existing source-audio pipeline renders ``DialogueSegment`` intervals.
+    Extending the immediately preceding/next dialogue mapping is therefore the
+    narrowest compatible way to retain a required visual action, semantic
+    bridge, reaction, or payoff.  The distinct ContinuityDecision authorizes
+    its endpoints; BoundaryDecision remains unchanged.
     """
 
-    if not source_audio_mode or len(dialogue_mappings) < 2:
+    if continuity_decision is None or not continuity_decision.required_spans:
         return []
-    gaps = [
-        max(0.0, right.source_start_seconds - left.source_end_seconds)
-        for left, right in zip(dialogue_mappings, dialogue_mappings[1:])
-    ]
-    candidate_duration = max(
-        0.0, float(context.get("end_time", 0)) - float(context.get("start_time", 0)),
-    )
-    multimodal = context.get("multimodal_context")
-    scene_boundaries = context.get("scene_boundaries")
-    visual_story_bridge = (
-        max(gaps, default=0.0) >= max(3.0, candidate_duration * 0.35)
-        and (
-            isinstance(multimodal, dict)
-            and multimodal.get("multimodal_payoff_grounded") is True
-            or isinstance(scene_boundaries, list) and len(scene_boundaries) >= 2
-        )
-    )
-    if content_type != "story" and not visual_story_bridge:
-        return []
+    if not dialogue_mappings:
+        raise ProductionPlanError("CONTINUITY_REQUIRED_SPAN_UNMAPPABLE: no source dialogue mappings.")
     warnings: list[str] = []
-    for left, right in zip(dialogue_mappings, dialogue_mappings[1:]):
-        if right.source_end_seconds < left.source_start_seconds - 0.001:
-            raise ProductionPlanError(
-                "STORY_SOURCE_ORDER_INVALID: source-audio story facts must remain chronological."
-            )
-        if right.source_start_seconds <= left.source_end_seconds + 0.001:
+    for requirement in continuity_decision.required_spans:
+        source_range = requirement.source_range
+        if _source_range_covered(dialogue_mappings, source_range.start_seconds, source_range.end_seconds):
             continue
-        previous = left.source_end_seconds
-        left.source_end_seconds = right.source_start_seconds
-        left.estimated_duration_seconds = max(
-            0.0, left.source_end_seconds - left.source_start_seconds,
-        )
-        # The adjacent mappings now meet at the already-approved start of the
-        # next complete word.  Since no source time is skipped at that join,
-        # the same point is also a valid end boundary for the preceding bridge.
-        if (
-            boundary_decision is not None
-            and any(
-                abs(right.source_start_seconds - point) <= 0.001
-                for point in boundary_decision.safe_start_points
+        ordered = sorted(dialogue_mappings, key=lambda item: (item.source_start_seconds, item.source_end_seconds))
+        before = [item for item in ordered if item.source_end_seconds <= source_range.start_seconds + 0.001]
+        after = [item for item in ordered if item.source_start_seconds >= source_range.end_seconds - 0.001]
+        if before:
+            target = before[-1]
+            previous = target.source_end_seconds
+            target.source_end_seconds = max(target.source_end_seconds, source_range.end_seconds)
+            target.estimated_duration_seconds = max(0.0, target.source_end_seconds - target.source_start_seconds)
+            warnings.append(
+                "CONTINUITY_REQUIRED_SPAN_PRESERVED:"
+                f"{requirement.requirement_type}:{target.segment_id}:{previous:.3f}->{target.source_end_seconds:.3f}"
             )
-        ):
-            boundary_decision.safe_end_points = sorted({
-                *boundary_decision.safe_end_points,
-                right.source_start_seconds,
-            })
-        warnings.append(
-            "STORY_CAUSAL_BRIDGE_PRESERVED:"
-            f"{left.segment_id}:{previous:.3f}->{left.source_end_seconds:.3f}"
-        )
+        elif after:
+            target = after[0]
+            previous = target.source_start_seconds
+            target.source_start_seconds = min(target.source_start_seconds, source_range.start_seconds)
+            target.estimated_duration_seconds = max(0.0, target.source_end_seconds - target.source_start_seconds)
+            warnings.append(
+                "CONTINUITY_REQUIRED_SPAN_PRESERVED:"
+                f"{requirement.requirement_type}:{target.segment_id}:{previous:.3f}->{target.source_start_seconds:.3f}"
+            )
+        else:
+            raise ProductionPlanError(
+                "CONTINUITY_REQUIRED_SPAN_UNMAPPABLE: "
+                f"{requirement.requirement_type}:{source_range.start_seconds:.3f}-{source_range.end_seconds:.3f}"
+            )
     return warnings
+
+
+def _source_range_covered(dialogue_mappings: list[DialogueSegment], start: float, end: float) -> bool:
+    cursor = start
+    for item in sorted(dialogue_mappings, key=lambda value: (value.source_start_seconds, value.source_end_seconds)):
+        if item.source_end_seconds < cursor - 0.001:
+            continue
+        if item.source_start_seconds > cursor + 0.001:
+            break
+        cursor = max(cursor, item.source_end_seconds)
+        if cursor >= end - 0.001:
+            return True
+    return False
 
 
 def _required_boundary_evidence_is_covered(
@@ -569,6 +571,51 @@ def _boundary_decision_from_context(context: dict[str, Any], candidate_id: str) 
         raise ProductionPlanError(
             "BOUNDARY_CANDIDATE_MISMATCH: SourceContext boundary decision belongs to another candidate."
         )
+    return decision
+
+
+def _continuity_decision_from_context(
+    context: dict[str, Any], candidate_id: str, boundary_decision: BoundaryDecision | None,
+) -> ContinuityDecision | None:
+    """Read A-2 provenance or deterministically derive it from cached evidence."""
+
+    raw = context.get("continuity_decision")
+    if raw not in (None, {}):
+        if not isinstance(raw, dict):
+            raise ProductionPlanError("CONTINUITY_DECISION_INVALID: SourceContext continuity_decision must be an object.")
+        try:
+            decision = ContinuityDecision.model_validate(raw)
+        except Exception as error:
+            raise ProductionPlanError(f"CONTINUITY_DECISION_INVALID: {error}") from error
+    elif boundary_decision is not None:
+        try:
+            decision = build_continuity_decision(
+                candidate_id=candidate_id,
+                boundary_decision=boundary_decision,
+                primary_evidence=[
+                    item for item in context.get("primary_evidence", []) if isinstance(item, dict)
+                ],
+                multimodal_context=(
+                    context.get("multimodal_context")
+                    if isinstance(context.get("multimodal_context"), dict) else {}
+                ),
+            )
+        except Exception as error:
+            raise ProductionPlanError(f"CONTINUITY_DECISION_INVALID: {error}") from error
+    else:
+        return None
+    if decision is None:
+        return None
+    if decision.candidate_id != candidate_id:
+        raise ProductionPlanError(
+            "CONTINUITY_CANDIDATE_MISMATCH: SourceContext continuity decision belongs to another candidate."
+        )
+    if boundary_decision is None:
+        raise ProductionPlanError("CONTINUITY_BOUNDARY_MISSING: continuity decision requires BoundaryDecision.")
+    if decision.boundary_decision_id != boundary_decision.decision_id:
+        raise ProductionPlanError("CONTINUITY_BOUNDARY_REFERENCE_MISMATCH")
+    if decision.boundary_decision_sha256 != stable_text_hash(boundary_decision.model_dump_json()):
+        raise ProductionPlanError("CONTINUITY_BOUNDARY_FINGERPRINT_MISMATCH")
     return decision
 
 

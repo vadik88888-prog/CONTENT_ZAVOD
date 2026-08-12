@@ -11,6 +11,7 @@ from app.quality_report import (
     build_quality_report,
     exact_dialogue_semantic_blocker,
 )
+from app.production_models import ContinuityDecision
 from app.utils import write_json
 
 
@@ -27,6 +28,17 @@ def _inputs(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
         run_id="run-1",
         revision_id="run-1:render-01",
     )
+    continuity = ContinuityDecision.model_validate({
+        "schema_version": "A-2.continuity.1",
+        "decision_id": "continuity-candidate-1-safe",
+        "candidate_id": "candidate-1",
+        "boundary_decision_id": "boundary-candidate-1",
+        "boundary_decision_sha256": "b" * 64,
+        "approved_source_range": {"start_seconds": 1.0, "end_seconds": 5.0},
+        "mode": "compact_dialogue",
+        "required_spans": [],
+        "omitted_spans": [],
+    })
     plan = {
         "plan_id": "plan-1",
         "envelope": {
@@ -35,6 +47,8 @@ def _inputs(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
                 "candidate_id": "candidate-1", "source_id": "source-1",
                 "run_id": "run-1", "project_id": "project-1",
             },
+            "continuity_decision_ref": continuity.decision_id,
+            "input_fingerprints": {"continuity_decision_sha256": continuity.fingerprint()},
         },
         "boundary_decision": {
             "word_integrity": word_integrity,
@@ -42,6 +56,7 @@ def _inputs(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
             "payoff_preserved": True,
             "allowed_source_range": {"start_seconds": 1.0, "end_seconds": 5.0},
         },
+        "continuity_decision": continuity.model_dump(mode="json"),
     }
     candidate = {
         "id": "candidate-1",
@@ -52,6 +67,19 @@ def _inputs(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
     render = {
         "output_file": str(artifact),
         "validation": validation,
+        "source_output_time_map": {
+            "schema_version": "7A.time-map.1",
+            "source_ticks_per_second": 1_000_000,
+            "output_fps": 30,
+            "continuity_decision_id": continuity.decision_id,
+            "continuity_decision_version": continuity.schema_version,
+            "continuity_decision_sha256": continuity.fingerprint(),
+            "segments": [{
+                "map_id": "map-source-1",
+                "source": {"start_tick": 1_000_000, "end_tick": 5_000_000},
+                "output": {"start_frame": 0, "end_frame": 120},
+            }],
+        },
         "quality": {"status": "passed"},
         "composition": {"segments": []},
         "subtitle_layout": {"quality_decision": {"status": "passed", "reason_codes": []}},
@@ -128,11 +156,26 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert data["schema_version"] == "5G.0"
     assert data["findings"] == []
     assert {item["code"] for item in data["checks"]} == {
-        "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "PLAN_IDENTITY", "COMPOSITION",
+        "ELIGIBILITY", "DIVERSITY", "BOUNDARIES", "CONTINUITY", "PLAN_IDENTITY", "COMPOSITION",
         "SOURCE_BROLL", "EDITORIAL_MOTION", "SUBTITLES", "SEMANTIC_CAPTIONS", "AUDIO", "FFPROBE",
         "ARTIFACT_IDENTITY", "SEMANTIC_CONTENT",
     }
     assert data["artifact_id"] and data["artifact_sha256"]
+
+
+def test_compact_dialogue_without_omissions_warns_when_render_map_is_unavailable(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    render.pop("source_output_time_map")
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    finding = next(item for item in report.findings if item.code == "CONTINUITY_TIME_MAP_MISSING")
+    assert finding.severity == "warning"
+    assert report.status == "PASS_WITH_WARNINGS"
 
 
 def test_quality_report_warning_preserves_machine_readable_evidence(tmp_path: Path) -> None:

@@ -124,6 +124,10 @@ class SourceContext:
     # Empty is the explicit compatibility state for transformation artifacts
     # written before Goal 5C. New candidates carry the immutable decision here.
     boundary_decision: dict[str, Any] = field(default_factory=dict)
+    # A-2 continuity is intentionally separate from boundary selection.  It
+    # records the provenance of non-dialogue spans that production may retain
+    # or omit inside the approved boundary.
+    continuity_decision: dict[str, Any] = field(default_factory=dict)
     multimodal_context: dict[str, Any] = field(default_factory=dict)
     composition_intent: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "2.0"
@@ -158,6 +162,7 @@ class SourceContext:
             "audio_energy_summary": self.audio_energy_summary,
             "candidate_features": self.candidate_features,
             "boundary_decision": self.boundary_decision,
+            "continuity_decision": self.continuity_decision,
             "multimodal_context": self.multimodal_context,
             "composition_intent": self.composition_intent,
         }
@@ -597,6 +602,9 @@ def source_context_from_dict(data: dict[str, Any]) -> SourceContext:
         audio_energy_summary=dict(data.get("audio_energy_summary", {})),
         candidate_features=dict(data.get("candidate_features", {})),
         boundary_decision=dict(data.get("boundary_decision", {})),
+        continuity_decision=dict(data.get("continuity_decision", {})),
+        multimodal_context=dict(data.get("multimodal_context", {})),
+        composition_intent=dict(data.get("composition_intent", {})),
         schema_version=str(data.get("schema_version", "2.0")),
     )
 

@@ -187,6 +187,14 @@ def test_source_audio_story_preserves_causal_bridge_between_grounded_facts() -> 
         {"segment_id": 10, "start": 4.0, "end": 6.0, "text": "The car stopped.", "scope": "primary_candidate", "confidence": 0.9},
         {"segment_id": 11, "start": 18.0, "end": 20.0, "text": "A helper fixed it.", "scope": "primary_candidate", "confidence": 0.9},
     ]
+    outcome["source_context"]["multimodal_context"] = {
+        "continuity_required_spans": [{
+            "requirement_type": "semantic_bridge",
+            "source_range": {"start_seconds": 6.0, "end_seconds": 18.0},
+            "rationale": "Observed causal bridge connects the setup to its payoff.",
+            "evidence": {"source": "controlled_fixture", "event_ids": ["bridge-1"]},
+        }],
+    }
     outcome["final_script"].update({
         "sentences": [
             {
@@ -212,10 +220,9 @@ def test_source_audio_story_preserves_causal_bridge_between_grounded_facts() -> 
         (4.0, 18.0), (18.0, 20.0),
     ]
     assert sum(item.estimated_duration_seconds for item in plan.dialogue_mappings) == 16.0
-    assert 18.0 in plan.boundary_decision.safe_start_points
-    assert 18.0 in plan.boundary_decision.safe_end_points
+    assert plan.continuity_decision and plan.continuity_decision.mode == "preserve_required_spans"
     assert plan.envelope and any(
-        warning.startswith("STORY_CAUSAL_BRIDGE_PRESERVED") for warning in plan.envelope.warnings
+        warning.startswith("CONTINUITY_REQUIRED_SPAN_PRESERVED") for warning in plan.envelope.warnings
     )
 
 

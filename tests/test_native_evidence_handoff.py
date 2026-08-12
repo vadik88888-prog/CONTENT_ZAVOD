@@ -16,6 +16,7 @@ from app.creative_evidence import build_native_evidence_handoff
 from app.creative_execution import compile_native_creative_plan
 from app.pipeline import Pipeline, StageTracker, _hash
 from app.production_models import BoundaryDecision, ProductionPlan
+from app.continuity import build_continuity_decision
 from app.production_plan import ProductionPlanEnvelopeContext
 from app.sources import Source
 from app.tts_providers import MockTTSProvider
@@ -168,6 +169,14 @@ def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) 
     )
     raw = legacy.model_dump(mode="json")
     raw["boundary_decision"] = boundary.model_dump(mode="json")
+    continuity = build_continuity_decision(
+        candidate_id=legacy.metadata.candidate_id,
+        boundary_decision=boundary,
+        primary_evidence=[{"segment_id": 0, "start": 1.0, "end": 2.0}],
+        multimodal_context={},
+    )
+    assert continuity is not None
+    raw["continuity_decision"] = continuity.model_dump(mode="json")
     for item in raw["dialogue_mappings"]:
         item["boundary_decision_id"] = boundary.decision_id
     for item in raw["segments"]:
@@ -178,6 +187,7 @@ def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) 
         source_id=legacy.metadata.source_id,
         final_script_hash=legacy.metadata.final_script_hash,
         boundary_decision=boundary,
+        continuity_decision=continuity,
     ).model_dump(mode="json")
     return ProductionPlan.model_validate(raw)
 

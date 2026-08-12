@@ -1,0 +1,50 @@
+{
+  "fixture_version": "A-2.cached-gameplay.1",
+  "candidate_id": "candidate-chapter-012-story-001",
+  "candidate_range": {"start_seconds": 267.67, "end_seconds": 291.47, "duration_seconds": 23.80},
+  "boundary_decision": {
+    "schema_version": "5C.1",
+    "decision_id": "boundary-candidate-chapter-012-story-001",
+    "candidate_id": "candidate-chapter-012-story-001",
+    "rough_range": {"start_seconds": 267.67, "end_seconds": 291.47},
+    "refined_range": {"start_seconds": 267.67, "end_seconds": 291.47},
+    "allowed_source_range": {"start_seconds": 267.67, "end_seconds": 291.47},
+    "start_reason": "Cached approved source boundary.",
+    "end_reason": "Cached approved source boundary.",
+    "word_integrity": true,
+    "sentence_integrity": true,
+    "semantic_completion": true,
+    "payoff_preserved": true,
+    "continuation_risk": 0.15,
+    "continuation_risk_threshold": 0.65,
+    "pre_roll_seconds": 0.0,
+    "post_roll_seconds": 0.0,
+    "confidence": 0.562,
+    "start_evidence": {"source": "cached_analysis"},
+    "end_evidence": {"source": "cached_analysis"},
+    "pause_evidence": {},
+    "required_evidence": [],
+    "safe_start_points": [267.92, 269.28, 275.69, 277.89, 278.73, 281.59, 286.56, 288.54, 290.38],
+    "safe_end_points": [268.56, 275.69, 276.75, 278.29, 279.79, 286.42, 287.72, 290.16, 290.82],
+    "fallback_used": false,
+    "fallback_reason": null
+  },
+  "primary_evidence": [
+    {"segment_id": 67, "start": 267.92, "end": 268.56},
+    {"segment_id": 68, "start": 269.28, "end": 275.69},
+    {"segment_id": 69, "start": 275.69, "end": 276.75},
+    {"segment_id": 70, "start": 277.89, "end": 278.29},
+    {"segment_id": 71, "start": 278.73, "end": 279.79},
+    {"segment_id": 72, "start": 281.59, "end": 286.42},
+    {"segment_id": 73, "start": 286.56, "end": 287.72},
+    {"segment_id": 74, "start": 288.54, "end": 290.16},
+    {"segment_id": 75, "start": 290.38, "end": 290.82}
+  ],
+  "multimodal_context": {
+    "schema_version": "6D.boundary-context.1",
+    "multimodal_payoff_grounded": false,
+    "visual_payoff_verified": false,
+    "visual_reaction_verified": false,
+    "evidence_refs": []
+  }
+}

@@ -12,6 +12,7 @@ from app.utils import stable_text_hash
 BOUNDARY_EPSILON_SECONDS = 0.001
 PRODUCTION_PLAN_ENVELOPE_VERSION = "5F.1"
 SUPPORTED_LEGACY_PLAN_VERSIONS = frozenset({"3A.0", "3A.1", "3A.2"})
+CONTINUITY_DECISION_VERSION = "A-2.continuity.1"
 
 
 class ProductionPlanIdentity(BaseModel):
@@ -64,6 +65,9 @@ class ProductionPlanInputFingerprints(BaseModel):
     analysis_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     final_script_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     boundary_decision_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    # A-2 keeps a separate cache identity for editorial continuity.  ``None``
+    # is retained only while reading previously persisted 5F plans.
+    continuity_decision_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class ProductionPlanEnvelope(BaseModel):
@@ -79,6 +83,7 @@ class ProductionPlanEnvelope(BaseModel):
     schema_version: Literal["5F.1"] = PRODUCTION_PLAN_ENVELOPE_VERSION
     identity: ProductionPlanIdentity
     boundary_decision_ref: str | None = Field(default=None, min_length=1)
+    continuity_decision_ref: str | None = Field(default=None, min_length=1)
     preset: ProductionPlanPreset
     target: ProductionPlanTarget
     input_fingerprints: ProductionPlanInputFingerprints
@@ -200,6 +205,72 @@ class BoundaryDecision(BaseModel):
             ):
                 raise ValueError("boundary requirement range must stay within allowed source range")
         return self
+
+
+class ContinuityRequiredSpan(BaseModel):
+    """A non-dialogue source span that must remain in the approved boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_type: Literal["visual_action", "semantic_bridge", "reaction", "payoff"]
+    source_range: BoundaryRange
+    rationale: str = Field(min_length=1)
+    evidence: dict[str, Any] = Field(min_length=1)
+
+
+class ContinuityOmittedSpan(BaseModel):
+    """An intentional or unresolved omission inside the approved boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_range: BoundaryRange
+    rationale_type: Literal[
+        "silence", "dialogue_compaction", "editorially_redundant", "unexplained",
+    ]
+    rationale: str = Field(min_length=1)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContinuityDecision(BaseModel):
+    """Versioned candidate-owned decision for non-dialogue continuity.
+
+    The decision is deliberately distinct from ``BoundaryDecision``: the
+    latter approves *where* production may source material, while this
+    artifact records whether non-dialogue spans inside that boundary may be
+    compacted, must be retained, or remain too weakly evidenced to publish.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["A-2.continuity.1"] = CONTINUITY_DECISION_VERSION
+    decision_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    boundary_decision_id: str = Field(min_length=1)
+    boundary_decision_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approved_source_range: BoundaryRange
+    mode: Literal["compact_dialogue", "preserve_required_spans", "uncertain"]
+    required_spans: list[ContinuityRequiredSpan] = Field(default_factory=list)
+    omitted_spans: list[ContinuityOmittedSpan] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _spans_stay_within_approved_boundary(self) -> "ContinuityDecision":
+        approved = self.approved_source_range
+        for span in [*self.required_spans, *self.omitted_spans]:
+            source_range = span.source_range
+            if (
+                source_range.start_seconds < approved.start_seconds - BOUNDARY_EPSILON_SECONDS
+                or source_range.end_seconds > approved.end_seconds + BOUNDARY_EPSILON_SECONDS
+            ):
+                raise ValueError("continuity span must stay within approved source range")
+        if self.mode == "compact_dialogue" and self.required_spans:
+            raise ValueError("compact_dialogue cannot declare required continuity spans")
+        if self.mode == "preserve_required_spans" and not self.required_spans:
+            raise ValueError("preserve_required_spans requires evidence-backed spans")
+        return self
+
+    def fingerprint(self) -> str:
+        return stable_text_hash(self.model_dump_json())
 
 
 class VoiceProfile(BaseModel):
@@ -392,6 +463,10 @@ class ProductionPlan(BaseModel):
     # None is the explicit migration state for 3A/5A artifacts.  New 5C plans
     # persist the full decision so a render-only run never has to recompute it.
     boundary_decision: BoundaryDecision | None = None
+    # A-2 is a separate candidate-owned decision.  It never mutates the
+    # semantic BoundaryDecision and lets downstream stages distinguish a safe
+    # dialogue compaction from mandatory visual/causal continuity.
+    continuity_decision: ContinuityDecision | None = None
     # Evidence-bearing editorial target hints only; the existing composition
     # engine remains responsible for safe crop/tracking decisions.
     composition_intent: dict[str, Any] = Field(default_factory=dict)
@@ -461,8 +536,16 @@ class ProductionPlan(BaseModel):
                 raise ValueError("EDIT_PLAN_SCHEMA_INVALID: boundary_decision_ref")
             if envelope.boundary_decision_ref != self.boundary_decision.decision_id:
                 raise ValueError("IDENTITY_MISMATCH: boundary_decision_ref")
+            if self.continuity_decision is None or not envelope.continuity_decision_ref:
+                raise ValueError("EDIT_PLAN_SCHEMA_INVALID: continuity_decision_ref")
+            if envelope.continuity_decision_ref != self.continuity_decision.decision_id:
+                raise ValueError("IDENTITY_MISMATCH: continuity_decision_ref")
             if envelope.input_fingerprints.final_script_sha256 != self.metadata.final_script_hash:
                 raise ValueError("EDIT_PLAN_SCHEMA_INVALID: final_script fingerprint")
+        if self.continuity_decision is not None:
+            continuity_errors = _continuity_handoff_errors(self)
+            if continuity_errors:
+                raise ValueError("; ".join(continuity_errors))
         if self.boundary_decision is not None:
             boundary_errors = _boundary_handoff_errors(self)
             if boundary_errors:
@@ -563,6 +646,26 @@ def validate_renderer_handoff(
                     "actual": envelope.boundary_decision_ref,
                 },
             )
+        continuity = plan.continuity_decision
+        if continuity is None or envelope.continuity_decision_ref != continuity.decision_id:
+            return ProductionPlanValidationFailure(
+                "CONTINUITY_DECISION_MISSING",
+                {
+                    "plan_id": plan.plan_id,
+                    "expected": continuity.decision_id if continuity else None,
+                    "actual": envelope.continuity_decision_ref,
+                },
+            )
+        if continuity.boundary_decision_id != plan.boundary_decision.decision_id:
+            return ProductionPlanValidationFailure(
+                "IDENTITY_MISMATCH",
+                {
+                    "plan_id": plan.plan_id,
+                    "field": "continuity_decision.boundary_decision_id",
+                    "expected": plan.boundary_decision.decision_id,
+                    "actual": continuity.boundary_decision_id,
+                },
+            )
         boundary_sha256 = stable_text_hash(plan.boundary_decision.model_dump_json())
         if envelope.input_fingerprints.boundary_decision_sha256 != boundary_sha256:
             return ProductionPlanValidationFailure(
@@ -572,6 +675,17 @@ def validate_renderer_handoff(
                     "input": "boundary_decision",
                     "expected": envelope.input_fingerprints.boundary_decision_sha256,
                     "actual": boundary_sha256,
+                },
+            )
+        continuity_sha256 = continuity.fingerprint()
+        if envelope.input_fingerprints.continuity_decision_sha256 != continuity_sha256:
+            return ProductionPlanValidationFailure(
+                "STALE_INPUTS",
+                {
+                    "plan_id": plan.plan_id,
+                    "input": "continuity_decision",
+                    "expected": envelope.input_fingerprints.continuity_decision_sha256,
+                    "actual": continuity_sha256,
                 },
             )
         if envelope.input_fingerprints.source_sha256 != source_sha256:
@@ -684,6 +798,32 @@ def validate_audio_handoff(plan: ProductionPlan) -> ProductionPlanHandoffFailure
     return None
 
 
+def _continuity_handoff_errors(plan: ProductionPlan) -> list[str]:
+    """Validate the immutable A-2 decision against its production consumer."""
+
+    decision = plan.continuity_decision
+    assert decision is not None
+    errors: list[str] = []
+    if decision.candidate_id != plan.metadata.candidate_id:
+        errors.append("CONTINUITY_CANDIDATE_MISMATCH")
+    boundary = plan.boundary_decision
+    if boundary is None:
+        errors.append("CONTINUITY_BOUNDARY_MISSING")
+        return errors
+    if decision.boundary_decision_id != boundary.decision_id:
+        errors.append("CONTINUITY_BOUNDARY_REFERENCE_MISMATCH")
+    if decision.boundary_decision_sha256 != stable_text_hash(boundary.model_dump_json()):
+        errors.append("CONTINUITY_BOUNDARY_FINGERPRINT_MISMATCH")
+    source_ranges = [
+        BoundaryRange(start_seconds=item.source_start_seconds, end_seconds=item.source_end_seconds)
+        for item in plan.dialogue_mappings
+    ]
+    for requirement in decision.required_spans:
+        if not _range_is_covered(requirement.source_range, source_ranges):
+            errors.append(f"CONTINUITY_{requirement.requirement_type.upper()}_LOST")
+    return errors
+
+
 def _boundary_handoff_errors(plan: ProductionPlan) -> list[str]:
     """Return deterministic post-edit boundary failures for a 5C plan.
 
@@ -723,9 +863,13 @@ def _boundary_handoff_errors(plan: ProductionPlan) -> list[str]:
             or dialogue.source_end_seconds > allowed.end_seconds + BOUNDARY_EPSILON_SECONDS
         ):
             errors.append(f"BOUNDARY_SOURCE_RANGE_OUTSIDE:{dialogue.segment_id}")
-        if not _is_safe_point(dialogue.source_start_seconds, decision.safe_start_points):
+        if not _is_safe_point(
+            dialogue.source_start_seconds, decision.safe_start_points, plan.continuity_decision,
+        ):
             errors.append(f"BOUNDARY_WORD_CUT:{dialogue.segment_id}:start")
-        if not _is_safe_point(dialogue.source_end_seconds, decision.safe_end_points):
+        if not _is_safe_point(
+            dialogue.source_end_seconds, decision.safe_end_points, plan.continuity_decision,
+        ):
             errors.append(f"BOUNDARY_WORD_CUT:{dialogue.segment_id}:end")
 
     for narration in (item for item in plan.segments if isinstance(item, NarrationSegment)):
@@ -741,9 +885,13 @@ def _boundary_handoff_errors(plan: ProductionPlan) -> list[str]:
                 or source.source_end_seconds > allowed.end_seconds + BOUNDARY_EPSILON_SECONDS
             ):
                 errors.append(f"BOUNDARY_SOURCE_RANGE_OUTSIDE:{narration.segment_id}")
-            if not _is_safe_point(source.source_start_seconds, decision.safe_start_points):
+            if not _is_safe_point(
+                source.source_start_seconds, decision.safe_start_points, plan.continuity_decision,
+            ):
                 errors.append(f"BOUNDARY_WORD_CUT:{narration.segment_id}:start")
-            if not _is_safe_point(source.source_end_seconds, decision.safe_end_points):
+            if not _is_safe_point(
+                source.source_end_seconds, decision.safe_end_points, plan.continuity_decision,
+            ):
                 errors.append(f"BOUNDARY_WORD_CUT:{narration.segment_id}:end")
 
     for requirement in decision.required_evidence:
@@ -752,8 +900,21 @@ def _boundary_handoff_errors(plan: ProductionPlan) -> list[str]:
     return errors
 
 
-def _is_safe_point(timestamp: float, safe_points: list[float]) -> bool:
-    return any(abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS for point in safe_points)
+def _is_safe_point(
+    timestamp: float,
+    safe_points: list[float],
+    continuity: ContinuityDecision | None = None,
+) -> bool:
+    if any(abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS for point in safe_points):
+        return True
+    # A required continuity span is a distinct evidence-backed edit decision.
+    # Its endpoints are valid even when they are not transcript word edges;
+    # this keeps visual action/reaction preservation from mutating 5C data.
+    return continuity is not None and any(
+        abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS
+        for span in continuity.required_spans
+        for point in (span.source_range.start_seconds, span.source_range.end_seconds)
+    )
 
 
 def _range_is_covered(required: BoundaryRange, ranges: list[BoundaryRange]) -> bool:

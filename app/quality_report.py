@@ -254,6 +254,7 @@ def build_quality_report(
     _collect_eligibility(finding, candidate_data)
     _collect_diversity(finding, diversity_decision, result.candidate_id)
     _collect_plan_and_boundary(finding, plan_data, result, project_id, source_id)
+    _collect_continuity(finding, plan_data, render)
     _collect_semantic_content(finding, plan_data)
     _collect_creative_execution(finding, render)
     _collect_composition_and_subtitles(finding, render)
@@ -292,6 +293,7 @@ def build_quality_report(
         "composition": _composition_quality(render) or {},
         "source_broll": _source_broll_quality(render) or {},
         "motion": _motion_quality(render) or {},
+        "continuity": _continuity_metrics(plan_data, render),
     }
     composition_fallbacks = _composition_fallbacks(render)
     source_broll_fallbacks = _source_broll_fallbacks(render)
@@ -326,6 +328,7 @@ def build_quality_report(
             "quality_config_version": config_version,
             "low_level_checks_reused": [
                 "eligibility", "diversity", "boundary_decision", "production_plan_envelope",
+                "continuity_decision", "source_output_time_map",
                 *(
                     [
                         "compiled_render_plan", "caption_quality_report",
@@ -536,6 +539,187 @@ def _collect_plan_and_boundary(
             threshold={"semantic_completion": True, "payoff_preserved": True}, producer="boundary_decision",
             message="Boundary decision reports an incomplete semantic ending.", interval=interval,
         )
+
+
+def _collect_continuity(finding: Any, plan: dict[str, Any], render: dict[str, Any]) -> None:
+    """Block native delivery when a non-dialogue omission lacks provenance."""
+
+    envelope = plan.get("envelope") if isinstance(plan.get("envelope"), dict) else {}
+    native = envelope.get("compatibility_mode") == "native"
+    decision = plan.get("continuity_decision") if isinstance(plan.get("continuity_decision"), dict) else None
+    if decision is None:
+        if native:
+            finding(
+                "CONTINUITY_DECISION_MISSING", "blocker", {"continuity_decision": None},
+                measured_value="unavailable", threshold="persisted A-2 ContinuityDecision",
+                producer="continuity_decision",
+                message="Native production plan has no continuity provenance for non-dialogue spans.",
+            )
+        return
+    try:
+        expected_sha256 = _continuity_fingerprint(decision)
+    except Exception as error:
+        finding(
+            "CONTINUITY_DECISION_INVALID", "blocker", {"continuity_decision": decision},
+            measured_value=str(error), threshold="valid A-2 ContinuityDecision",
+            producer="continuity_decision",
+            message="Continuity decision cannot be validated as a versioned production artifact.",
+        )
+        return
+    expected_id = decision.get("decision_id")
+    expected_version = decision.get("schema_version")
+    fingerprints = envelope.get("input_fingerprints") if isinstance(envelope.get("input_fingerprints"), dict) else {}
+    if native and (
+        envelope.get("continuity_decision_ref") != expected_id
+        or fingerprints.get("continuity_decision_sha256") != expected_sha256
+    ):
+        finding(
+            "CONTINUITY_DECISION_IDENTITY_MISMATCH", "blocker",
+            {"continuity_decision": decision, "plan_envelope": envelope},
+            measured_value={
+                "ref": envelope.get("continuity_decision_ref"),
+                "sha256": fingerprints.get("continuity_decision_sha256"),
+            },
+            threshold={"ref": expected_id, "sha256": expected_sha256},
+            producer="continuity_decision",
+            message="Production envelope/cache identity does not bind the exact continuity decision.",
+        )
+        return
+    mapping = _source_output_time_map(render)
+    if mapping is None:
+        required = decision.get("required_spans") if isinstance(decision.get("required_spans"), list) else []
+        omissions = decision.get("omitted_spans") if isinstance(decision.get("omitted_spans"), list) else []
+        needs_omission_proof = bool(required) or any(
+            isinstance(span, dict) and span.get("rationale_type") == "unexplained"
+            for span in omissions
+        )
+        finding(
+            "CONTINUITY_TIME_MAP_MISSING", "blocker" if needs_omission_proof else "warning",
+            {"continuity_decision": decision},
+            measured_value="unavailable", threshold="SourceOutputTimeMap bound to ContinuityDecision",
+            producer="continuity_decision",
+            message=(
+                "Final quality cannot verify required or unexplained continuity spans without the source/output time map."
+                if needs_omission_proof
+                else "Continuity has no required or unexplained spans, but the source/output time map was not persisted."
+            ),
+        )
+        return
+    actual_identity = {
+        "decision_id": mapping.get("continuity_decision_id"),
+        "schema_version": mapping.get("continuity_decision_version"),
+        "sha256": mapping.get("continuity_decision_sha256"),
+    }
+    if actual_identity != {
+        "decision_id": expected_id,
+        "schema_version": expected_version,
+        "sha256": expected_sha256,
+    }:
+        finding(
+            "CONTINUITY_TIME_MAP_MISMATCH", "blocker",
+            {"continuity_decision": decision, "source_output_time_map": mapping},
+            measured_value=actual_identity,
+            threshold={"decision_id": expected_id, "schema_version": expected_version, "sha256": expected_sha256},
+            producer="continuity_decision",
+            message="Source/output time map is not bound to the exact continuity decision used by production.",
+        )
+        return
+    ranges = _source_ranges_from_map(mapping)
+    required = decision.get("required_spans") if isinstance(decision.get("required_spans"), list) else []
+    for span in required:
+        source_range = span.get("source_range") if isinstance(span, dict) else None
+        if not _map_covers(source_range, ranges):
+            finding(
+                "CONTINUITY_REQUIRED_SPAN_LOST", "blocker",
+                {"continuity_decision": decision, "required_span": span, "source_output_time_map": mapping},
+                measured_value=source_range, threshold="required source span retained in output",
+                producer="continuity_decision",
+                message="Evidence-backed continuity span is absent from the rendered source map.",
+                interval=source_range if isinstance(source_range, dict) else None,
+            )
+    omissions = decision.get("omitted_spans") if isinstance(decision.get("omitted_spans"), list) else []
+    unresolved = [
+        span for span in omissions
+        if isinstance(span, dict)
+        and span.get("rationale_type") == "unexplained"
+        and not _map_covers(span.get("source_range"), ranges)
+    ]
+    if unresolved:
+        finding(
+            "CONTINUITY_UNEXPLAINED_OMISSION", "blocker",
+            {"continuity_decision": decision, "unexplained_omissions": unresolved, "source_output_time_map": mapping},
+            measured_value={"mode": decision.get("mode"), "unexplained_omission_count": len(unresolved)},
+            threshold="no unexplained non-dialogue omissions remain in the rendered map",
+            producer="continuity_decision",
+            message="Continuity evidence is uncertain and production omitted non-dialogue spans without a proven rationale.",
+        )
+
+
+def _source_output_time_map(render: dict[str, Any]) -> dict[str, Any] | None:
+    mapping = render.get("source_output_time_map")
+    if isinstance(mapping, dict):
+        return mapping
+    compiled = render.get("compiled_render_plan")
+    if isinstance(compiled, dict) and isinstance(compiled.get("source_output_mapping"), dict):
+        return compiled["source_output_mapping"]
+    return None
+
+
+def _continuity_fingerprint(decision: dict[str, Any]) -> str:
+    """Use the production contract's canonical decision serialization."""
+
+    from app.production_models import ContinuityDecision
+
+    return ContinuityDecision.model_validate(decision).fingerprint()
+
+
+def _source_ranges_from_map(mapping: dict[str, Any]) -> list[tuple[float, float]]:
+    raw_segments = mapping.get("segments") if isinstance(mapping.get("segments"), list) else []
+    ranges: list[tuple[float, float]] = []
+    ticks_per_second = float(mapping.get("source_ticks_per_second") or 1_000_000)
+    for item in raw_segments:
+        source = item.get("source") if isinstance(item, dict) else None
+        if not isinstance(source, dict):
+            continue
+        try:
+            start = float(source["start_tick"]) / ticks_per_second
+            end = float(source["end_tick"]) / ticks_per_second
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        if end > start:
+            ranges.append((start, end))
+    return sorted(ranges)
+
+
+def _map_covers(source_range: Any, ranges: list[tuple[float, float]]) -> bool:
+    if not isinstance(source_range, dict):
+        return False
+    try:
+        cursor = float(source_range["start_seconds"])
+        end = float(source_range["end_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    for start, stop in ranges:
+        if stop < cursor - 0.001:
+            continue
+        if start > cursor + 0.001:
+            break
+        cursor = max(cursor, stop)
+        if cursor >= end - 0.001:
+            return True
+    return False
+
+
+def _continuity_metrics(plan: dict[str, Any], render: dict[str, Any]) -> dict[str, Any]:
+    decision = plan.get("continuity_decision") if isinstance(plan.get("continuity_decision"), dict) else {}
+    mapping = _source_output_time_map(render)
+    return {
+        "decision_id": decision.get("decision_id"),
+        "mode": decision.get("mode"),
+        "required_span_count": len(decision.get("required_spans", [])) if isinstance(decision.get("required_spans"), list) else 0,
+        "omitted_span_count": len(decision.get("omitted_spans", [])) if isinstance(decision.get("omitted_spans"), list) else 0,
+        "source_output_mapping_present": mapping is not None,
+    }
 
 
 def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> None:
@@ -860,6 +1044,10 @@ def _check_catalog(
         ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),
+        (
+            "CONTINUITY", "continuity_decision", plan.get("continuity_decision"),
+            "every omitted non-dialogue span has a typed rationale and required spans survive",
+        ),
         (
             "SEMANTIC_CONTENT", "semantic_content_quality", plan.get("dialogue_mappings"),
             "every published dialogue mapping has grounded confidence >= 0.5",

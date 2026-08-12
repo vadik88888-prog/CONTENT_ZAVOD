@@ -183,7 +183,9 @@ class VideoCompositionService:
                 "plan_reference": plan_reference,
             })
         try:
-            mapping = source_output_map_from_legacy_timeline(timeline)
+            mapping = source_output_map_from_legacy_timeline(
+                timeline, continuity_decision=plan.continuity_decision,
+            )
         except ValueError as error:
             # Mapping is a render contract, so surface its strict invariant as
             # a candidate-scoped production failure instead of leaking a raw
@@ -3135,6 +3137,7 @@ def production_render_report_section(project: VideoProject) -> dict[str, Any]:
             "composition_plan": compiled_plan.composition_plan.model_dump(mode="json"),
             "source_broll_plan": compiled_plan.source_broll_plan.model_dump(mode="json"),
             "motion_plan": compiled_plan.motion_plan.model_dump(mode="json"),
+            "source_output_time_map": compiled_plan.source_output_mapping.model_dump(mode="json"),
         })
         if native:
             report["subtitle_layout"] = {

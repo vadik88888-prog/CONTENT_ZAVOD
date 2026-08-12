@@ -16,7 +16,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.production_models import ProductionPlan, ProductionPlanReference
+from app.production_models import ContinuityDecision, ProductionPlan, ProductionPlanReference
 from app.video_models import ReframePlan, SubtitleProject, VideoTimeline
 
 
@@ -180,6 +180,12 @@ class SourceOutputTimeMap(FrozenContract):
     source_ticks_per_second: Literal[1_000_000] = 1_000_000
     output_fps: Literal[30] = 30
     segments: tuple[EditMapSegment, ...] = Field(min_length=1)
+    # A-2 binds the actual source/output map to the candidate-owned continuity
+    # decision, so render cache and final QC cannot treat it as an untracked
+    # dialogue-only timeline.
+    continuity_decision_id: str | None = Field(default=None, pattern=ID_PATTERN)
+    continuity_decision_version: str | None = None
+    continuity_decision_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
 
     @model_validator(mode="after")
     def _unambiguous_destination(self) -> "SourceOutputTimeMap":
@@ -191,6 +197,13 @@ class SourceOutputTimeMap(FrozenContract):
             raise ValueError("edit mapping segments must be ordered by output frame")
         if any(right.output.start_frame < left.output.end_frame for left, right in zip(ordered, ordered[1:])):
             raise ValueError("edit mapping cannot assign two sources to the same destination frame")
+        continuity_values = (
+            self.continuity_decision_id,
+            self.continuity_decision_version,
+            self.continuity_decision_sha256,
+        )
+        if any(value is not None for value in continuity_values) and any(value is None for value in continuity_values):
+            raise ValueError("edit mapping continuity identity must be complete")
         return self
 
     @property
@@ -213,7 +226,10 @@ class SourceOutputTimeMap(FrozenContract):
         return OutputInterval(start_frame=start_frame, end_frame=max(start_frame + 1, end_frame))
 
 
-def source_output_map_from_legacy_timeline(timeline: VideoTimeline) -> SourceOutputTimeMap:
+def source_output_map_from_legacy_timeline(
+    timeline: VideoTimeline,
+    continuity_decision: ContinuityDecision | None = None,
+) -> SourceOutputTimeMap:
     """Adapt the current VideoTimeline's persisted clip decisions to 30 fps."""
 
     segments: list[EditMapSegment] = []
@@ -247,7 +263,12 @@ def source_output_map_from_legacy_timeline(timeline: VideoTimeline) -> SourceOut
         ))
     if not segments:
         raise ValueError("LEGACY_TIMELINE_HAS_NO_SOURCE_MAPPING")
-    return SourceOutputTimeMap(segments=tuple(segments))
+    return SourceOutputTimeMap(
+        segments=tuple(segments),
+        continuity_decision_id=(continuity_decision.decision_id if continuity_decision else None),
+        continuity_decision_version=(continuity_decision.schema_version if continuity_decision else None),
+        continuity_decision_sha256=(continuity_decision.fingerprint() if continuity_decision else None),
+    )
 
 
 class BeatRole(StrEnum):

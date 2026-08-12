@@ -5,6 +5,7 @@ from typing import Any
 
 from app.audio_features import window_audio_features
 from app.candidate_quality import boundary_multimodal_context
+from app.continuity import build_continuity_decision
 from app.config import TransformationConfig
 from app.models import Candidate
 from app.transformation_models import (
@@ -117,6 +118,23 @@ def build_source_context(
                     preserve_until,
                 })
                 boundary_decision["end_reason"] = "multimodal_payoff_preservation"
+        # Exact transcript evidence edges are safe extraction points in the
+        # existing 5C hand-off.  Persist them before A-2 fingerprints its
+        # parent decision so later plan assembly need not alter that parent.
+        boundary_decision["safe_start_points"] = sorted({
+            *[float(item) for item in boundary_decision.get("safe_start_points", [])],
+            *[item.start for item in primary],
+        })
+        boundary_decision["safe_end_points"] = sorted({
+            *[float(item) for item in boundary_decision.get("safe_end_points", [])],
+            *[item.end for item in primary],
+        })
+    continuity_decision = build_continuity_decision(
+        candidate_id=candidate.id,
+        boundary_decision=boundary_decision,
+        primary_evidence=[item.to_dict() for item in primary],
+        multimodal_context=multimodal_context,
+    )
     return SourceContext(
         candidate_id=candidate.id,
         source_id=str(source.get("id", "")),
@@ -150,6 +168,9 @@ def build_source_context(
         audio_energy_summary=audio_summary,
         candidate_features=dict(candidate.feature_vector),
         boundary_decision=boundary_decision,
+        continuity_decision=(
+            continuity_decision.model_dump(mode="json") if continuity_decision is not None else {}
+        ),
         multimodal_context=multimodal_context,
         composition_intent=dict(candidate.composition_intent),
     )
