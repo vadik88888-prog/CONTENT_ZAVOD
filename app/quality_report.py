@@ -17,6 +17,7 @@ from app.utils import stable_file_hash, stable_text_hash, utc_now
 
 QUALITY_REPORT_SCHEMA_VERSION = "5G.0"
 QUALITY_STATUSES = frozenset({"PASS", "PASS_WITH_WARNINGS", "BLOCKED"})
+SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD = 0.5
 QualitySeverity = Literal["warning", "blocker"]
 
 
@@ -144,6 +145,52 @@ def artifact_id_for(result: ClipResult, artifact_sha256: str) -> str:
         "sha256": artifact_sha256,
     }
     return f"artifact-{stable_text_hash(str(identity))[:24]}"
+
+
+def exact_dialogue_semantic_blocker(plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the shared blocker for exact dialogue mappings, if any.
+
+    Candidate-level averages are intentionally absent from this policy: every
+    dialogue/fact mapping that the plan would publish must independently meet
+    the existing semantic confidence floor.
+    """
+
+    mappings = plan.get("dialogue_mappings") if isinstance(plan, dict) else None
+    if not isinstance(mappings, list):
+        return None
+    low_confidence: list[dict[str, Any]] = []
+    for item in mappings:
+        if not isinstance(item, dict):
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD:
+            low_confidence.append({
+                "segment_id": item.get("segment_id"),
+                "fact_id": item.get("fact_id"),
+                "transcript_segment_id": item.get("transcript_segment_id"),
+                "confidence": round(confidence, 6),
+                "source_start_seconds": item.get("source_start_seconds"),
+                "source_end_seconds": item.get("source_end_seconds"),
+            })
+    if not low_confidence:
+        return None
+    threshold = SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD
+    return {
+        "code": "AUDIO_UNINTELLIGIBLE",
+        "severity": "blocker",
+        "evidence": {"low_confidence_dialogue": low_confidence},
+        "measured_value": min(item["confidence"] for item in low_confidence),
+        "threshold": f">={threshold}",
+        "producer": "semantic_content_quality",
+        "message": "Published dialogue contains low-confidence ASR/semantic content.",
+        "details": (
+            "At least one exact dialogue/fact mapping is below the semantic "
+            "confidence floor; aggregate candidate confidence cannot override it."
+        ),
+    }
 
 
 def build_quality_report(
@@ -422,39 +469,16 @@ def _collect_semantic_content(finding: Any, plan: dict[str, Any]) -> None:
     score used during ranking.
     """
 
-    mappings = plan.get("dialogue_mappings") if isinstance(plan, dict) else None
-    if not isinstance(mappings, list):
-        return
-    threshold = 0.5
-    low_confidence = []
-    for item in mappings:
-        if not isinstance(item, dict):
-            continue
-        try:
-            confidence = float(item.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            confidence = 0.0
-        if confidence < threshold:
-            low_confidence.append({
-                "segment_id": item.get("segment_id"),
-                "fact_id": item.get("fact_id"),
-                "transcript_segment_id": item.get("transcript_segment_id"),
-                "confidence": round(confidence, 6),
-                "source_start_seconds": item.get("source_start_seconds"),
-                "source_end_seconds": item.get("source_end_seconds"),
-            })
-    if low_confidence:
+    blocker = exact_dialogue_semantic_blocker(plan)
+    if blocker is not None:
         finding(
-            "AUDIO_UNINTELLIGIBLE", "blocker",
-            {"low_confidence_dialogue": low_confidence},
-            measured_value=min(item["confidence"] for item in low_confidence),
-            threshold=f">={threshold}", producer="semantic_content_quality",
-            message="Published dialogue contains low-confidence ASR/semantic content.",
-            details=(
-                "At least one exact dialogue/fact mapping is below the semantic "
-                "confidence floor; aggregate candidate confidence cannot override it."
-            ),
+            blocker["code"], blocker["severity"], blocker["evidence"],
+            measured_value=blocker["measured_value"],
+            threshold=blocker["threshold"], producer=blocker["producer"],
+            message=blocker["message"], details=blocker["details"],
         )
+
+
 def _collect_plan_and_boundary(
     finding: Any,
     plan: dict[str, Any],

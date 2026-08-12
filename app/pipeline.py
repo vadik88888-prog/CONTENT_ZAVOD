@@ -77,7 +77,7 @@ from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
-from app.quality_report import build_quality_report
+from app.quality_report import build_quality_report, exact_dialogue_semantic_blocker
 from app.production_plan import (
     PRODUCTION_PLAN_VERSION,
     ProductionPlanEnvelopeContext,
@@ -1652,6 +1652,7 @@ class Pipeline:
     ) -> PipelineResult:
         """Create candidate-owned Creative Previews from the approved plan graph."""
 
+        production = self._preflight_semantic_content(tracker, production)
         transformations = {
             str(item.get("candidate_id") or ""): item
             for item in transformation.get("items", []) if isinstance(item, dict)
@@ -2115,6 +2116,7 @@ class Pipeline:
                 "pause_count": timeline["pause_count"],
                 "timeline_version": timeline["timeline_version"],
             })
+        production = self._preflight_semantic_content(tracker, production)
         analysis_work = Path(analysis.work_directory).resolve()
         root_work = (self.root / "work").resolve()
         if not analysis_work.is_relative_to(root_work):
@@ -2643,6 +2645,75 @@ class Pipeline:
             "items": outcomes,
             "production_note": "Production Plan is the future source of truth; no TTS, audio mix, subtitle render, ASS or video render was generated.",
         }
+
+    def _preflight_semantic_content(
+        self,
+        tracker: StageTracker,
+        production: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Block unsafe exact dialogue mappings before any delivery work.
+
+        This is a candidate fan-out stage: a blocked plan remains in the stage
+        report with a typed reason while valid sibling plans stay renderable.
+        Final Quality Gate calls the same policy function after render as a
+        defence-in-depth check.
+        """
+
+        raw_items = production.get("items") if isinstance(production, dict) else None
+        if not isinstance(raw_items, list) or not raw_items:
+            return production
+        outcomes: list[dict[str, Any]] = []
+        for item in raw_items:
+            if (
+                not isinstance(item, dict)
+                or item.get("status") != "completed"
+                or not isinstance(item.get("plan"), dict)
+            ):
+                outcomes.append(item)
+                continue
+            candidate_id = str(item.get("candidate_id") or "candidate")
+            plan = item["plan"]
+            stage_name = f"semantic_content_preflight:{candidate_id}"
+            tracker.start(stage_name, _hash({
+                "policy": "exact-dialogue-semantic-confidence-0.5",
+                "dialogue_mappings": plan.get("dialogue_mappings"),
+            }))
+            blocker = exact_dialogue_semantic_blocker(plan)
+            if blocker is None:
+                tracker.finish(stage_name)
+                outcomes.append(item)
+                continue
+            low_confidence = blocker["evidence"]["low_confidence_dialogue"]
+            segment_ids = ", ".join(
+                str(mapping.get("segment_id") or mapping.get("fact_id") or "unknown")
+                for mapping in low_confidence
+            )
+            message = (
+                f"{blocker['code']}: exact dialogue/fact mapping confidence "
+                f"{blocker['measured_value']} is below {blocker['threshold']} "
+                f"({segment_ids})."
+            )
+            tracker.finish(stage_name, "failed", message)
+            outcomes.append({
+                **item,
+                "status": "failed",
+                "stage": stage_name,
+                "reason": blocker["code"],
+                "reason_code": blocker["code"],
+                "error": message,
+                "errors": [message],
+                "semantic_blocker": blocker,
+            })
+            self.errors.append(f"{stage_name}: {message}")
+        successful = [item for item in outcomes if isinstance(item, dict) and item.get("status") == "completed"]
+        result = dict(production)
+        result["items"] = outcomes
+        result["status"] = (
+            "completed" if successful and len(successful) == len(outcomes)
+            else "partial" if successful
+            else "failed"
+        )
+        return result
 
     def _run_tts(
         self, tracker: StageTracker, production: dict[str, Any],
@@ -4045,7 +4116,12 @@ def _production_items(production: dict[str, Any]) -> list[dict[str, Any]]:
         })
     # Old reports expose only the primary plan. Keep render-only and existing
     # cache layouts operational while new full runs fan out to every item.
-    if not result and isinstance(production, dict) and isinstance(production.get("production_plan"), dict):
+    if (
+        not result
+        and not raw_items
+        and isinstance(production, dict)
+        and isinstance(production.get("production_plan"), dict)
+    ):
         result.append({"candidate_id": "primary", "plan": production["production_plan"], "requested_index": 1})
     return result
 

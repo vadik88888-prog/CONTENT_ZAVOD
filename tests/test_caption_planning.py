@@ -308,6 +308,23 @@ def test_weak_phrase_timing_degrades_to_phrase_static_without_per_word_effects()
     assert plan.quality_report.status == "PASS_WITH_WARNINGS"
 
 
+def test_transcript_word_probability_flows_to_plan_and_degrades_low_confidence_emphasis() -> None:
+    transcript = _word_transcript()
+    for word in transcript["words"]:
+        word.pop("confidence")
+        word["probability"] = 0.38
+
+    plan = build_caption_plan(_intent(), transcript, _config())
+
+    words = [word for cue in plan.cues for word in cue.words]
+    assert words
+    assert {word.confidence for word in words} == {0.38}
+    assert all(cue.timing_confidence == 0.38 for cue in plan.cues)
+    assert all(cue.timing_mode == "static" for cue in plan.cues)
+    assert all(cue.primitive_id == "static" for cue in plan.cues)
+    assert all(cue.emphasis is None for cue in plan.cues)
+
+
 def test_weak_semantic_confidence_uses_static_safe_treatment() -> None:
     intent = _intent(Intensity.HIGH).model_copy(update={
         "beats": tuple(item.model_copy(update={"confidence": 0.55}) for item in _intent().beats),

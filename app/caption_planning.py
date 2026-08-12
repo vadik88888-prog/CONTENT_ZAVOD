@@ -665,8 +665,11 @@ def _coerce_word(value: CaptionWordInput | dict[str, Any]) -> CaptionWordInput |
     source = str(value.get("timing_source") or "verified")
     if source not in {"verified", "aligned", "phrase", "estimated"}:
         source = "verified"
+    raw_confidence = value.get("confidence")
+    if raw_confidence is None:
+        raw_confidence = value.get("probability", 1.0)
     try:
-        confidence = float(value.get("confidence", 1.0))
+        confidence = float(raw_confidence)
     except (TypeError, ValueError):
         confidence = 0.0
     return CaptionWordInput(text, start, end, max(0.0, min(1.0, confidence)), source)  # type: ignore[arg-type]

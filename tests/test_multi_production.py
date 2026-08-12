@@ -169,6 +169,80 @@ def test_unexpected_candidate_render_failure_does_not_stop_later_candidates(
     assert rendered["items"][1]["status"] == "completed"
 
 
+def test_low_confidence_exact_mapping_blocks_only_its_creative_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig()
+    config.production_render.enabled = True
+    pipeline = Pipeline(tmp_path, config, run_id="semantic-preflight-run")
+    tracker = StageTracker(tmp_path / "state.json")
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"source")
+    source = Source("source", source_path, "source", "local")
+    production = _production_with_two_plans()
+    # A strong candidate-level aggregate must not mask one unsafe exact fact.
+    production["items"][0]["candidate_confidence"] = 0.99
+    production["items"][0]["plan"]["dialogue_mappings"][0]["confidence"] = 0.21
+    production["items"][0]["plan"]["segments"][1]["confidence"] = 0.21
+
+    preflighted = pipeline._preflight_semantic_content(tracker, production)
+    blocked, safe = preflighted["items"]
+
+    assert preflighted["status"] == "partial"
+    assert blocked["status"] == "failed"
+    assert blocked["reason_code"] == "AUDIO_UNINTELLIGIBLE"
+    assert blocked["semantic_blocker"]["threshold"] == ">=0.5"
+    assert "dialogue-001" in blocked["error"]
+    assert safe["status"] == "completed"
+    assert tracker.data["stages"]["semantic_content_preflight:clip-one"]["status"] == "failed"
+    assert tracker.data["stages"]["semantic_content_preflight:clip-two"]["status"] == "completed"
+
+    output_directory = tmp_path / "output"
+    safe_output = output_directory / "candidates" / "clip-two"
+    (safe_output / "audio").mkdir(parents=True)
+    write_json(safe_output / "audio" / "audio-project.json", {"candidate": "clip-two"})
+
+    class FakeAudioProject:
+        @classmethod
+        def model_validate(cls, data: dict) -> dict:
+            return data
+
+    render_calls: list[str] = []
+
+    def fake_compose(
+        _self: Pipeline, _tracker: StageTracker, plan: ProductionPlan, _audio: dict,
+        _source: Source, _transcript: dict, _work: Path, destination: Path, **_kwargs: object,
+    ) -> dict:
+        render_calls.append(plan.metadata.candidate_id)
+        artifact = destination / "creative-preview" / "creative-preview.mp4"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"safe-preview")
+        return {
+            "enabled": True, "status": "completed", "output_file": str(artifact),
+            "render_profile": "creative_preview",
+        }
+
+    monkeypatch.setattr("app.pipeline.AudioProject", FakeAudioProject)
+    monkeypatch.setattr(Pipeline, "_compose_production_render", fake_compose)
+    rendered = pipeline._run_production_render(
+        tracker,
+        preflighted,
+        {"items": [{
+            "candidate_id": "clip-two", "status": "completed",
+            "output_directory": str(safe_output),
+        }]},
+        source,
+        {},
+        tmp_path / "work",
+        output_directory,
+        render_profile="creative_preview",
+    )
+
+    assert render_calls == ["clip-two"]
+    assert [item["candidate_id"] for item in rendered["items"]] == ["clip-two"]
+    assert not (output_directory / "creative-preview" / "creative-preview.mp4").exists()
+
+
 def test_post_render_fingerprint_failure_does_not_stop_later_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

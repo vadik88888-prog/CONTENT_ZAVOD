@@ -6,7 +6,11 @@ from pathlib import Path
 from app.clip_results import ClipResult
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
 from app.pipeline import build_terminal_state
-from app.quality_report import build_quality_report
+from app.quality_report import (
+    SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD,
+    build_quality_report,
+    exact_dialogue_semantic_blocker,
+)
 from app.utils import write_json
 
 
@@ -160,6 +164,40 @@ def test_corrupt_food_low_confidence_dialogue_remains_a_quality_blocker(tmp_path
     blocker = next(item for item in report.findings if item.code == "AUDIO_UNINTELLIGIBLE")
     assert blocker.provenance["producer"] == "semantic_content_quality"
     assert next(item for item in report.checks if item["code"] == "SEMANTIC_CONTENT")["status"] == "blocked"
+
+
+def test_preview_and_final_share_exact_dialogue_semantic_blocker_policy(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    plan["dialogue_mappings"] = [
+        {
+            "segment_id": "dialogue-safe", "fact_id": "fact-safe",
+            "transcript_segment_id": 1, "confidence": SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD,
+            "source_start_seconds": 1.0, "source_end_seconds": 2.0,
+        },
+        {
+            "segment_id": "dialogue-unsafe", "fact_id": "fact-unsafe",
+            "transcript_segment_id": 2, "confidence": 0.499,
+            "source_start_seconds": 2.0, "source_end_seconds": 3.0,
+        },
+    ]
+
+    preview_blocker = exact_dialogue_semantic_blocker(plan)
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+    final_blocker = next(item for item in report.findings if item.code == "AUDIO_UNINTELLIGIBLE")
+
+    assert preview_blocker is not None
+    assert preview_blocker["code"] == final_blocker.code
+    assert preview_blocker["threshold"] == final_blocker.threshold == ">=0.5"
+    assert preview_blocker["evidence"] == final_blocker.evidence
+    assert exact_dialogue_semantic_blocker({
+        **plan,
+        "dialogue_mappings": [plan["dialogue_mappings"][0]],
+    }) is None
 
 
 def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_report(tmp_path: Path) -> None:
