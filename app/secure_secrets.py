@@ -5,6 +5,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 _PROVIDER_VARIABLES = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
@@ -53,7 +54,19 @@ def validate_api_key(provider: str, value: str) -> str | None:
     return None
 
 
-def api_key_state(provider: str, root: Path | None = None) -> str:
+def api_key_state(
+    provider: str,
+    root: Path | None = None,
+    *,
+    probe: Callable[[str], str] | None = None,
+) -> str:
+    """Return credential state without ever returning the credential itself.
+
+    A caller may provide a bounded probe.  The secret is passed only to that
+    in-memory callback; exceptions and unknown results collapse to the safe
+    ``unavailable`` state and never escape with provider response details.
+    """
+
     normalized_provider = str(provider).strip().casefold()
     variable = _variable(normalized_provider)
     if variable is None:
@@ -63,7 +76,15 @@ def api_key_state(provider: str, root: Path | None = None) -> str:
         value = _read_dotenv_value(Path(root) / ".env", variable)
     if not value:
         return "missing"
-    return "invalid" if validate_api_key(normalized_provider, value) else "configured"
+    if validate_api_key(normalized_provider, value):
+        return "invalid"
+    if probe is None:
+        return "configured"
+    try:
+        state = probe(value)
+    except Exception:
+        return "unavailable"
+    return state if state in {"configured", "auth_rejected", "unavailable"} else "unavailable"
 
 
 def key_configured(provider: str, root: Path | None = None) -> bool:

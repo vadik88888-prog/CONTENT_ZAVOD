@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QBoxLayout,
+    QCheckBox,
     QDialog,
     QLabel,
     QLineEdit,
@@ -28,12 +29,16 @@ class OnboardingDialog(QDialog):
         title = QLabel("Добро пожаловать")
         title.setStyleSheet("font-size: 24px; font-weight: 700;")
         layout.addWidget(title)
-        message = QLabel("Проекты и история запусков будут сохранены локально. Ключ API не нужен, чтобы открыть приложение и проверить систему.")
+        message = QLabel("Проекты и история запусков будут сохранены локально. Для реальной AI-обработки нужен подтверждённый ключ; локальный тестовый режим доступен без него.")
         make_label_shrinkable(message); layout.addWidget(message)
 
         self.api_label = QLabel()
         self.api_label.setObjectName("muted")
         make_label_shrinkable(self.api_label)
+        self.local_test = QCheckBox("Использовать локальный тестовый режим без API")
+        self.local_test.setChecked(self.viewmodel.settings.local_test_mode)
+        self.local_test.setToolTip("Результаты mock-режима предназначены только для проверки интерфейса и процесса.")
+        self.local_test.toggled.connect(self._set_local_test_mode)
         self.api_setup_button = QPushButton("Настроить API-ключ")
         self.api_setup_button.setCheckable(True)
         self.api_setup_button.toggled.connect(self._set_api_setup_visible)
@@ -47,6 +52,7 @@ class OnboardingDialog(QDialog):
         self.api_result.setObjectName("muted")
         make_label_shrinkable(self.api_result)
         layout.addWidget(self.api_label)
+        layout.addWidget(self.local_test)
         layout.addWidget(self.api_setup_button)
         layout.addWidget(self.api_key)
         layout.addWidget(self.save_key_button)
@@ -114,12 +120,23 @@ class OnboardingDialog(QDialog):
     def _render_provider(self) -> None:
         provider = self.viewmodel.ai_provider()
         configurable = provider in {"openai", "gemini"}
-        name = provider.title() if configurable and provider is not None else "локальный режим"
-        self.api_label.setText(
-            f"AI: {name}. Ключ необязателен; при настройке он останется скрытым."
-        )
+        name = provider.title() if configurable and provider is not None else "локальный тестовый режим"
+        if configurable:
+            self.api_label.setText(
+                f"AI: {name}. Для реальной обработки требуется подтверждённый ключ; значение останется скрытым."
+            )
+        else:
+            self.api_label.setText(
+                f"AI: {name}. Ключ не требуется; результаты не являются production-ready."
+            )
         self.api_setup_button.setVisible(configurable)
         self._set_api_setup_visible(configurable and self.api_setup_button.isChecked())
+
+    def _set_local_test_mode(self, enabled: bool) -> None:
+        self.viewmodel.settings.local_test_mode = enabled
+        self._readiness = None
+        self._render_provider()
+        self.viewmodel.diagnostics()
 
     def _save_api_key(self) -> None:
         result = self.viewmodel.save_api_key(self.api_key.text())

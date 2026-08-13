@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +22,12 @@ class DoctorReadiness(StrEnum):
     READY = "ready"
     LIMITED = "limited"
     SETUP_REQUIRED = "setup_required"
+
+
+class CredentialProbeStatus(StrEnum):
+    CONFIGURED = "configured"
+    AUTH_REJECTED = "auth_rejected"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,106 @@ def _writable_directory_check(path: Path, label: str) -> Check:
     return Check(label, "ok", f"Доступна для записи: {path}")
 
 
+def _probe_api_credential(provider: str, secret: str) -> str:
+    """Validate one real-provider credential without exposing its value.
+
+    Both supported providers accept credentials in HTTPS headers for their
+    read-only model-list endpoint.  Only an explicit 401/403 is an auth
+    rejection; transport failures, rate limits and provider 5xx responses are
+    temporary availability warnings.
+    """
+
+    if provider == "openai":
+        url = "https://api.openai.com/v1/models"
+        headers = {"Authorization": f"Bearer {secret}"}
+    elif provider == "gemini":
+        url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+        headers = {"x-goog-api-key": secret}
+    else:
+        return CredentialProbeStatus.UNAVAILABLE
+    request = urllib.request.Request(
+        url,
+        headers={
+            **headers,
+            "Accept": "application/json",
+            "User-Agent": "ContentFactory-Doctor/1",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status_value = getattr(response, "status", None)
+            status = int(status_value if status_value is not None else response.getcode())
+    except urllib.error.HTTPError as error:
+        status = int(error.code)
+        error.close()
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return CredentialProbeStatus.UNAVAILABLE
+    except Exception:
+        # Provider libraries and system TLS stacks can raise implementation-
+        # specific errors.  Their text may contain proxy or credential data,
+        # so diagnostics deliberately collapse them to one safe state.
+        return CredentialProbeStatus.UNAVAILABLE
+    if status in {401, 403}:
+        return CredentialProbeStatus.AUTH_REJECTED
+    if 200 <= status < 300:
+        return CredentialProbeStatus.CONFIGURED
+    return CredentialProbeStatus.UNAVAILABLE
+
+
+def _ai_provider_checks(runtime: RuntimeLayout, config: AppConfig) -> list[Check]:
+    provider = config.ai.provider
+    checks = [Check("AI provider", "ok", f"{provider} · {config.ai.model}")]
+    if provider == "mock":
+        checks.append(Check(
+            "Локальный тестовый режим",
+            "warn",
+            "Используется mock-провайдер; этот режим не подтверждает готовность реальной AI-обработки.",
+            "Для реальной обработки выберите OpenAI или Gemini и подтвердите рабочий API-ключ.",
+        ))
+        return checks
+
+    from app.secure_secrets import api_key_state
+
+    label = "OpenAI API key" if provider == "openai" else "Gemini API key"
+    state = api_key_state(
+        provider,
+        runtime.data,
+        probe=lambda secret: _probe_api_credential(provider, secret),
+    )
+    if state == CredentialProbeStatus.CONFIGURED:
+        checks.append(Check(label, "ok", "Ключ подтверждён провайдером; значение скрыто."))
+    elif state == CredentialProbeStatus.AUTH_REJECTED:
+        checks.append(Check(
+            label,
+            "error",
+            "Провайдер отклонил ключ (401/403); реальная AI-обработка недоступна.",
+            "Замените ключ в настройках и повторите проверку либо явно включите локальный тестовый режим.",
+        ))
+    elif state == "invalid":
+        checks.append(Check(
+            label,
+            "error",
+            "Ключ найден, но не прошёл локальную проверку формата; реальная AI-обработка недоступна.",
+            "Введите корректный ключ в настройках либо явно включите локальный тестовый режим.",
+        ))
+    elif state == CredentialProbeStatus.UNAVAILABLE:
+        checks.append(Check(
+            label,
+            "warn",
+            "Ключ настроен, но провайдер временно недоступен; подтвердить ключ сейчас не удалось.",
+            "Повторите проверку позже; при необходимости явно включите локальный тестовый режим.",
+        ))
+    else:
+        checks.append(Check(
+            label,
+            "error",
+            "Ключ не настроен; реальная AI-обработка недоступна.",
+            "Добавьте ключ в настройках либо явно включите локальный тестовый режим.",
+        ))
+    return checks
+
+
 def collect_checks(root: Path | RuntimeLayout, config: AppConfig | None = None) -> list[Check]:
     runtime = _layout(root)
     config = config or AppConfig()
@@ -208,31 +316,7 @@ def collect_checks(root: Path | RuntimeLayout, config: AppConfig | None = None) 
         if not has_whisper else "",
     ))
 
-    provider = config.ai.provider
-    checks.append(Check("AI provider", "ok", f"{provider} · {config.ai.model}"))
-    if provider == "mock":
-        checks.append(Check("AI API key", "ok", "Не требуется для локального тестового провайдера."))
-    else:
-        from app.secure_secrets import api_key_state
-
-        label = "OpenAI API key" if provider == "openai" else "Gemini API key"
-        state = api_key_state(provider, runtime.data)
-        if state == "configured":
-            checks.append(Check(label, "ok", "Ключ настроен; значение скрыто."))
-        elif state == "invalid":
-            checks.append(Check(
-                label,
-                "warn",
-                "Ключ найден, но не прошёл локальную проверку формата.",
-                "Введите корректный ключ в настройках или включите локальный тестовый режим.",
-            ))
-        else:
-            checks.append(Check(
-                label,
-                "warn",
-                "Ключ не настроен; локальная работа приложения остаётся доступна.",
-                "Добавьте ключ в настройках или включите локальный тестовый режим.",
-            ))
+    checks.extend(_ai_provider_checks(runtime, config))
 
     if config.tts.enabled:
         tts_provider = config.tts.provider
@@ -323,6 +407,6 @@ def format_report(checks: list[Check]) -> str:
 
 
 __all__ = [
-    "Check", "DoctorReadiness", "DoctorSummary", "collect_checks", "format_report",
-    "has_blocking_checks", "summarize_checks",
+    "Check", "CredentialProbeStatus", "DoctorReadiness", "DoctorSummary", "collect_checks",
+    "format_report", "has_blocking_checks", "summarize_checks",
 ]
