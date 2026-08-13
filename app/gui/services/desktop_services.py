@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
 from app.candidate_review import validate_boundary_override
-from app.clip_results import ClipResult, primary_clip_results
 from app.gui.models import (
     DesktopProject,
     DesktopSettings,
@@ -27,6 +26,7 @@ from app.gui.services.pipeline_facade import (
     PreparedPipelineRun,
 )
 from app.gui.services.run_history_store import RunHistoryStore
+from app.gui.services.run_projection import RunProjectionCache, RunUiProjection
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
@@ -45,6 +45,7 @@ class DesktopServices:
     runs: RunHistoryStore
     pipeline: PipelineFacade
     system: SystemService
+    _run_projections: RunProjectionCache = field(default_factory=RunProjectionCache, repr=False)
 
     @classmethod
     def create(cls, engine_root: Path) -> "DesktopServices":
@@ -74,6 +75,7 @@ class DesktopServices:
         self.settings.validate()
         self.projects = DesktopProjectStore(Path(self.settings.data_directory))
         self.runs = RunHistoryStore(self.projects)
+        self._run_projections.clear()
         self.save_settings()
         self.recover_interrupted_runs()
         self.recover_ready_analysis_runs()
@@ -374,32 +376,40 @@ class DesktopServices:
             )
 
     def presentation(
-        self, project: DesktopProject, *, snapshot: ProcessingSnapshot | None = None,
+        self,
+        project: DesktopProject,
+        *,
+        snapshot: ProcessingSnapshot | None = None,
+        runs: Iterable[ProjectRun] | None = None,
     ) -> ProjectPresentation:
-        runs = self.runs_for(project)
+        owned_runs = list(runs) if runs is not None else self.runs_for(project)
         return derive_project_presentation(
             project,
-            runs,
+            owned_runs,
             snapshot=snapshot,
-            has_final_outputs=self._has_valid_final_outputs(runs),
+            has_final_outputs=self._has_valid_final_outputs(owned_runs),
         )
 
-    @staticmethod
-    def _has_valid_final_outputs(runs: Iterable[ProjectRun]) -> bool:
+    def _has_valid_final_outputs(self, runs: Iterable[ProjectRun]) -> bool:
+        final_kinds = {RunKind.FULL, RunKind.SELECTED_RENDER, RunKind.RENDER_REVISION}
+        terminal_statuses = {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_WARNINGS}
         for run in runs:
-            if not run.report_path:
+            if run.run_kind not in final_kinds or run.status not in terminal_statuses:
                 continue
-            report = read_json(Path(run.report_path), {})
-            if not isinstance(report, dict):
-                continue
-            raw_registry = report.get("primary_results")
-            if isinstance(raw_registry, list):
-                registry = [item for raw in raw_registry if (item := ClipResult.from_dict(raw)) is not None]
-            else:
-                registry = primary_clip_results(report.get("production_render"))
-            if any(Path(result.output_file).is_file() for result in registry):
+            if any(
+                Path(value).suffix.lower() == ".mp4" and Path(value).is_file()
+                for value in run.artifact_paths
+            ):
+                return True
+            manifest = self._run_projections.manifest_for_run(run)
+            if manifest is not None and any(
+                Path(result.output_file).is_file() for result in manifest.primary_results
+            ):
                 return True
         return False
+
+    def run_projection(self, run: ProjectRun) -> RunUiProjection:
+        return self._run_projections.for_run(run)
 
     def runs_for(self, project: DesktopProject) -> list[ProjectRun]:
         return self.runs.list(project.project_id)

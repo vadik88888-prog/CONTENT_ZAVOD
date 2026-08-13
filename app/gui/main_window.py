@@ -140,7 +140,7 @@ class MainWindow(QMainWindow):
         self.settings_index = self.stack.addWidget(self.settings_screen)
         self.projects_screen.project_opened.connect(self.show_project)
         self.project_screen.back_requested.connect(self.show_projects)
-        self.project_viewmodel.project_persisted.connect(lambda _project_id: self.projects_screen.refresh())
+        self.project_viewmodel.project_persisted.connect(lambda _project_id: self.projects_screen.mark_dirty())
         layout.addWidget(self.stack, 1)
         self._restore_last_screen()
         self._apply_sidebar_layout()
@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
     def show_projects(self, *, remember: bool = True) -> None:
         self.stack.setCurrentIndex(self.projects_index)
         self._set_selected(self.projects_button)
-        self.projects_screen.refresh()
+        self.projects_screen.refresh_if_dirty()
         if remember:
             self.services.settings.last_screen = "projects"
 

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.components import VideoDropZone
-from app.gui.models import DesktopProject
+from app.gui.models import DesktopProject, ProjectPresentation
 from app.gui.responsive import set_responsive_text
 from app.gui.services.error_mapping import dialog_message, map_error
 from app.gui.viewmodels import ProjectsViewModel
@@ -35,8 +35,12 @@ class ProjectsScreen(QWidget):
         self.setObjectName("screen")
         self.viewmodel = viewmodel
         self._projects: list[DesktopProject] = []
+        self._presentations: dict[str, ProjectPresentation] = {}
+        self._active_project_id: str | None = None
         self._rendered_columns = 0
         self._reflow_pending = False
+        self._refresh_pending = False
+        self._dirty = True
         self._compact_source_layout: bool | None = None
 
         root = QVBoxLayout(self)
@@ -171,7 +175,32 @@ class ProjectsScreen(QWidget):
         self._apply_responsive_layout(force=True)
 
     def refresh(self) -> None:
+        self._dirty = False
         self.viewmodel.refresh()
+
+    def mark_dirty(self) -> None:
+        """Invalidate recent projects without rebuilding a hidden screen."""
+
+        self._dirty = True
+        if self.isVisible():
+            self._queue_refresh()
+
+    def refresh_if_dirty(self) -> None:
+        if self._dirty:
+            self._queue_refresh()
+
+    def _queue_refresh(self) -> None:
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        QTimer.singleShot(0, self._flush_refresh)
+
+    def _flush_refresh(self) -> None:
+        self._refresh_pending = False
+        if not self.isVisible():
+            return
+        if self._dirty:
+            self.refresh()
 
     def focus_source(self) -> None:
         """Present the source choice after global “New project” navigation."""
@@ -199,6 +228,14 @@ class ProjectsScreen(QWidget):
 
     def _render(self, projects: list[DesktopProject]) -> None:
         self._projects = list(projects)
+        self._presentations = {}
+        for project in self._projects:
+            runs = self.viewmodel.services.runs_for(project)
+            self._presentations[project.project_id] = self.viewmodel.services.presentation(
+                project, runs=runs,
+            )
+        active = self.viewmodel.services.active_job()
+        self._active_project_id = active[0] if active else None
         self.recent_count.setText(f"{len(projects)}" if projects else "")
         self.empty.setVisible(not projects)
         self._render_cards()
@@ -219,11 +256,9 @@ class ProjectsScreen(QWidget):
                     widget.deleteLater()
         columns = self._recent_columns()
         self._rendered_columns = columns
-        active = self.viewmodel.services.active_job()
-        active_project_id = active[0] if active else None
         for index, project in enumerate(self._projects):
             row, column = divmod(index, columns)
-            self.list_layout.addWidget(self._card(project, active_project_id), row, column)
+            self.list_layout.addWidget(self._card(project, self._active_project_id), row, column)
         if self._projects:
             self.list_layout.setRowStretch((len(self._projects) - 1) // columns + 1, 1)
         for column in range(columns):
@@ -277,7 +312,10 @@ class ProjectsScreen(QWidget):
         name.setWordWrap(True)
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         set_responsive_text(name, project.name)
-        presentation = self.viewmodel.services.presentation(project)
+        presentation = self._presentations.get(project.project_id)
+        if presentation is None:
+            runs = self.viewmodel.services.runs_for(project)
+            presentation = self.viewmodel.services.presentation(project, runs=runs)
         status = QLabel()
         status.setObjectName("status")
         status.setWordWrap(True)
@@ -352,6 +390,7 @@ class ProjectsScreen(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self.refresh_if_dirty()
         # The first refresh normally happens before QScrollArea has a real
         # viewport. Re-evaluate once the native window publishes that width so
         # a wide first show does not remain stuck in the fallback one column.

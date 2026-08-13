@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
 )
 
 from app.analysis_artifact import candidate_is_draftable
-from app.clip_results import ClipResult, primary_clip_results, unique_primary_results
+from app.clip_results import ClipResult, unique_primary_results
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
-from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectRun
+from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import format_seconds, read_json
@@ -102,6 +102,12 @@ class ProjectScreen(QWidget):
         self.viewmodel = viewmodel
         self.project: DesktopProject | None = None
         self.runs: list[ProjectRun] = []
+        self._pending_project: DesktopProject | None = None
+        self._pending_runs: list[ProjectRun] | None = None
+        self._persisted_refresh_pending = False
+        self._processing_structure_key: tuple[object, ...] | None = None
+        self._analysis_cache_key: tuple[Path, int, int] | None = None
+        self._analysis_cache: dict[str, Any] = {}
         self._active_candidate_id: str | None = None
         # The player is shared by Moments and Drafts.  Keep its review binding
         # separate from the user choices persisted in the project: a project
@@ -478,8 +484,8 @@ class ProjectScreen(QWidget):
         self._compose_stage_workspaces(left, body)
         root.addLayout(body, 1)
         self._install_sticky_actions(root)
-        self.viewmodel.project_changed.connect(self._project_changed)
-        self.viewmodel.runs_changed.connect(self._runs_changed)
+        self.viewmodel.project_changed.connect(self._queue_project_changed)
+        self.viewmodel.runs_changed.connect(self._queue_runs_changed)
         self.viewmodel.processing_changed.connect(self._processing_changed)
         self.viewmodel.error_occurred.connect(self._error)
         self._compact_stage_layout: bool | None = None
@@ -1160,6 +1166,46 @@ class ProjectScreen(QWidget):
         # persisted state; the temporary "create more" route is session-only.
         self._results_subflow_override = None
         self.viewmodel.open(project)
+        # Navigation is a user-visible state transition and remains
+        # synchronous.  The two persisted signals emitted by ``open`` are
+        # still rendered by one coalesced flush instead of two rebuilds.
+        if self._persisted_refresh_pending:
+            self._flush_persisted_refresh()
+
+    def _queue_project_changed(self, project: DesktopProject) -> None:
+        if self._persisting_active_preview and self.project and self.project.project_id == project.project_id:
+            self.project = project
+            return
+        self._pending_project = project
+        self._queue_persisted_refresh()
+
+    def _queue_runs_changed(self, runs: list[ProjectRun]) -> None:
+        self._pending_runs = list(runs)
+        self._queue_persisted_refresh()
+
+    def _queue_persisted_refresh(self) -> None:
+        if self._persisted_refresh_pending:
+            return
+        self._persisted_refresh_pending = True
+        QTimer.singleShot(0, self._flush_persisted_refresh)
+
+    def _flush_persisted_refresh(self) -> None:
+        self._persisted_refresh_pending = False
+        project = self._pending_project
+        runs = self._pending_runs
+        self._pending_project = None
+        self._pending_runs = None
+        if runs is not None:
+            self.runs = runs
+        if project is not None:
+            self._project_changed(project)
+        if runs is not None:
+            self._runs_changed(runs, refresh_project=project is None)
+        if project is not None:
+            # ``open()`` emits processing after project/runs in the same call
+            # stack.  Reconcile once after the coalesced persisted refresh so
+            # terminal recovery controls see the newly opened project.
+            self._processing_changed(self.viewmodel.snapshot)
 
     def _project_changed(self, project: DesktopProject) -> None:
         if self._persisting_active_preview and self.project and self.project.project_id == project.project_id:
@@ -1179,10 +1225,14 @@ class ProjectScreen(QWidget):
             self._active_candidate_id = getattr(project, "active_preview_candidate_id", None)
             self._active_candidate_range = None
             self._active_preview_kind = "source"
+            self._processing_structure_key = None
         self.title.setText(project.name)
-        self.status.setText(self.viewmodel.services.presentation(
-            project, snapshot=self.viewmodel.snapshot,
-        ).status_label)
+        presentation = self.viewmodel.services.presentation(
+            project,
+            snapshot=self.viewmodel.snapshot,
+            runs=self._runs_for_project(project),
+        )
+        self.status.setText(presentation.status_label)
         self.run_button.setText("Начать поиск моментов")
         if project.source_spec.is_ready and (is_new_project or self.preview.active_media_path is None):
             self.preview.show_source(
@@ -1224,7 +1274,7 @@ class ProjectScreen(QWidget):
         self._update_final_results(project)
         self._update_next_step(project)
         self._reconcile_active_candidate_preview(project, previous_step=previous_step)
-        self._apply_flow_visibility(project)
+        self._apply_flow_visibility(project, presentation=presentation)
 
     def _set_advanced_visible(self, visible: bool) -> None:
         if self._flow_step != "settings":
@@ -1369,12 +1419,21 @@ class ProjectScreen(QWidget):
                 return matched
         return max(runs, key=lambda run: (run.started_at, run.run_id), default=None)
 
-    def _derive_flow_step(self, project: DesktopProject) -> str:
+    def _derive_flow_step(
+        self,
+        project: DesktopProject,
+        *,
+        presentation: ProjectPresentation | None = None,
+    ) -> str:
         if self._results_subflow_override == "candidates" and project.analysis_artifact_path:
             return "candidates"
-        return self.viewmodel.services.presentation(
-            project, snapshot=self.viewmodel.snapshot,
-        ).flow_step
+        if presentation is None:
+            presentation = self.viewmodel.services.presentation(
+                project,
+                snapshot=self.viewmodel.snapshot,
+                runs=self._runs_for_project(project),
+            )
+        return presentation.flow_step
 
     def _flow_hint_for(self, step: str, project: DesktopProject) -> str:
         hints = {
@@ -1387,13 +1446,21 @@ class ProjectScreen(QWidget):
         }
         return hints.get(step, "Выберите источник видео.")
 
-    def _apply_flow_visibility(self, project: DesktopProject) -> None:
-        step = self._derive_flow_step(project)
+    def _apply_flow_visibility(
+        self,
+        project: DesktopProject,
+        *,
+        presentation: ProjectPresentation | None = None,
+    ) -> None:
+        if presentation is None:
+            presentation = self.viewmodel.services.presentation(
+                project,
+                snapshot=self.viewmodel.snapshot,
+                runs=self._runs_for_project(project),
+            )
+        step = self._derive_flow_step(project, presentation=presentation)
         self._flow_step = step
         active = self.viewmodel.snapshot.phase in {"preparing", "running", "cancelling"}
-        presentation = self.viewmodel.services.presentation(
-            project, snapshot=self.viewmodel.snapshot,
-        )
         global_step = _GLOBAL_STEP_FOR_FLOW[step]
         global_index = next(index for index, (name, _label) in enumerate(_GLOBAL_FLOW_STEPS, start=1) if name == global_step)
         self.flow_position.setText(f"Этап {global_index} из {len(_GLOBAL_FLOW_STEPS)}")
@@ -1571,6 +1638,23 @@ class ProjectScreen(QWidget):
             return
         self.viewmodel.start_analysis()
 
+    def _analysis_artifact(self, project: DesktopProject) -> dict[str, Any]:
+        path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
+        if path is None:
+            return {}
+        try:
+            resolved = path.resolve()
+            stat = resolved.stat()
+        except OSError:
+            return {}
+        key = (resolved, stat.st_size, stat.st_mtime_ns)
+        if key == self._analysis_cache_key:
+            return self._analysis_cache
+        raw = read_json(resolved, {})
+        self._analysis_cache_key = key
+        self._analysis_cache = raw if isinstance(raw, dict) else {}
+        return self._analysis_cache
+
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
         workflow_step = self._derive_flow_step(project)
@@ -1597,8 +1681,7 @@ class ProjectScreen(QWidget):
         self._candidate_thumbnail_labels = {}
         self._candidate_thumbnail_paths = {}
         self._candidate_cards = {}
-        analysis_path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
-        analysis = read_json(analysis_path, {}) if analysis_path and analysis_path.is_file() else {}
+        analysis = self._analysis_artifact(project)
         candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
         if workflow_step == "candidates":
             # Phase 6 owns eligibility. Moments only projects its persisted
@@ -2084,21 +2167,13 @@ class ProjectScreen(QWidget):
         return self.viewmodel.services.runs_for(project)
 
     def _final_output_records(self, project: DesktopProject) -> list[ClipResult]:
-        """Read only the canonical result registry, never folders or list positions."""
+        """Project the canonical manifest registry without parsing full reports."""
 
         collected: list[ClipResult] = []
         for run in self._runs_for_project(project):
-            if not run.report_path:
+            if run.run_kind not in {RunKind.FULL, RunKind.SELECTED_RENDER, RunKind.RENDER_REVISION}:
                 continue
-            report = read_json(Path(run.report_path), {})
-            if not isinstance(report, dict):
-                continue
-            raw_registry = report.get("primary_results")
-            if isinstance(raw_registry, list):
-                registry = [item for raw in raw_registry if (item := ClipResult.from_dict(raw)) is not None]
-            else:
-                registry = primary_clip_results(report.get("production_render"))
-            for result in registry:
+            for result in self.viewmodel.services.run_projection(run).primary_results:
                 path = Path(result.output_file)
                 if path.is_absolute() and VideoPreview.usable_media_path(path):
                     collected.append(result)
@@ -2158,9 +2233,8 @@ class ProjectScreen(QWidget):
     def _final_candidate_metadata(self, project: DesktopProject) -> dict[str, dict[str, object]]:
         """Read titles and source ranges from already-persisted candidate metadata."""
 
-        path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
-        analysis = read_json(path, {}) if path and path.is_file() else {}
-        candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
+        analysis = self._analysis_artifact(project)
+        candidates = analysis.get("candidates", [])
         metadata = {
             str(item.get("candidate_id")): {
                 "title": str(item.get("title") or item.get("core_idea") or "Готовый ролик"),
@@ -2169,26 +2243,10 @@ class ProjectScreen(QWidget):
             }
             for item in candidates if isinstance(item, dict) and item.get("candidate_id")
         }
-        for run in self._runs_for_project(project):
-            if not run.report_path:
-                continue
-            report = read_json(Path(run.report_path), {})
-            intelligence = report.get("clip_intelligence", {}) if isinstance(report, dict) else {}
-            candidates = intelligence.get("candidates", []) if isinstance(intelligence, dict) else []
-            if not isinstance(candidates, list):
-                continue
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "")
-                if not candidate_id or candidate_id in metadata:
-                    continue
-                excerpt = str(candidate.get("title") or candidate.get("core_idea") or candidate.get("text") or "").strip()
-                metadata[candidate_id] = {
-                    "title": (excerpt[:96].rstrip() + "…") if len(excerpt) > 96 else excerpt,
-                    "start": candidate.get("start_seconds", candidate.get("start")),
-                    "end": candidate.get("end_seconds", candidate.get("end")),
-                }
+        if not metadata:
+            for run in self._runs_for_project(project):
+                for candidate_id, values in self.viewmodel.services.run_projection(run).candidate_metadata.items():
+                    metadata.setdefault(candidate_id, dict(values))
         return metadata
 
     def _run_id_for_result(self, project: DesktopProject, result: ClipResult) -> str:
@@ -2198,17 +2256,7 @@ class ProjectScreen(QWidget):
             return result.run_id
         target = str(Path(result.output_file)).replace("\\", "/").casefold()
         for run in self._runs_for_project(project):
-            if not run.report_path:
-                continue
-            report = read_json(Path(run.report_path), {})
-            if not isinstance(report, dict):
-                continue
-            raw_registry = report.get("primary_results")
-            registry = (
-                [item for raw in raw_registry if (item := ClipResult.from_dict(raw)) is not None]
-                if isinstance(raw_registry, list)
-                else primary_clip_results(report.get("production_render"))
-            )
+            registry = self.viewmodel.services.run_projection(run).primary_results
             if any(str(Path(item.output_file)).replace("\\", "/").casefold() == target for item in registry):
                 return run.run_id
         return ""
@@ -2240,17 +2288,8 @@ class ProjectScreen(QWidget):
             return list(dict.fromkeys(warnings))
         for run in self._runs_for_project(project):
             warnings.extend(run.warnings)
-            if run.report_path:
-                report = read_json(Path(run.report_path), {})
-                if isinstance(report, dict):
-                    values = report.get("warnings", [])
-                    if isinstance(values, list):
-                        warnings.extend(str(value) for value in values if str(value).strip())
-                    production = report.get("production_render", {})
-                    if isinstance(production, dict):
-                        values = production.get("warnings", [])
-                        if isinstance(values, list):
-                            warnings.extend(str(value) for value in values if str(value).strip())
+            if run.status == "completed_with_warnings" and not run.warnings:
+                warnings.extend(self.viewmodel.services.run_projection(run).warnings)
         return self._summarize_final_warnings(list(dict.fromkeys(warnings)))
 
     @staticmethod
@@ -2863,7 +2902,7 @@ class ProjectScreen(QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self.viewmodel.render_selected(selected_ids)
 
-    def _runs_changed(self, runs: list[ProjectRun]) -> None:
+    def _runs_changed(self, runs: list[ProjectRun], *, refresh_project: bool = True) -> None:
         self.runs = runs
         self._update_content_summary(runs)
         while self.history_layout.count() > 1:
@@ -2894,16 +2933,23 @@ class ProjectScreen(QWidget):
             folder.clicked.connect(lambda _, path=Path(run.log_path).parent if run.log_path else None: self._open_folder(path))
             layout.addWidget(folder)
             self.history_layout.insertWidget(self.history_layout.count() - 1, frame)
-        if self.project:
+        if self.project and refresh_project:
             self._update_final_results(self.project)
             self._update_candidate_review(self.project)
             self._update_next_step(self.project)
 
     def _update_content_summary(self, runs: list[ProjectRun]) -> None:
-        for run in runs:
-            if not run.report_path:
-                continue
-            report = read_json(Path(run.report_path), {})
+        reports: list[dict[str, Any]] = []
+        if self.project:
+            analysis_report = self._analysis_content_summary_report(self._analysis_artifact(self.project))
+            if analysis_report is not None:
+                reports.append(analysis_report)
+        if not reports:
+            for run in runs:
+                projection = self.viewmodel.services.run_projection(run)
+                if projection.content_summary_report is not None:
+                    reports.append(projection.content_summary_report)
+        for report in reports:
             understanding = report.get("content_understanding", {}) if isinstance(report, dict) else {}
             if not isinstance(understanding, dict) or not understanding.get("enabled"):
                 continue
@@ -2940,6 +2986,66 @@ class ProjectScreen(QWidget):
             self._replace_card_text(self.content_summary, lines)
             return
         self._replace_card_text(self.content_summary, ["Рекомендация появится после завершения анализа."])
+
+    @staticmethod
+    def _analysis_content_summary_report(analysis: dict[str, Any]) -> dict[str, Any] | None:
+        if not analysis:
+            return None
+        profile = analysis.get("content_profile", {})
+        recommendation_root = analysis.get("recommendation", {})
+        summary = analysis.get("summary", {})
+        if not isinstance(profile, dict) or not isinstance(recommendation_root, dict):
+            return None
+        recommendation = recommendation_root.get("clip_count", {})
+        coverage = recommendation_root.get("coverage", {})
+        if not isinstance(recommendation, dict) or not isinstance(coverage, dict):
+            return None
+        available_chapters = coverage.get("available_chapters", [])
+        selected_chapters = coverage.get("selected_chapters", [])
+        understanding = {
+            "enabled": True,
+            "profile": {"detected_content_type": profile.get("detected_content_type", "не определён")},
+            "content_map": {
+                "chapters": [None] * len(available_chapters) if isinstance(available_chapters, list) else [],
+            },
+            "clip_count_recommendation": {
+                "estimated_publishable_clip_range": recommendation.get("estimated_publishable_clip_range", {}),
+                "estimated_story_count": recommendation.get(
+                    "estimated_story_count",
+                    summary.get("candidate_count", 0) if isinstance(summary, dict) else 0,
+                ),
+            },
+            "coverage_map": {
+                "selected_chapters": list(selected_chapters) if isinstance(selected_chapters, list) else [],
+            },
+        }
+        report: dict[str, Any] = {"content_understanding": understanding}
+        candidates = analysis.get("candidates", [])
+        chosen = None
+        if isinstance(candidates, list):
+            chosen = next(
+                (item for item in candidates if isinstance(item, dict) and item.get("selected_by_recommendation")),
+                next((item for item in candidates if isinstance(item, dict) and item.get("recommended")), None),
+            )
+        if isinstance(chosen, dict):
+            level = {
+                "low": "weak", "medium": "moderate", "high": "strong", "very_high": "excellent",
+            }.get(str(chosen.get("virality_level") or chosen.get("potential") or "").lower(), "moderate")
+            report["virality"] = {"enabled": True}
+            report["clip_intelligence"] = {"candidates": [{
+                "selected": True,
+                "virality": {
+                    "viral_potential": {
+                        "level": level,
+                        "strongest_factors": [],
+                        "confidence": {"warnings": chosen.get("warnings", [])},
+                    },
+                    "publishability": {},
+                    "retention_profile": {},
+                    "eligibility": {"status": chosen.get("publishability_status", "")},
+                },
+            }]}
+        return report
 
     def _update_next_step(self, project: DesktopProject) -> None:
         """Keep the page-level answer to “what do I do now?” short and stable."""
@@ -3015,7 +3121,6 @@ class ProjectScreen(QWidget):
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         blocked = self.viewmodel.blocked_by_other_project
-        self._update_processing_stages(snapshot)
         if active:
             detail = self._processing_detail(snapshot)
             self.progress.set_running(
@@ -3039,6 +3144,18 @@ class ProjectScreen(QWidget):
                     ):
                         retry_label = "Повторить поиск моментов"
             self.progress.set_finished(message, retry_label)
+        structure_key = (
+            snapshot.phase,
+            snapshot.stage,
+            blocked,
+            self.project.project_id if self.project else None,
+        )
+        if structure_key == self._processing_structure_key:
+            # Elapsed/activity/progress telemetry owns only the progress
+            # surface.  Persisted project/run projection is unchanged.
+            return
+        self._processing_structure_key = structure_key
+        self._update_processing_stages(snapshot)
         self.run_button.setDisabled(active or blocked)
         self.setup_start_button.setDisabled(active or blocked)
         has_draft_choice = bool(
@@ -3067,12 +3184,33 @@ class ProjectScreen(QWidget):
                 heavy_hint or str(button.property("responsiveFullText") or button.text())
             )
         if self.project:
-            self.status.setText(self.viewmodel.services.presentation(
-                self.project, snapshot=snapshot,
-            ).status_label)
+            if active:
+                latest = self._latest_run(self.project)
+                run_kind = self.viewmodel.run.run_kind if self.viewmodel.run else (latest.run_kind if latest else RunKind.FULL)
+                status_label = (
+                    "Загружаем видео" if snapshot.stage == "download" else {
+                        RunKind.ANALYSIS: "Ищем моменты",
+                        RunKind.DRAFT: "Создаём черновики",
+                        RunKind.SELECTED_RENDER: "Создаём ролики",
+                        RunKind.RENDER_REVISION: "Создаём ролики",
+                    }.get(run_kind, "Идёт обработка")
+                )
+                presentation = ProjectPresentation(
+                    "download" if snapshot.stage == "download" else "processing",
+                    status_label,
+                    latest,
+                    True,
+                )
+            else:
+                presentation = self.viewmodel.services.presentation(
+                    self.project,
+                    snapshot=snapshot,
+                    runs=self._runs_for_project(self.project),
+                )
+            self.status.setText(presentation.status_label)
             self._update_download_card(self.project)
             self._update_stage_context(self.project)
-            self._apply_flow_visibility(self.project)
+            self._apply_flow_visibility(self.project, presentation=presentation)
 
     def _other_project_job_hint(self) -> str:
         owner = self.viewmodel.active_project_name or "другом проекте"
