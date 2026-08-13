@@ -31,6 +31,7 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.runtime import RuntimeLayout
+from app.secure_secrets import load_runtime_secrets
 from app.source_download import cleanup_partial_downloads, validate_public_video_url
 from app.utils import read_json, stable_text_hash, utc_now
 
@@ -63,6 +64,7 @@ class DesktopServices:
             else RuntimeLayout.for_source(runtime, data=runtime)
         )
         settings_store = SettingsStore(layout.data)
+        load_runtime_secrets(layout.data)
         settings = settings_store.load()
         projects = DesktopProjectStore(Path(settings.data_directory))
         runs = RunHistoryStore(projects)
@@ -73,7 +75,7 @@ class DesktopServices:
             projects=projects,
             runs=runs,
             pipeline=PipelineFacade(layout),
-            system=SystemService(layout.resources),
+            system=SystemService(layout),
             runtime=layout,
         )
         services.recover_interrupted_runs()

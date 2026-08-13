@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
 from app.config import load_config
 from app.doctor import format_report
 from app.gui.responsive import make_label_shrinkable, set_responsive_text
-from app.gui.services.secure_secrets import key_configured
 from app.gui.viewmodels import SettingsViewModel
+from app.secure_secrets import key_configured
 
 
 class SettingsScreen(QWidget):
@@ -146,6 +146,18 @@ class SettingsScreen(QWidget):
         make_label_shrinkable(note)
         self.ai_section.layout().addWidget(self.ai_info)
         self.ai_section.layout().addWidget(note)
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("Новый API-ключ — значение останется скрытым")
+        self.api_key.setClearButtonEnabled(True)
+        self.save_key_button = QPushButton("Сохранить ключ локально")
+        self.save_key_button.clicked.connect(self._save_api_key)
+        self.api_key_result = QLabel()
+        self.api_key_result.setObjectName("muted")
+        make_label_shrinkable(self.api_key_result)
+        self.ai_section.layout().addWidget(self.api_key)
+        self.ai_section.layout().addWidget(self.save_key_button)
+        self.ai_section.layout().addWidget(self.api_key_result)
         advanced_layout.addWidget(self.ai_section)
         self.advanced_content.hide()
         layout.addWidget(self.advanced_content)
@@ -178,7 +190,8 @@ class SettingsScreen(QWidget):
         root.addWidget(scroll, 1)
 
         self.viewmodel.settings_changed.connect(self._render)
-        self.viewmodel.diagnostics_ready.connect(lambda checks: self.diagnostics.setPlainText(format_report(checks)))
+        self.viewmodel.diagnostics_started.connect(self._diagnostics_started)
+        self.viewmodel.diagnostics_ready.connect(self._diagnostics_ready)
         self._render(self.viewmodel.settings)
 
     def _set_advanced_visible(self, visible: bool) -> None:
@@ -208,18 +221,30 @@ class SettingsScreen(QWidget):
         config_path = Path(settings.config_path) if settings.config_path else self.viewmodel.services.resources_root / "config.example.yaml"
         try:
             config = load_config(config_path)
-            key = "настроен" if key_configured(config.ai.provider, self.viewmodel.services.resources_root) else "не настроен"
+            effective_provider = "mock" if settings.local_test_mode else config.ai.provider
+            key = (
+                "не требуется"
+                if effective_provider == "mock"
+                else "настроен"
+                if key_configured(effective_provider, self.viewmodel.services.system.data_root)
+                else "не настроен"
+            )
             set_responsive_text(
                 self.ai_info,
-                f"AI: {config.ai.provider} · {config.ai.model}\n"
+                f"AI: {effective_provider} · {config.ai.model}\n"
                 f"Озвучка: {config.tts.provider} · {config.tts.model}\n"
                 f"Статус ключа: {key}",
             )
+            configurable = effective_provider in {"openai", "gemini"}
+            self.api_key.setVisible(configurable)
+            self.save_key_button.setVisible(configurable)
         except Exception:
             set_responsive_text(
                 self.ai_info,
                 "Выберите корректный файл конфигурации, чтобы увидеть используемые параметры.",
             )
+            self.api_key.hide()
+            self.save_key_button.hide()
 
     def _save(self) -> None:
         self.viewmodel.settings.config_path = self.config_path.text().strip() or None
@@ -246,6 +271,21 @@ class SettingsScreen(QWidget):
         path = Path(self.viewmodel.settings.data_directory)
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _save_api_key(self) -> None:
+        result = self.viewmodel.save_api_key(self.api_key.text())
+        self.api_key.clear()
+        self.api_key_result.setText(result.message)
+
+    def _diagnostics_started(self) -> None:
+        self.check_button.setEnabled(False)
+        self.check_button.setText("Проверяем…")
+        self.diagnostics.setPlainText("Диагностика выполняется в фоне; интерфейс остаётся доступным.")
+
+    def _diagnostics_ready(self, checks) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("Проверить снова")
+        self.diagnostics.setPlainText(format_report(checks))
 
     @staticmethod
     def _section(title: str) -> QFrame:

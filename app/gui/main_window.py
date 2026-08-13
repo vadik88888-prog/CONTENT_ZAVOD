@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QDialog,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.doctor import DoctorReadiness, summarize_checks
 from app.gui.screens import OnboardingDialog, ProjectScreen, ProjectsScreen, SettingsScreen
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.viewmodels import ProjectViewModel, ProjectsViewModel, SettingsViewModel
@@ -93,12 +95,12 @@ class MainWindow(QMainWindow):
         status_layout = QVBoxLayout(self.system_status)
         status_layout.setContentsMargins(12, 11, 12, 11)
         status_layout.setSpacing(4)
-        self.system_status_title = QLabel("●  Система готова")
+        self.system_status_title = QLabel("●  Проверка…")
         self.system_status_title.setObjectName("systemStatusTitle")
         self.system_status_title.setWordWrap(True)
         self.system_status_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.system_status_title.setToolTip("Система готова")
-        self.system_status_detail = QLabel("Локальная обработка\nВсе проекты остаются здесь")
+        self.system_status_title.setToolTip("Проверяется состояние системы")
+        self.system_status_detail = QLabel("Диагностика запускается в фоне")
         self.system_status_detail.setObjectName("muted")
         self.system_status_detail.setWordWrap(True)
         self.system_status_detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -141,11 +143,15 @@ class MainWindow(QMainWindow):
         self.projects_screen.project_opened.connect(self.show_project)
         self.project_screen.back_requested.connect(self.show_projects)
         self.project_viewmodel.project_persisted.connect(lambda _project_id: self.projects_screen.mark_dirty())
+        self.settings_viewmodel.diagnostics_started.connect(self._diagnostics_started)
+        self.settings_viewmodel.diagnostics_ready.connect(self._diagnostics_ready)
         layout.addWidget(self.stack, 1)
         self._restore_last_screen()
         self._apply_sidebar_layout()
         QTimer.singleShot(0, self._fit_to_available_screen)
         QTimer.singleShot(0, self._maybe_onboard)
+        if self.services.settings.onboarding_completed:
+            QTimer.singleShot(0, self.settings_viewmodel.diagnostics)
 
     def show_projects(self, *, remember: bool = True) -> None:
         self.stack.setCurrentIndex(self.projects_index)
@@ -205,9 +211,12 @@ class MainWindow(QMainWindow):
         dialog = OnboardingDialog(self.settings_viewmodel, self)
         self._onboarding_dialog = dialog
         try:
-            dialog.exec()
+            result = dialog.exec()
         finally:
             self._onboarding_dialog = None
+        if result == QDialog.DialogCode.Rejected and not self.services.settings.onboarding_completed:
+            self.close()
+            return
         self.show_projects()
 
     def _set_selected(self, button: QPushButton | None) -> None:
@@ -221,6 +230,22 @@ class MainWindow(QMainWindow):
             "Выберите длинное видео или публичную ссылку, настройте обработку и подтвердите лучшие моменты. "
             "Все данные и ролики остаются на этом компьютере.",
         )
+
+    def _diagnostics_started(self) -> None:
+        self.system_status_title.setText("●  Проверка…")
+        self.system_status_title.setToolTip("Проверяется состояние системы")
+        self.system_status_detail.setText("Диагностика выполняется в фоне")
+
+    def _diagnostics_ready(self, checks) -> None:
+        summary = summarize_checks(checks)
+        prefix = {
+            DoctorReadiness.READY: "●  ",
+            DoctorReadiness.LIMITED: "▲  ",
+            DoctorReadiness.SETUP_REQUIRED: "■  ",
+        }[summary.readiness]
+        self.system_status_title.setText(prefix + summary.title)
+        self.system_status_title.setToolTip(summary.title)
+        self.system_status_detail.setText(summary.detail)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

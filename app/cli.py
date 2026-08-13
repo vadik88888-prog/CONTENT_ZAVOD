@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from app.config import load_config
-from app.doctor import collect_checks, format_report
+from app.doctor import collect_checks, format_report, has_blocking_checks
 from app.errors import ClipEngineError
 from app.pipeline import Pipeline
 from app.utils import read_json
@@ -201,8 +201,9 @@ def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> 
         except ClipEngineError as error:
             print(f"Ошибка: {error}", file=sys.stderr)
             return 2
-        print(format_report(collect_checks(root, config)))
-        return 0
+        checks = collect_checks(root, config)
+        print(format_report(checks))
+        return 2 if has_blocking_checks(checks) else 0
     if arguments.command == "analyze":
         try:
             config = load_config(arguments.config)
