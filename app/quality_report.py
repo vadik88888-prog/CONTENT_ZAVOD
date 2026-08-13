@@ -162,19 +162,24 @@ def exact_dialogue_semantic_blocker(plan: dict[str, Any]) -> dict[str, Any] | No
     for item in mappings:
         if not isinstance(item, dict):
             continue
-        try:
-            confidence = float(item.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            confidence = 0.0
-        if confidence < SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD:
-            low_confidence.append({
-                "segment_id": item.get("segment_id"),
-                "fact_id": item.get("fact_id"),
-                "transcript_segment_id": item.get("transcript_segment_id"),
-                "confidence": round(confidence, 6),
-                "source_start_seconds": item.get("source_start_seconds"),
-                "source_end_seconds": item.get("source_end_seconds"),
-            })
+        evidence_mappings = item.get("evidence_mappings")
+        exact_mappings = evidence_mappings if isinstance(evidence_mappings, list) and evidence_mappings else [item]
+        for exact in exact_mappings:
+            if not isinstance(exact, dict):
+                continue
+            try:
+                confidence = float(exact.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if confidence < SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD:
+                low_confidence.append({
+                    "segment_id": item.get("segment_id"),
+                    "fact_id": exact.get("fact_id"),
+                    "transcript_segment_id": exact.get("transcript_segment_id"),
+                    "confidence": round(confidence, 6),
+                    "source_start_seconds": exact.get("source_start_seconds"),
+                    "source_end_seconds": exact.get("source_end_seconds"),
+                })
     if not low_confidence:
         return None
     threshold = SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD

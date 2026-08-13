@@ -217,13 +217,105 @@ def test_source_audio_story_preserves_causal_bridge_between_grounded_facts() -> 
     )
 
     assert [(item.source_start_seconds, item.source_end_seconds) for item in plan.dialogue_mappings] == [
-        (4.0, 18.0), (18.0, 20.0),
+        (4.0, 20.0),
     ]
     assert sum(item.estimated_duration_seconds for item in plan.dialogue_mappings) == 16.0
+    assert [
+        (item.fact_id, item.source_start_seconds, item.source_end_seconds)
+        for item in plan.dialogue_mappings[0].evidence_mappings
+    ] == [
+        ("fact-setup", 4.0, 6.0),
+        ("fact-payoff", 18.0, 20.0),
+    ]
     assert plan.continuity_decision and plan.continuity_decision.mode == "preserve_required_spans"
-    assert plan.envelope and any(
-        warning.startswith("CONTINUITY_REQUIRED_SPAN_PRESERVED") for warning in plan.envelope.warnings
+
+
+@pytest.mark.parametrize("audio_mode", ["original", "original_enhanced"])
+def test_source_audio_micro_asr_gap_preserves_one_continuous_media_segment(audio_mode: str) -> None:
+    outcome = _outcome_with_boundary()
+    outcome["semantic_representation"].update({
+        "supporting_facts": [
+            {
+                "fact_id": "fact-before-gap", "statement": "First thought.",
+                "evidence_segment_ids": [10], "evidence_quote": "First thought.",
+                "evidence_start": 4.0, "evidence_end": 12.0, "confidence": 0.91,
+                "source_scope": "primary_candidate", "factuality_type": "explicit",
+            },
+            {
+                "fact_id": "fact-after-gap", "statement": "Second thought.",
+                "evidence_segment_ids": [11], "evidence_quote": "Second thought.",
+                "evidence_start": 12.08, "evidence_end": 20.0, "confidence": 0.92,
+                "source_scope": "primary_candidate", "factuality_type": "explicit",
+            },
+        ],
+        "source_evidence_map": {"fact-before-gap": [10], "fact-after-gap": [11]},
+    })
+    outcome["source_context"]["primary_evidence"] = [
+        {"segment_id": 10, "start": 4.0, "end": 12.0, "text": "First thought.", "scope": "primary_candidate", "confidence": 0.91},
+        {"segment_id": 11, "start": 12.08, "end": 20.0, "text": "Second thought.", "scope": "primary_candidate", "confidence": 0.92},
+    ]
+    required = outcome["source_context"]["boundary_decision"]["required_evidence"]
+    required[0]["source_range"] = {"start_seconds": 4.0, "end_seconds": 12.0}
+    required[0]["transcript_segment_id"] = 10
+    required[1]["source_range"] = {"start_seconds": 12.08, "end_seconds": 20.0}
+    required[1]["transcript_segment_id"] = 11
+    required[2]["source_range"] = {"start_seconds": 18.0, "end_seconds": 20.0}
+    required[2]["transcript_segment_id"] = 11
+    outcome["final_script"].update({
+        "sentences": [
+            {
+                "sentence_id": "sentence-before", "text": "First thought.", "role": "hook",
+                "supported_by_fact_ids": ["fact-before-gap"], "source_segment_ids": [10], "confidence": 0.91,
+            },
+            {
+                "sentence_id": "sentence-after", "text": "Second thought.", "role": "payoff",
+                "supported_by_fact_ids": ["fact-after-gap"], "source_segment_ids": [11], "confidence": 0.92,
+            },
+        ],
+        "full_text": "First thought. Second thought.",
+        "used_fact_ids": ["fact-before-gap", "fact-after-gap"],
+    })
+
+    production = AppConfig().production
+    production.audio_mode = audio_mode
+    plan = build_production_plan(outcome, production, envelope_context=_native_envelope_context())
+
+    assert plan.continuity_decision and plan.continuity_decision.mode == "uncertain"
+    assert [(item.source_start_seconds, item.source_end_seconds) for item in plan.dialogue_mappings] == [(4.0, 20.0)]
+    assert [
+        (item.source_start_seconds, item.source_end_seconds)
+        for item in plan.dialogue_mappings[0].evidence_mappings
+    ] == [(4.0, 12.0), (12.08, 20.0)]
+
+
+def test_source_audio_internal_cut_requires_persisted_typed_omission_rationale() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["primary_evidence"] = [
+        {"segment_id": 0, "start": 4.0, "end": 8.0, "text": "Before pause.", "scope": "primary_candidate", "confidence": 0.9},
+        {"segment_id": 1, "start": 12.0, "end": 20.0, "text": "After pause.", "scope": "primary_candidate", "confidence": 0.9},
+    ]
+    outcome["source_context"]["multimodal_context"] = {
+        "continuity_omissions": [{
+            "source_range": {"start_seconds": 8.0, "end_seconds": 12.0},
+            "rationale_type": "silence",
+            "rationale": "Measured silence has no visual action or semantic bridge.",
+            "evidence": {"source": "silence_detector", "duration_seconds": 4.0},
+        }],
+    }
+    required = outcome["source_context"]["boundary_decision"]["required_evidence"]
+    required[0]["source_range"] = {"start_seconds": 4.0, "end_seconds": 8.0}
+    required[1]["source_range"] = {"start_seconds": 12.0, "end_seconds": 20.0}
+
+    plan = build_production_plan(
+        outcome, AppConfig().production, envelope_context=_native_envelope_context(),
     )
+
+    assert plan.continuity_decision and [
+        item.rationale_type for item in plan.continuity_decision.omitted_spans
+    ] == ["silence"]
+    assert [(item.source_start_seconds, item.source_end_seconds) for item in plan.dialogue_mappings] == [
+        (4.0, 8.0), (12.0, 20.0),
+    ]
 
 
 def test_native_envelope_is_deterministic_and_binds_v2_identity_contract() -> None:
@@ -341,7 +433,7 @@ def test_production_plan_persists_boundary_decision_and_links_every_dialogue_sou
 
 def test_production_plan_blocks_dialogue_word_cut_after_boundary_handoff() -> None:
     outcome = _outcome_with_boundary()
-    outcome["semantic_representation"]["supporting_facts"][0]["evidence_start"] = 4.2
+    outcome["source_context"]["boundary_decision"]["refined_range"]["start_seconds"] = 4.2
 
     with pytest.raises(ProductionPlanError, match="BOUNDARY_WORD_CUT"):
         build_production_plan(outcome, AppConfig().production)
@@ -522,6 +614,15 @@ def test_native_plan_suppresses_repeated_exact_dialogue_source_range_with_eviden
     ]
 
 
+def test_native_source_plan_rejects_unexplained_physical_media_cut() -> None:
+    raw = _native_plan().model_dump(mode="json")
+    raw["segments"][0]["source_end_seconds"] = 10.0
+    raw["dialogue_mappings"][0]["source_end_seconds"] = 10.0
+
+    with pytest.raises(ValidationError, match="CONTINUITY_UNEXPLAINED_MEDIA_CUT"):
+        ProductionPlan.model_validate(raw)
+
+
 def test_native_plan_carries_approved_boundary_pre_and_post_roll_into_source_dialogue() -> None:
     outcome = _outcome_with_boundary()
     for fact in outcome["semantic_representation"]["supporting_facts"]:
@@ -539,10 +640,10 @@ def test_native_plan_carries_approved_boundary_pre_and_post_roll_into_source_dia
     assert (dialogue.source_start_seconds, dialogue.source_end_seconds) == (4.0, 20.0)
     assert validate_audio_handoff(plan) is None
     assert plan.envelope is not None
-    assert {
-        "BOUNDARY_PRE_ROLL_APPLIED:dialogue-001:5.000->4.000",
-        "BOUNDARY_POST_ROLL_APPLIED:dialogue-001:19.000->20.000",
-    } <= set(plan.envelope.warnings)
+    assert [(item.source_start_seconds, item.source_end_seconds) for item in dialogue.evidence_mappings] == [
+        (5.0, 19.0),
+    ]
+    assert not any(warning.startswith("BOUNDARY_") for warning in plan.envelope.warnings)
 
 
 def test_production_plan_only_does_not_overwrite_existing_render_cache(tmp_path: Path) -> None:

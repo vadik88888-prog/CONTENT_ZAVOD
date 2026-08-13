@@ -11,6 +11,7 @@ from app.production_models import (
     AudioLayer,
     BoundaryDecision,
     ContinuityDecision,
+    DialogueEvidenceMapping,
     DialogueSegment,
     NarrationSegment,
     ProductionPlanEnvelope,
@@ -183,6 +184,14 @@ def build_production_plan(
                     source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                     speaker=str(production_config.original_dialogue_speaker),
                     confidence=float(fact.get("confidence", 0.0)),
+                    evidence_mappings=[DialogueEvidenceMapping(
+                        fact_id=fact_id,
+                        transcript_segment_id=source_id,
+                        source_start_seconds=source_start,
+                        source_end_seconds=source_end,
+                        source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
+                        confidence=float(fact.get("confidence", 0.0)),
+                    )],
                     boundary_decision_id=boundary_decision.decision_id if boundary_decision else None,
                     linked_segment_ids=[],
                 )
@@ -236,6 +245,14 @@ def build_production_plan(
                 source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
                 speaker=str(production_config.original_dialogue_speaker),
                 confidence=float(fact.get("confidence", 0.0)),
+                evidence_mappings=[DialogueEvidenceMapping(
+                    fact_id=fact_id,
+                    transcript_segment_id=segment_id,
+                    source_start_seconds=source_start,
+                    source_end_seconds=source_end,
+                    source_text=str(source.get("text") or fact.get("evidence_quote") or fact.get("statement")),
+                    confidence=float(fact.get("confidence", 0.0)),
+                )],
                 boundary_decision_id=boundary_decision.decision_id if boundary_decision else None,
                 linked_segment_ids=[narration_id],
             )
@@ -263,10 +280,21 @@ def build_production_plan(
     continuity_decision = _continuity_decision_from_context(
         context, candidate_id, boundary_decision,
     )
-    continuity_warnings = _apply_continuity_required_spans(
-        dialogue_mappings,
-        continuity_decision=continuity_decision,
+    _validate_grounded_dialogue_evidence(
+        dialogue_mappings, boundary_decision, continuity_decision,
     )
+    if source_audio_mode:
+        segments, dialogue_mappings = _build_continuous_source_dialogue(
+            dialogue_mappings,
+            boundary_decision=boundary_decision,
+            continuity_decision=continuity_decision,
+        )
+        continuity_warnings = []
+    else:
+        continuity_warnings = _apply_continuity_required_spans(
+            dialogue_mappings,
+            continuity_decision=continuity_decision,
+        )
     boundary_padding_warnings = _apply_boundary_padding(dialogue_mappings, boundary_decision)
     timeline = _build_timeline(segments)
     subtitle_track = _build_subtitle_track(segments, timeline, language)
@@ -360,6 +388,55 @@ def _register_grounded_dialogue_boundaries(
             safe_ends.add(dialogue.source_end_seconds)
     boundary_decision.safe_start_points = sorted(safe_starts)
     boundary_decision.safe_end_points = sorted(safe_ends)
+
+
+def _validate_grounded_dialogue_evidence(
+    dialogue_mappings: list[DialogueSegment],
+    decision: BoundaryDecision | None,
+    continuity_decision: ContinuityDecision | None,
+) -> None:
+    """Validate exact ASR/fact provenance before source media is consolidated."""
+
+    if decision is None:
+        return
+    allowed = decision.allowed_source_range
+    ranges = []
+    errors: list[str] = []
+    for dialogue in dialogue_mappings:
+        start = dialogue.source_start_seconds
+        end = dialogue.source_end_seconds
+        ranges.append((start, end))
+        if start < allowed.start_seconds - 0.001 or end > allowed.end_seconds + 0.001:
+            errors.append(f"BOUNDARY_SOURCE_RANGE_OUTSIDE:{dialogue.segment_id}")
+    if continuity_decision is not None:
+        ranges.extend(
+            (span.source_range.start_seconds, span.source_range.end_seconds)
+            for span in continuity_decision.required_spans
+        )
+    for requirement in decision.required_evidence:
+        if requirement.required and not _tuple_range_is_covered(
+            requirement.source_range.start_seconds,
+            requirement.source_range.end_seconds,
+            ranges,
+        ):
+            errors.append(f"BOUNDARY_{requirement.requirement_type.upper()}_LOST")
+    if errors:
+        raise ProductionPlanError("; ".join(dict.fromkeys(errors)))
+
+
+def _tuple_range_is_covered(
+    required_start: float, required_end: float, ranges: list[tuple[float, float]],
+) -> bool:
+    cursor = required_start
+    for start, end in sorted(ranges):
+        if end < cursor - 0.001:
+            continue
+        if start > cursor + 0.001:
+            break
+        cursor = max(cursor, end)
+        if cursor >= required_end - 0.001:
+            return True
+    return False
 
 
 def production_summary(plan: ProductionPlan) -> str:
@@ -502,6 +579,133 @@ def _apply_continuity_required_spans(
                 f"{requirement.requirement_type}:{source_range.start_seconds:.3f}-{source_range.end_seconds:.3f}"
             )
     return warnings
+
+
+def _build_continuous_source_dialogue(
+    dialogue_mappings: list[DialogueSegment],
+    *,
+    boundary_decision: BoundaryDecision | None,
+    continuity_decision: ContinuityDecision | None,
+) -> tuple[list[Any], list[DialogueSegment]]:
+    """Separate exact evidence geometry from source-audio edit geometry.
+
+    Original-audio delivery retains the approved source interval as one
+    continuous media segment by default.  Only a persisted, typed omission
+    rationale authorizes an internal physical cut; an ``unexplained`` ASR gap
+    remains in the media and is left for A-2 to verify against the render map.
+    """
+
+    if boundary_decision is None or not dialogue_mappings:
+        return list(dialogue_mappings), dialogue_mappings
+    approved = (
+        continuity_decision.approved_source_range
+        if continuity_decision is not None else boundary_decision.refined_range
+    )
+    explained_omissions = [
+        span for span in (continuity_decision.omitted_spans if continuity_decision else [])
+        if span.rationale_type != "unexplained"
+    ]
+    for omission in explained_omissions:
+        if continuity_decision and any(
+            _ranges_overlap(omission.source_range, required.source_range)
+            for required in continuity_decision.required_spans
+        ):
+            raise ProductionPlanError(
+                "CONTINUITY_OMISSION_CONFLICT_REQUIRED_SPAN: "
+                f"{omission.source_range.start_seconds:.3f}-{omission.source_range.end_seconds:.3f}"
+            )
+    retained = [(approved.start_seconds, approved.end_seconds)]
+    for omission in sorted(
+        explained_omissions,
+        key=lambda item: (item.source_range.start_seconds, item.source_range.end_seconds),
+    ):
+        retained = _subtract_interval(
+            retained,
+            omission.source_range.start_seconds,
+            omission.source_range.end_seconds,
+        )
+    if not retained:
+        raise ProductionPlanError("CONTINUITY_SOURCE_BOUNDARY_FULLY_OMITTED")
+
+    exact_evidence = [
+        evidence
+        for dialogue in dialogue_mappings
+        for evidence in (
+            dialogue.evidence_mappings
+            or [DialogueEvidenceMapping(
+                fact_id=dialogue.fact_id,
+                transcript_segment_id=dialogue.transcript_segment_id,
+                source_start_seconds=dialogue.source_start_seconds,
+                source_end_seconds=dialogue.source_end_seconds,
+                source_text=dialogue.source_text,
+                confidence=dialogue.confidence,
+            )]
+        )
+    ]
+    assignments: list[list[DialogueEvidenceMapping]] = [[] for _ in retained]
+    for evidence in exact_evidence:
+        midpoint = (evidence.source_start_seconds + evidence.source_end_seconds) / 2
+        target_index = min(
+            range(len(retained)),
+            key=lambda index: _distance_to_interval(midpoint, retained[index]),
+        )
+        assignments[target_index].append(evidence)
+
+    continuous: list[DialogueSegment] = []
+    for index, ((start, end), evidence_items) in enumerate(zip(retained, assignments), start=1):
+        representative = min(
+            evidence_items or exact_evidence,
+            key=lambda item: (item.source_start_seconds, item.source_end_seconds, item.fact_id),
+        )
+        source_text = " ".join(dict.fromkeys(item.source_text for item in evidence_items))
+        continuous.append(DialogueSegment(
+            segment_id=f"dialogue-{index:03d}",
+            order=index,
+            estimated_duration_seconds=max(0.0, end - start),
+            fact_id=representative.fact_id,
+            transcript_segment_id=representative.transcript_segment_id,
+            source_start_seconds=start,
+            source_end_seconds=end,
+            source_text=source_text or representative.source_text,
+            speaker=dialogue_mappings[0].speaker,
+            confidence=min(
+                (item.confidence for item in evidence_items),
+                default=representative.confidence,
+            ),
+            evidence_mappings=evidence_items,
+            boundary_decision_id=boundary_decision.decision_id,
+            linked_segment_ids=[],
+        ))
+    return list(continuous), continuous
+
+
+def _subtract_interval(
+    retained: list[tuple[float, float]], omission_start: float, omission_end: float,
+) -> list[tuple[float, float]]:
+    result: list[tuple[float, float]] = []
+    for start, end in retained:
+        if omission_end <= start + 0.001 or omission_start >= end - 0.001:
+            result.append((start, end))
+            continue
+        if omission_start > start + 0.001:
+            result.append((start, min(end, omission_start)))
+        if omission_end < end - 0.001:
+            result.append((max(start, omission_end), end))
+    return result
+
+
+def _ranges_overlap(left: Any, right: Any) -> bool:
+    return (
+        left.start_seconds < right.end_seconds - 0.001
+        and right.start_seconds < left.end_seconds - 0.001
+    )
+
+
+def _distance_to_interval(value: float, interval: tuple[float, float]) -> float:
+    start, end = interval
+    if start <= value <= end:
+        return 0.0
+    return min(abs(value - start), abs(value - end))
 
 
 def _source_range_covered(dialogue_mappings: list[DialogueSegment], start: float, end: float) -> bool:

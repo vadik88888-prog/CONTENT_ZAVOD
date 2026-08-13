@@ -338,6 +338,25 @@ class NarrationSegment(ProductionSegment):
     timeline_included: Literal[True] = True
 
 
+class DialogueEvidenceMapping(BaseModel):
+    """Exact fact/ASR provenance retained independently from media cuts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str = Field(min_length=1)
+    transcript_segment_id: int = Field(ge=0)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(ge=0)
+    source_text: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _timestamps_are_ordered(self) -> "DialogueEvidenceMapping":
+        if self.source_end_seconds < self.source_start_seconds:
+            raise ValueError("source_end_seconds must not precede source_start_seconds")
+        return self
+
+
 class DialogueSegment(ProductionSegment):
     """A mapping placeholder, not an extracted or mixed audio asset."""
 
@@ -349,6 +368,10 @@ class DialogueSegment(ProductionSegment):
     source_text: str = Field(min_length=1)
     speaker: str
     confidence: float = Field(ge=0, le=1)
+    # Physical source media may span natural pauses between exact ASR/fact
+    # evidence.  These mappings preserve the original evidence geometry without
+    # turning every evidence edge into an edit point.  Empty means a legacy plan.
+    evidence_mappings: list[DialogueEvidenceMapping] = Field(default_factory=list)
     # A 5C plan binds every extracted source interval to the decision that
     # authorized it. None is retained only for pre-5C cached plans.
     boundary_decision_id: str | None = None
@@ -818,6 +841,32 @@ def _continuity_handoff_errors(plan: ProductionPlan) -> list[str]:
         BoundaryRange(start_seconds=item.source_start_seconds, end_seconds=item.source_end_seconds)
         for item in plan.dialogue_mappings
     ]
+    if plan.envelope and plan.envelope.compatibility_mode == "native" and plan.audio_mode in {
+        "original", "original_enhanced",
+    }:
+        if not any(item.evidence_mappings for item in plan.dialogue_mappings):
+            errors.append("DIALOGUE_EVIDENCE_MAPPING_MISSING")
+        explained = [
+            item.source_range for item in decision.omitted_spans
+            if item.rationale_type != "unexplained"
+        ]
+        approved = decision.approved_source_range
+        cursor = approved.start_seconds
+        for source_range in sorted(source_ranges, key=lambda item: (item.start_seconds, item.end_seconds)):
+            if source_range.end_seconds <= approved.start_seconds + BOUNDARY_EPSILON_SECONDS:
+                continue
+            if source_range.start_seconds >= approved.end_seconds - BOUNDARY_EPSILON_SECONDS:
+                break
+            gap_end = min(source_range.start_seconds, approved.end_seconds)
+            if gap_end > cursor + BOUNDARY_EPSILON_SECONDS and not _range_is_covered(
+                BoundaryRange(start_seconds=cursor, end_seconds=gap_end), explained,
+            ):
+                errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
+            cursor = max(cursor, min(source_range.end_seconds, approved.end_seconds))
+        if cursor < approved.end_seconds - BOUNDARY_EPSILON_SECONDS and not _range_is_covered(
+            BoundaryRange(start_seconds=cursor, end_seconds=approved.end_seconds), explained,
+        ):
+            errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
     for requirement in decision.required_spans:
         if not _range_is_covered(requirement.source_range, source_ranges):
             errors.append(f"CONTINUITY_{requirement.requirement_type.upper()}_LOST")
@@ -910,9 +959,20 @@ def _is_safe_point(
     # A required continuity span is a distinct evidence-backed edit decision.
     # Its endpoints are valid even when they are not transcript word edges;
     # this keeps visual action/reaction preservation from mutating 5C data.
-    return continuity is not None and any(
+    if continuity is None:
+        return False
+    if any(
         abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS
         for span in continuity.required_spans
+        for point in (span.source_range.start_seconds, span.source_range.end_seconds)
+    ):
+        return True
+    # A persisted typed omission is an explicit edit decision.  Unexplained
+    # gaps never authorize a physical cut.
+    return any(
+        span.rationale_type != "unexplained"
+        and abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS
+        for span in continuity.omitted_spans
         for point in (span.source_range.start_seconds, span.source_range.end_seconds)
     )
 

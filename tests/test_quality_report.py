@@ -148,6 +148,77 @@ def _set_native_rich_render(render: dict) -> None:
     })
 
 
+def _set_continuity_case(
+    plan: dict, render: dict, continuity: ContinuityDecision, mapped_ranges: list[tuple[float, float]],
+) -> None:
+    plan["continuity_decision"] = continuity.model_dump(mode="json")
+    plan["envelope"]["continuity_decision_ref"] = continuity.decision_id
+    plan["envelope"]["input_fingerprints"]["continuity_decision_sha256"] = continuity.fingerprint()
+    render["source_output_time_map"].update({
+        "continuity_decision_id": continuity.decision_id,
+        "continuity_decision_version": continuity.schema_version,
+        "continuity_decision_sha256": continuity.fingerprint(),
+        "segments": [
+            {
+                "map_id": f"map-{index}",
+                "source": {"start_tick": int(start * 1_000_000), "end_tick": int(end * 1_000_000)},
+                "output": {"start_frame": index * 30, "end_frame": (index + 1) * 30},
+            }
+            for index, (start, end) in enumerate(mapped_ranges)
+        ],
+    })
+
+
+def _unexplained_large_omission() -> ContinuityDecision:
+    return ContinuityDecision.model_validate({
+        "schema_version": "A-2.continuity.1",
+        "decision_id": "continuity-candidate-1-large-gap",
+        "candidate_id": "candidate-1",
+        "boundary_decision_id": "boundary-candidate-1",
+        "boundary_decision_sha256": "b" * 64,
+        "approved_source_range": {"start_seconds": 1.0, "end_seconds": 20.0},
+        "mode": "uncertain",
+        "required_spans": [],
+        "omitted_spans": [{
+            "source_range": {"start_seconds": 8.0, "end_seconds": 14.0},
+            "rationale_type": "unexplained",
+            "rationale": "No persisted rationale explains this six-second source gap.",
+            "evidence": {"source": "regression_fixture"},
+        }],
+    })
+
+
+def test_continuous_source_map_passes_a2_despite_asr_evidence_gap(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    continuity = _unexplained_large_omission()
+    _set_continuity_case(plan, render, continuity, [(1.0, 20.0)])
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "PASS"
+    assert not any(item.code == "CONTINUITY_UNEXPLAINED_OMISSION" for item in report.findings)
+
+
+def test_real_large_unexplained_source_omission_remains_blocked_by_a2(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    continuity = _unexplained_large_omission()
+    _set_continuity_case(plan, render, continuity, [(1.0, 8.0), (14.0, 20.0)])
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    finding = next(item for item in report.findings if item.code == "CONTINUITY_UNEXPLAINED_OMISSION")
+    assert finding.measured_value == {"mode": "uncertain", "unexplained_omission_count": 1}
+
+
 def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     _artifact, _result, report = _report(tmp_path)
 
@@ -241,6 +312,27 @@ def test_preview_and_final_share_exact_dialogue_semantic_blocker_policy(tmp_path
         **plan,
         "dialogue_mappings": [plan["dialogue_mappings"][0]],
     }) is None
+
+
+def test_semantic_quality_reads_exact_evidence_inside_continuous_media_segment() -> None:
+    blocker = exact_dialogue_semantic_blocker({
+        "dialogue_mappings": [{
+            "segment_id": "dialogue-continuous",
+            "confidence": 0.99,
+            "source_start_seconds": 1.0,
+            "source_end_seconds": 20.0,
+            "evidence_mappings": [{
+                "fact_id": "fact-low-confidence",
+                "transcript_segment_id": 7,
+                "confidence": 0.42,
+                "source_start_seconds": 8.0,
+                "source_end_seconds": 9.0,
+            }],
+        }],
+    })
+
+    assert blocker is not None
+    assert blocker["evidence"]["low_confidence_dialogue"][0]["fact_id"] == "fact-low-confidence"
 
 
 def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_report(tmp_path: Path) -> None:
