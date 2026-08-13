@@ -1,7 +1,7 @@
 # Windows onedir foundation
 
-This directory is the source layout for the friend-beta Windows portable build.
-It does not create an installer.
+This directory builds the friend-beta Windows x64 portable ZIP. It does not
+create an installer.
 
 The resulting onedir layout is expected to contain:
 
@@ -19,15 +19,25 @@ ContentFactory/
 
 Writable settings, projects, engine work, and run metadata use
 `%LOCALAPPDATA%\ContentFactoryData` (`RuntimeLayout.data`), never `_internal` or
-the repository. Before a build, place redistributable tool binaries and their
-required DLLs in `packaging/windows/tools/`; only `.exe` and `.dll` files are
-collected. Licenses must be added alongside the eventual portable artifact.
+the repository. Exact runtime and tool inputs are pinned in `runtime.lock.json`
+and `binaries.lock.json`. Before a build, place matching binaries in
+`packaging/windows/tools/`; only `.exe` and `.dll` files are collected.
 
-The next packaging step can run:
+Install the pinned build toolchain, build, and smoke a fresh ZIP extraction:
 
 ```powershell
-python -m PyInstaller --clean packaging/windows/ContentFactory.spec
+python -m pip install -r packaging/windows/build-requirements.txt
+python packaging/windows/prepare_binaries.py
+python packaging/windows/build_portable.py
+python packaging/windows/smoke_portable.py
 ```
+
+Outputs:
+
+- `packaging/windows/artifacts/ContentFactory-beta-win-x64/`
+- `packaging/windows/artifacts/ContentFactory-beta-win-x64.zip`
+- `packaging/windows/reports/ContentFactory-beta-win-x64.build.json`
+- `packaging/windows/reports/SHA256SUMS`
 
 The executable starts the desktop by default. Its private
 `--content-factory-internal-cli` switch is reserved for child processes created

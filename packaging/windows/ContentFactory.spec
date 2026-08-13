@@ -2,12 +2,16 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
+
 
 spec_directory = Path(SPECPATH).resolve()
 project_root = spec_directory.parents[1]
 datas = [
     (str(project_root / "config.example.yaml"), "."),
     (str(project_root / "app" / "gui" / "styles" / "theme.qss"), "app/gui/styles"),
+    (str(spec_directory / "runtime.lock.json"), "manifests"),
+    (str(spec_directory / "binaries.lock.json"), "manifests"),
 ]
 assets_directory = project_root / "assets"
 if assets_directory.is_dir():
@@ -19,13 +23,28 @@ binaries = [
     for path in tools_directory.iterdir()
     if path.is_file() and path.suffix.casefold() in {".exe", ".dll"}
 ]
+hiddenimports = []
+for package in ("faster_whisper", "ctranslate2", "tokenizers"):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
+hiddenimports += collect_submodules("openai")
+hiddenimports += collect_submodules(
+    "google.genai", filter=lambda name: "._test" not in name and ".tests" not in name,
+)
+for distribution in (
+    "faster-whisper", "ctranslate2", "av", "tokenizers",
+    "huggingface-hub", "openai", "google-genai",
+):
+    datas += copy_metadata(distribution)
 
 a = Analysis(
     [str(spec_directory / "desktop_entrypoint.py")],
     pathex=[str(project_root)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

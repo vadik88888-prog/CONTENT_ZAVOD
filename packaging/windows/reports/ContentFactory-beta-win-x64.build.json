@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "artifact": "ContentFactory-beta-win-x64",
+  "built_at": "2026-08-13T21:57:59.876563+00:00",
+  "base_git_commit": "4cc988e618651c7b8e73fda5d73624c55ace6e48",
+  "source_mode": "exported_git_snapshot",
+  "python": {
+    "implementation": "CPython",
+    "version": "3.11.15",
+    "architecture": "AMD64",
+    "bits": 64
+  },
+  "distributions": {
+    "PyInstaller": "6.21.0",
+    "pyinstaller-hooks-contrib": "2026.6",
+    "PySide6": "6.11.1",
+    "shiboken6": "6.11.1",
+    "pydantic": "2.13.4",
+    "pydantic-core": "2.46.4",
+    "PyYAML": "6.0.3",
+    "faster-whisper": "1.2.1",
+    "ctranslate2": "4.8.1",
+    "av": "18.0.0",
+    "tokenizers": "0.23.1",
+    "huggingface-hub": "1.24.0",
+    "numpy": "2.4.6",
+    "openai": "2.48.0",
+    "google-genai": "2.14.0"
+  },
+  "binaries": [
+    {
+      "name": "ffmpeg.exe",
+      "version": "8.0.1-essentials_build-www.gyan.dev",
+      "size_bytes": 99264000,
+      "sha256": "5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d",
+      "source": "https://github.com/zackees/ffmpeg_bins/raw/main/v8.0/win32.zip",
+      "license": "GPL-3.0-or-later"
+    },
+    {
+      "name": "ffprobe.exe",
+      "version": "8.0.1-essentials_build-www.gyan.dev",
+      "size_bytes": 99066368,
+      "sha256": "192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d",
+      "source": "https://github.com/zackees/ffmpeg_bins/raw/main/v8.0/win32.zip",
+      "license": "GPL-3.0-or-later"
+    },
+    {
+      "name": "yt-dlp.exe",
+      "version": "2026.07.04",
+      "size_bytes": 18226085,
+      "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
+      "source": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
+      "license": "Unlicense"
+    }
+  ],
+  "inputs": {
+    "packaging/windows/ContentFactory.spec": "67b3018f87d74f506fa97c9cef97c6e23de412507165e2b3674f0a16cfd8ade0",
+    "packaging/windows/desktop_entrypoint.py": "198f618b71c28a3abfa846cb56132ac902cf1e9dfcd84c647050aeefcfd01c4c",
+    "packaging/windows/build_portable.py": "f3886ef1ce5e9180cab7beeaee63e63252235e34a522336f7ca3e521eaeda016",
+    "packaging/windows/runtime.lock.json": "6f866ffdd3d026a835d248c5e2ad05a0789bcc6d7c472726420108ac7786b795",
+    "packaging/windows/binaries.lock.json": "1a0dea7b743ccbd121fd929e2df018b4c741846e992e6ed969367945f2dcb8d4",
+    "app/runtime.py": "b20349a9ec2c6c81c6bb2f189359693df3b2b937dd0f148467abfc2535d71e4a",
+    "app/frozen_entrypoint.py": "4f42d9b5f892c6b518a9d38e22e3829c1743d50b90cf97b4ca180ea35425342b"
+  },
+  "status": "smoke_passed",
+  "build_seconds": 159.579,
+  "zip_seconds": 32.955,
+  "onedir": {
+    "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64",
+    "file_count": 587,
+    "size_bytes": 610462793,
+    "executable_sha256": "bca2c3e5c906e8ea599a63f0424d462570751bb05b39e7f8b528b36e445eeafb"
+  },
+  "zip": {
+    "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64.zip",
+    "file_count": 587,
+    "size_bytes": 247776454,
+    "sha256": "b6b4fae5f1fe2d4f01146e8b3f22d40f93c222102fa301d4073bb6c1fd643973"
+  },
+  "smoke": {
+    "completed_at": "2026-08-13T22:00:06.264965+00:00",
+    "source": "fresh_zip_extraction",
+    "extracted_path": "build/windows-portable-smoke/extracted/ContentFactory-beta-win-x64",
+    "frozen_cli": {
+      "exit_code": 0,
+      "seconds": 5.347,
+      "markers": [
+        "Content Factory",
+        "OK FFmpeg",
+        "OK FFprobe",
+        "OK yt-dlp"
+      ],
+      "output_tail": "Content Factory — проверка окружения\r\n\r\nOK Python: 3.11.15 (требуется 3.11+)\r\nOK FFmpeg: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\extracted\\ContentFactory-beta-win-x64\\_internal\\tools\\ffmpeg.EXE\r\nOK FFprobe: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\extracted\\ContentFactory-beta-win-x64\\_internal\\tools\\ffprobe.EXE\r\nOK yt-dlp: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\extracted\\ContentFactory-beta-win-x64\\_internal\\tools\\yt-dlp.EXE\r\nOK NVIDIA GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU · 4096 · 610.88\r\nOK CUDA: CTranslate2 видит CUDA-устройств: 1.\r\nOK faster-whisper: Установлен.\r\nOK AI provider: openai · gpt-5-mini\r\n! OpenAI API key: Не задан — используйте --mock-ai или добавьте ключ в .env.\r\nOK Папка input: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\input\r\nOK Папка work: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\work\r\nOK Папка output: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-clean-source\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\output\r\n\r\nИтог: ошибок — 0, предупреждений — 1.\r\nКлюч AI не обязателен: локальный режим с --mock-ai доступен без него."
+    },
+    "native_window": {
+      "process_id": 27336,
+      "window_visible": true,
+      "window_title": "Content Factory",
+      "window_handle": 8195064,
+      "survived_settle": true,
+      "close_requested": false,
+      "exited": true,
+      "seconds": 10.705,
+      "launch_method": "Start-Process"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 # Bundled tools staging
 
-Place licensed Windows `ffmpeg.exe`, `ffprobe.exe`, `yt-dlp.exe`, and any
-required DLLs here for a portable build. This repository scaffold intentionally
-does not download or redistribute binaries.
+`prepare_binaries.py` downloads and verifies the exact Windows x64
+`ffmpeg.exe`, `ffprobe.exe`, and `yt-dlp.exe` versions pinned in
+`../binaries.lock.json`. The binaries remain ignored by Git and are collected
+only into local portable artifacts.

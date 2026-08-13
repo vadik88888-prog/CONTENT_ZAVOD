@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "application": {
+    "name": "Content Factory",
+    "version": "0.1.0",
+    "artifact": "ContentFactory-beta-win-x64"
+  },
+  "python": {
+    "implementation": "CPython",
+    "version": "3.11.15",
+    "architecture": "AMD64",
+    "bits": 64
+  },
+  "distributions": {
+    "PyInstaller": "6.21.0",
+    "pyinstaller-hooks-contrib": "2026.6",
+    "PySide6": "6.11.1",
+    "shiboken6": "6.11.1",
+    "pydantic": "2.13.4",
+    "pydantic-core": "2.46.4",
+    "PyYAML": "6.0.3",
+    "faster-whisper": "1.2.1",
+    "ctranslate2": "4.8.1",
+    "av": "18.0.0",
+    "tokenizers": "0.23.1",
+    "huggingface-hub": "1.24.0",
+    "numpy": "2.4.6",
+    "openai": "2.48.0",
+    "google-genai": "2.14.0"
+  }
+}
