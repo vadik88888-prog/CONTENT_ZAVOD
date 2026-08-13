@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QThreadPool
 
 import app.gui.services.pipeline_facade as facade_module
 from app.gui.components.video_preview import VideoPreview
@@ -16,6 +17,13 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.viewmodels.project_viewmodel import ProjectViewModel
 from app.utils import read_json, write_json
+
+
+def _drain_background() -> None:
+    application = QCoreApplication.instance() or QCoreApplication([])
+    assert QThreadPool.globalInstance().waitForDone(5_000)
+    application.processEvents()
+    application.processEvents()
 
 
 def _context(tmp_path: Path):
@@ -216,6 +224,7 @@ def test_failed_process_with_current_canonical_results_keeps_outputs(tmp_path: P
     viewmodel.prepared = prepared
 
     viewmodel._failed("Процесс обработки завершился с кодом 1.")
+    _drain_background()
 
     assert run.status == RunStatus.COMPLETED_WITH_WARNINGS
     assert STATE_PERSISTENCE_WARNING in run.warnings
@@ -244,6 +253,7 @@ def test_cancelled_process_preserves_verified_partial_output(tmp_path: Path, val
     viewmodel.prepared = prepared
 
     viewmodel._cancelled()
+    _drain_background()
 
     assert run.status == RunStatus.COMPLETED_WITH_WARNINGS
     assert viewmodel.snapshot.phase == ProcessingPhase.COMPLETED_WITH_WARNINGS
@@ -306,6 +316,7 @@ def test_zero_exit_missing_output_clears_stale_stage_and_fails(tmp_path: Path) -
     viewmodel.error_occurred.connect(errors.append)
 
     viewmodel._completed(0)
+    _drain_background()
 
     assert run.status == RunStatus.FAILED
     assert viewmodel.snapshot.phase == ProcessingPhase.FAILED

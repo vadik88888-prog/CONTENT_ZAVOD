@@ -34,6 +34,12 @@ from app.source_download import cleanup_partial_downloads, validate_public_video
 from app.utils import read_json, stable_text_hash, utc_now
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedSource:
+    path: Path
+    metadata: dict
+
+
 @dataclass(slots=True)
 class DesktopServices:
     """Application-service boundary shared by view-models and Qt widgets."""
@@ -85,9 +91,16 @@ class DesktopServices:
         return self.projects.list()
 
     def create_project(self, source_path: str | Path) -> DesktopProject:
+        return self.create_validated_project(self.validate_source(source_path))
+
+    def validate_source(self, source_path: str | Path) -> ValidatedSource:
+        """Resolve and probe source media without mutating desktop state."""
+
         source = self._resolve_valid_source(source_path)
-        metadata = self.pipeline.inspect_source(source)
-        project = self.projects.create(source, source_metadata=metadata)
+        return ValidatedSource(source, self.pipeline.inspect_source(source))
+
+    def create_validated_project(self, source: ValidatedSource) -> DesktopProject:
+        project = self.projects.create(source.path, source_metadata=source.metadata)
         self._refresh_setup_state(project, "Источник готов. Настройте обработку и запустите анализ, когда будете готовы.")
         self.projects.save(project)
         return project
@@ -107,15 +120,18 @@ class DesktopServices:
         self.projects.save(project)
 
     def complete_url_download(self, project: DesktopProject, path: str | Path) -> DesktopProject:
-        source = self._resolve_valid_source(path)
+        return self.complete_validated_url_download(project, self.validate_source(path))
+
+    def complete_validated_url_download(
+        self, project: DesktopProject, source: ValidatedSource,
+    ) -> DesktopProject:
         source_directory = (Path(project.project_directory) / "sources").resolve()
-        if not source.is_relative_to(source_directory):
+        if not source.path.is_relative_to(source_directory):
             raise InputValidationError("Загруженный файл должен находиться в папке проекта.")
-        metadata = self.pipeline.inspect_source(source)
-        project.source_path = str(source)
-        project.source_metadata = metadata
-        project.source_spec.downloaded_path = str(source)
-        project.source_spec.metadata = metadata
+        project.source_path = str(source.path)
+        project.source_metadata = source.metadata
+        project.source_spec.downloaded_path = str(source.path)
+        project.source_spec.metadata = source.metadata
         project.source_spec.download_state = "downloaded"
         project.source_spec.error_message = None
         project.status = ProjectStatus.SOURCE_READY

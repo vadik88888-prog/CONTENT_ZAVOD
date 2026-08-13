@@ -8,7 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QThreadPool
 from PySide6.QtWidgets import QApplication
 
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunStatus
@@ -21,6 +21,13 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.styles import load_theme
 from app.gui.viewmodels.project_viewmodel import ProjectViewModel
+
+
+def _drain_background() -> None:
+    application = QCoreApplication.instance() or QCoreApplication([])
+    assert QThreadPool.globalInstance().waitForDone(5_000)
+    application.processEvents()
+    application.processEvents()
 
 
 def _services(tmp_path: Path) -> DesktopServices:
@@ -224,6 +231,8 @@ def test_terminal_callback_mutates_only_owner_while_other_project_is_open(
 
         monkeypatch.setattr(DesktopServices, "finish_cancelled", finish_cancelled)
         viewmodel._cancelled()
+
+    _drain_background()
 
     assert services.projects.load(owner.project_id).status == terminal
     restored_other = services.projects.load(other.project_id)

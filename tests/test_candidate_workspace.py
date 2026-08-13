@@ -7,7 +7,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QPoint, QUrl, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QThreadPool, QUrl, Qt
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton, QWidget
@@ -25,6 +25,12 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.viewmodels import ProjectViewModel
 from app.utils import read_json, write_json
+
+
+def _drain_background(application: QCoreApplication) -> None:
+    assert QThreadPool.globalInstance().waitForDone(5_000)
+    application.processEvents()
+    application.processEvents()
 
 
 def _eligibility(eligible: bool = True) -> dict[str, object]:
@@ -352,7 +358,7 @@ def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_open
         assert all(viewmodel.project.candidate_states[item] == "draft_planning" for item in selected_ids)
 
         viewmodel._completed(0)
-        app.processEvents()
+        _drain_background(app)
 
         assert screen._flow_step == "drafts"
         assert viewmodel.project is not None
@@ -532,7 +538,7 @@ def test_link_project_reopens_at_download_then_moves_to_settings(monkeypatch, tm
         viewmodel._launching = True
         viewmodel._after_download = "none"
         viewmodel._download_completed(str(downloaded))
-        app.processEvents()
+        _drain_background(app)
 
         assert viewmodel.project is not None
         assert viewmodel.project.source == downloaded.resolve()

@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.gui.models import DesktopProject, ProcessingPhase, ProcessingSnapshot, ProjectRun, RunKind, RunStatus
+from app.gui.services.background_task import BackgroundTask
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.error_mapping import UserFacingError, map_error
 from app.gui.services.pipeline_facade import PreparedPipelineRun
 from app.gui.services.pipeline_runner import QtPipelineRunner
 from app.gui.services.url_source_service import URLSourceService
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalizationResult:
+    phase: ProcessingPhase
+    message: str
+    run: ProjectRun
+    error_message: str | None = None
 
 
 class ProjectViewModel(QObject):
@@ -34,6 +45,8 @@ class ProjectViewModel(QObject):
         self._launching = False
         self._started_at: float | None = None
         self._after_download = "process"
+        self._source_probe_task: BackgroundTask | None = None
+        self._finalization_task: BackgroundTask | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
         self._elapsed_timer.timeout.connect(self._emit_elapsed)
@@ -362,6 +375,16 @@ class ProjectViewModel(QObject):
             self._emit_owner_processing()
             self.source_downloader.cancel()
             return
+        if self._source_probe_task is not None:
+            self._source_probe_task.cancel_delivery()
+            self._source_probe_task = None
+            self._download_cancelled()
+            return
+        # Completion validation and run-history snapshot are an atomic commit.
+        # Once the renderer has exited, preserve any verified artifacts instead
+        # of cancelling between their snapshot and terminal project state.
+        if self._finalization_task is not None:
+            return
         if not self.active or not self.run:
             return
         self.run.status = RunStatus.CANCELLING
@@ -418,10 +441,25 @@ class ProjectViewModel(QObject):
     def _download_completed(self, path: str) -> None:
         self._ensure_job_context()
         owner = self._job_project
-        if not owner:
+        if not owner or self._source_probe_task is not None:
+            return
+        self._job_snapshot.phase = ProcessingPhase.RUNNING
+        self._job_snapshot.stage = "download"
+        self._job_snapshot.message = "Проверяем загруженное видео"
+        self._emit_owner_processing()
+        task = BackgroundTask(lambda: self.services.validate_source(path))
+        task.result_ready.connect(self._download_source_validated)
+        task.error_raised.connect(self._download_source_validation_failed)
+        self._source_probe_task = task
+        task.start()
+
+    def _download_source_validated(self, source: object) -> None:
+        self._source_probe_task = None
+        owner = self._job_project
+        if owner is None:
             return
         try:
-            self._job_project = self.services.complete_url_download(owner, path)
+            self._job_project = self.services.complete_validated_url_download(owner, source)  # type: ignore[arg-type]
         except Exception as error:
             self._download_failed(str(error))
             return
@@ -448,6 +486,10 @@ class ProjectViewModel(QObject):
             self._emit_owner_processing()
             self.error_occurred.emit(map_error(error))
             self._release_job()
+
+    def _download_source_validation_failed(self, error: object) -> None:
+        self._source_probe_task = None
+        self._download_failed(str(error))
 
     def _download_failed(self, message: str) -> None:
         self._ensure_job_context()
@@ -531,15 +573,26 @@ class ProjectViewModel(QObject):
         self._ensure_job_context()
         if not self._job_project or not self.run or not self.prepared:
             return
+        project, run, prepared = self._job_project, self.run, self.prepared
+        self._begin_finalization(
+            lambda: self._finalize_success(project, run, prepared),
+            "Проверяем и сохраняем результат",
+        )
+
+    def _finalize_success(
+        self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun,
+    ) -> _FinalizationResult:
         try:
-            run = self.services.finish_success(self._job_project, self.run, self.prepared)
+            run = self.services.finish_success(project, run, prepared)
         except Exception as error:
-            self._failed(str(error))
-            return
+            return self._finalize_failure(project, run, prepared, str(error), str(error))
         if run.status == RunStatus.FAILED:
-            self._finish(ProcessingPhase.FAILED, "Не удалось создать итоговый видеофайл", run)
-            self.error_occurred.emit(map_error(run.error_summary or "Не удалось создать итоговый видеофайл."))
-            return
+            return _FinalizationResult(
+                ProcessingPhase.FAILED,
+                "Не удалось создать итоговый видеофайл",
+                run,
+                run.error_summary or "Не удалось создать итоговый видеофайл.",
+            )
         phase = ProcessingPhase.COMPLETED_WITH_WARNINGS if run.warnings else ProcessingPhase.COMPLETED
         messages = {
             RunKind.ANALYSIS: "Анализ готов: выберите кандидаты для черновика",
@@ -549,58 +602,116 @@ class ProjectViewModel(QObject):
         message = messages.get(run.run_kind, "Ролик готов")
         if run.warnings:
             message += " с предупреждениями"
-        self._finish(phase, message, run)
+        return _FinalizationResult(phase, message, run)
 
     def _failed(self, message: str) -> None:
         self._ensure_job_context()
-        if not self._job_project or not self.run:
+        if not self._job_project or not self.run or self._finalization_task is not None:
             return
-        if self.prepared:
-            recovered = self.services.recover_failed_process(self._job_project, self.run, self.prepared)
+        project, run, prepared = self._job_project, self.run, self.prepared
+        details = self.runner.failure_details or message
+        self._begin_finalization(
+            lambda: self._finalize_failure(project, run, prepared, message, details),
+            "Проверяем состояние после остановки",
+        )
+
+    def _finalize_failure(
+        self,
+        project: DesktopProject,
+        run: ProjectRun,
+        prepared: PreparedPipelineRun | None,
+        message: str,
+        details: str,
+    ) -> _FinalizationResult:
+        try:
+            recovered = self.services.recover_failed_process(project, run, prepared) if prepared else None
             if recovered:
-                self._finish(
+                return _FinalizationResult(
                     ProcessingPhase.COMPLETED_WITH_WARNINGS,
                     "Ролики созданы, но не удалось сохранить служебное состояние",
                     recovered,
                 )
-                return
-            reported = self.services.recover_reported_failure(self._job_project, self.run, self.prepared)
+            reported = self.services.recover_reported_failure(project, run, prepared) if prepared else None
             if reported:
-                self._finish(
+                return _FinalizationResult(
                     ProcessingPhase.FAILED,
                     reported.error_summary or "Не удалось завершить выбранный этап",
                     reported,
+                    reported.error_summary or message,
                 )
-                self.error_occurred.emit(map_error(reported.error_summary or message))
-                return
-        run = self.services.finish_failure(self._job_project, self.run, message, self.runner.failure_details or message)
+        except Exception as recovery_error:
+            details = f"{details}; recovery failed: {recovery_error}"
+        run = self.services.finish_failure(project, run, message, details)
         final_message = (
             "Обработка остановилась и не отвечает."
             if message == "Обработка остановилась и не отвечает."
             else "Не удалось создать ролик"
         )
-        self._finish(ProcessingPhase.FAILED, final_message, run)
-        self.error_occurred.emit(map_error(message))
+        return _FinalizationResult(ProcessingPhase.FAILED, final_message, run, message)
 
     def _cancelled(self) -> None:
         self._ensure_job_context()
-        if not self._job_project or not self.run:
+        if not self._job_project or not self.run or self._finalization_task is not None:
             return
-        if self.prepared:
+        project, run, prepared = self._job_project, self.run, self.prepared
+        self._begin_finalization(
+            lambda: self._finalize_cancelled(project, run, prepared),
+            "Проверяем сохранённые результаты",
+        )
+
+    def _finalize_cancelled(
+        self, project: DesktopProject, run: ProjectRun, prepared: PreparedPipelineRun | None,
+    ) -> _FinalizationResult:
+        if prepared:
             # A cancellation can race the final persistence step after one or
             # more candidate MP4s were already completed.  Preserve verified
             # canonical outputs instead of replacing that partial success with
             # an opaque cancelled run.
-            recovered = self.services.recover_failed_process(self._job_project, self.run, self.prepared)
+            recovered = self.services.recover_failed_process(project, run, prepared)
             if recovered:
-                self._finish(
+                return _FinalizationResult(
                     ProcessingPhase.COMPLETED_WITH_WARNINGS,
                     "Часть роликов готова; незавершённые можно запустить снова",
                     recovered,
                 )
-                return
-        run = self.services.finish_cancelled(self._job_project, self.run)
-        self._finish(ProcessingPhase.CANCELLED, "Создание отменено", run)
+        run = self.services.finish_cancelled(project, run)
+        return _FinalizationResult(ProcessingPhase.CANCELLED, "Создание отменено", run)
+
+    def _begin_finalization(
+        self, operation: Callable[[], _FinalizationResult], message: str,
+    ) -> None:
+        if self._finalization_task is not None:
+            return
+        self._job_snapshot.phase = ProcessingPhase.RUNNING
+        self._job_snapshot.stage = "terminal"
+        self._job_snapshot.message = message
+        self._job_snapshot.long_stage_warning = None
+        self._emit_owner_processing()
+        task = BackgroundTask(operation)
+        task.result_ready.connect(self._finalization_ready)
+        task.error_raised.connect(self._finalization_failed)
+        self._finalization_task = task
+        task.start()
+
+    def _finalization_ready(self, value: object) -> None:
+        self._finalization_task = None
+        if not isinstance(value, _FinalizationResult):
+            self._finalization_failed(RuntimeError("Invalid finalization result."))
+            return
+        self._finish(value.phase, value.message, value.run)
+        if value.error_message:
+            self.error_occurred.emit(map_error(value.error_message))
+
+    def _finalization_failed(self, error: object) -> None:
+        self._finalization_task = None
+        self._elapsed_timer.stop()
+        self._job_snapshot.phase = ProcessingPhase.FAILED
+        self._job_snapshot.stage = None
+        self._job_snapshot.message = "Не удалось завершить обработку"
+        self._job_snapshot.elapsed_seconds = 0.0
+        self._emit_owner_processing()
+        self.error_occurred.emit(map_error(error if isinstance(error, Exception) else str(error)))
+        self._release_job()
 
     def _finish(self, phase: ProcessingPhase, message: str, run: ProjectRun) -> None:
         self._elapsed_timer.stop()

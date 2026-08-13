@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QThread, QThreadPool, QTimer
 from PySide6.QtWidgets import QApplication
 
 import app.gui.services.run_projection as run_projection_module
@@ -16,6 +18,7 @@ from app.gui.models import (
     DesktopSettings,
     ProcessingPhase,
     ProcessingSnapshot,
+    ProjectStatus,
     ProjectRun,
     RunKind,
     RunStatus,
@@ -23,7 +26,7 @@ from app.gui.models import (
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.screens.projects_screen import ProjectsScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
-from app.gui.services.desktop_services import DesktopServices
+from app.gui.services.desktop_services import DesktopServices, ValidatedSource
 from app.gui.services.pipeline_facade import PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.run_projection import RunProjectionCache
@@ -55,6 +58,21 @@ def _services(tmp_path: Path) -> DesktopServices:
         pipeline=PipelineFacade(root),
         system=SystemService(root),
     )
+
+
+def _process_until(application: QApplication, predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        application.processEvents()
+        if time.monotonic() >= deadline:
+            raise AssertionError("Timed out waiting for background Qt work.")
+        time.sleep(0.005)
+
+
+def _drain_background(application: QApplication) -> None:
+    assert QThreadPool.globalInstance().waitForDone(5_000)
+    application.processEvents()
+    application.processEvents()
 
 
 def _run(report_path: Path, *, manifest_path: Path | None = None) -> ProjectRun:
@@ -260,3 +278,144 @@ def test_progress_telemetry_tick_is_constant_projection_free_work(tmp_path: Path
         monkeypatch.undo()
         screen.deleteLater()
         application.processEvents()
+
+
+def test_local_source_probe_returns_immediately_and_keeps_gui_events_running(tmp_path: Path, monkeypatch) -> None:
+    application = _application()
+    services = _services(tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    entered = threading.Event()
+    release = threading.Event()
+    worker_was_gui_thread: list[bool] = []
+
+    def delayed_validation(_services: DesktopServices, path: str) -> ValidatedSource:
+        worker_was_gui_thread.append(QThread.currentThread() == application.thread())
+        entered.set()
+        assert release.wait(5.0)
+        return ValidatedSource(Path(path).resolve(), {
+            "duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0,
+        })
+
+    monkeypatch.setattr(DesktopServices, "validate_source", delayed_validation)
+    viewmodel = ProjectsViewModel(services)
+    created: list[object] = []
+    delivery_was_gui_thread: list[bool] = []
+
+    def receive_project(project: object) -> None:
+        delivery_was_gui_thread.append(QThread.currentThread() == application.thread())
+        created.append(project)
+
+    viewmodel.project_created.connect(receive_project)
+
+    started = time.perf_counter()
+    viewmodel.create(str(source))
+    callback_seconds = time.perf_counter() - started
+    _process_until(application, entered.is_set)
+    gui_ticks: list[bool] = []
+    QTimer.singleShot(0, lambda: gui_ticks.append(True))
+    application.processEvents()
+
+    assert callback_seconds < 0.05
+    assert gui_ticks == [True]
+    assert worker_was_gui_thread == [False]
+    assert created == []
+
+    release.set()
+    _drain_background(application)
+    assert len(created) == 1
+    assert delivery_was_gui_thread == [True]
+
+
+def test_completion_post_process_returns_immediately_and_delivers_only_finalized_run(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    application = _application()
+    services = _services(tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    project = services.projects.create(source)
+    run = services.runs.create(project, {}, {"path": str(source)}, "test", run_kind=RunKind.SELECTED_RENDER)
+    entered = threading.Event()
+    release = threading.Event()
+    worker_was_gui_thread: list[bool] = []
+
+    def delayed_completion(_services, owner, current_run, _prepared):
+        worker_was_gui_thread.append(QThread.currentThread() == application.thread())
+        entered.set()
+        assert release.wait(5.0)
+        owner.status = ProjectStatus.COMPLETED
+        current_run.status = RunStatus.COMPLETED
+        services.projects.save(owner)
+        services.runs.save(current_run)
+        return current_run
+
+    monkeypatch.setattr(DesktopServices, "finish_success", delayed_completion)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    viewmodel.run = run
+    viewmodel.prepared = object()  # type: ignore[assignment]
+    viewmodel._launching = True
+    finished: list[ProjectRun] = []
+    delivery_was_gui_thread: list[bool] = []
+
+    def receive_run(completed: ProjectRun) -> None:
+        delivery_was_gui_thread.append(QThread.currentThread() == application.thread())
+        finished.append(completed)
+
+    viewmodel.run_finished.connect(receive_run)
+
+    started = time.perf_counter()
+    viewmodel._completed(0)
+    callback_seconds = time.perf_counter() - started
+    _process_until(application, entered.is_set)
+    gui_ticks: list[bool] = []
+    QTimer.singleShot(0, lambda: gui_ticks.append(True))
+    application.processEvents()
+
+    assert callback_seconds < 0.05
+    assert gui_ticks == [True]
+    assert worker_was_gui_thread == [False]
+    assert finished == []
+
+    release.set()
+    _drain_background(application)
+    assert finished == [run]
+    assert delivery_was_gui_thread == [True]
+    assert viewmodel.snapshot.phase == ProcessingPhase.COMPLETED
+
+
+def test_cancel_during_download_probe_discards_stale_validated_source(tmp_path: Path, monkeypatch) -> None:
+    application = _application()
+    services = _services(tmp_path)
+    project = services.projects.create_url("https://example.test/video", {"title": "Video"})
+    downloaded = project.directory / "sources" / "downloaded.mp4"
+    downloaded.parent.mkdir(parents=True)
+    downloaded.write_bytes(b"source")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def delayed_validation(_services: DesktopServices, path: str) -> ValidatedSource:
+        entered.set()
+        assert release.wait(5.0)
+        return ValidatedSource(Path(path).resolve(), {
+            "duration": 30.0, "width": 1920, "height": 1080, "fps": 30.0,
+        })
+
+    monkeypatch.setattr(DesktopServices, "validate_source", delayed_validation)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+    viewmodel._launching = True
+    viewmodel._after_download = "none"
+    viewmodel._download_completed(str(downloaded))
+    _process_until(application, entered.is_set)
+
+    viewmodel.cancel()
+    assert viewmodel.project and viewmodel.project.source_spec.download_state == "cancelled"
+    assert not viewmodel.active
+
+    release.set()
+    _drain_background(application)
+    restored = services.projects.load(project.project_id)
+    assert restored.source_spec.download_state == "cancelled"
+    assert not restored.source_spec.is_ready

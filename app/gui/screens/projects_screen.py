@@ -172,6 +172,7 @@ class ProjectsScreen(QWidget):
         self.viewmodel.project_created.connect(self.project_opened)
         self.viewmodel.error_occurred.connect(self._show_error)
         self.viewmodel.url_busy_changed.connect(self._url_busy_changed)
+        self.viewmodel.source_busy_changed.connect(self._source_busy_changed)
         self._apply_responsive_layout(force=True)
 
     def refresh(self) -> None:
@@ -225,6 +226,13 @@ class ProjectsScreen(QWidget):
         self.url_input.setDisabled(busy)
         self.url_button.setDisabled(busy)
         self.url_button.setText("Проверяем ссылку…" if busy else "Добавить видео")
+
+    def _source_busy_changed(self, busy: bool) -> None:
+        self.drop_zone.setDisabled(busy)
+        self.file_button.setDisabled(busy)
+        self.url_input.setDisabled(busy)
+        self.url_button.setDisabled(busy)
+        self.file_button.setText("Проверяем видео…" if busy else "Выбрать видео")
 
     def _render(self, projects: list[DesktopProject]) -> None:
         self._projects = list(projects)

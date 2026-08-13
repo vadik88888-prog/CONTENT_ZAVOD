@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QThreadPool
 
 from app.gui.services import pipeline_runner as pipeline_runner_module
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus
@@ -20,9 +21,14 @@ from app.gui.viewmodels.project_viewmodel import ProjectViewModel
 
 
 def _application():
-    from PySide6.QtCore import QCoreApplication
-
     return QCoreApplication.instance() or QCoreApplication([])
+
+
+def _drain_background() -> None:
+    application = _application()
+    assert QThreadPool.globalInstance().waitForDone(5_000)
+    application.processEvents()
+    application.processEvents()
 
 
 def _prepared(tmp_path: Path, arguments: list[str]) -> PreparedPipelineRun:
@@ -154,6 +160,7 @@ def test_completed_link_download_hands_off_without_redownloading(monkeypatch, tm
     viewmodel._launching = True
     viewmodel._after_download = "none"
     viewmodel._download_completed(str(downloaded))
+    _drain_background()
 
     assert viewmodel.project is not None
     assert viewmodel.project.status == ProjectStatus.SOURCE_READY
@@ -436,6 +443,7 @@ def test_terminal_state_clears_stale_stage_after_stall_failure(tmp_path: Path) -
     viewmodel.runner._failure_details = "stall watchdog timeout"
 
     viewmodel._failed("Обработка остановилась и не отвечает.")
+    _drain_background()
 
     assert run.error_summary == "Обработка остановилась и не отвечает."
     assert run.technical_details == "stall watchdog timeout"
