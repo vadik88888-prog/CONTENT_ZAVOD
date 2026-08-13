@@ -25,8 +25,10 @@ from app.creative_evidence import build_native_evidence_handoff
 from app.creative_lifecycle import (
     CandidateCreativeExecution,
     CandidateCreativeHandoff,
+    CreativeArtifactError,
     build_creative_execution,
     build_creative_handoff,
+    persist_candidate_caption_feasibility,
     persist_candidate_creative_identity,
 )
 from app.creative_contracts import (
@@ -345,15 +347,49 @@ class VideoCompositionService:
                 ),
             ],
         )
+        caption_feasibility_reference = None
+        if (
+            compiled_plan.compatibility_mode == "native"
+            and compiled_plan.caption_plan.feasibility_decision is not None
+        ):
+            try:
+                caption_feasibility_reference = persist_candidate_caption_feasibility(
+                    output_directory,
+                    compiled_plan=compiled_plan,
+                )
+            except CreativeArtifactError as error:
+                raise ProductionRenderError(
+                    f"CAPTION_FEASIBILITY_ARTIFACT_PERSIST_FAILED: {_safe_error(error)}"
+                ) from error
         quality = validate_output_quality(
             project,
             project.render_request.subtitles_enabled,
             compiled_plan=compiled_plan,
         )
+        if caption_feasibility_reference is not None:
+            quality["caption_feasibility_artifact"] = (
+                caption_feasibility_reference.model_dump(mode="json")
+            )
         if quality["status"] == "failed":
+            artifact_reference = (
+                caption_feasibility_reference.model_dump(mode="json")
+                if caption_feasibility_reference is not None else None
+            )
+            lineage = ""
+            if caption_feasibility_reference is not None:
+                lineage = (
+                    f" {caption_feasibility_reference.blocker_code or caption_feasibility_reference.status};"
+                    f" caption_feasibility_artifact={caption_feasibility_reference.artifact_path};"
+                    f" artifact_sha256={caption_feasibility_reference.artifact_sha256};"
+                    f" decision_fingerprint={caption_feasibility_reference.decision_fingerprint};"
+                )
             raise ProductionRenderError(
-                "Resolved creative quality validation failed before final-ready state: "
-                + "; ".join(quality["errors"])
+                "Resolved creative quality validation failed before final-ready state:"
+                + lineage
+                + " "
+                + "; ".join(quality["errors"]),
+                quality_gate_report=quality,
+                artifact_reference=artifact_reference,
             )
         render_root = output_directory / (
             "creative-preview" if profile.profile_id == "creative_preview" else "production-render"

@@ -43,6 +43,13 @@ from app.creative_contracts import (
     compile_render_plan,
     source_output_map_from_legacy_timeline,
 )
+from app.creative_execution import compile_native_creative_plan
+from app.creative_lifecycle import (
+    CandidateCaptionFeasibilityArtifact,
+    CandidateCaptionFeasibilityReference,
+    CreativeArtifactError,
+    load_candidate_caption_feasibility,
+)
 from app.composition_planning import TargetObservation
 from app.errors import ProductionRenderError
 from app.motion_planning import build_motion_plan
@@ -68,7 +75,7 @@ from app.video_composition import (
     _validate_tracking_decisions,
     _visual_filter,
 )
-from app.production_models import SourceSegmentRange
+from app.production_models import ProductionPlan, SourceSegmentRange
 from app.video_models import (
     CanvasConfig, CompositionSegment, CropPlan, ReframeKeyframe, RenderValidation,
     SourceVideoClip, SubjectBounds, VideoTimeline,
@@ -945,6 +952,120 @@ def test_render_cpu_mux_subtitles_cache_and_secret_free_report(tmp_path: Path) -
         "foreground_coverage_ratio", "blur_coverage_ratio", "subject_screen_ratio",
         "unused_visual_area_ratio", "scene_transition_count",
     } <= composition["summary"].keys()
+
+
+def test_blocked_native_caption_gate_persists_validated_candidate_evidence_before_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.utils import stable_file_hash
+
+    config = _audio_config()
+    config.production_render.enabled = True
+    config.production_render.output_width = 180
+    config.production_render.output_height = 320
+    config.production_render.output_fps = 30
+    config.production_render.video_bitrate = "500k"
+    config.production_render.encoder = "cpu"
+    config.validate()
+    raw_plan = _plan(narration=False, dialogue=True).model_dump(mode="json")
+    raw_plan["segments"] = [
+        item for item in raw_plan["segments"] if item["segment_type"] != "pause"
+    ]
+    raw_plan["timeline"]["entries"] = [
+        item for item in raw_plan["timeline"]["entries"]
+        if item["segment_id"] != "pause-001"
+    ]
+    raw_plan["timeline"]["estimated_duration_seconds"] = 1.0
+    raw_plan["timeline"]["pause_count"] = 0
+    plan = ProductionPlan.model_validate(raw_plan)
+    source = local_source(str(_source_video(tmp_path / "source.mp4")))
+    transcript = {"words": [
+        {
+            "text": "нужно", "start": 1.0, "end": 1.20,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+        {
+            "text": "вырастить", "start": 1.20, "end": 1.55,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+        {
+            "text": "покупатели,", "start": 1.55, "end": 2.0,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+    ]}
+    work_directory = tmp_path / "work"
+    candidate_root = tmp_path / "candidate-audio"
+    audio = AudioCompositionService(tmp_path, config).compose(
+        plan, source, transcript, _tts_result(tmp_path, config, plan),
+        work_directory, candidate_root,
+    )
+    source_info = probe_media(source.path, require_video=True)
+    timeline, _fallbacks = build_video_timeline(
+        plan, audio, transcript, source.path, source_info,
+        CanvasConfig(width=180, height=320, fps=30), config.production_render,
+    )
+    mapping = source_output_map_from_legacy_timeline(timeline)
+    intent = _native_intent(plan, mapping)
+    compiled = compile_native_creative_plan(
+        intent, transcript, config, source_width=320, source_height=180,
+    )
+    decision = compiled.caption_plan.feasibility_decision
+    assert decision is not None and decision.status == "INFEASIBLE"
+
+    def unexpected_render(*_args, **_kwargs):
+        pytest.fail("_render must not run after CAPTION_CPS_INFEASIBLE")
+
+    monkeypatch.setattr(VideoCompositionService, "_render", unexpected_render)
+    pipeline = Pipeline(tmp_path, config)
+    report = pipeline._compose_production_render(
+        StageTracker(work_directory / "state.json"),
+        plan, audio, source, transcript, work_directory, candidate_root,
+        raise_on_error=False, compiled_plan=compiled, creative_intent=intent,
+    )
+
+    assert report["status"] == "failed"
+    assert "CAPTION_CPS_INFEASIBLE" in report["errors"][0]
+    reference = CandidateCaptionFeasibilityReference.model_validate(
+        report["caption_feasibility_artifact"]
+    )
+    artifact_path = Path(reference.artifact_path)
+    assert artifact_path == (
+        candidate_root / "caption-feasibility" / "caption-feasibility-decision.json"
+    ).resolve()
+    assert artifact_path.is_file()
+    assert reference.artifact_sha256 == stable_file_hash(artifact_path)
+    assert report["pre_render_quality_gate"]["caption_feasibility_artifact"] == (
+        reference.model_dump(mode="json")
+    )
+    assert not (candidate_root / "production-render" / "compiled-render-plan.json").exists()
+    assert not (candidate_root / "creative-preview" / "compiled-render-plan.json").exists()
+
+    artifact = CandidateCaptionFeasibilityArtifact.model_validate(
+        json.loads(artifact_path.read_text(encoding="utf-8"))
+    )
+    assert artifact.production_plan == compiled.production_plan
+    assert artifact.candidate_id == plan.metadata.candidate_id
+    assert artifact.status == "INFEASIBLE"
+    assert artifact.blocker_code == "CAPTION_CPS_INFEASIBLE"
+    assert artifact.decision_fingerprint == decision.canonical_hash()
+    exact = next(item for item in artifact.decision.evidence if item.character_count == 25)
+    assert exact.measured_cps == 25.0
+    assert exact.hard_cps_ceiling == 20.0
+    assert exact.available_frames == 30
+    assert exact.required_frames == 38
+    span = next(item for item in artifact.evidence_spans if item.evidence_id == exact.evidence_id)
+    assert span.cue_ids and span.word_ids == exact.word_ids
+    assert span.character_count == 25
+    assert span.measured_cps == 25.0
+    assert span.hard_cps_ceiling == 20.0
+    assert span.available_frames == 30
+    assert span.required_frames == 38
+
+    artifact_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(CreativeArtifactError, match="ARTIFACT_INVALID|SHA_MISMATCH"):
+        load_candidate_caption_feasibility(
+            candidate_root, reference=reference, compiled_plan=compiled,
+        )
 
 
 def test_creative_preview_and_final_render_the_same_compiled_plan(tmp_path: Path) -> None:

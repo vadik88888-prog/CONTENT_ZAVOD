@@ -1761,6 +1761,11 @@ class Pipeline:
                 reviewed.append({
                     **base, "state": "draft_failed", "error": preview_error,
                     "stage": str(preview_item.get("stage") or f"creative_preview:{candidate_id}"),
+                    **{
+                        key: preview_item[key]
+                        for key in ("caption_feasibility_artifact", "pre_render_quality_gate")
+                        if key in preview_item
+                    },
                 })
                 self._write_draft_progress(
                     output_directory=output_directory, analysis=analysis, source=source,
@@ -1840,6 +1845,11 @@ class Pipeline:
                 "candidate_id": str(item.get("candidate_id") or ""),
                 "stage": str(item.get("stage") or ""),
                 "error": str(item.get("error") or "Draft preview failed."),
+                **{
+                    key: item[key]
+                    for key in ("caption_feasibility_artifact", "pre_render_quality_gate")
+                    if key in item
+                },
             }
             for item in reviewed if item.get("state") != "draft_ready"
         ]
@@ -3064,6 +3074,11 @@ class Pipeline:
                     "content_fingerprint": _render_content_fingerprint(Path(output_file), report),
                     "run_id": self.run_id,
                     "revision_id": f"{self.run_id}:render-{requested_index:02d}",
+                    **{
+                        key: report[key]
+                        for key in ("caption_feasibility_artifact", "pre_render_quality_gate")
+                        if key in report
+                    },
                     **identity,
                 }
             except Exception as error:
@@ -3150,9 +3165,17 @@ class Pipeline:
             safe = sanitize_api_error(error)
             tracker.finish(stage_name, "failed", safe)
             self.errors.append(f"production_render: {safe}")
+            lineage = _production_render_error_lineage(error)
             if raise_on_error:
-                raise ProductionRenderError(f"Production render не завершён: {safe}") from error
-            return {"enabled": True, "status": "failed", "errors": [safe], "ai_called": False}
+                raise ProductionRenderError(
+                    f"Production render did not complete: {safe}",
+                    quality_gate_report=getattr(error, "quality_gate_report", None),
+                    artifact_reference=getattr(error, "artifact_reference", None),
+                ) from error
+            return {
+                "enabled": True, "status": "failed", "errors": [safe], "ai_called": False,
+                **lineage,
+            }
         tracker.finish(stage_name, "completed" if project.status in {"completed", "warning"} else project.status)
         self.warnings.extend(project.warnings)
         return report
@@ -3415,6 +3438,7 @@ class Pipeline:
                 "enabled": True, "status": "failed", "ai_called": False,
                 "tts_regenerated": False, "audio_remixed": False,
                 "errors": [sanitize_api_error(error)], "warnings": [], "artifacts": [],
+                **_production_render_error_lineage(error),
             }
             existing["stages"] = tracker.data.get("stages", {})
             existing["warnings"] = [*existing.get("warnings", []), *self.warnings]
@@ -4435,6 +4459,19 @@ def _candidate_stage_error(item: object, fallback: str) -> str:
 
     detail = _outcome_detail(item if isinstance(item, dict) else None, fallback)
     return sanitize_api_error(RuntimeError(detail))
+
+
+def _production_render_error_lineage(error: BaseException) -> dict[str, Any]:
+    """Carry a validated pre-render decision into candidate/run failure reports."""
+
+    result: dict[str, Any] = {}
+    artifact = getattr(error, "artifact_reference", None)
+    quality_gate = getattr(error, "quality_gate_report", None)
+    if isinstance(artifact, dict):
+        result["caption_feasibility_artifact"] = dict(artifact)
+    if isinstance(quality_gate, dict):
+        result["pre_render_quality_gate"] = dict(quality_gate)
+    return result
 
 
 def _finish_candidate_stage_failure(

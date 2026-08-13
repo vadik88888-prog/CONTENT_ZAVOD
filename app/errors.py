@@ -78,3 +78,14 @@ class ProductionPlanHandoffError(AudioCompositionError):
 
 class ProductionRenderError(ClipEngineError):
     """Goal 3D could not safely build a final video from existing production artifacts."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        quality_gate_report: dict[str, object] | None = None,
+        artifact_reference: dict[str, object] | None = None,
+    ) -> None:
+        self.quality_gate_report = quality_gate_report
+        self.artifact_reference = artifact_reference
+        super().__init__(message)

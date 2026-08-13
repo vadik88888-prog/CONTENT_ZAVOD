@@ -10,28 +10,140 @@ from pydantic import Field, model_validator
 from app.composition_planning import TargetObservation
 from app.config import AppConfig
 from app.creative_contracts import (
+    CaptionFeasibilityDecision,
+    CaptionPlan,
     CompiledRenderPlan,
     CreativeIntent,
     CreativePolicy,
     FrozenContract,
     HASH_PATTERN,
     ImmutableProductionPlanLink,
+    OUTPUT_FPS,
+    OutputInterval,
+    SourceInterval,
     canonical_hash,
 )
 from app.creative_policy import CREATIVE_POLICY_VERSION, preset_family_policy
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
-from app.utils import read_json, utc_now, write_json
+from app.utils import read_json, stable_file_hash, utc_now, write_json
 
 
 CREATIVE_HANDOFF_SCHEMA_VERSION = "7G.3.creative-handoff.1"
 CREATIVE_EXECUTION_SCHEMA_VERSION = "7G.3.creative-execution.1"
+CAPTION_FEASIBILITY_ARTIFACT_SCHEMA_VERSION = "7J.2A-3.caption-feasibility-artifact.1"
+CAPTION_FEASIBILITY_REFERENCE_SCHEMA_VERSION = "7J.2A-3.caption-feasibility-reference.1"
+CAPTION_FEASIBILITY_ARTIFACT_RELATIVE_PATH = Path(
+    "caption-feasibility/caption-feasibility-decision.json"
+)
 
 ExecutionStatus = Literal["native_rich", "native_fallback", "legacy"]
 
 
 class CreativeArtifactError(ValueError):
     pass
+
+
+class CandidateCaptionFeasibilitySpan(FrozenContract):
+    evidence_id: str = Field(min_length=1)
+    cue_ids: tuple[str, ...] = Field(min_length=1)
+    word_ids: tuple[str, ...] = Field(min_length=1)
+    text: str = Field(min_length=1)
+    source: SourceInterval
+    immutable_word_output: OutputInterval
+    mapping_segment_ids: tuple[str, ...] = Field(min_length=1)
+    character_count: int = Field(gt=0)
+    available_frames: int = Field(gt=0)
+    required_frames: int = Field(gt=0)
+    measured_cps: float = Field(gt=0)
+    hard_cps_ceiling: float = Field(gt=0)
+
+
+class CandidateCaptionFeasibilityArtifact(FrozenContract):
+    """Candidate-owned durable copy of the validated pre-render decision."""
+
+    schema_version: Literal["7J.2A-3.caption-feasibility-artifact.1"] = (
+        CAPTION_FEASIBILITY_ARTIFACT_SCHEMA_VERSION
+    )
+    production_plan: ImmutableProductionPlanLink
+    candidate_id: str = Field(min_length=1)
+    caption_plan_schema_version: str = Field(min_length=1)
+    caption_intent_id: str = Field(min_length=1)
+    caption_plan_fingerprint: str = Field(pattern=HASH_PATTERN)
+    compiled_render_plan_hash: str = Field(pattern=HASH_PATTERN)
+    compiled_caption_feasibility_sha256: str = Field(pattern=HASH_PATTERN)
+    decision_id: str = Field(min_length=1)
+    status: Literal["FEASIBLE", "INFEASIBLE", "NOT_APPLICABLE"]
+    blocker_code: Literal["CAPTION_CPS_INFEASIBLE"] | None = None
+    decision: CaptionFeasibilityDecision
+    evidence_spans: tuple[CandidateCaptionFeasibilitySpan, ...] = ()
+    decision_fingerprint: str = Field(pattern=HASH_PATTERN)
+    artifact_fingerprint: str = Field(pattern=HASH_PATTERN)
+
+    @model_validator(mode="after")
+    def _valid_identity_and_fingerprints(self) -> "CandidateCaptionFeasibilityArtifact":
+        if self.candidate_id != self.production_plan.identity.candidate_id:
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_CANDIDATE_MISMATCH")
+        if self.decision_id != self.decision.decision_id or self.status != self.decision.status:
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_DECISION_MISMATCH")
+        expected_blocker = "CAPTION_CPS_INFEASIBLE" if self.decision.status == "INFEASIBLE" else None
+        if self.blocker_code != expected_blocker or self.decision.reason_code != (
+            expected_blocker or (
+                "CAPTION_TEMPORALLY_FEASIBLE"
+                if self.decision.status == "FEASIBLE" else "NO_MAPPED_WORDS"
+            )
+        ):
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_STATUS_MISMATCH")
+        decision_fingerprint = self.decision.canonical_hash()
+        if (
+            self.decision_fingerprint != decision_fingerprint
+            or self.compiled_caption_feasibility_sha256 != decision_fingerprint
+        ):
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_DECISION_HASH_MISMATCH")
+        evidence = {item.evidence_id: item for item in self.decision.evidence}
+        spans = {item.evidence_id: item for item in self.evidence_spans}
+        if len(spans) != len(self.evidence_spans) or set(spans) != set(evidence):
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_EVIDENCE_MISMATCH")
+        for evidence_id, item in evidence.items():
+            span = spans[evidence_id]
+            if (
+                span.word_ids != item.word_ids
+                or span.text != item.text
+                or span.source != item.source
+                or span.immutable_word_output != item.immutable_word_output
+                or span.mapping_segment_ids != item.mapping_segment_ids
+                or span.character_count != item.character_count
+                or span.available_frames != (
+                    item.immutable_word_output.end_frame
+                    - item.immutable_word_output.start_frame
+                )
+                or span.required_frames != item.required_frames
+                or span.measured_cps != round(
+                    item.character_count / (span.available_frames / OUTPUT_FPS), 6
+                )
+                or span.hard_cps_ceiling != item.hard_cps_ceiling
+            ):
+                raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_SPAN_MISMATCH")
+        payload = self.model_dump(mode="json")
+        payload.pop("artifact_fingerprint", None)
+        if canonical_hash(payload) != self.artifact_fingerprint:
+            raise ValueError("CAPTION_FEASIBILITY_ARTIFACT_HASH_MISMATCH")
+        return self
+
+
+class CandidateCaptionFeasibilityReference(FrozenContract):
+    schema_version: Literal["7J.2A-3.caption-feasibility-reference.1"] = (
+        CAPTION_FEASIBILITY_REFERENCE_SCHEMA_VERSION
+    )
+    candidate_id: str = Field(min_length=1)
+    decision_id: str = Field(min_length=1)
+    status: Literal["FEASIBLE", "INFEASIBLE", "NOT_APPLICABLE"]
+    blocker_code: Literal["CAPTION_CPS_INFEASIBLE"] | None = None
+    artifact_path: str = Field(min_length=1)
+    artifact_sha256: str = Field(pattern=HASH_PATTERN)
+    artifact_fingerprint: str = Field(pattern=HASH_PATTERN)
+    decision_fingerprint: str = Field(pattern=HASH_PATTERN)
+    compiled_render_plan_hash: str = Field(pattern=HASH_PATTERN)
 
 
 class CandidateCreativeHandoff(FrozenContract):
@@ -141,6 +253,149 @@ def build_creative_execution(
         style_revision=style_revision,
         created_at=utc_now(),
     )
+
+
+def build_candidate_caption_feasibility_artifact(
+    compiled_plan: CompiledRenderPlan,
+) -> CandidateCaptionFeasibilityArtifact:
+    caption_plan: CaptionPlan = compiled_plan.caption_plan
+    decision = caption_plan.feasibility_decision
+    if decision is None:
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_DECISION_MISSING")
+    compiled_fingerprint = compiled_plan.input_fingerprints.caption_feasibility_sha256
+    decision_fingerprint = decision.canonical_hash()
+    if compiled_fingerprint != decision_fingerprint:
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_COMPILED_FINGERPRINT_MISMATCH")
+
+    cue_ids_by_word: dict[str, list[str]] = {}
+    for cue in caption_plan.cues:
+        for word in cue.words:
+            cue_ids_by_word.setdefault(word.word_id, []).append(cue.cue_id)
+    spans: list[dict[str, Any]] = []
+    for evidence in decision.evidence:
+        cue_ids = tuple(dict.fromkeys(
+            cue_id
+            for word_id in evidence.word_ids
+            for cue_id in cue_ids_by_word.get(word_id, ())
+        ))
+        if not cue_ids:
+            raise CreativeArtifactError("CAPTION_FEASIBILITY_EVIDENCE_CUE_MISSING")
+        spans.append({
+            "evidence_id": evidence.evidence_id,
+            "cue_ids": cue_ids,
+            "word_ids": evidence.word_ids,
+            "text": evidence.text,
+            "source": evidence.source.model_dump(mode="json"),
+            "immutable_word_output": evidence.immutable_word_output.model_dump(mode="json"),
+            "mapping_segment_ids": evidence.mapping_segment_ids,
+            "character_count": evidence.character_count,
+            "available_frames": (
+                evidence.immutable_word_output.end_frame
+                - evidence.immutable_word_output.start_frame
+            ),
+            "required_frames": evidence.required_frames,
+            "measured_cps": round(
+                evidence.character_count
+                / (
+                    (
+                        evidence.immutable_word_output.end_frame
+                        - evidence.immutable_word_output.start_frame
+                    ) / OUTPUT_FPS
+                ),
+                6,
+            ),
+            "hard_cps_ceiling": evidence.hard_cps_ceiling,
+        })
+
+    payload: dict[str, Any] = {
+        "schema_version": CAPTION_FEASIBILITY_ARTIFACT_SCHEMA_VERSION,
+        "production_plan": compiled_plan.production_plan.model_dump(mode="json"),
+        "candidate_id": compiled_plan.production_plan.identity.candidate_id,
+        "caption_plan_schema_version": caption_plan.schema_version,
+        "caption_intent_id": caption_plan.intent_id,
+        "caption_plan_fingerprint": caption_plan.canonical_hash(),
+        "compiled_render_plan_hash": compiled_plan.plan_hash,
+        "compiled_caption_feasibility_sha256": compiled_fingerprint,
+        "decision_id": decision.decision_id,
+        "status": decision.status,
+        "blocker_code": (
+            "CAPTION_CPS_INFEASIBLE" if decision.status == "INFEASIBLE" else None
+        ),
+        "decision": decision.model_dump(mode="json"),
+        "evidence_spans": spans,
+        "decision_fingerprint": decision_fingerprint,
+    }
+    payload["artifact_fingerprint"] = canonical_hash(payload)
+    return CandidateCaptionFeasibilityArtifact.model_validate(payload)
+
+
+def persist_candidate_caption_feasibility(
+    root: Path,
+    *,
+    compiled_plan: CompiledRenderPlan,
+) -> CandidateCaptionFeasibilityReference:
+    """Persist and revalidate caption feasibility before the render gate runs."""
+
+    artifact = build_candidate_caption_feasibility_artifact(compiled_plan)
+    path = (root / CAPTION_FEASIBILITY_ARTIFACT_RELATIVE_PATH).resolve()
+    write_json(path, artifact.model_dump(mode="json"))
+    try:
+        persisted = CandidateCaptionFeasibilityArtifact.model_validate(read_json(path, None))
+    except Exception as error:
+        raise CreativeArtifactError(
+            f"CAPTION_FEASIBILITY_ARTIFACT_INVALID: {error}"
+        ) from error
+    if persisted != artifact:
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_ARTIFACT_WRITE_MISMATCH")
+    reference = CandidateCaptionFeasibilityReference(
+        candidate_id=artifact.candidate_id,
+        decision_id=artifact.decision_id,
+        status=artifact.status,
+        blocker_code=artifact.blocker_code,
+        artifact_path=str(path),
+        artifact_sha256=stable_file_hash(path),
+        artifact_fingerprint=artifact.artifact_fingerprint,
+        decision_fingerprint=artifact.decision_fingerprint,
+        compiled_render_plan_hash=artifact.compiled_render_plan_hash,
+    )
+    # Count the artifact as valid only after a full contract and SHA check.
+    load_candidate_caption_feasibility(root, reference=reference, compiled_plan=compiled_plan)
+    return reference
+
+
+def load_candidate_caption_feasibility(
+    root: Path,
+    *,
+    reference: CandidateCaptionFeasibilityReference,
+    compiled_plan: CompiledRenderPlan,
+) -> CandidateCaptionFeasibilityArtifact:
+    expected_path = (root / CAPTION_FEASIBILITY_ARTIFACT_RELATIVE_PATH).resolve()
+    if Path(reference.artifact_path).resolve() != expected_path:
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_ARTIFACT_PATH_MISMATCH")
+    try:
+        artifact = CandidateCaptionFeasibilityArtifact.model_validate(read_json(expected_path, None))
+    except Exception as error:
+        raise CreativeArtifactError(
+            f"CAPTION_FEASIBILITY_ARTIFACT_INVALID: {error}"
+        ) from error
+    if stable_file_hash(expected_path) != reference.artifact_sha256:
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_ARTIFACT_SHA_MISMATCH")
+    decision = compiled_plan.caption_plan.feasibility_decision
+    if (
+        artifact.production_plan != compiled_plan.production_plan
+        or artifact.compiled_render_plan_hash != compiled_plan.plan_hash
+        or artifact.caption_plan_fingerprint != compiled_plan.caption_plan.canonical_hash()
+        or decision is None
+        or artifact.decision != decision
+        or artifact.artifact_fingerprint != reference.artifact_fingerprint
+        or artifact.decision_fingerprint != reference.decision_fingerprint
+        or artifact.candidate_id != reference.candidate_id
+        or artifact.decision_id != reference.decision_id
+        or artifact.status != reference.status
+        or artifact.blocker_code != reference.blocker_code
+    ):
+        raise CreativeArtifactError("CAPTION_FEASIBILITY_ARTIFACT_IDENTITY_MISMATCH")
+    return artifact
 
 
 def persist_candidate_creative_identity(
