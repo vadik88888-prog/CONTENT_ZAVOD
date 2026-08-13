@@ -1,17 +1,10 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from app.gui.models import DesktopSettings
+from app.runtime import default_data_directory
 from app.utils import read_json, write_json
-
-
-def default_data_directory() -> Path:
-    """Windows-local app data, with a deterministic fallback for development."""
-
-    root = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-    return Path(root) / "ContentFactoryData" if root else Path.home() / ".content-factory"
 
 
 class SettingsStore:

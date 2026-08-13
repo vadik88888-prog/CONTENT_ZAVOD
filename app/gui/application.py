@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 from app.gui.main_window import MainWindow
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.styles import load_theme
+from app.runtime import RuntimeLayout
 
 
 # Qt permits exactly one application object per process.  Keep the desktop
@@ -24,7 +25,7 @@ _pending_instance_activation = False
 
 
 def application_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return RuntimeLayout.detect().resources
 
 
 def _instance_server_name() -> str:
@@ -215,8 +216,12 @@ def _activate(window: MainWindow) -> None:
     window.activateWindow()
 
 
-def run(argv: list[str] | None = None) -> int:
+def run(
+    argv: list[str] | None = None, *, runtime: RuntimeLayout | None = None,
+) -> int:
     global _main_window
+    layout = runtime or RuntimeLayout.detect()
+    layout.activate()
     app = _desktop_application(argv)
     app.setApplicationName("Content Factory")
     app.setOrganizationName("Content Factory")
@@ -230,7 +235,7 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        window = MainWindow(DesktopServices.create(application_root()))
+        window = MainWindow(DesktopServices.create(layout))
         _main_window = window
         window.show()
         if _pending_instance_activation:

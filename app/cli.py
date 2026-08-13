@@ -191,8 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    root = Path.cwd()
+def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> int:
+    root = (runtime_root or Path.cwd()).expanduser().resolve()
     _load_dotenv(root)
     arguments = build_parser().parse_args(argv)
     if arguments.command == "doctor":

@@ -205,10 +205,10 @@ class SettingsScreen(QWidget):
             "Локальный тестовый режим включён." if settings.local_test_mode
             else "Локальная обработка готова к работе."
         )
-        config_path = Path(settings.config_path) if settings.config_path else self.viewmodel.services.engine_root / "config.example.yaml"
+        config_path = Path(settings.config_path) if settings.config_path else self.viewmodel.services.resources_root / "config.example.yaml"
         try:
             config = load_config(config_path)
-            key = "настроен" if key_configured(config.ai.provider, self.viewmodel.services.engine_root) else "не настроен"
+            key = "настроен" if key_configured(config.ai.provider, self.viewmodel.services.resources_root) else "не настроен"
             set_responsive_text(
                 self.ai_info,
                 f"AI: {config.ai.provider} · {config.ai.model}\n"

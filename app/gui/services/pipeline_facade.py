@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +27,7 @@ from app.product_flow import (
     resolve_processing_intent,
 )
 from app.quality_report import QUALITY_REPORT_SCHEMA_VERSION, aggregate_quality_status, read_quality_report
+from app.runtime import RuntimeLayout
 from app.utils import read_json, safe_name, stable_file_hash
 
 
@@ -121,8 +121,14 @@ class ReportedPipelineFailure:
 class PipelineFacade:
     """The only desktop layer that knows how to invoke the existing engine."""
 
-    def __init__(self, engine_root: Path) -> None:
-        self.engine_root = engine_root.resolve()
+    def __init__(self, engine_root: Path | RuntimeLayout) -> None:
+        self.runtime = (
+            engine_root
+            if isinstance(engine_root, RuntimeLayout)
+            else RuntimeLayout.for_source(engine_root, data=engine_root)
+        )
+        self.engine_root = self.runtime.data
+        self.resources_root = self.runtime.resources
 
     def inspect_source(self, source_path: str | Path) -> dict[str, Any]:
         path = validate_video_path(source_path)
@@ -196,7 +202,7 @@ class PipelineFacade:
 
         # The engine is executed as a child of QProcess, where Python's normal
         # stdout buffering hides useful diagnostics until the process exits.
-        arguments = ["-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id, "--transform-script"]
+        arguments = ["process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id, "--transform-script"]
         if settings.local_test_mode:
             arguments.extend(["--mock-ai", "--no-ai-transformation"])
         if project.settings.recompute_all or not project.settings.use_cache:
@@ -223,7 +229,7 @@ class PipelineFacade:
 
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         arguments = [
-            "-u", "-m", "app", "analyze", "--input", str(source_path), "--config", str(config_path),
+            "analyze", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id,
         ]
         if settings.local_test_mode:
@@ -249,7 +255,7 @@ class PipelineFacade:
             raise InputValidationError("Выберите хотя бы один кандидат для чернового просмотра.")
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         arguments = [
-            "-u", "-m", "app", "draft", "--input", str(source_path), "--config", str(config_path),
+            "draft", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),
             "--analysis-id", project.analysis_id,
         ]
@@ -281,7 +287,7 @@ class PipelineFacade:
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
-            "-u", "-m", "app", "render", "--input", str(source_path), "--config", str(config_path),
+            "render", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--draft", str(draft_path),
             "--confirm-production",
         ]
@@ -471,8 +477,10 @@ class PipelineFacade:
         """Prepare a launch without deriving engine output locations in GUI code."""
 
         metadata_path = run_metadata_path(self.engine_root, run_id)
+        command = self.runtime.internal_cli_command(arguments)
         return PreparedPipelineRun(
-            program=sys.executable, arguments=arguments, working_directory=self.engine_root,
+            program=str(command.program), arguments=list(command.arguments),
+            working_directory=command.working_directory,
             # These are a harmless pre-engine sentinel.  No completion logic
             # reads them: it resolves the engine metadata first.
             state_path=metadata_path, report_path=metadata_path,
@@ -524,7 +532,7 @@ class PipelineFacade:
                 if str(item)
             ]
         arguments = [
-            "-u", "-m", "app", "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id,
+            "process", "--input", str(source_path), "--config", str(config_path), "--run-id", run.run_id, "--project-id", project.project_id,
             "--upstream-run-directory", str(parent_output),
             "--production-render-only", "--recompute-production-render",
         ]
@@ -1176,12 +1184,12 @@ class PipelineFacade:
             configured = Path(settings.config_path).expanduser()
             if configured.is_file():
                 return configured
-        example = self.engine_root / "config.example.yaml"
+        example = self.resources_root / "config.example.yaml"
         if example.is_file():
             return example
         # Keep a locally renamed user configuration usable without changing the
         # normal repository contract.  Desktop settings still take precedence.
-        renamed = self.engine_root / "config.yaml.yaml"
+        renamed = self.resources_root / "config.yaml.yaml"
         return renamed if renamed.is_file() else example
 
     @staticmethod

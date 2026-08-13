@@ -30,6 +30,7 @@ from app.gui.services.run_projection import RunProjectionCache, RunUiProjection
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
+from app.runtime import RuntimeLayout
 from app.source_download import cleanup_partial_downloads, validate_public_video_url
 from app.utils import read_json, stable_text_hash, utc_now
 
@@ -51,22 +52,29 @@ class DesktopServices:
     runs: RunHistoryStore
     pipeline: PipelineFacade
     system: SystemService
+    runtime: RuntimeLayout | None = None
     _run_projections: RunProjectionCache = field(default_factory=RunProjectionCache, repr=False)
 
     @classmethod
-    def create(cls, engine_root: Path) -> "DesktopServices":
-        settings_store = SettingsStore()
+    def create(cls, runtime: RuntimeLayout | Path) -> "DesktopServices":
+        layout = (
+            runtime
+            if isinstance(runtime, RuntimeLayout)
+            else RuntimeLayout.for_source(runtime, data=runtime)
+        )
+        settings_store = SettingsStore(layout.data)
         settings = settings_store.load()
         projects = DesktopProjectStore(Path(settings.data_directory))
         runs = RunHistoryStore(projects)
         services = cls(
-            engine_root=engine_root.resolve(),
+            engine_root=layout.data,
             settings_store=settings_store,
             settings=settings,
             projects=projects,
             runs=runs,
-            pipeline=PipelineFacade(engine_root),
-            system=SystemService(engine_root),
+            pipeline=PipelineFacade(layout),
+            system=SystemService(layout.resources),
+            runtime=layout,
         )
         services.recover_interrupted_runs()
         services.recover_ready_analysis_runs()
@@ -75,6 +83,10 @@ class DesktopServices:
 
     def save_settings(self) -> None:
         self.settings_store.save(self.settings)
+
+    @property
+    def resources_root(self) -> Path:
+        return self.runtime.resources if self.runtime is not None else self.engine_root
 
     def reconfigure_data_directory(self, directory: Path) -> None:
         self.settings.data_directory = str(directory.expanduser().resolve())
