@@ -17,6 +17,12 @@ import shutil
 import subprocess
 from typing import Any, Iterable, Literal, Sequence
 
+from app.caption_presets import (
+    CaptionPresetDefinition,
+    caption_preset_definition,
+    caption_preset_from_token_id,
+    default_caption_preset_for_style,
+)
 from app.config import ProductionRenderConfig
 from app.creative_contracts import (
     BeatRole,
@@ -48,6 +54,8 @@ from app.creative_contracts import (
     SourceOutputTimeMap,
     canonical_hash,
 )
+from app.creative_policy import CREATIVE_PRESET_DEFINITIONS
+from app.font_assets import curated_font_asset_for_face, resolved_font_asset_id
 from app.production_subtitles import resolve_subtitle_style
 from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
@@ -76,7 +84,6 @@ _NO_BREAK_AFTER = frozenset({
     "a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
     "в", "во", "и", "к", "ко", "на", "о", "об", "от", "по", "с", "со", "у", "за", "из", "не",
 })
-_STYLE_BY_FAMILY = {"clean": "clean", "emphasis": "dynamic", "minimal": "minimal", "editorial": "documentary"}
 _FALLBACK_FONTS = ("Arial", "DejaVu Sans", "Noto Sans")
 _TOKEN_RE = re.compile(r"\S+", re.UNICODE)
 _NORMALISE_RE = re.compile(r"[^\w]+", re.UNICODE)
@@ -208,14 +215,15 @@ class CaptionPlanner:
         font_manifest: CaptionFontManifest | None = None,
     ) -> CaptionPlan:
         platform = intent.policy.platform
+        caption_preset = _caption_preset(intent)
         manifest, font_path = _resolve_font_manifest(
             self.config.subtitle_font_family,
-            weight="bold" if intent.policy.caption_style_family != "minimal" else "normal",
+            weight=caption_preset.font_weight,
             supplied=font_manifest,
         )
-        style = _caption_style(intent, self.config, manifest)
+        style = _caption_style(self.config, manifest, caption_preset)
         measurer = _FontMeasurer(manifest, font_path, style)
-        typography = _typography(intent, self.config, style)
+        typography = _typography(intent, self.config, style, caption_preset)
         words, input_diagnostics = _mapped_words(intent, transcript)
         regions = (*_composition_regions(composition_plan), *tuple(protected_regions))
         diagnostics = list(input_diagnostics)
@@ -271,7 +279,7 @@ class CaptionPlanner:
             semantic_output = _words_output(layout.words)
             event = _semantic_event(intent, layout.words, semantic_output, last_motion_frame)
             emphasis_event = _semantic_emphasis_event(intent, layout.words, semantic_output)
-            primitive = _primitive(intent, timing_mode, event)
+            primitive = _primitive(intent, timing_mode, event, caption_preset)
             if event is not None and primitive != "static":
                 last_motion_frame = output.start_frame
             elif event is not None and timing_mode != "word":
@@ -411,7 +419,7 @@ def _resolve_font_manifest(
         actual_family, scripts = _font_details(path, family)
         fallback = unsafe or actual_family.casefold() != requested.casefold()
         return CaptionFontManifest(
-            font_id=f"font-{checksum[:24]}", requested_family=requested,
+            font_id=resolved_font_asset_id(actual_family, weight=weight), requested_family=requested,
             resolved_family=actual_family, weight=weight, file_name=path.name,
             file_sha256=checksum, supported_scripts=scripts,
             metrics_backend="gdi_file_metrics" if os.name == "nt" else "qt_file_metrics",
@@ -420,7 +428,8 @@ def _resolve_font_manifest(
         ), path
     identity = canonical_hash({"family": "Arial", "weight": weight, "status": "unverified"})
     return CaptionFontManifest(
-        font_id=f"font-{identity[:24]}", requested_family=requested, resolved_family="Arial",
+        font_id=f"font.unverified.arial.{weight}.{identity[:12]}",
+        requested_family=requested, resolved_family="Arial",
         weight=weight, supported_scripts=("unknown",), metrics_backend="heuristic",
         shaping_backend="libass-harfbuzz", fallback_chain=_FALLBACK_FONTS,
         deployment_status="unverified", fallback_used=True,
@@ -480,17 +489,19 @@ def _find_font_file(family: str, weight: str) -> Path | None:
     return None
 
 
-def _font_registry_rank(name: str, needle: str, weight: str) -> tuple[int, int, str]:
+def _font_registry_rank(name: str, needle: str, weight: str) -> tuple[int, int, int, str]:
     value = name.casefold()
-    exact = 0 if value.startswith(needle + " (") else 1
+    display = re.sub(r"\s*\([^)]*\)\s*$", "", value).strip()
+    base_family = re.sub(r"\s+(bold|italic|oblique|regular)(\s+(italic|oblique))?$", "", display).strip()
+    exact_family = 0 if base_family == needle else 1
     wants_bold = weight == "bold"
     weight_mismatch = 0 if ("bold" in value) == wants_bold else 1
     italic = 1 if "italic" in value else 0
-    return exact + weight_mismatch, italic, value
+    return exact_family, weight_mismatch, italic, value
 
 
 def _font_roots() -> tuple[Path, ...]:
-    roots: list[Path] = []
+    roots: list[Path] = [Path(__file__).resolve().parents[1] / "assets" / "fonts"]
     if os.name == "nt":
         roots.append(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts")
         local = os.environ.get("LOCALAPPDATA")
@@ -508,8 +519,11 @@ def _font_details(path: Path, fallback_family: str) -> tuple[str, tuple[Literal[
     # coverage remains conservative unless the approved launch family is known.
     del path
     known_multiscript = {"arial", "dejavu sans", "noto sans"}
+    curated = curated_font_asset_for_face(fallback_family)
     scripts: tuple[Literal["latin", "cyrillic", "unknown"], ...] = (
-        ("latin", "cyrillic") if fallback_family.casefold() in known_multiscript else ("unknown",)
+        ("latin", "cyrillic")
+        if fallback_family.casefold() in known_multiscript or curated is not None
+        else ("unknown",)
     )
     return fallback_family, scripts
 
@@ -578,16 +592,55 @@ def _find_manifest_file(manifest: CaptionFontManifest) -> Path | None:
     return None
 
 
-def _caption_style(intent: CreativeIntent, config: ProductionRenderConfig, manifest: CaptionFontManifest) -> SubtitleStyle:
-    style_id = _STYLE_BY_FAMILY[intent.policy.caption_style_family]
+def materialize_caption_font_directory(
+    manifest: CaptionFontManifest,
+    directory: Path,
+) -> Path:
+    """Stage the exact checksummed face in a renderer-controlled directory."""
+
+    if manifest.file_sha256 is None or manifest.file_name is None:
+        raise ValueError("CAPTION_FONT_EXACT_FILE_REQUIRED")
+    source = _find_manifest_file(manifest)
+    if source is None:
+        raise ValueError("CAPTION_FONT_CHECKSUM_MISMATCH")
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix.casefold() if source.suffix else ".ttf"
+    safe_asset_id = re.sub(r"[^A-Za-z0-9._-]+", "_", manifest.font_id)
+    target = directory / f"{safe_asset_id}.{manifest.file_sha256[:16]}{suffix}"
+    if target.is_file() and _file_sha256(target) == manifest.file_sha256:
+        return directory.resolve()
+    write_bytes_atomic(target, source.read_bytes())
+    if _file_sha256(target) != manifest.file_sha256:
+        raise ValueError("CAPTION_FONT_MATERIALIZATION_CHECKSUM_MISMATCH")
+    return directory.resolve()
+
+
+def _caption_preset(intent: CreativeIntent) -> CaptionPresetDefinition:
+    creative = CREATIVE_PRESET_DEFINITIONS.get(intent.policy.preset_id)  # type: ignore[arg-type]
+    if creative is not None and creative.caption_style_family == intent.policy.caption_style_family:
+        return caption_preset_definition(creative.caption_preset_id)
+    return default_caption_preset_for_style(intent.policy.caption_style_family)
+
+
+def _caption_style(
+    config: ProductionRenderConfig,
+    manifest: CaptionFontManifest,
+    preset: CaptionPresetDefinition,
+) -> SubtitleStyle:
+    style_id = preset.legacy_style_id
     resolved = replace(config, subtitle_style=style_id, subtitle_font_family=manifest.resolved_family)
     style, _fallback, _warning = resolve_subtitle_style(resolved)
     return style.model_copy(update={"uppercase": False})
 
 
-def _typography(intent: CreativeIntent, config: ProductionRenderConfig, style: SubtitleStyle) -> CaptionTypographyToken:
+def _typography(
+    intent: CreativeIntent,
+    config: ProductionRenderConfig,
+    style: SubtitleStyle,
+    preset: CaptionPresetDefinition,
+) -> CaptionTypographyToken:
     return CaptionTypographyToken(
-        token_id=f"caption-{intent.policy.caption_style_family}-{intent.policy.intensity.value}-v1",
+        token_id=preset.token_id,
         font_size_ratio=style.font_size / 1920,
         minimum_font_size_ratio=(style.font_size / 1920) * config.subtitle_min_font_scale,
         font_weight=style.font_weight,
@@ -1485,25 +1538,33 @@ def _semantic_emphasis_event(
 
 
 def _primitive(
-    intent: CreativeIntent, timing_mode: str, event: _SemanticEvent | None,
+    intent: CreativeIntent,
+    timing_mode: str,
+    event: _SemanticEvent | None,
+    preset: CaptionPresetDefinition,
 ) -> Literal["static", "fade", "scale", "slide", "karaoke"]:
+    primitive: Literal["static", "fade", "scale", "slide", "karaoke"]
     if event is None:
         return "static"
     if timing_mode != "word":
         return "static"
     if intent.policy.reduced_motion:
-        return "fade"
-    if intent.policy.intensity == Intensity.LOW:
-        return "fade" if event.beat is not None else "static"
-    if event.emphasis is not None and timing_mode == "word":
-        return "karaoke"
-    if event.beat is not None and event.beat.role == BeatRole.PAYOFF:
-        return "scale"
-    if event.beat is not None and event.beat.role == BeatRole.HOOK:
-        return "slide" if intent.policy.intensity == Intensity.HIGH else "fade"
-    if event.motion is not None:
-        return "scale" if intent.policy.intensity == Intensity.HIGH else "fade"
-    return "fade"
+        primitive = "fade"
+    elif intent.policy.intensity == Intensity.LOW:
+        primitive = "fade" if event.beat is not None else "static"
+    elif event.emphasis is not None and timing_mode == "word":
+        primitive = "karaoke"
+    elif event.beat is not None and event.beat.role == BeatRole.PAYOFF:
+        primitive = "scale"
+    elif event.beat is not None and event.beat.role == BeatRole.HOOK:
+        primitive = "slide" if intent.policy.intensity == Intensity.HIGH else "fade"
+    elif event.motion is not None:
+        primitive = "scale" if intent.policy.intensity == Intensity.HIGH else "fade"
+    else:
+        primitive = "fade"
+    if primitive in preset.allowed_primitives:
+        return primitive
+    return preset.reduced_motion_fallback if preset.reduced_motion_fallback in preset.allowed_primitives else "static"
 
 
 def _emphasis_plan(
@@ -1812,6 +1873,14 @@ def write_caption_plan_ass(
     font_size = max(8, round(typography.font_size_ratio * height))
     outline = max(0, round(typography.outline_width_ratio * height))
     shadow = max(0, round(typography.shadow_ratio * height))
+    preset = caption_preset_from_token_id(typography.token_id)
+    if preset is not None and preset.background_mode == "opaque_box":
+        border_style = 3
+        outline = max(outline, round(preset.box_padding_ratio * height))
+        back_color = _ass_color_with_opacity(preset.background_color, preset.background_opacity)
+    else:
+        border_style = 1
+        back_color = "&H00000000&"
     header = f"""[Script Info]
 ; CaptionPlan: {plan.schema_version}
 ; FontSHA256: {manifest.file_sha256 or 'unverified'}
@@ -1823,7 +1892,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: CaptionPlan,{_escape_style(manifest.resolved_family)},{font_size},{_ass_color(typography.text_color)},{_ass_color(typography.highlight_color)},{_ass_color(typography.outline_color)},&H00000000,{-1 if typography.font_weight == 'bold' else 0},0,0,0,100,100,0,0,1,{outline},{shadow},8,0,0,0,1
+Style: CaptionPlan,{_escape_style(manifest.resolved_family)},{font_size},{_ass_color(typography.text_color)},{_ass_color(typography.highlight_color)},{_ass_color(typography.outline_color)},{back_color},{-1 if typography.font_weight == 'bold' else 0},0,0,0,100,100,0,0,{border_style},{outline},{shadow},8,0,0,0,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -1923,6 +1992,12 @@ def _escape_style(value: str) -> str:
 def _ass_color(value: str) -> str:
     red, green, blue = value[1:3], value[3:5], value[5:7]
     return f"&H00{blue}{green}{red}&"
+
+
+def _ass_color_with_opacity(value: str, opacity: float) -> str:
+    red, green, blue = value[1:3], value[3:5], value[5:7]
+    alpha = round((1 - min(1.0, max(0.0, opacity))) * 255)
+    return f"&H{alpha:02X}{blue}{green}{red}&"
 
 
 def _ass_time(seconds: float) -> str:

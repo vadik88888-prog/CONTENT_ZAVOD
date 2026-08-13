@@ -375,6 +375,8 @@ def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() ->
     assert plan.schema_version == "7C.caption-plan.1"
     assert plan.backend_id == "libass"
     assert plan.font_manifest is not None and plan.font_manifest.file_sha256
+    assert plan.typography is not None
+    assert plan.typography.token_id == "caption-preset:accent_yellow:1.0.0"
     assert any(cue.beat_role == BeatRole.HOOK and cue.primitive_id == "slide" for cue in plan.cues)
     assert any(cue.beat_role == BeatRole.PAYOFF and cue.primitive_id == "scale" for cue in plan.cues)
     emphasized = [cue for cue in plan.cues if cue.emphasis is not None]
@@ -517,3 +519,20 @@ def test_missing_font_uses_approved_deterministic_fallback() -> None:
     assert plan.font_manifest.resolved_family != "__definitely_missing_caption_font__"
     assert "CAPTION_FONT_FALLBACK" in {finding.code for finding in plan.quality_report.findings}
     assert all(cue.fallback_reason in {None, "missing_font"} or cue.fallback_reason == "readability" for cue in plan.cues)
+
+
+def test_contrast_box_caption_token_maps_to_deterministic_ass_style(tmp_path: Path) -> None:
+    plan = build_caption_plan(_intent(), _word_transcript(), _config())
+    assert plan.typography is not None
+    boxed = plan.model_copy(update={
+        "typography": plan.typography.model_copy(update={
+            "token_id": "caption-preset:contrast_box:1.0.0",
+        }),
+    })
+    path = write_caption_plan_ass(boxed, tmp_path / "boxed.ass", 1080, 1920)
+    style = next(
+        line for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if line.startswith("Style: CaptionPlan,")
+    ).split(",")
+    assert style[6].startswith("&H52")
+    assert style[15] == "3"

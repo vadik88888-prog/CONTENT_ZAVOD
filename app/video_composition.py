@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, cast
 
 from app.audio_models import AudioProject
-from app.caption_planning import write_caption_plan_ass
+from app.caption_planning import materialize_caption_font_directory, write_caption_plan_ass
 from app.composition_planning import TargetObservation
 from app.config import AppConfig, ProductionRenderConfig
 from app.creative_execution import (
@@ -649,11 +649,24 @@ class VideoCompositionService:
         try:
             if encoded is None:
                 temporary = _temporary_path(temp_root, ".mp4")
+                font_directory: Path | None = None
+                if (
+                    project.render_request.subtitles_enabled
+                    and compiled_plan.compatibility_mode == "native"
+                ):
+                    manifest = compiled_plan.caption_plan.font_manifest
+                    if manifest is None:
+                        raise ProductionRenderError("NATIVE_CAPTION_FONT_MANIFEST_MISSING")
+                    font_directory = materialize_caption_font_directory(
+                        manifest,
+                        temp_root / "caption-fonts" / (manifest.file_sha256 or "unverified")[:16],
+                    )
                 encoder, hardware_fallback, encoder_warning = self._mux_base_visual(
                     base.path, Path(project.mixed_audio_path),
                     captions.path if project.render_request.subtitles_enabled else None,
                     temporary, project.canvas, render_profile.video_bitrate, render_profile.encoder,
                     compiled_plan.motion_plan if compiled_plan.compatibility_mode == "native" else None,
+                    font_directory=font_directory,
                 )
                 validation = validate_final_video(
                     temporary, project.canvas, Path(project.mixed_audio_path), self.config.production_render,
@@ -848,6 +861,8 @@ class VideoCompositionService:
         video_bitrate: str,
         encoder_preference: Literal["auto", "nvenc", "cpu"],
         motion_plan=None,
+        *,
+        font_directory: Path | None = None,
     ) -> tuple[str, bool, str | None]:
         """Composite captions when needed; otherwise mux without a second video encode."""
 
@@ -869,7 +884,7 @@ class VideoCompositionService:
             filters.append(f"{video_label}{motion_filter}[vmotion]")
             video_label = "[vmotion]"
         if ass_path is not None:
-            filters.append(f"{video_label}ass='{_filter_path(ass_path)}'[vout]")
+            filters.append(f"{video_label}{_ass_filter(ass_path, font_directory)}[vout]")
         else:
             filters.append(f"{video_label}null[vout]")
         graph = ";".join(filters)
@@ -2919,6 +2934,13 @@ def _ffmpeg() -> str:
 
 def _filter_path(path: Path) -> str:
     return path.resolve().as_posix().replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
+
+
+def _ass_filter(ass_path: Path, font_directory: Path | None = None) -> str:
+    value = f"ass='{_filter_path(ass_path)}'"
+    if font_directory is not None:
+        value += f":fontsdir='{_filter_path(font_directory)}'"
+    return value
 
 
 def _transcript_ranges(transcript: dict[str, Any]) -> dict[int, tuple[float, float]]:

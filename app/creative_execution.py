@@ -64,7 +64,7 @@ def default_native_creative_intent(
         preset_version=envelope.preset.preset_version,
         platform=envelope.preset.platform,
         caption_style_family=family_policy.caption_style_family,
-        caption_density="balanced",
+        caption_density=family_policy.caption_density,
         intensity=family_policy.intensity_ceiling,
         reduced_motion=False,
         source_broll_enabled=family_policy.source_extra_shots_default,

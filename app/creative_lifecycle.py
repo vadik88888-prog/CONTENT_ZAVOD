@@ -476,6 +476,7 @@ def creative_policy_for_config(
         "preset_version": config.product_flow.preset_version,
         "platform": config.product_flow.platform,
         "caption_style_family": family_policy.caption_style_family,
+        "caption_density": family_policy.caption_density,
         "intensity": family_policy.intensity_ceiling,
         # Rights and evidence do not become stronger during a style revision.
         "source_broll_enabled": parent.source_broll_enabled,
