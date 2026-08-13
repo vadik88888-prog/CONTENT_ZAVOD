@@ -1714,6 +1714,7 @@ def _boundary_failure_reason(
 
 def select_with_coverage(
     scored: list[ScoredCandidate], config: Any, content_map_data: dict[str, Any],
+    *, production_feasibility: dict[str, Any] | None = None,
 ) -> tuple[list[ScoredCandidate], dict[str, Any]]:
     """Select strong StoryUnits with existing coverage plus deterministic MMR diversity."""
 
@@ -1726,10 +1727,18 @@ def select_with_coverage(
     selections: list[DiversitySelection] = []
     requested = min(config.max_clips, config.ai_reranking.final_clip_count)
     diversity_lambda = float(settings.diversity_lambda)
+    from app.production_feasibility import production_feasibility_index
+
+    feasibility_by_id = production_feasibility_index(production_feasibility)
+    allow_ranked_replacements = bool(
+        isinstance(production_feasibility, dict)
+        and production_feasibility.get("allow_ranked_replacements")
+    )
     eligible_for_similarity = [
         item for item in scored
         if item.candidate.eligibility_decision is not None
         and item.candidate.eligibility_decision.explicitly_eligible
+        and feasibility_by_id.get(item.candidate.id, {}).get("status") != "GUARANTEED_BLOCKED"
     ]
     similarities, similarity_index = _eligible_diversity_similarities(eligible_for_similarity, stories)
 
@@ -1766,7 +1775,17 @@ def select_with_coverage(
                 "ELIGIBILITY_NOT_PASSED",
                 f"Eligibility gate rejected candidate: state={state}; codes={','.join(codes)}.",
             )
-        elif not item.selected:
+        elif feasibility_by_id.get(item.candidate.id, {}).get("status") == "GUARANTEED_BLOCKED":
+            feasibility = feasibility_by_id[item.candidate.id]
+            reject(
+                item,
+                "PRODUCTION_FEASIBILITY_BLOCKED",
+                str(
+                    feasibility.get("reason")
+                    or "Guaranteed blocked by provider-free production feasibility."
+                ),
+            )
+        elif not item.selected and not allow_ranked_replacements:
             reject(item, "BASE_SELECTION_REJECTED", item.rejection_reason or "Не прошёл базовый quality ranking.")
         elif item.candidate.duration < float(config.min_clip_duration):
             reject(
@@ -1850,7 +1869,11 @@ def select_with_coverage(
         )
         best.candidate.incremental_coverage_score = float(details["incremental_coverage_score"])
         best.selection_reason = "Выбран: качество, coverage и semantic diversity подтверждены MMR-политикой."
-        best.selection_diagnostics = {"decision": "accepted_coverage", **details}
+        best.selection_diagnostics = {
+            "decision": "accepted_coverage",
+            **details,
+            "production_feasibility": feasibility_by_id.get(best.candidate.id),
+        }
         selected.append(best)
         selections.append(DiversitySelection(
             candidate_id=best.candidate.id,
@@ -1880,6 +1903,7 @@ def select_with_coverage(
             "reason": exclusion.reason,
             "reason_code": exclusion.reason_code,
             "diversity": exclusion.to_dict(),
+            "production_feasibility": feasibility_by_id.get(item.candidate.id),
         }
     score_order = {
         item.candidate.id: position

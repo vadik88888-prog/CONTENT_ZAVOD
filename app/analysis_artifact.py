@@ -129,6 +129,8 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
         }
     }
     boundary = _dict_value(candidate.get("boundary_diagnostics"))
+    selection_diagnostics = _dict_value(candidate.get("selection_diagnostics"))
+    production_feasibility = _dict_value(selection_diagnostics.get("production_feasibility"))
     eligibility_decision = _eligibility_decision(candidate.get("eligibility_decision"))
     selected = candidate_id in selected_ids and eligibility_decision.explicitly_eligible
     start = _optional_float(candidate.get("start"))
@@ -199,9 +201,17 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
         "recommended": selected,
         "selected_by_recommendation": selected,
         "recommendation_status": "recommended" if selected else "not_recommended",
+        "production_feasibility": production_feasibility,
         "virality_level": potential.get("level") or potential_level,
         "publishability_status": eligibility.get("status"),
-        "warnings": [*list(candidate.get("warnings") or []), *risks],
+        "warnings": [
+            *list(candidate.get("warnings") or []),
+            *risks,
+            *(
+                [str(production_feasibility.get("reason"))]
+                if production_feasibility.get("status") == "GUARANTEED_BLOCKED" else []
+            ),
+        ],
     }
 
 

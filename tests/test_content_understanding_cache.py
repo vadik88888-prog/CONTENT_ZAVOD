@@ -304,6 +304,10 @@ def test_repeated_analysis_reuses_source_intelligence_cache(tmp_path: Path, monk
     assert first.analysis_id == second.analysis_id
     report = read_json(second.report_path, {})
     assert report["stages"]["transcription"]["cache_hit"] is True
+    assert report["stages"]["production_feasibility"]["cache_hit"] is True
+    feasibility = read_json(first.work_directory / "production_feasibility.json", {})
+    assert feasibility["provider_mode"] == "local_only"
+    assert feasibility["provider_calls"] == {"brain": 0, "vision": 0, "transformation": 0}
     assert report["terminal"]["status"] == "analysis_ready"
 
 

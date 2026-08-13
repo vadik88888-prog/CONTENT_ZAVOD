@@ -84,6 +84,11 @@ from app.production_plan import (
     build_production_plan,
     production_summary,
 )
+from app.production_feasibility import (
+    PRODUCTION_FEASIBILITY_POLICY_VERSION,
+    resolve_recommendation_production_feasibility,
+    validate_production_feasibility_artifact,
+)
 from app.scene_detection import detect_scene_boundaries
 from app.selection import select_clips
 from app.sources import Source, local_source, url_source, validate_source_arguments
@@ -105,7 +110,7 @@ INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
     "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
     "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
-    "coverage_map", "clip_count_recommendation", "render", "report",
+    "production_feasibility", "coverage_map", "clip_count_recommendation", "render", "report",
 )
 INTELLIGENCE_ENGINE_VERSION = "1.8.0"
 TRANSFORMATION_STAGES = (
@@ -793,11 +798,51 @@ class Pipeline:
             )
             ranked_data = virality_ranking
         scored = [scored_from_dict(item) for item in ranked_data.get("candidates", [])]
+        self._prepare_recommendation_candidates(scored, visual_analysis)
+        production_feasibility = self._cached(
+            tracker,
+            "production_feasibility",
+            work_directory / "production_feasibility.json",
+            {
+                "policy_version": PRODUCTION_FEASIBILITY_POLICY_VERSION,
+                "source": source.id,
+                "scored": _hash(ranked_data),
+                "prepared_candidates": _hash([item.to_dict() for item in scored]),
+                "transcript": _hash(transcript),
+                "transcript_features": _hash(transcript_features),
+                "audio_features": _hash(audio_features),
+                "scenes": _hash(scenes),
+                "multimodal_timeline": _hash(multimodal_timeline),
+                "story_units": _hash(story_units),
+                "transformation": self.config.transformation,
+                "production": self.config.production,
+                "production_render": self.config.production_render,
+                "product_flow": self.config.product_flow,
+            },
+            lambda: self._production_feasibility(
+                scored,
+                source=source,
+                source_data=source_data,
+                metadata=metadata,
+                transcript=transcript,
+                transcript_features=transcript_features,
+                audio_features=audio_features,
+                scenes=scenes,
+                multimodal_timeline=multimodal_timeline,
+                story_units=story_units,
+                content_map=content_map,
+                path=work_directory / "production_feasibility.json",
+            ),
+            cache_tracker=source_cache,
+            validator=validate_production_feasibility_artifact,
+        )
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {
                 "policy_version": "coverage-diversity-mmr-5B.2",
                 "scored": _hash(ranked_data), "content_map": _hash(content_map),
+                "prepared_candidates": _hash([item.to_dict() for item in scored]),
+                "production_feasibility": _hash(production_feasibility),
                 "threshold": self.config.score_threshold, "overlap": self.config.overlap_threshold,
                 "distance": self.config.min_selected_clip_distance_seconds, "limit": self.config.ai_reranking.final_clip_count,
                 "coverage": {
@@ -820,7 +865,12 @@ class Pipeline:
                     "minimum_publishability_score": self.config.virality.minimum_publishability_score,
                 },
             },
-            lambda: self._final_selection(scored, work_directory / "final_selection.json", content_map),
+            lambda: self._final_selection(
+                scored,
+                work_directory / "final_selection.json",
+                content_map,
+                production_feasibility,
+            ),
             cache_tracker=source_cache,
         )
         coverage_map = self._cached(
@@ -1039,6 +1089,8 @@ class Pipeline:
                 "vision": vision_analysis,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
+                "production_feasibility_ref": str(work_directory / "production_feasibility.json"),
+                "production_feasibility": final_data.get("production_feasibility", {}),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
                 "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "story_unit_count": len(story_units.get("story_units", [])),
@@ -1074,6 +1126,7 @@ class Pipeline:
                 "vision_observations_ref": str(work_directory / "vision-observations.json"),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundary_ref": str(work_directory / "semantic_boundaries.json"),
+                "production_feasibility_ref": str(work_directory / "production_feasibility.json"),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
                 "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "strategy_version": self.config.content_understanding.strategy_version,
@@ -1204,6 +1257,7 @@ class Pipeline:
             "content_map": str(work_directory / "global_content_map.json"),
             "story_units": str(work_directory / "story_units.json"),
             "semantic_boundaries": str(work_directory / "semantic_boundaries.json"),
+            "production_feasibility": str(work_directory / "production_feasibility.json"),
             "coverage_map": str(work_directory / "coverage_map.json"),
             "clip_count_recommendation": str(work_directory / "clip_count_recommendation.json"),
             "candidate_data": str(candidate_data_path),
@@ -1239,6 +1293,7 @@ class Pipeline:
                 "selected_candidate_ids": [item.candidate.id for item in final_scored if item.candidate.id in selected_ids],
                 "clip_count": clip_count_recommendation,
                 "coverage": coverage_map,
+                "production_feasibility": final_data.get("production_feasibility", {}),
             },
             summary={
                 "candidate_count": len(final_scored),
@@ -1314,6 +1369,8 @@ class Pipeline:
                 "vision": vision_analysis,
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
+                "production_feasibility_ref": str(work_directory / "production_feasibility.json"),
+                "production_feasibility": final_data.get("production_feasibility", {}),
                 "coverage_map_ref": str(work_directory / "coverage_map.json"),
                 "clip_count_recommendation_ref": str(work_directory / "clip_count_recommendation.json"),
                 "story_unit_count": len(story_units.get("story_units", [])),
@@ -2429,11 +2486,92 @@ class Pipeline:
         write_json(path, data)
         return data
 
-    def _final_selection(self, scored: list, path: Path, content_map: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _prepare_recommendation_candidates(
+        self,
+        scored: list,
+        visual_analysis: dict[str, Any],
+    ) -> None:
+        """Refresh deterministic gates after loading old ranking caches."""
+
+        for item in scored:
+            candidate = item.candidate
+            candidate.eligibility_decision = build_eligibility_decision(
+                candidate,
+                candidate.feature_vector,
+                config_version=self.config.scoring.candidate_quality_config_version,
+                min_duration_seconds=self.config.candidate_generation.min_duration_seconds,
+                max_duration_seconds=self.config.candidate_generation.max_duration_seconds,
+                visual_analysis=visual_analysis,
+            )
+            ensure_candidate_boundary_decision(candidate)
+
+    def _production_feasibility(
+        self,
+        scored: list,
+        *,
+        source: Source,
+        source_data: dict[str, Any],
+        metadata: dict[str, Any],
+        transcript: dict[str, Any],
+        transcript_features: dict[str, Any],
+        audio_features: dict[str, Any],
+        scenes: dict[str, Any],
+        multimodal_timeline: dict[str, Any],
+        story_units: dict[str, Any],
+        content_map: dict[str, Any],
+        path: Path,
+    ) -> dict[str, Any]:
+        analysis_fingerprint = _hash({
+            "policy_version": PRODUCTION_FEASIBILITY_POLICY_VERSION,
+            "source": source.id,
+            "transcript": transcript,
+            "candidates": [item.candidate.to_dict() for item in scored],
+            "multimodal_timeline": multimodal_timeline,
+            "story_units": story_units,
+        })
+        envelope_context = self._production_plan_envelope_context(
+            source,
+            transcript,
+            analysis_id=f"analysis-feasibility-{analysis_fingerprint[:16]}",
+            analysis_fingerprint=analysis_fingerprint,
+        )
+        data = resolve_recommendation_production_feasibility(
+            scored,
+            content_map=content_map,
+            source=source_data,
+            metadata=metadata,
+            transcript=transcript,
+            transcript_features=transcript_features,
+            audio_features=audio_features,
+            scenes=scenes,
+            multimodal_timeline=multimodal_timeline,
+            story_units=story_units,
+            config=self.config,
+            envelope_context=envelope_context,
+        )
+        write_json(path, data)
+        return data
+
+    def _final_selection(
+        self,
+        scored: list,
+        path: Path,
+        content_map: dict[str, Any] | None = None,
+        production_feasibility: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if content_map is not None:
-            selected, coverage = select_with_coverage(scored, self.config, content_map)
+            selected, coverage = select_with_coverage(
+                scored,
+                self.config,
+                content_map,
+                production_feasibility=production_feasibility,
+            )
         else:
-            selected = select_clips(scored, self.config)
+            selected = select_clips(
+                scored,
+                self.config,
+                production_feasibility=production_feasibility,
+            )
             coverage = {}
         requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
         warnings: list[str] = []
@@ -2449,6 +2587,17 @@ class Pipeline:
             "warnings": warnings,
             "coverage": coverage,
             "diversity_decision": coverage.get("diversity_decision") if content_map is not None else None,
+            "production_feasibility": {
+                "policy_version": (
+                    production_feasibility.get("policy_version")
+                    if isinstance(production_feasibility, dict) else None
+                ),
+                "summary": (
+                    production_feasibility.get("summary", {})
+                    if isinstance(production_feasibility, dict) else {}
+                ),
+                "artifact_ref": str(path.with_name("production_feasibility.json")),
+            },
         }
         write_json(path, data)
         return data

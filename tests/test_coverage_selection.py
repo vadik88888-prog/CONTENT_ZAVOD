@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.config import AppConfig
+from app.analysis_artifact import candidate_is_draftable
 from app.candidate_quality import CANDIDATE_QUALITY_SCHEMA_VERSION, EligibilityDecision, EligibilityState
 from app.content_understanding import (
     GlobalContentMap,
@@ -93,6 +94,50 @@ def test_semantic_duplicate_is_not_used_to_fill_requested_count() -> None:
     assert decision["schema_version"] == "5B.2"
     assert decision["result_reason_code"] == "INSUFFICIENT_UNIQUE_CANDIDATES"
     assert any(item["reason_code"] == "SEMANTIC_DUPLICATE" for item in decision["exclusions"])
+
+
+def test_guaranteed_production_blocker_is_replaced_without_disabling_manual_choice() -> None:
+    content_map = _content_map([
+        "The first complete claim has a clear result and a useful conclusion.",
+        "The second complete claim explains a different useful conclusion.",
+        "The third complete claim provides another independent result.",
+        "The fourth complete claim is a viable diverse alternative.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 3
+    scored = _scored(content_map, [99, 98, 97, 96])
+    blocked_id = scored[0].candidate.id
+    scored[3].selected = False
+    feasibility = {
+        "allow_ranked_replacements": True,
+        "candidates": [{
+            "candidate_id": blocked_id,
+            "status": "GUARANTEED_BLOCKED",
+            "reason_code": "CAPTION_CPS_INFEASIBLE",
+            "reason": "Guaranteed blocked by provider-free A-3 policy: CAPTION_CPS_INFEASIBLE.",
+            "blockers": [{"gate": "A-3", "reason_code": "CAPTION_CPS_INFEASIBLE"}],
+        }],
+    }
+
+    selected, coverage = select_with_coverage(
+        scored,
+        config,
+        content_map,
+        production_feasibility=feasibility,
+    )
+
+    assert blocked_id not in [item.candidate.id for item in selected]
+    assert len(selected) == 3
+    assert scored[3] in selected
+    exclusion = next(
+        item for item in coverage["diversity_decision"]["exclusions"]
+        if item["candidate_id"] == blocked_id
+    )
+    assert exclusion["reason_code"] == "PRODUCTION_FEASIBILITY_BLOCKED"
+    assert scored[0].selection_diagnostics["production_feasibility"]["reason_code"] == "CAPTION_CPS_INFEASIBLE"
+    # Recommendation is filtered, but explicit manual selection still owns the
+    # same eligibility decision and is allowed to reach the ordinary downstream gate.
+    assert candidate_is_draftable(scored[0].to_dict()) is True
 
 
 def test_mmr_selects_weaker_unique_candidate_instead_of_multiple_semantic_clones() -> None:
