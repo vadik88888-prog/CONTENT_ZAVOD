@@ -170,8 +170,9 @@ def _validate_native_output_quality(
             warnings.append(f"Native {name} quality report uses a declared warning/fallback.")
         for finding in findings:
             message = str(getattr(finding, "message", "") or getattr(finding, "code", "native quality finding"))
+            code = str(getattr(finding, "code", "native quality finding"))
             if str(getattr(finding, "severity", "warning")) == "blocker":
-                errors.append(message)
+                errors.append(f"{code}: {message}")
             elif message not in warnings:
                 warnings.append(message)
 

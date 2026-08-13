@@ -134,31 +134,31 @@ def test_interview_contiguous_micro_cuts_repartition_to_real_cps_fit() -> None:
             output=OutputInterval(start_frame=8, end_frame=28),
         ),
         EditMapSegment(
-            map_id="micro-002", source=SourceInterval.from_seconds(1, 1.5),
+            map_id="micro-002", source=SourceInterval.from_seconds(0.93, 1.43),
             output=OutputInterval(start_frame=28, end_frame=43),
         ),
         EditMapSegment(
-            map_id="micro-003", source=SourceInterval.from_seconds(2, 2.44),
+            map_id="micro-003", source=SourceInterval.from_seconds(1.43, 1.87),
             output=OutputInterval(start_frame=43, end_frame=57),
         ),
         EditMapSegment(
-            map_id="micro-004", source=SourceInterval.from_seconds(3, 4.26),
+            map_id="micro-004", source=SourceInterval.from_seconds(1.87, 3.13),
             output=OutputInterval(start_frame=57, end_frame=95),
         ),
         EditMapSegment(
-            map_id="micro-005", source=SourceInterval.from_seconds(5, 6.75),
+            map_id="micro-005", source=SourceInterval.from_seconds(3.13, 4.88),
             output=OutputInterval(start_frame=95, end_frame=148),
         ),
     ))
     word_specs = (
         ("\u0433" * 8, 0.25, 0.70), ("\u0433" * 9, 0.70, 0.93),
-        ("\u0433" * 2, 1.000, 1.125), ("\u0433" * 3, 1.125, 1.250),
-        ("\u0433" * 3, 1.250, 1.375), ("\u0433" * 4, 1.375, 1.500),
-        ("\u0433" * 6, 2.00, 2.22), ("\u0433" * 7, 2.22, 2.44),
-        ("\u0433" * 7, 3.00, 3.42), ("\u0433" * 2, 3.42, 3.84),
-        ("\u0433" * 9, 3.84, 4.26),
-        ("\u0433", 5.00, 5.20), ("\u0433" * 7, 5.20, 5.50),
-        ("\u0433" * 2, 5.50, 5.80), ("\u0433" * 10, 5.80, 6.10),
+        ("\u0433" * 2, 0.930, 1.055), ("\u0433" * 3, 1.055, 1.180),
+        ("\u0433" * 3, 1.180, 1.305), ("\u0433" * 4, 1.305, 1.430),
+        ("\u0433" * 6, 1.43, 1.65), ("\u0433" * 7, 1.65, 1.87),
+        ("\u0433" * 7, 1.87, 2.29), ("\u0433" * 2, 2.29, 2.71),
+        ("\u0433" * 9, 2.71, 3.13),
+        ("\u0433", 3.13, 3.33), ("\u0433" * 7, 3.33, 3.63),
+        ("\u0433" * 2, 3.63, 3.93), ("\u0433" * 10, 3.93, 4.23),
     )
     transcript = {"words": [
         {
@@ -211,10 +211,133 @@ def test_infeasible_micro_cut_keeps_reading_speed_ceiling_blocker() -> None:
     assert plan.quality_report.status == "BLOCKED"
     blockers = [
         finding for finding in plan.quality_report.findings
-        if finding.code == "CAPTION_CPS_HIGH" and finding.severity == "blocker"
+        if finding.code == "CAPTION_CPS_INFEASIBLE" and finding.severity == "blocker"
     ]
     assert blockers
     assert blockers[0].threshold == 20.0
+    assert plan.feasibility_decision is not None
+    assert plan.feasibility_decision.status == "INFEASIBLE"
+    assert plan.feasibility_decision.reason_code == "CAPTION_CPS_INFEASIBLE"
+    assert plan.feasibility_decision.speech_retiming_allowed is False
+    assert plan.feasibility_decision.transcript_rewrite_allowed is False
+    evidence = plan.feasibility_decision.evidence[0]
+    assert evidence.character_count == 30
+    assert evidence.available_frames == 15
+    assert evidence.required_frames == 45
+    assert evidence.measured_cps == 60.0
+
+
+def test_real_interview_phrase_has_exact_temporal_infeasibility_evidence() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="interview-dialogue-001",
+        source=SourceInterval.from_seconds(1200.67, 1202.58),
+        output=OutputInterval(start_frame=0, end_frame=57),
+    ),))
+    specs = (
+        ("Представьте,", 1200.92, 1201.32),
+        ("что", 1201.40, 1201.50),
+        ("вам", 1201.50, 1201.62),
+        ("нужно", 1201.62, 1201.82),
+        ("вырастить", 1201.82, 1202.14),
+        ("покупатели,", 1202.14, 1202.58),
+    )
+    transcript = {"words": [
+        {
+            "text": text, "start": start, "end": end,
+            "confidence": 0.99, "timing_source": "verified",
+        }
+        for text, start, end in specs
+    ]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+
+    assert plan.feasibility_decision is not None
+    assert plan.feasibility_decision.status == "INFEASIBLE"
+    evidence = next(
+        item for item in plan.feasibility_decision.evidence
+        if item.text == "нужно вырастить покупатели,"
+    )
+    assert evidence.character_count == 25
+    assert evidence.available_frames == 30
+    assert evidence.required_frames == 38
+    assert evidence.measured_cps == 25.0
+    assert evidence.hard_cps_ceiling == 20.0
+    assert evidence.mapping_segment_ids == ("interview-dialogue-001",)
+    assert any(
+        item.code == "CAPTION_CPS_INFEASIBLE" and item.severity == "blocker"
+        for item in plan.quality_report.findings
+    )
+
+
+def test_words_at_known_interview_boundary_keep_identity_order_timing_and_provenance() -> None:
+    mapping = SourceOutputTimeMap(segments=(
+        EditMapSegment(
+            map_id="interview-before-1210-90",
+            source=SourceInterval.from_seconds(1210.50, 1210.90),
+            output=OutputInterval(start_frame=0, end_frame=12),
+        ),
+        EditMapSegment(
+            map_id="interview-between-boundaries",
+            source=SourceInterval.from_seconds(1210.90, 1211.50),
+            output=OutputInterval(start_frame=12, end_frame=30),
+        ),
+        EditMapSegment(
+            map_id="interview-after-1211-50",
+            source=SourceInterval.from_seconds(1211.50, 1212.00),
+            output=OutputInterval(start_frame=30, end_frame=45),
+        ),
+    ))
+    transcript = {"words": [
+        {
+            "text": "человек", "start": 1210.74, "end": 1211.04,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+        {
+            "text": "умеет", "start": 1211.38, "end": 1211.66,
+            "confidence": 0.99, "timing_source": "verified",
+        },
+    ]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+    words = [word for cue in plan.cues for word in cue.words]
+
+    assert [word.word_id for word in words] == ["word-00001", "word-00002"]
+    assert [word.text for word in words] == ["человек", "умеет"]
+    assert words[0].source == SourceInterval.from_seconds(1210.74, 1211.04)
+    assert words[0].mapping_segment_ids == (
+        "interview-before-1210-90", "interview-between-boundaries",
+    )
+    assert words[0].output == OutputInterval(start_frame=7, end_frame=17)
+    assert words[1].source == SourceInterval.from_seconds(1211.38, 1211.66)
+    assert words[1].mapping_segment_ids == (
+        "interview-between-boundaries", "interview-after-1211-50",
+    )
+    assert words[1].output == OutputInterval(start_frame=26, end_frame=35)
+    assert plan.quality_report.status == "PASS"
+
+
+def test_word_mapping_does_not_join_a_real_discontinuous_cut() -> None:
+    mapping = SourceOutputTimeMap(segments=(
+        EditMapSegment(
+            map_id="cut-left", source=SourceInterval.from_seconds(10.0, 11.0),
+            output=OutputInterval(start_frame=0, end_frame=30),
+        ),
+        EditMapSegment(
+            map_id="cut-right", source=SourceInterval.from_seconds(20.0, 21.0),
+            output=OutputInterval(start_frame=30, end_frame=60),
+        ),
+    ))
+    transcript = {"words": [{
+        "text": "человек", "start": 10.8, "end": 20.2,
+        "confidence": 0.99, "timing_source": "verified",
+    }]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+
+    assert not plan.cues
+    assert "UNMAPPED_WORD_DROPPED" in plan.diagnostics
+    assert plan.feasibility_decision is not None
+    assert plan.feasibility_decision.status == "NOT_APPLICABLE"
 
 
 def test_frame_overlap_does_not_create_false_cps_blocker() -> None:

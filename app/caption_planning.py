@@ -23,6 +23,8 @@ from app.creative_contracts import (
     CaptionCollisionDecision,
     CaptionCuePlan,
     CaptionEmphasisPlan,
+    CaptionFeasibilityDecision,
+    CaptionFeasibilityEvidence,
     CaptionFontManifest,
     CaptionPlan,
     CaptionQualityFinding,
@@ -43,6 +45,7 @@ from app.creative_contracts import (
     ResolvedMotionEvent,
     SemanticClass,
     SourceInterval,
+    SourceOutputTimeMap,
     canonical_hash,
 )
 from app.production_subtitles import resolve_subtitle_style
@@ -50,7 +53,9 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "7J.1.caption-calibration.1"
+CAPTION_PLANNER_VERSION = "7J.2A-3.caption-temporal-feasibility.1"
+CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.1"
+CAPTION_HARD_CPS_CEILING = 20.0
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
 CAPTION_TARGET_CPS_MIN = 13.0
 CAPTION_TARGET_CPS_MAX = 17.0
@@ -114,7 +119,12 @@ class _MappedWord:
     output: OutputInterval
     timing_source: Literal["verified", "aligned", "phrase", "estimated"]
     confidence: float
-    map_id: str
+    source: SourceInterval
+    map_ids: tuple[str, ...]
+
+    @property
+    def map_id(self) -> str:
+        return self.map_ids[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +220,7 @@ class CaptionPlanner:
         regions = (*_composition_regions(composition_plan), *tuple(protected_regions))
         diagnostics = list(input_diagnostics)
         if not words:
+            feasibility = _caption_feasibility_not_applicable(intent)
             findings: tuple[CaptionQualityFinding, ...] = (
                 CaptionQualityFinding(
                     code="CAPTION_TIMING_WEAK", severity="warning", measured_value="no_mapped_words",
@@ -220,7 +231,8 @@ class CaptionPlanner:
             return CaptionPlan(
                 schema_version=CAPTION_PLAN_SCHEMA_VERSION,
                 intent_id=intent.intent_id, backend_id="libass", intensity=intent.policy.intensity,
-                font_manifest=manifest, typography=typography, quality_report=report,
+                font_manifest=manifest, typography=typography,
+                feasibility_decision=feasibility, quality_report=report,
                 diagnostics=tuple((*diagnostics, "NO_MAPPED_CAPTION_WORDS")),
             )
 
@@ -232,7 +244,7 @@ class CaptionPlanner:
             tuple(_normalise(part) for part in emphasis.text_span.split() if _normalise(part))
             for emphasis in intent.semantic_emphasis
         )
-        for run in _word_runs(words):
+        for run in _word_runs(words, intent):
             for group in _cue_groups(run, self.config, intent):
                 layouts.extend(_fit_layout(
                     group, measurer, base_size, minimum_size, max_width,
@@ -278,6 +290,7 @@ class CaptionPlanner:
             words_plan = tuple(CaptionWordPlan(
                 word_id=word.word_id, text=word.text, output=word.output,
                 timing_source=word.timing_source, confidence=word.confidence,
+                source=word.source, mapping_segment_ids=word.map_ids,
             ) for word in layout.words)
             fallback_reason: CaptionFallbackReason | None = None
             if timing_mode != "word":
@@ -322,7 +335,14 @@ class CaptionPlanner:
 
         if measurer.used_heuristic and manifest.metrics_backend != "heuristic":
             manifest = manifest.model_copy(update={"metrics_backend": "heuristic"})
-        findings = _assess_plan(cues, manifest, measurer, intent, self.config, intensity_degraded)
+        feasibility = _caption_feasibility_decision(
+            words, cues, intent, self.config, measurer, minimum_size, max_width,
+            protected_phrases,
+        )
+        findings = _assess_plan(
+            cues, manifest, measurer, intent, self.config, intensity_degraded,
+            feasibility,
+        )
         report = _quality_report(cues, findings, manifest, measurer, intent)
         diagnostics.extend(_diagnostics(cues, manifest, measurer))
         if readability_coalesced:
@@ -337,6 +357,7 @@ class CaptionPlanner:
             intensity=intent.policy.intensity,
             font_manifest=manifest,
             typography=typography,
+            feasibility_decision=feasibility,
             quality_report=report,
             diagnostics=tuple(dict.fromkeys(diagnostics)),
         )
@@ -595,18 +616,15 @@ def _mapped_words(
             diagnostics.append("INVALID_WORD_TIMING_DROPPED")
             continue
         source = SourceInterval.from_seconds(max(0.0, word.start_seconds), max(0.0, word.end_seconds))
-        matches = [segment for segment in intent.source_output_mapping.segments if segment.source.contains(source)]
-        if len(matches) != 1:
+        mapped = intent.source_output_mapping.map_continuous_interval(source)
+        if mapped is None:
             diagnostics.append("UNMAPPED_WORD_DROPPED")
             continue
-        output = intent.source_output_mapping.map_interval(source)
-        if output is None:
-            diagnostics.append("AMBIGUOUS_WORD_TIMING_DROPPED")
-            continue
+        output, map_ids = mapped
         result.append(_MappedWord(
             word_id=f"word-{index:05d}", text=word.text.strip(), output=output,
             timing_source=word.timing_source, confidence=max(0.0, min(1.0, word.confidence)),
-            map_id=matches[0].map_id,
+            source=source, map_ids=map_ids,
         ))
     result.sort(key=lambda item: (item.output.start_frame, item.output.end_frame, item.word_id))
     return result, list(dict.fromkeys(diagnostics))
@@ -703,7 +721,7 @@ def _distributed_phrase(
     return result
 
 
-def _word_runs(words: list[_MappedWord]) -> list[tuple[_MappedWord, ...]]:
+def _word_runs(words: list[_MappedWord], intent: CreativeIntent) -> list[tuple[_MappedWord, ...]]:
     runs: list[list[_MappedWord]] = []
     current: list[_MappedWord] = []
     for word in words:
@@ -712,7 +730,14 @@ def _word_runs(words: list[_MappedWord]) -> list[tuple[_MappedWord, ...]]:
         # continuous, so treating every map_id change as a caption hard stop
         # can make an otherwise feasible CPS partition impossible.  A real
         # presentation gap remains the run boundary.
-        if current and word.output.start_frame - current[-1].output.end_frame > 18:
+        if current and (
+            word.output.start_frame - current[-1].output.end_frame > 18
+            or not _map_ids_are_continuous(
+                intent.source_output_mapping,
+                current[-1].map_ids[-1],
+                word.map_ids[0],
+            )
+        ):
             runs.append(current)
             current = []
         current.append(word)
@@ -1069,21 +1094,13 @@ def _layout_run_ranges(
 ) -> list[tuple[int, int]]:
     if not layouts:
         return []
-    mapping = intent.source_output_mapping.segments
-    mapping_order = {segment.map_id: index for index, segment in enumerate(mapping)}
     ranges: list[tuple[int, int]] = []
     start = 0
     for index in range(1, len(layouts)):
-        previous_id = layouts[index - 1].words[-1].map_id
-        current_id = layouts[index].words[0].map_id
-        previous_index = mapping_order[previous_id]
-        current_index = mapping_order[current_id]
-        contiguous = previous_id == current_id or (
-            current_index > previous_index
-            and all(
-                mapping[position].output.end_frame == mapping[position + 1].output.start_frame
-                for position in range(previous_index, current_index)
-            )
+        previous_id = layouts[index - 1].words[-1].map_ids[-1]
+        current_id = layouts[index].words[0].map_ids[0]
+        contiguous = _map_ids_are_continuous(
+            intent.source_output_mapping, previous_id, current_id,
         )
         if not contiguous:
             ranges.append((start, index))
@@ -1097,11 +1114,31 @@ def _mapping_chain_bounds(intent: CreativeIntent, map_id: str) -> tuple[int, int
     index = next(position for position, segment in enumerate(mapping) if segment.map_id == map_id)
     start = index
     end = index
-    while start > 0 and mapping[start - 1].output.end_frame == mapping[start].output.start_frame:
+    while start > 0 and intent.source_output_mapping.segments_are_continuous(
+        mapping[start - 1], mapping[start],
+    ):
         start -= 1
-    while end + 1 < len(mapping) and mapping[end].output.end_frame == mapping[end + 1].output.start_frame:
+    while end + 1 < len(mapping) and intent.source_output_mapping.segments_are_continuous(
+        mapping[end], mapping[end + 1],
+    ):
         end += 1
     return mapping[start].output.start_frame, mapping[end].output.end_frame
+
+
+def _map_ids_are_continuous(
+    mapping: SourceOutputTimeMap, left_id: str, right_id: str,
+) -> bool:
+    positions = {segment.map_id: index for index, segment in enumerate(mapping.segments)}
+    left = positions[left_id]
+    right = positions[right_id]
+    if right < left:
+        return False
+    return all(
+        mapping.segments_are_continuous(
+            mapping.segments[index], mapping.segments[index + 1],
+        )
+        for index in range(left, right)
+    )
 
 
 def _layout_has_protected_semantic_event(layout: _Layout, intent: CreativeIntent) -> bool:
@@ -1127,7 +1164,7 @@ def _words_output(words: tuple[_MappedWord, ...]) -> OutputInterval:
 
 
 def _maximum_caption_cps(words: tuple[_MappedWord, ...]) -> float:
-    return 20.0 if _contains_cyrillic(" ".join(word.text for word in words)) else 22.0
+    return CAPTION_HARD_CPS_CEILING
 
 
 def _target_caption_cps(config: ProductionRenderConfig) -> float:
@@ -1140,6 +1177,197 @@ def _target_caption_cps(config: ProductionRenderConfig) -> float:
 def _minimum_caption_frames(words: tuple[_MappedWord, ...], cps: float) -> int:
     text = " ".join(word.text for word in words)
     return math.ceil(len(text.replace(" ", "")) / cps * 30)
+
+
+def _caption_feasibility_not_applicable(intent: CreativeIntent) -> CaptionFeasibilityDecision:
+    payload = {
+        "intent_id": intent.intent_id,
+        "version": CAPTION_FEASIBILITY_VERSION,
+        "status": "NOT_APPLICABLE",
+    }
+    return CaptionFeasibilityDecision(
+        decision_id=f"caption-feasibility-{canonical_hash(payload)[:24]}",
+        status="NOT_APPLICABLE",
+        reason_code="NO_MAPPED_WORDS",
+    )
+
+
+def _caption_feasibility_decision(
+    words: list[_MappedWord],
+    cues: list[CaptionCuePlan],
+    intent: CreativeIntent,
+    config: ProductionRenderConfig,
+    measurer: _FontMeasurer,
+    minimum_size: int,
+    maximum_width: float,
+    protected_phrases: tuple[tuple[str, ...], ...],
+) -> CaptionFeasibilityDecision:
+    """Exhaustively decide whether legal cue partitions can satisfy hard CPS.
+
+    The search changes only cue partition, presentation window, and line break.
+    Word identity and activation frames stay frozen; speech retiming and text
+    rewriting are deliberately absent from the state space.
+    """
+
+    feasible = True
+    evaluated = 0
+    failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
+    for run in _word_runs(words, intent):
+        run_feasible, run_evaluated, run_failed_windows = _caption_run_is_feasible(
+            run,
+            intent,
+            config,
+            measurer,
+            minimum_size,
+            maximum_width,
+            protected_phrases,
+        )
+        feasible = feasible and run_feasible
+        evaluated += run_evaluated
+        if not run_feasible and run_failed_windows:
+            failed_windows.extend(run_failed_windows)
+
+    evidence: list[CaptionFeasibilityEvidence] = []
+    if not feasible:
+        for mapped, available, required in failed_windows:
+            hard_cps = _maximum_caption_cps(mapped)
+            characters = len("".join(word.text for word in mapped).replace(" ", ""))
+            measured = characters / max(1 / 30, available / 30)
+            if required <= available or measured <= hard_cps + 1e-9:
+                continue
+            source = SourceInterval(
+                start_tick=min(word.source.start_tick for word in mapped),
+                end_tick=max(word.source.end_tick for word in mapped),
+            )
+            map_ids = tuple(dict.fromkeys(
+                map_id for word in mapped for map_id in word.map_ids
+            ))
+            evidence.append(CaptionFeasibilityEvidence(
+                evidence_id=f"caption-cps-evidence-{len(evidence) + 1:03d}",
+                word_ids=tuple(word.word_id for word in mapped),
+                text=" ".join(word.text for word in mapped),
+                source=source,
+                immutable_word_output=_words_output(mapped),
+                mapping_segment_ids=map_ids,
+                character_count=characters,
+                available_frames=available,
+                required_frames=required,
+                measured_cps=round(measured, 6),
+                hard_cps_ceiling=hard_cps,
+                reason="minimum_presentation_window_exceeds_available",
+            ))
+    if not feasible and not evidence:
+        by_id = {word.word_id: word for word in words}
+        for cue in cues:
+            mapped = tuple(by_id[word.word_id] for word in cue.words if word.word_id in by_id)
+            if not mapped or cue.timing_mode != "word":
+                continue
+            hard_cps = _maximum_caption_cps(mapped)
+            characters = len("".join(cue.resolved_lines).replace(" ", ""))
+            available = cue.output.end_frame - cue.output.start_frame
+            required = _minimum_caption_frames(mapped, hard_cps)
+            measured = characters / max(1 / 30, available / 30)
+            if required <= available or measured <= hard_cps + 1e-9:
+                continue
+            source = SourceInterval(
+                start_tick=min(word.source.start_tick for word in mapped),
+                end_tick=max(word.source.end_tick for word in mapped),
+            )
+            map_ids = tuple(dict.fromkeys(
+                map_id for word in mapped for map_id in word.map_ids
+            ))
+            evidence.append(CaptionFeasibilityEvidence(
+                evidence_id=f"caption-cps-evidence-{len(evidence) + 1:03d}",
+                word_ids=tuple(word.word_id for word in mapped),
+                text=" ".join(word.text for word in mapped),
+                source=source,
+                immutable_word_output=_words_output(mapped),
+                mapping_segment_ids=map_ids,
+                character_count=characters,
+                available_frames=available,
+                required_frames=required,
+                measured_cps=round(measured, 6),
+                hard_cps_ceiling=hard_cps,
+                reason="minimum_presentation_window_exceeds_available",
+            ))
+    # A failed search must have an auditable local witness. If the current
+    # partition has no hard-CPS witness, it is not safe to claim physical
+    # impossibility; retain the ordinary quality finding instead.
+    infeasible = not feasible and bool(evidence)
+    status = "INFEASIBLE" if infeasible else "FEASIBLE"
+    reason = "CAPTION_CPS_INFEASIBLE" if infeasible else "CAPTION_TEMPORALLY_FEASIBLE"
+    identity = canonical_hash({
+        "version": CAPTION_FEASIBILITY_VERSION,
+        "intent_id": intent.intent_id,
+        "mapping": intent.source_output_mapping.fingerprint,
+        "status": status,
+        "word_ids": [word.word_id for word in words],
+        "word_outputs": [word.output.model_dump(mode="json") for word in words],
+        "evidence": [item.model_dump(mode="json") for item in evidence],
+        "evaluated_partition_count": evaluated,
+    })
+    return CaptionFeasibilityDecision(
+        decision_id=f"caption-feasibility-{identity[:24]}",
+        status=status,
+        reason_code=reason,
+        evaluated_word_count=len(words),
+        evaluated_partition_count=evaluated,
+        evidence=tuple(evidence) if infeasible else (),
+    )
+
+
+def _caption_run_is_feasible(
+    words: tuple[_MappedWord, ...],
+    intent: CreativeIntent,
+    config: ProductionRenderConfig,
+    measurer: _FontMeasurer,
+    minimum_size: int,
+    maximum_width: float,
+    protected_phrases: tuple[tuple[str, ...], ...],
+) -> tuple[bool, int, list[tuple[tuple[_MappedWord, ...], int, int]]]:
+    chain_start, chain_end = _mapping_chain_bounds(intent, words[0].map_ids[0])
+    maximum_frames = round(config.subtitle_max_duration * 30)
+    # index -> earliest possible exclusive end frame. An earlier end dominates
+    # every later state because it leaves at least as much time for the tail.
+    best: dict[int, int] = {0: chain_start}
+    evaluated = 0
+    failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
+    for end in range(1, len(words) + 1):
+        if end < len(words) and _splits_protected_phrase(words, end, protected_phrases):
+            continue
+        for start in range(max(0, end - config.subtitle_max_words_per_cue), end):
+            previous_end = best.get(start)
+            if previous_end is None:
+                continue
+            if end - start < config.subtitle_min_words_per_cue and end != len(words):
+                continue
+            selected = words[start:end]
+            raw = _words_output(selected)
+            if raw.end_frame - raw.start_frame > maximum_frames:
+                continue
+            if _best_lines(
+                selected, measurer, minimum_size, maximum_width, protected_phrases,
+            ) is None:
+                continue
+            evaluated += 1
+            required = max(
+                raw.end_frame - raw.start_frame,
+                _minimum_caption_frames(selected, _maximum_caption_cps(selected)),
+            )
+            if required > maximum_frames:
+                continue
+            earliest_start = max(chain_start, previous_end - 2)
+            if earliest_start > raw.start_frame:
+                continue
+            earliest_end = max(raw.end_frame, earliest_start + required)
+            if earliest_end > chain_end:
+                if end == len(words):
+                    failed_windows.append((selected, chain_end - earliest_start, required))
+                continue
+            current = best.get(end)
+            if current is None or earliest_end < current:
+                best[end] = earliest_end
+    return len(words) in best, evaluated, failed_windows
 
 
 def _timing_mode(words: tuple[_MappedWord, ...]) -> tuple[Literal["word", "phrase", "static"], float]:
@@ -1425,9 +1653,10 @@ def _rect_overlap_ratio(left: NormalizedRect, right: NormalizedRect) -> float:
 def _assess_plan(
     cues: list[CaptionCuePlan], manifest: CaptionFontManifest, measurer: _FontMeasurer,
     intent: CreativeIntent, config: ProductionRenderConfig, intensity_degraded: set[str],
+    feasibility: CaptionFeasibilityDecision,
 ) -> tuple[CaptionQualityFinding, ...]:
     findings: list[CaptionQualityFinding] = []
-    maximum_cps = 20.0 if any(_contains_cyrillic(" ".join(cue.resolved_lines)) for cue in cues) else 22.0
+    maximum_cps = CAPTION_HARD_CPS_CEILING
     left, _top, right, _bottom = _SAFE_INSETS.get(intent.policy.platform, _SAFE_INSETS["universal"])
     maximum_width = config.output_width * min(config.subtitle_max_rendered_width_ratio, 1 - left - right)
     for cue in cues:
@@ -1435,10 +1664,19 @@ def _assess_plan(
         cps = len("".join(cue.resolved_lines).replace(" ", "")) / max(1 / 30, duration)
         if cps > maximum_cps:
             severity: Literal["warning", "blocker"] = "blocker" if cue.timing_mode == "word" else "warning"
+            code: Literal["CAPTION_CPS_HIGH", "CAPTION_CPS_INFEASIBLE"] = (
+                "CAPTION_CPS_INFEASIBLE"
+                if severity == "blocker" and feasibility.status == "INFEASIBLE"
+                else "CAPTION_CPS_HIGH"
+            )
             findings.append(CaptionQualityFinding(
-                code="CAPTION_CPS_HIGH", severity=severity, cue_id=cue.cue_id,
+                code=code, severity=severity, cue_id=cue.cue_id,
                 measured_value=round(cps, 3), threshold=maximum_cps,
-                message="Caption reading speed exceeds the language-profile ceiling.",
+                message=(
+                    "Frozen word timing and semantic constraints make the hard CPS ceiling physically infeasible."
+                    if code == "CAPTION_CPS_INFEASIBLE"
+                    else "Caption reading speed exceeds the language-profile ceiling."
+                ),
             ))
         if cue.timing_mode != "word":
             findings.append(CaptionQualityFinding(

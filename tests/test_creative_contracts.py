@@ -7,6 +7,7 @@ from app.creative_contracts import (
     BackendAssignment,
     BeatProposal,
     CaptionCuePlan,
+    CaptionFeasibilityDecision,
     CaptionPlan,
     CanvasPlan,
     CompositionPlan,
@@ -215,6 +216,59 @@ def test_source_output_mapping_handles_cuts_reorder_and_rejects_ambiguous_destin
     adapted = source_output_map_from_legacy_timeline(timeline)
     assert adapted.segments[0].source == SourceInterval.from_seconds(10, 12)
     assert adapted.segments[1].output == OutputInterval(start_frame=60, end_frame=180)
+
+
+def test_time_map_cross_segment_interval_requires_source_and_output_continuity() -> None:
+    continuous = SourceOutputTimeMap(segments=(
+        EditMapSegment(
+            map_id="continuous-left", source=SourceInterval.from_seconds(10, 11),
+            output=OutputInterval(start_frame=0, end_frame=30),
+        ),
+        EditMapSegment(
+            map_id="continuous-right", source=SourceInterval.from_seconds(11, 12),
+            output=OutputInterval(start_frame=30, end_frame=60),
+        ),
+    ))
+
+    mapped = continuous.map_continuous_interval(SourceInterval.from_seconds(10.8, 11.2))
+
+    assert mapped == (
+        OutputInterval(start_frame=24, end_frame=36),
+        ("continuous-left", "continuous-right"),
+    )
+    assert continuous.map_interval(SourceInterval.from_seconds(10.8, 11.2)) is None
+
+    source_cut = continuous.model_copy(update={
+        "segments": (
+            continuous.segments[0],
+            continuous.segments[1].model_copy(update={
+                "source": SourceInterval.from_seconds(20, 21),
+            }),
+        ),
+    })
+    assert source_cut.map_continuous_interval(SourceInterval.from_seconds(10.8, 20.2)) is None
+
+    output_gap = continuous.model_copy(update={
+        "segments": (
+            continuous.segments[0],
+            continuous.segments[1].model_copy(update={
+                "output": OutputInterval(start_frame=31, end_frame=61),
+            }),
+        ),
+    })
+    assert output_gap.map_continuous_interval(SourceInterval.from_seconds(10.8, 11.2)) is None
+
+    incompatible_rate = continuous.model_copy(update={
+        "segments": (
+            continuous.segments[0],
+            continuous.segments[1].model_copy(update={
+                "output": OutputInterval(start_frame=30, end_frame=90),
+            }),
+        ),
+    })
+    assert incompatible_rate.map_continuous_interval(
+        SourceInterval.from_seconds(10.8, 11.2),
+    ) is None
 
 
 def test_legacy_time_map_assigns_a_non_frame_aligned_cut_frame_once() -> None:
@@ -438,6 +492,23 @@ def test_compiled_plan_hash_and_parity_are_canonical_and_immutable() -> None:
     changed_keys = {node.node_id: node.cache_key for node in changed.render_graph_nodes}
     assert {
         node for node in first_keys if first_keys[node] == changed_keys[node]
+    } == {"composition", "broll", "motion", "base-visual"}
+
+    assert first.input_fingerprints.caption_feasibility_sha256 is None
+    decision = CaptionFeasibilityDecision(
+        decision_id="caption-feasibility-cache-001",
+        status="FEASIBLE",
+        reason_code="CAPTION_TEMPORALLY_FEASIBLE",
+        evaluated_word_count=3,
+        evaluated_partition_count=4,
+    )
+    decision_changed = compile_with(captions.model_copy(update={
+        "feasibility_decision": decision,
+    }))
+    assert decision_changed.input_fingerprints.caption_feasibility_sha256 == decision.canonical_hash()
+    decision_keys = {node.node_id: node.cache_key for node in decision_changed.render_graph_nodes}
+    assert {
+        node for node in first_keys if first_keys[node] == decision_keys[node]
     } == {"composition", "broll", "motion", "base-visual"}
 
     tampered = first.model_dump(mode="json")

@@ -24,6 +24,7 @@ CREATIVE_PROPOSAL_SCHEMA_VERSION = "7A.proposal.1"
 CREATIVE_INTENT_SCHEMA_VERSION = "7A.intent.1"
 TIME_MAPPING_SCHEMA_VERSION = "7A.time-map.1"
 CAPTION_PLAN_SCHEMA_VERSION = "7C.caption-plan.1"
+CAPTION_FEASIBILITY_DECISION_VERSION = "7J.2A-3.caption-feasibility.1"
 COMPOSITION_PLAN_SCHEMA_VERSION: Literal["7D.composition-plan.1"] = "7D.composition-plan.1"
 MOTION_PLAN_SCHEMA_VERSION: Literal["7F.motion-plan.1"] = "7F.motion-plan.1"
 SOURCE_BROLL_PLAN_SCHEMA_VERSION: Literal["7E.source-broll-plan.1"] = "7E.source-broll-plan.1"
@@ -224,6 +225,77 @@ class SourceOutputTimeMap(FrozenContract):
             end_offset * output_duration + source_duration - 1
         ) // source_duration
         return OutputInterval(start_frame=start_frame, end_frame=max(start_frame + 1, end_frame))
+
+    def map_continuous_interval(
+        self, source: SourceInterval,
+    ) -> tuple[OutputInterval, tuple[str, ...]] | None:
+        """Map an interval through one unique continuous source/output chain.
+
+        ``map_interval`` deliberately retains the strict 7A single-segment
+        contract used by semantic decisions. Caption words need one additional
+        safe case: a word can straddle two evidence-sized mapping segments even
+        though neither segment contains it alone. Such a word is mapped only
+        when every crossed boundary is continuous in both source and output;
+        a real cut, reorder, gap, or ambiguous repeated source range remains
+        unmapped. Returned segment ids are durable mapping provenance.
+        """
+
+        matches: list[tuple[OutputInterval, tuple[str, ...]]] = []
+        for start, segment in enumerate(self.segments):
+            if not (segment.source.start_tick <= source.start_tick < segment.source.end_tick):
+                continue
+            end = start
+            while source.end_tick > self.segments[end].source.end_tick:
+                if end + 1 >= len(self.segments):
+                    break
+                left, right = self.segments[end], self.segments[end + 1]
+                if not self.segments_are_continuous(left, right):
+                    break
+                end += 1
+            if source.end_tick > self.segments[end].source.end_tick:
+                continue
+            first, last = self.segments[start], self.segments[end]
+            start_frame = self._map_tick(first, source.start_tick, end=False)
+            end_frame = self._map_tick(last, source.end_tick, end=True)
+            matches.append((
+                OutputInterval(
+                    start_frame=start_frame,
+                    end_frame=max(start_frame + 1, end_frame),
+                ),
+                tuple(item.map_id for item in self.segments[start:end + 1]),
+            ))
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def segments_are_continuous(left: EditMapSegment, right: EditMapSegment) -> bool:
+        return (
+            left.source.end_tick == right.source.start_tick
+            and left.output.end_frame == right.output.start_frame
+            and SourceOutputTimeMap._segment_rates_are_compatible(left, right)
+        )
+
+    @staticmethod
+    def _segment_rates_are_compatible(left: EditMapSegment, right: EditMapSegment) -> bool:
+        """Allow normal frame quantisation, but reject a playback-rate seam."""
+
+        def rate_bounds(segment: EditMapSegment) -> tuple[float, float]:
+            source_seconds = (segment.source.end_tick - segment.source.start_tick) / SOURCE_TICKS_PER_SECOND
+            frames = segment.output.end_frame - segment.output.start_frame
+            return max(0.0, frames - 1) / source_seconds, (frames + 1) / source_seconds
+
+        left_low, left_high = rate_bounds(left)
+        right_low, right_high = rate_bounds(right)
+        return max(left_low, right_low) <= min(left_high, right_high)
+
+    @staticmethod
+    def _map_tick(segment: EditMapSegment, tick: int, *, end: bool) -> int:
+        source_duration = segment.source.end_tick - segment.source.start_tick
+        output_duration = segment.output.end_frame - segment.output.start_frame
+        offset = tick - segment.source.start_tick
+        numerator = offset * output_duration
+        if end:
+            numerator += source_duration - 1
+        return segment.output.start_frame + numerator // source_duration
 
 
 def source_output_map_from_legacy_timeline(
@@ -915,6 +987,14 @@ class CaptionWordPlan(FrozenContract):
     output: OutputInterval
     timing_source: Literal["verified", "aligned", "phrase", "estimated"]
     confidence: float = Field(ge=0, le=1)
+    source: SourceInterval | None = None
+    mapping_segment_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _complete_mapping_provenance(self) -> "CaptionWordPlan":
+        if (self.source is None) != (not self.mapping_segment_ids):
+            raise ValueError("caption word mapping provenance must be complete")
+        return self
 
 
 class CaptionEmphasisPlan(FrozenContract):
@@ -991,9 +1071,64 @@ class CaptionCollisionDecision(FrozenContract):
     ] = "preferred_lane"
 
 
+class CaptionFeasibilityEvidence(FrozenContract):
+    evidence_id: str = Field(pattern=ID_PATTERN)
+    word_ids: tuple[str, ...] = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=1200)
+    source: SourceInterval
+    immutable_word_output: OutputInterval
+    mapping_segment_ids: tuple[str, ...] = Field(min_length=1)
+    character_count: int = Field(gt=0)
+    available_frames: int = Field(gt=0)
+    required_frames: int = Field(gt=0)
+    measured_cps: float = Field(gt=0)
+    hard_cps_ceiling: float = Field(gt=0)
+    reason: Literal["minimum_presentation_window_exceeds_available"]
+
+    @model_validator(mode="after")
+    def _proves_infeasibility(self) -> "CaptionFeasibilityEvidence":
+        if self.required_frames <= self.available_frames:
+            raise ValueError("caption infeasibility evidence must exceed available frames")
+        if self.measured_cps <= self.hard_cps_ceiling:
+            raise ValueError("caption infeasibility evidence must exceed the hard CPS ceiling")
+        return self
+
+
+class CaptionFeasibilityDecision(FrozenContract):
+    schema_version: Literal["7J.2A-3.caption-feasibility.1"] = CAPTION_FEASIBILITY_DECISION_VERSION
+    decision_id: str = Field(pattern=ID_PATTERN)
+    decision_version: Literal["7J.2A-3.caption-feasibility.1"] = CAPTION_FEASIBILITY_DECISION_VERSION
+    status: Literal["FEASIBLE", "INFEASIBLE", "NOT_APPLICABLE"]
+    reason_code: Literal[
+        "CAPTION_TEMPORALLY_FEASIBLE", "CAPTION_CPS_INFEASIBLE", "NO_MAPPED_WORDS",
+    ]
+    hard_cps_ceiling: float = Field(default=20.0, gt=0)
+    frozen_word_timing: Literal[True] = True
+    speech_retiming_allowed: Literal[False] = False
+    transcript_rewrite_allowed: Literal[False] = False
+    evaluated_word_count: int = Field(default=0, ge=0)
+    evaluated_partition_count: int = Field(default=0, ge=0)
+    evidence: tuple[CaptionFeasibilityEvidence, ...] = ()
+
+    @model_validator(mode="after")
+    def _status_matches_evidence(self) -> "CaptionFeasibilityDecision":
+        expected_reason = {
+            "FEASIBLE": "CAPTION_TEMPORALLY_FEASIBLE",
+            "INFEASIBLE": "CAPTION_CPS_INFEASIBLE",
+            "NOT_APPLICABLE": "NO_MAPPED_WORDS",
+        }[self.status]
+        if self.reason_code != expected_reason:
+            raise ValueError("caption feasibility status and reason code disagree")
+        if self.status == "INFEASIBLE" and not self.evidence:
+            raise ValueError("infeasible caption decision requires exact evidence")
+        if self.status != "INFEASIBLE" and self.evidence:
+            raise ValueError("only infeasible caption decisions may contain blocker evidence")
+        return self
+
+
 class CaptionQualityFinding(FrozenContract):
     code: Literal[
-        "CAPTION_CPS_HIGH", "CAPTION_TIMING_WEAK", "CAPTION_FONT_FALLBACK",
+        "CAPTION_CPS_HIGH", "CAPTION_CPS_INFEASIBLE", "CAPTION_TIMING_WEAK", "CAPTION_FONT_FALLBACK",
         "CAPTION_METRICS_FALLBACK", "CAPTION_INTENSITY_DEGRADED",
         "CAPTION_SAFE_ZONE_VIOLATION", "CAPTION_PROTECTED_REGION_OVERLAP",
         "CAPTION_LANE_SWITCH_RATE_HIGH", "CAPTION_LINE_OVERFLOW",
@@ -1098,6 +1233,7 @@ class CaptionPlan(FrozenContract):
     intensity: Intensity = Intensity.LOW
     font_manifest: CaptionFontManifest | None = None
     typography: CaptionTypographyToken | None = None
+    feasibility_decision: CaptionFeasibilityDecision | None = None
     quality_report: CaptionQualityReport = Field(default_factory=CaptionQualityReport)
     diagnostics: tuple[str, ...] = ()
 
@@ -1110,6 +1246,8 @@ class CaptionPlan(FrozenContract):
                 raise ValueError("7C libass captions require deterministic font and typography manifests")
             if self.quality_report.status == "LEGACY_UNASSESSED":
                 raise ValueError("7C libass captions require an assessed quality report")
+            if self.feasibility_decision is None:
+                raise ValueError("7C libass captions require a temporal feasibility decision")
             if any(cue.normalized_bounds is None or cue.collision is None for cue in self.cues):
                 raise ValueError("7C libass caption cues require frozen geometry and collision decisions")
         return self
@@ -1678,6 +1816,7 @@ class CompiledInputFingerprints(FrozenContract):
     evidence_sha256: str = Field(pattern=HASH_PATTERN)
     edit_mapping_sha256: str = Field(pattern=HASH_PATTERN)
     caption_plan_sha256: str = Field(pattern=HASH_PATTERN)
+    caption_feasibility_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
     composition_plan_sha256: str = Field(pattern=HASH_PATTERN)
     motion_plan_sha256: str = Field(pattern=HASH_PATTERN)
     source_broll_plan_sha256: str = Field(pattern=HASH_PATTERN)
@@ -2081,6 +2220,10 @@ def compile_render_plan(
         "evidence_sha256": intent.evidence_fingerprint,
         "edit_mapping_sha256": intent.source_output_mapping.fingerprint,
         "caption_plan_sha256": caption_plan.canonical_hash(),
+        "caption_feasibility_sha256": (
+            caption_plan.feasibility_decision.canonical_hash()
+            if caption_plan.feasibility_decision is not None else None
+        ),
         "composition_plan_sha256": composition_plan.canonical_hash(),
         "motion_plan_sha256": motion_plan.canonical_hash(),
         "source_broll_plan_sha256": source_broll_plan.canonical_hash(),
