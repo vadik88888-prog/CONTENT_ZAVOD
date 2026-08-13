@@ -1244,6 +1244,12 @@ class DesktopServices:
         )
         run.finished_at = utc_now()
         run.warnings = warnings
+        # A verified engine completion may be repairing a Desktop run that was
+        # previously marked failed only because its artifact lookup missed the
+        # canonical report.  Do not retain that stale failure on the recovered
+        # analysis-ready/draft-ready record.
+        run.error_summary = None
+        run.technical_details = None
         run.cost_estimate = completion.cost_estimate
         run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
         run_info = report.get("run", {}) if isinstance(report, dict) else {}

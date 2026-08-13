@@ -129,6 +129,12 @@ class PipelineFacade:
         )
         self.engine_root = self.runtime.data
         self.resources_root = self.runtime.resources
+        # The CLI owns its artifact tree relative to the working directory
+        # selected by RuntimeLayout.  In a source checkout that is the
+        # resources root (so ``python -m app`` remains importable); in a frozen
+        # build it is the writable data root.  Desktop must address the
+        # engine's index at that same root instead of assuming data == cwd.
+        self.engine_artifact_root = self.runtime.internal_cli_command(()).working_directory
 
     def inspect_source(self, source_path: str | Path) -> dict[str, Any]:
         path = validate_video_path(source_path)
@@ -476,8 +482,8 @@ class PipelineFacade:
     ) -> PreparedPipelineRun:
         """Prepare a launch without deriving engine output locations in GUI code."""
 
-        metadata_path = run_metadata_path(self.engine_root, run_id)
         command = self.runtime.internal_cli_command(arguments)
+        metadata_path = run_metadata_path(command.working_directory, run_id)
         return PreparedPipelineRun(
             program=str(command.program), arguments=list(command.arguments),
             working_directory=command.working_directory,
@@ -1031,7 +1037,7 @@ class PipelineFacade:
         if prepared is None or not prepared.run_id:
             return prepared
         metadata = find_run_artifact_metadata(
-            self.engine_root,
+            self.engine_artifact_root,
             run_id=prepared.run_id,
             project_id=prepared.project_id,
             preferred_path=prepared.artifact_metadata_path,

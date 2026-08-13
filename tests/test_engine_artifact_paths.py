@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
+from app.analysis_artifact import new_analysis_artifact
 from app.config import AppConfig
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -13,7 +15,13 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.pipeline import Pipeline, StageTracker
-from app.run_artifacts import find_run_artifact_metadata, run_metadata_path
+from app.run_artifacts import (
+    find_run_artifact_metadata,
+    make_run_artifact_metadata,
+    run_metadata_path,
+    write_run_artifact_metadata,
+)
+from app.runtime import RuntimeLayout
 from app.utils import read_json, write_json
 
 
@@ -169,6 +177,8 @@ def test_recovery_restores_ready_legacy_analysis_without_relaunching(tmp_path: P
         "runtime_flags": {"mode": "analysis"},
     }
     run.status = RunStatus.FAILED
+    run.error_summary = "Итоговый отчёт обработки не найден."
+    run.technical_details = f"Expected report is missing: {run_metadata_path(data, run.run_id)}"
     runs.save(run)
     actual = tmp_path / "output" / "фактический-url-title-42" / "runs" / run.run_id
     analysis = actual / "analysis.json"
@@ -196,3 +206,127 @@ def test_recovery_restores_ready_legacy_analysis_without_relaunching(tmp_path: P
     assert restored.analysis_artifact_path == str(analysis.resolve())
     assert restored_run.status == RunStatus.ANALYSIS_READY
     assert restored_run.settings_snapshot["execution"]["engine_paths"]["report_path"] == str((actual / "report.json").resolve())
+
+
+def test_source_desktop_recovers_analysis_when_engine_index_is_not_under_data_root(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A successful source-mode CLI run must not be failed by Desktop finalization."""
+
+    resources = tmp_path / "исходный checkout"
+    data = tmp_path / "данные Desktop"
+    resources.mkdir()
+    source = data / "projects" / "media" / (
+        "РЕКРЕНТ СЛОВИЛ ЖЕСТКИЙ ТИЛЬТ ИЗ-ЗА ТИММЕЙТОВ НА ФЕЙСИТЕ — "
+        + "очень длинное имя источника " * 3
+        + ".webm"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+
+    runtime = RuntimeLayout.for_source(resources, data=data, program=Path(sys.executable))
+    projects = DesktopProjectStore(data)
+    project = projects.create(source)
+    runs = RunHistoryStore(projects)
+    run = runs.create(project, {}, {"path": str(source)}, "0.1.0", run_kind=RunKind.ANALYSIS)
+    facade = PipelineFacade(runtime)
+
+    pending = facade._pending_prepared(
+        ["analyze"], source, project.directory / "runtime-config.yaml",
+        run.run_id, project.project_id, {"mode": "analysis"},
+    )
+    assert pending.artifact_metadata_path == run_metadata_path(resources, run.run_id)
+    assert pending.artifact_metadata_path != run_metadata_path(data, run.run_id)
+
+    # Recreate the persisted broken Desktop record from the real incident: it
+    # points at the data-root sentinel, while the source-mode engine published
+    # its canonical paths under its actual working directory.
+    run.settings_snapshot["execution"] = {
+        "run_id": run.run_id,
+        "project_id": project.project_id,
+        "artifact_metadata_path": str(run_metadata_path(data, run.run_id)),
+        "allow_legacy_artifact_scan": False,
+        "source_path": str(source),
+        "runtime_flags": {"mode": "analysis"},
+    }
+    run.status = RunStatus.FAILED
+    runs.save(run)
+
+    output = resources / "output" / "engine-owned-unicode-slug" / "runs" / run.run_id
+    work = resources / "work" / "engine-owned-unicode-slug"
+    analysis = output / "analysis.json"
+    candidate_id = "candidate-chapter-007-story-001"
+    new_analysis_artifact(
+        analysis_id="analysis-ready", project_id=project.project_id,
+        source={"id": "source-fingerprint", "path": str(source)},
+        source_fingerprint="source-fingerprint", analysis_fingerprint="analysis-fingerprint",
+        work_directory=str(work), candidate_data_ref=str(work / "candidates.scored.json"),
+        references={}, candidates=[{
+            "candidate_id": candidate_id,
+            "title": "Один найденный момент",
+            "start_seconds": 10.0,
+            "end_seconds": 24.0,
+            "selected_by_recommendation": True,
+        }],
+        recommendation={"selected_candidate_ids": [candidate_id]},
+        summary={"candidate_count": 1, "recommended_count": 1},
+        content_profile={}, duration_seconds=90.0, candidate_count=1,
+        recommended_count={"min": 1, "max": 3, "default": 3},
+    ).write(analysis)
+    warning = "Найдено только 1 достаточно разных сильных фрагмента из запрошенных 3."
+    report = output / "report.json"
+    write_json(report, {
+        "terminal": {"status": "analysis_ready"},
+        "warnings": [warning],
+        "output_files": [],
+        "clip_intelligence": {"candidates": [{"id": candidate_id}]},
+        "run": {
+            "run_id": run.run_id,
+            "project_id": project.project_id,
+            "run_directory": str(output),
+            "analysis_artifact_path": str(analysis),
+            "analysis_id": "analysis-ready",
+            "analysis_fingerprint": "analysis-fingerprint",
+            "terminal_status": "analysis_ready",
+        },
+    })
+    write_run_artifact_metadata(resources, make_run_artifact_metadata(
+        engine_root=resources,
+        run_id=run.run_id,
+        project_id=project.project_id,
+        work_directory=work,
+        output_directory=output,
+        report_path=report,
+        analysis_artifact_path=analysis,
+        terminal_status="analysis_ready",
+    ))
+
+    settings = DesktopSettings.defaults(data)
+    services = DesktopServices(
+        engine_root=data,
+        settings_store=SettingsStore(data),
+        settings=settings,
+        projects=projects,
+        runs=runs,
+        pipeline=facade,
+        system=SystemService(runtime),
+        runtime=runtime,
+    )
+    monkeypatch.setattr(
+        services.pipeline, "prepare_analysis",
+        lambda *_args, **_kwargs: pytest.fail("persisted analysis must not be launched again"),
+    )
+
+    assert services.recover_ready_analysis_runs() == 1
+    restored = projects.load(project.project_id)
+    restored_run = runs.load(project.project_id, run.run_id)
+
+    assert restored.status == ProjectStatus.ANALYSIS_READY
+    assert restored.analysis_artifact_path == str(analysis.resolve())
+    assert restored.candidate_states == {candidate_id: "analyzed"}
+    assert restored_run.status == RunStatus.ANALYSIS_READY
+    assert restored_run.warnings == [warning]
+    assert restored_run.error_summary is None
+    assert restored_run.technical_details is None
+    assert restored_run.settings_snapshot["execution"]["engine_paths"]["report_path"] == str(report.resolve())
+    assert read_json(Path(restored.analysis_artifact_path))["candidates"][0]["title"] == "Один найденный момент"
