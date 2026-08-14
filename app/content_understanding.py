@@ -560,7 +560,7 @@ class DeterministicContentStrategy:
                 "speaker_ids": _speaker_ids(raw_segments),
                 "scene_boundary_count": len(scenes.get("boundaries", [])),
                 "filename_signal_used": bool(detected_profile.get("provenance", {}).get("filename_signal_used")),
-                "profile_axes": ["format", "editorial_mode", "domain", "traits"],
+                "profile_axes": list(PROFILE_AXIS_ORDER),
             },
             detected_profile=detected_profile,
             effective_profile=effective_profile,

@@ -1,0 +1,392 @@
+{
+  "schema_version": "source-content-profile-v2-task1-real-window.1",
+  "captured_at": "2026-08-14T15:04:16.088684+00:00",
+  "os": "Windows-10-10.0.26200-SP0",
+  "qt_platform": "windows",
+  "screen": {
+    "name": "\\\\.\\DISPLAY1",
+    "available_geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 1536,
+      "height": 816
+    },
+    "device_pixel_ratio": 1.25
+  },
+  "window": {
+    "class": "ProjectScreen",
+    "title": "Content Factory — Source Content Profile v2 QA",
+    "native_window_id": 19859436,
+    "width": 1400,
+    "height": 736
+  },
+  "sample_selections": {
+    "format": "gameplay",
+    "editorial_mode": "commentary",
+    "domain": "gaming",
+    "traits": "visual_led"
+  },
+  "persisted_values": {
+    "format": "gameplay",
+    "editorial_mode": "commentary",
+    "domain": "gaming",
+    "traits": "visual_led"
+  },
+  "controls": {
+    "format": {
+      "visible": true,
+      "fully_inside_scroll_viewport": true,
+      "enabled": true,
+      "geometry": {
+        "x": 19,
+        "y": 194,
+        "width": 1316,
+        "height": 36
+      },
+      "items": [
+        {
+          "label": "Авто",
+          "value": "auto"
+        },
+        {
+          "label": "Говорящая голова",
+          "value": "talking_head"
+        },
+        {
+          "label": "Диалог",
+          "value": "dialogue"
+        },
+        {
+          "label": "Демонстрация экрана",
+          "value": "screen_demo"
+        },
+        {
+          "label": "Геймплей",
+          "value": "gameplay"
+        },
+        {
+          "label": "Сценовое видео",
+          "value": "scene_driven"
+        },
+        {
+          "label": "Смешанный",
+          "value": "mixed"
+        }
+      ],
+      "expected_values": [
+        "auto",
+        "talking_head",
+        "dialogue",
+        "screen_demo",
+        "gameplay",
+        "scene_driven",
+        "mixed"
+      ],
+      "expected_labels": [
+        "Авто",
+        "Говорящая голова",
+        "Диалог",
+        "Демонстрация экрана",
+        "Геймплей",
+        "Сценовое видео",
+        "Смешанный"
+      ],
+      "values_match_contract": true,
+      "labels_match_contract": true,
+      "current_value": "gameplay",
+      "current_label": "Геймплей"
+    },
+    "editorial_mode": {
+      "visible": true,
+      "fully_inside_scroll_viewport": true,
+      "enabled": true,
+      "geometry": {
+        "x": 19,
+        "y": 258,
+        "width": 1316,
+        "height": 36
+      },
+      "items": [
+        {
+          "label": "Авто",
+          "value": "auto"
+        },
+        {
+          "label": "Объяснение",
+          "value": "explanatory"
+        },
+        {
+          "label": "Интервью",
+          "value": "interview"
+        },
+        {
+          "label": "Комментарий",
+          "value": "commentary"
+        },
+        {
+          "label": "Мотивация",
+          "value": "motivational"
+        },
+        {
+          "label": "История",
+          "value": "narrative"
+        },
+        {
+          "label": "Демонстрация",
+          "value": "demonstration"
+        },
+        {
+          "label": "Развлечение",
+          "value": "entertainment"
+        },
+        {
+          "label": "Новости / аналитика",
+          "value": "news_analysis"
+        }
+      ],
+      "expected_values": [
+        "auto",
+        "explanatory",
+        "interview",
+        "commentary",
+        "motivational",
+        "narrative",
+        "demonstration",
+        "entertainment",
+        "news_analysis"
+      ],
+      "expected_labels": [
+        "Авто",
+        "Объяснение",
+        "Интервью",
+        "Комментарий",
+        "Мотивация",
+        "История",
+        "Демонстрация",
+        "Развлечение",
+        "Новости / аналитика"
+      ],
+      "values_match_contract": true,
+      "labels_match_contract": true,
+      "current_value": "commentary",
+      "current_label": "Комментарий"
+    },
+    "domain": {
+      "visible": true,
+      "fully_inside_scroll_viewport": true,
+      "enabled": true,
+      "geometry": {
+        "x": 19,
+        "y": 322,
+        "width": 1316,
+        "height": 36
+      },
+      "items": [
+        {
+          "label": "Авто",
+          "value": "auto"
+        },
+        {
+          "label": "Бизнес",
+          "value": "business"
+        },
+        {
+          "label": "Технологии",
+          "value": "technology"
+        },
+        {
+          "label": "Образование",
+          "value": "education"
+        },
+        {
+          "label": "Игры",
+          "value": "gaming"
+        },
+        {
+          "label": "Еда",
+          "value": "food"
+        },
+        {
+          "label": "Здоровье",
+          "value": "health"
+        },
+        {
+          "label": "Финансы",
+          "value": "finance"
+        },
+        {
+          "label": "Лайфстайл",
+          "value": "lifestyle"
+        },
+        {
+          "label": "Развлечения",
+          "value": "entertainment"
+        },
+        {
+          "label": "Новости",
+          "value": "news"
+        },
+        {
+          "label": "Общее",
+          "value": "general"
+        }
+      ],
+      "expected_values": [
+        "auto",
+        "business",
+        "technology",
+        "education",
+        "gaming",
+        "food",
+        "health",
+        "finance",
+        "lifestyle",
+        "entertainment",
+        "news",
+        "general"
+      ],
+      "expected_labels": [
+        "Авто",
+        "Бизнес",
+        "Технологии",
+        "Образование",
+        "Игры",
+        "Еда",
+        "Здоровье",
+        "Финансы",
+        "Лайфстайл",
+        "Развлечения",
+        "Новости",
+        "Общее"
+      ],
+      "values_match_contract": true,
+      "labels_match_contract": true,
+      "current_value": "gaming",
+      "current_label": "Игры"
+    },
+    "traits": {
+      "visible": true,
+      "fully_inside_scroll_viewport": true,
+      "enabled": true,
+      "geometry": {
+        "x": 19,
+        "y": 386,
+        "width": 1316,
+        "height": 36
+      },
+      "items": [
+        {
+          "label": "Авто",
+          "value": "auto"
+        },
+        {
+          "label": "Ведёт речь",
+          "value": "speech_led"
+        },
+        {
+          "label": "Ведёт визуал",
+          "value": "visual_led"
+        },
+        {
+          "label": "Один спикер",
+          "value": "single_speaker"
+        },
+        {
+          "label": "Несколько спикеров",
+          "value": "multi_speaker"
+        },
+        {
+          "label": "Вопрос — ответ",
+          "value": "question_answer"
+        },
+        {
+          "label": "Высокий темп",
+          "value": "high_pacing"
+        },
+        {
+          "label": "Спокойный темп",
+          "value": "low_pacing"
+        },
+        {
+          "label": "Высокая эмоциональность",
+          "value": "high_emotion"
+        },
+        {
+          "label": "Плотная информация",
+          "value": "dense_information"
+        },
+        {
+          "label": "Повторы",
+          "value": "repetitive"
+        },
+        {
+          "label": "Экранный контент",
+          "value": "screen_content"
+        },
+        {
+          "label": "Ведут сцены",
+          "value": "scene_driven"
+        },
+        {
+          "label": "Обучающий",
+          "value": "instructional"
+        }
+      ],
+      "expected_values": [
+        "auto",
+        "speech_led",
+        "visual_led",
+        "single_speaker",
+        "multi_speaker",
+        "question_answer",
+        "high_pacing",
+        "low_pacing",
+        "high_emotion",
+        "dense_information",
+        "repetitive",
+        "screen_content",
+        "scene_driven",
+        "instructional"
+      ],
+      "expected_labels": [
+        "Авто",
+        "Ведёт речь",
+        "Ведёт визуал",
+        "Один спикер",
+        "Несколько спикеров",
+        "Вопрос — ответ",
+        "Высокий темп",
+        "Спокойный темп",
+        "Высокая эмоциональность",
+        "Плотная информация",
+        "Повторы",
+        "Экранный контент",
+        "Ведут сцены",
+        "Обучающий"
+      ],
+      "values_match_contract": true,
+      "labels_match_contract": true,
+      "current_value": "visual_led",
+      "current_label": "Ведёт визуал"
+    }
+  },
+  "checks": {
+    "qt_windows_platform": true,
+    "native_window_created": true,
+    "project_screen_visible": true,
+    "settings_panel_visible": true,
+    "all_controls_visible": true,
+    "all_controls_inside_scroll_viewport": true,
+    "all_controls_enabled": true,
+    "all_values_match_contract": true,
+    "all_labels_match_contract": true,
+    "interactive_selection_persisted": true
+  },
+  "result": "PASS",
+  "screenshot": {
+    "path": "project-screen-profile-controls.png",
+    "sha256": "157d747c7adf69bbd8156aa28a3ca8c0334872e514addb9ed0987242cac49b44",
+    "width": 1750,
+    "height": 920
+  }
+}

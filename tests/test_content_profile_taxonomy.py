@@ -100,6 +100,41 @@ def test_schema_config_product_and_profile_validation_cannot_drift_from_registry
         config.validate()
 
 
+def test_profile_consumers_do_not_redeclare_axis_order_or_auto_sentinel() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    consumer_paths = (
+        repository_root / "app" / "config.py",
+        repository_root / "app" / "content_understanding.py",
+        repository_root / "app" / "product_flow.py",
+        repository_root / "app" / "gui" / "screens" / "project_screen.py",
+    )
+
+    repeated_axis_orders: list[str] = []
+    for source_path in consumer_paths:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.List, ast.Tuple)):
+                continue
+            values = tuple(
+                item.value for item in node.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+            if values == PROFILE_AXIS_ORDER:
+                repeated_axis_orders.append(str(source_path.relative_to(repository_root)))
+
+    assert repeated_axis_orders == []
+
+    screen_path = repository_root / "app" / "gui" / "screens" / "project_screen.py"
+    screen_tree = ast.parse(screen_path.read_text(encoding="utf-8"))
+    trait_fallbacks = [
+        node for node in ast.walk(screen_tree)
+        if isinstance(node, ast.IfExp) and "profile_traits_override" in ast.unparse(node.test)
+    ]
+    assert len(trait_fallbacks) == 1
+    assert isinstance(trait_fallbacks[0].orelse, ast.Name)
+    assert trait_fallbacks[0].orelse.id == "AUTO_PROFILE_INPUT"
+
+
 def test_config_preserves_5a1_to_5a2_schema_compatibility() -> None:
     current = AppConfig()
     assert current.content_understanding.profile_schema_version == CONTENT_PROFILE_SCHEMA_VERSION

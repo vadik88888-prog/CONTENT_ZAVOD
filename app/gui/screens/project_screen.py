@@ -1322,7 +1322,9 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.profile_domain_override, project.settings.profile_domain_override)
         self._set_combo_data(
             self.profile_trait_override,
-            project.settings.profile_traits_override[0] if project.settings.profile_traits_override else "auto",
+            project.settings.profile_traits_override[0]
+            if project.settings.profile_traits_override
+            else AUTO_PROFILE_INPUT,
         )
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
         self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
