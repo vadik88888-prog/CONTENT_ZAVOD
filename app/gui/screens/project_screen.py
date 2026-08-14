@@ -17,6 +17,11 @@ from PySide6.QtWidgets import (
 
 from app.analysis_artifact import candidate_is_draftable
 from app.clip_results import ClipResult, unique_primary_results
+from app.content_profile_taxonomy import (
+    AUTO_PROFILE_INPUT,
+    ProfileAxisId,
+    user_overridable_values,
+)
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
@@ -42,6 +47,14 @@ _GLOBAL_STEP_FOR_FLOW = {
     "drafts": "results",
     "finished": "results",
 }
+
+
+def _populate_profile_override(combo: QComboBox, axis_id: ProfileAxisId) -> None:
+    """Populate a user control from the canonical profile registry."""
+
+    combo.addItem("Авто", AUTO_PROFILE_INPUT)
+    for value in user_overridable_values(axis_id):
+        combo.addItem(value.label, value.id)
 
 
 class _ElidedLabel(QLabel):
@@ -416,53 +429,31 @@ class ProjectScreen(QWidget):
         settings.addWidget(self.deep_analysis)
         settings.addWidget(QLabel("Профиль источника: формат"))
         self.profile_format_override = QComboBox()
-        for label, value in (
-            ("Авто", "auto"), ("Говорящая голова", "talking_head"), ("Диалог", "dialogue"),
-            ("Демонстрация экрана", "screen_demo"), ("Геймплей", "gameplay"),
-            ("Сценовое видео", "scene_driven"), ("Смешанный", "mixed"),
-        ):
-            self.profile_format_override.addItem(label, value)
+        _populate_profile_override(self.profile_format_override, "format")
         self.profile_format_override.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(profile_format_override=str(self.profile_format_override.currentData()))
         )
         settings.addWidget(self.profile_format_override)
         settings.addWidget(QLabel("Редакционный режим источника"))
         self.profile_editorial_mode_override = QComboBox()
-        for label, value in (
-            ("Авто", "auto"), ("Объяснение", "explanatory"), ("Интервью", "interview"),
-            ("Комментарий", "commentary"), ("Мотивация", "motivational"), ("История", "narrative"),
-            ("Демонстрация", "demonstration"), ("Развлечение", "entertainment"), ("Новости / аналитика", "news_analysis"),
-        ):
-            self.profile_editorial_mode_override.addItem(label, value)
+        _populate_profile_override(self.profile_editorial_mode_override, "editorial_mode")
         self.profile_editorial_mode_override.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(profile_editorial_mode_override=str(self.profile_editorial_mode_override.currentData()))
         )
         settings.addWidget(self.profile_editorial_mode_override)
         settings.addWidget(QLabel("Тематика источника"))
         self.profile_domain_override = QComboBox()
-        for label, value in (
-            ("Авто", "auto"), ("Бизнес", "business"), ("Технологии", "technology"),
-            ("Образование", "education"), ("Игры", "gaming"), ("Еда", "food"),
-            ("Здоровье", "health"), ("Финансы", "finance"), ("Лайфстайл", "lifestyle"),
-            ("Развлечения", "entertainment"), ("Новости", "news"), ("Общее", "general"),
-        ):
-            self.profile_domain_override.addItem(label, value)
+        _populate_profile_override(self.profile_domain_override, "domain")
         self.profile_domain_override.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(profile_domain_override=str(self.profile_domain_override.currentData()))
         )
         settings.addWidget(self.profile_domain_override)
         settings.addWidget(QLabel("Главный признак источника"))
         self.profile_trait_override = QComboBox()
-        for label, value in (
-            ("Авто", "auto"), ("Ведёт речь", "speech_led"), ("Ведёт визуал", "visual_led"),
-            ("Вопрос — ответ", "question_answer"), ("Высокий темп", "high_pacing"),
-            ("Спокойный темп", "low_pacing"), ("Плотная информация", "dense_information"),
-            ("Экранный контент", "screen_content"), ("Обучающий", "instructional"),
-        ):
-            self.profile_trait_override.addItem(label, value)
+        _populate_profile_override(self.profile_trait_override, "traits")
         self.profile_trait_override.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(
-                profile_traits_override=[] if self.profile_trait_override.currentData() == "auto"
+                profile_traits_override=[] if self.profile_trait_override.currentData() == AUTO_PROFILE_INPUT
                 else [str(self.profile_trait_override.currentData())]
             )
         )

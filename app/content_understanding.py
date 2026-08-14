@@ -14,6 +14,15 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from app.content_profile_taxonomy import (
+    CONTENT_PROFILE_SCHEMA_VERSION,
+    LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS,
+    PROFILE_AXIS_ORDER,
+    order_profile_ids,
+    profile_value_ids,
+    unknown_fallback,
+    user_override_ids,
+)
 from app.diversity import (
     DIVERSITY_DECISION_SCHEMA_VERSION,
     DiversityDecision,
@@ -31,8 +40,8 @@ from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
 
-VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.2"
-LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
+VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = CONTENT_PROFILE_SCHEMA_VERSION
+LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS[0]
 CONTENT_STRATEGY_VERSION = "5A.3"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
@@ -48,22 +57,12 @@ DOMINANT_FORMATS = frozenset({
     "narrated_visual", "scene_driven", "gameplay_commentary",
     "screen_recording", "mixed", "unknown",
 })
-PROFILE_FORMATS = frozenset({
-    "talking_head", "dialogue", "screen_demo", "gameplay", "scene_driven", "mixed", "unknown",
-})
-PROFILE_EDITORIAL_MODES = frozenset({
-    "explanatory", "interview", "commentary", "motivational", "narrative",
-    "demonstration", "entertainment", "news_analysis", "unknown",
-})
-PROFILE_DOMAINS = frozenset({
-    "business", "technology", "education", "gaming", "food", "health", "finance",
-    "lifestyle", "entertainment", "news", "general", "unknown",
-})
-PROFILE_TRAITS = frozenset({
-    "speech_led", "visual_led", "single_speaker", "multi_speaker", "question_answer",
-    "high_pacing", "low_pacing", "high_emotion", "dense_information", "repetitive",
-    "screen_content", "scene_driven", "instructional",
-})
+# Compatibility aliases for callers that imported the pre-registry names.  The
+# values are projections of the canonical registry, never independent lists.
+PROFILE_FORMATS = frozenset(profile_value_ids("format"))
+PROFILE_EDITORIAL_MODES = frozenset(profile_value_ids("editorial_mode"))
+PROFILE_DOMAINS = frozenset(profile_value_ids("domain"))
+PROFILE_TRAITS = frozenset(profile_value_ids("traits"))
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
 _MOTIVATIONAL_TERMS = (
@@ -690,7 +689,7 @@ def _detect_profile_axes(
     elif scene_count >= 8 or visual_density >= 0.55:
         format_axis = _axis("scene_driven", 0.62, ["scenes:high_visual_activity"])
     else:
-        format_axis = _axis("unknown", 0.2, ["fallback:insufficient_format_evidence"])
+        format_axis = _axis(unknown_fallback("format"), 0.2, ["fallback:insufficient_format_evidence"])
 
     editorial_terms = {
         "interview": _DIALOGUE_TERMS,
@@ -707,7 +706,7 @@ def _detect_profile_axes(
     editorial_mode, editorial_score = max(editorial_scores.items(), key=lambda item: (item[1], item[0]))
     if editorial_score <= 0:
         enough_speech = len(_tokens(text)) >= 6
-        editorial_mode = "commentary" if enough_speech else "unknown"
+        editorial_mode = "commentary" if enough_speech else unknown_fallback("editorial_mode")
         editorial_confidence = 0.52 if enough_speech else 0.2
         editorial_evidence = ["transcript:speech_present"] if enough_speech else ["fallback:insufficient_editorial_evidence"]
     else:
@@ -740,7 +739,7 @@ def _detect_profile_axes(
     elif domain_score > 0:
         domain_axis = _axis(domain, min(0.9, 0.5 + domain_score * 0.1), [f"transcript:{domain}_terms"])
     else:
-        domain_axis = _axis("general" if text.strip() else "unknown", 0.45 if text.strip() else 0.2,
+        domain_axis = _axis("general" if text.strip() else unknown_fallback("domain"), 0.45 if text.strip() else 0.2,
                             ["fallback:general_spoken_content"] if text.strip() else ["fallback:insufficient_domain_evidence"])
 
     traits: list[dict[str, Any]] = []
@@ -787,9 +786,10 @@ def _normalise_manual_override(value: Any) -> dict[str, Any]:
         "format": raw.get("format") or None,
         "editorial_mode": raw.get("editorial_mode") or None,
         "domain": raw.get("domain") or None,
-        "traits": sorted({str(item) for item in raw.get("traits", [])}) if isinstance(raw.get("traits", []), list) else [],
+        "traits": list(order_profile_ids("traits", [str(item) for item in raw.get("traits", [])]))
+        if isinstance(raw.get("traits", []), list) else [],
     }
-    active = any(override[name] for name in ("format", "editorial_mode", "domain")) or bool(override["traits"])
+    active = any(override[name] for name in PROFILE_AXIS_ORDER[:-1]) or bool(override["traits"])
     override["provenance"] = "user" if active else "none"
     override["revision_id"] = stable_text_hash(json.dumps(override, ensure_ascii=False, sort_keys=True))[:16] if active else None
     _validate_manual_override(override)
@@ -800,7 +800,7 @@ def _resolve_effective_profile(
     detected: dict[str, Any], manual_override: dict[str, Any], *, min_confidence: float,
 ) -> dict[str, Any]:
     effective: dict[str, Any] = {"resolution": {}}
-    for name in ("format", "editorial_mode", "domain"):
+    for name in PROFILE_AXIS_ORDER[:-1]:
         override_value = manual_override.get(name)
         proposal = detected[name]
         if override_value:
@@ -810,16 +810,16 @@ def _resolve_effective_profile(
             effective[name] = proposal["value"]
             effective["resolution"][name] = "detected"
         else:
-            effective[name] = "unknown"
+            effective[name] = unknown_fallback(name)
             effective["resolution"][name] = "safe_fallback"
     if manual_override.get("traits"):
         effective["traits"] = list(manual_override["traits"])
         effective["resolution"]["traits"] = "manual_override"
     else:
-        effective["traits"] = sorted({
+        effective["traits"] = list(order_profile_ids("traits", {
             str(item["value"]) for item in detected.get("traits", [])
             if float(item.get("confidence", 0)) >= min_confidence
-        })
+        }))
         effective["resolution"]["traits"] = "detected"
     _validate_effective_profile(effective)
     return effective
@@ -841,7 +841,7 @@ def _legacy_content_type_projection(
     elif domain == "entertainment" and editorial == "narrative":
         content_type = "movie_or_series"
     confidences = [
-        float(detected[name]["confidence"]) for name in ("format", "editorial_mode", "domain")
+        float(detected[name]["confidence"]) for name in PROFILE_AXIS_ORDER[:-1]
         if effective["resolution"][name] == "detected"
     ]
     confidence = sum(confidences) / len(confidences) if confidences else (1.0 if "manual_override" in effective["resolution"].values() else 0.2)
@@ -857,17 +857,17 @@ def _legacy_format_projection(value: str) -> str:
 
 
 def _validate_detected_profile(profile: dict[str, Any]) -> None:
-    if set(profile) != {"format", "editorial_mode", "domain", "traits", "provenance"}:
+    if set(profile) != {*PROFILE_AXIS_ORDER, "provenance"}:
         raise ValueError("VideoContentProfile detected_profile has an invalid shape.")
-    for name, allowed in (("format", PROFILE_FORMATS), ("editorial_mode", PROFILE_EDITORIAL_MODES), ("domain", PROFILE_DOMAINS)):
+    for name in PROFILE_AXIS_ORDER[:-1]:
         proposal = profile.get(name)
-        if not isinstance(proposal, dict) or proposal.get("value") not in allowed:
+        if not isinstance(proposal, dict) or proposal.get("value") not in profile_value_ids(name):
             raise ValueError(f"VideoContentProfile detected {name} is invalid.")
         if not 0 <= float(proposal.get("confidence", -1)) <= 1 or not isinstance(proposal.get("evidence"), list):
             raise ValueError(f"VideoContentProfile detected {name} evidence is invalid.")
     traits = profile.get("traits")
     if not isinstance(traits, list) or any(
-        not isinstance(item, dict) or item.get("value") not in PROFILE_TRAITS
+        not isinstance(item, dict) or item.get("value") not in profile_value_ids("traits")
         or not 0 <= float(item.get("confidence", -1)) <= 1 or not isinstance(item.get("evidence"), list)
         for item in traits
     ):
@@ -877,25 +877,25 @@ def _validate_detected_profile(profile: dict[str, Any]) -> None:
 
 
 def _validate_effective_profile(profile: dict[str, Any]) -> None:
-    if profile.get("format") not in PROFILE_FORMATS or profile.get("editorial_mode") not in PROFILE_EDITORIAL_MODES or profile.get("domain") not in PROFILE_DOMAINS:
+    if any(profile.get(axis_id) not in profile_value_ids(axis_id) for axis_id in PROFILE_AXIS_ORDER[:-1]):
         raise ValueError("VideoContentProfile effective axes are invalid.")
-    if not isinstance(profile.get("traits"), list) or any(item not in PROFILE_TRAITS for item in profile["traits"]):
+    if not isinstance(profile.get("traits"), list) or any(item not in profile_value_ids("traits") for item in profile["traits"]):
         raise ValueError("VideoContentProfile effective traits are invalid.")
     resolution = profile.get("resolution")
-    if not isinstance(resolution, dict) or set(resolution) != {"format", "editorial_mode", "domain", "traits"}:
+    if not isinstance(resolution, dict) or set(resolution) != set(PROFILE_AXIS_ORDER):
         raise ValueError("VideoContentProfile effective resolution is invalid.")
     if any(value not in {"detected", "manual_override", "safe_fallback", "legacy_migration"} for value in resolution.values()):
         raise ValueError("VideoContentProfile effective resolution provenance is invalid.")
 
 
 def _validate_manual_override(override: dict[str, Any]) -> None:
-    if override.get("format") not in PROFILE_FORMATS | {None}:
+    if override.get("format") not in frozenset(user_override_ids("format")) | {None}:
         raise ValueError("Unsupported manual profile format override.")
-    if override.get("editorial_mode") not in PROFILE_EDITORIAL_MODES | {None}:
+    if override.get("editorial_mode") not in frozenset(user_override_ids("editorial_mode")) | {None}:
         raise ValueError("Unsupported manual profile editorial_mode override.")
-    if override.get("domain") not in PROFILE_DOMAINS | {None}:
+    if override.get("domain") not in frozenset(user_override_ids("domain")) | {None}:
         raise ValueError("Unsupported manual profile domain override.")
-    if not isinstance(override.get("traits"), list) or any(item not in PROFILE_TRAITS for item in override["traits"]):
+    if not isinstance(override.get("traits"), list) or any(item not in user_override_ids("traits") for item in override["traits"]):
         raise ValueError("Unsupported manual profile traits override.")
     if override.get("provenance") not in {"none", "user"}:
         raise ValueError("Unsupported manual profile override provenance.")
@@ -910,18 +910,18 @@ def _migrate_legacy_profile(data: dict[str, Any]) -> dict[str, Any]:
         "host_guest": "dialogue", "screen_recording": "screen_demo",
         "gameplay_commentary": "gameplay", "narrated_visual": "scene_driven",
         "scene_driven": "scene_driven", "mixed": "mixed",
-    }.get(str(data.get("dominant_format")), "unknown")
+    }.get(str(data.get("dominant_format")), unknown_fallback("format"))
     editorial_mode = {
         "interview": "interview", "motivational": "motivational", "educational": "explanatory",
         "lecture": "explanatory", "tutorial": "demonstration", "commentary": "commentary",
         "news_or_analysis": "news_analysis", "movie_or_series": "narrative",
-    }.get(str(data.get("detected_content_type")), "unknown")
+    }.get(str(data.get("detected_content_type")), unknown_fallback("editorial_mode"))
     confidence = _bounded(float(data.get("content_type_confidence", 0)))
     migrated["schema_version"] = VIDEO_CONTENT_PROFILE_SCHEMA_VERSION
     migrated["detected_profile"] = {
         "format": _axis(format_value, confidence, ["migration:legacy_dominant_format"]),
         "editorial_mode": _axis(editorial_mode, confidence, ["migration:legacy_content_type"]),
-        "domain": _axis("gaming" if data.get("detected_content_type") == "gameplay" else "unknown", confidence, ["migration:legacy_content_type"]),
+        "domain": _axis("gaming" if data.get("detected_content_type") == "gameplay" else unknown_fallback("domain"), confidence, ["migration:legacy_content_type"]),
         "traits": [],
         "provenance": {
             "filename_signal_used": bool(
@@ -932,9 +932,9 @@ def _migrate_legacy_profile(data: dict[str, Any]) -> dict[str, Any]:
     }
     migrated["effective_profile"] = {
         "format": format_value, "editorial_mode": editorial_mode,
-        "domain": "gaming" if data.get("detected_content_type") == "gameplay" else "unknown",
+        "domain": "gaming" if data.get("detected_content_type") == "gameplay" else unknown_fallback("domain"),
         "traits": [],
-        "resolution": {name: "legacy_migration" for name in ("format", "editorial_mode", "domain", "traits")},
+        "resolution": {name: "legacy_migration" for name in PROFILE_AXIS_ORDER},
     }
     migrated["manual_override"] = _normalise_manual_override({})
     return migrated

@@ -150,6 +150,24 @@ def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() 
     assert resolved.to_dict()["effective_subtitle_preset"] == "minimal"
 
 
+def test_auto_preset_uses_structured_effective_profile_before_legacy_projection() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(preset_selection_mode="auto"),
+        _metadata(
+            detected_content_type="podcast",
+            effective_profile={
+                "format": "gameplay",
+                "editorial_mode": "commentary",
+                "domain": "gaming",
+                "traits": ["visual_led"],
+            },
+        ),
+    )
+
+    assert resolved.recommended_subtitle_preset == "minimal"
+    assert resolved.subtitle_preset == "minimal"
+
+
 def test_explicit_preset_beats_content_recommendation_and_is_applied_to_runtime() -> None:
     resolved = resolve_processing_intent(
         ProcessingIntent(

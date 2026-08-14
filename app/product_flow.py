@@ -13,8 +13,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, cast
 
+from app.content_profile_taxonomy import (
+    AUTO_PROFILE_INPUT,
+    order_profile_ids,
+    profile_input_ids,
+    user_override_ids,
+)
 from app.creative_policy import (
     PresetFamily,
+    creative_profile_signal,
     recommend_preset_family,
     resolve_preset_family,
 )
@@ -27,10 +34,11 @@ SUBTITLE_PRESETS = frozenset({"minimal", "documentary", "dynamic", "clean"})
 PRESET_SELECTION_MODES = frozenset({"auto", "explicit"})
 CLIP_COUNTS = frozenset({"auto", "1", "3", "5"})
 AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
-PROFILE_FORMAT_OVERRIDES = frozenset({"auto", "talking_head", "dialogue", "screen_demo", "gameplay", "scene_driven", "mixed", "unknown"})
-PROFILE_EDITORIAL_MODE_OVERRIDES = frozenset({"auto", "explanatory", "interview", "commentary", "motivational", "narrative", "demonstration", "entertainment", "news_analysis", "unknown"})
-PROFILE_DOMAIN_OVERRIDES = frozenset({"auto", "business", "technology", "education", "gaming", "food", "health", "finance", "lifestyle", "entertainment", "news", "general", "unknown"})
-PROFILE_TRAIT_OVERRIDES = frozenset({"speech_led", "visual_led", "single_speaker", "multi_speaker", "question_answer", "high_pacing", "low_pacing", "high_emotion", "dense_information", "repetitive", "screen_content", "scene_driven", "instructional"})
+# Compatibility aliases derived from the canonical registry.
+PROFILE_FORMAT_OVERRIDES = frozenset(profile_input_ids("format"))
+PROFILE_EDITORIAL_MODE_OVERRIDES = frozenset(profile_input_ids("editorial_mode"))
+PROFILE_DOMAIN_OVERRIDES = frozenset(profile_input_ids("domain"))
+PROFILE_TRAIT_OVERRIDES = frozenset(user_override_ids("traits"))
 PRESET_RESOLVER_VERSION = "4B.1"
 
 
@@ -73,9 +81,9 @@ class ProcessingIntent:
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
     editorial_intent: str = ""
-    profile_format_override: str = "auto"
-    profile_editorial_mode_override: str = "auto"
-    profile_domain_override: str = "auto"
+    profile_format_override: str = AUTO_PROFILE_INPUT
+    profile_editorial_mode_override: str = AUTO_PROFILE_INPUT
+    profile_domain_override: str = AUTO_PROFILE_INPUT
     profile_traits_override: tuple[str, ...] = ()
 
     def validate(self) -> None:
@@ -122,7 +130,7 @@ class ProcessingIntent:
             "profile_format_override": self.profile_format_override,
             "profile_editorial_mode_override": self.profile_editorial_mode_override,
             "profile_domain_override": self.profile_domain_override,
-            "profile_traits_override": list(self.profile_traits_override),
+            "profile_traits_override": list(order_profile_ids("traits", list(self.profile_traits_override))),
         }
 
     @classmethod
@@ -138,9 +146,9 @@ class ProcessingIntent:
             preset_selection_mode=str(value.get("preset_selection_mode", "explicit")),
             audio_mode=str(value.get("audio_mode", "original")),
             editorial_intent=str(value.get("editorial_intent", "")),
-            profile_format_override=str(value.get("profile_format_override", "auto")),
-            profile_editorial_mode_override=str(value.get("profile_editorial_mode_override", "auto")),
-            profile_domain_override=str(value.get("profile_domain_override", "auto")),
+            profile_format_override=str(value.get("profile_format_override", AUTO_PROFILE_INPUT)),
+            profile_editorial_mode_override=str(value.get("profile_editorial_mode_override", AUTO_PROFILE_INPUT)),
+            profile_domain_override=str(value.get("profile_domain_override", AUTO_PROFILE_INPUT)),
             profile_traits_override=tuple(
                 str(item) for item in (
                     value.get("profile_traits_override")
@@ -362,10 +370,10 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         audio_mode=intent.audio_mode,
         editorial_intent=intent.editorial_intent.strip(),
         manual_profile_override={
-            **({"format": intent.profile_format_override} if intent.profile_format_override != "auto" else {}),
-            **({"editorial_mode": intent.profile_editorial_mode_override} if intent.profile_editorial_mode_override != "auto" else {}),
-            **({"domain": intent.profile_domain_override} if intent.profile_domain_override != "auto" else {}),
-            **({"traits": list(intent.profile_traits_override)} if intent.profile_traits_override else {}),
+            **({"format": intent.profile_format_override} if intent.profile_format_override != AUTO_PROFILE_INPUT else {}),
+            **({"editorial_mode": intent.profile_editorial_mode_override} if intent.profile_editorial_mode_override != AUTO_PROFILE_INPUT else {}),
+            **({"domain": intent.profile_domain_override} if intent.profile_domain_override != AUTO_PROFILE_INPUT else {}),
+            **({"traits": list(order_profile_ids("traits", list(intent.profile_traits_override)))} if intent.profile_traits_override else {}),
         },
         candidate_limit=int(defaults["candidates"]),
         shortlist_size=max(clip_count, int(defaults["shortlist"])),
@@ -547,17 +555,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
 
 
 def _preset_content_type(source_metadata: dict[str, Any] | None) -> str:
-    metadata = source_metadata or {}
-    structured = " ".join(
-        str(metadata.get(key) or "")
-        for key in ("detected_content_type", "content_type", "content_kind", "dominant_format")
-    ).strip()
-    if structured:
-        return structured
-    return " ".join(
-        str(metadata.get(key) or "")
-        for key in ("genre", "title", "filename")
-    ).strip()
+    return creative_profile_signal(source_metadata)
 
 
 def _number(value: Any) -> float | None:

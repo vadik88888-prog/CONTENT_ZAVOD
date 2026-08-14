@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from app.content_profile_taxonomy import AUTO_PROFILE_INPUT
 from app.product_flow import ProcessingIntent
 from app.source_models import SourceSpec
 from app.utils import utc_now
@@ -50,9 +51,9 @@ class ProjectOptions:
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
     editorial_intent: str = ""
-    profile_format_override: str = "auto"
-    profile_editorial_mode_override: str = "auto"
-    profile_domain_override: str = "auto"
+    profile_format_override: str = AUTO_PROFILE_INPUT
+    profile_editorial_mode_override: str = AUTO_PROFILE_INPUT
+    profile_domain_override: str = AUTO_PROFILE_INPUT
     profile_traits_override: list[str] = field(default_factory=list)
     composition_strategy: str = "safe_auto"
     same_source_broll_allowed: bool = False

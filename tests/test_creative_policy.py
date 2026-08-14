@@ -4,6 +4,7 @@ from app.creative_contracts import Intensity
 from app.creative_policy import (
     CREATIVE_POLICY_VERSION,
     PRESET_FAMILY_POLICIES,
+    creative_profile_signal,
     recommend_preset_family,
     resolve_preset_family,
 )
@@ -29,6 +30,27 @@ def test_content_recommendations_cover_calibration_fixtures() -> None:
     assert recommend_preset_family("interview") == "documentary"
     assert recommend_preset_family("vlog / food / travel") == "dynamic"
     assert recommend_preset_family("visual-heavy / gameplay") == "minimal"
+
+
+def test_creative_profile_adapter_prefers_structured_effective_profile() -> None:
+    profile = {
+        "detected_content_type": "podcast",
+        "dominant_format": "single_speaker_monologue",
+        "detected_profile": {
+            "format": {"value": "talking_head"},
+            "editorial_mode": {"value": "explanatory"},
+            "domain": {"value": "education"},
+        },
+        "effective_profile": {
+            "format": "gameplay",
+            "editorial_mode": "commentary",
+            "domain": "gaming",
+            "traits": ["visual_led", "high_pacing"],
+        },
+    }
+
+    assert creative_profile_signal(profile) == "gameplay commentary gaming visual_led high_pacing"
+    assert recommend_preset_family(profile) == "minimal"
 
 
 def test_explicit_user_preset_always_wins_over_content_recommendation() -> None:
