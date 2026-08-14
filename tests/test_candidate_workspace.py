@@ -12,6 +12,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLabel, QMessageBox, QPushButton, QWidget
 
+from app.analysis_artifact import new_analysis_artifact
 from app.gui.components import VideoPreview
 from app.gui.main_window import MainWindow
 from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind, RunStatus
@@ -46,6 +47,11 @@ def _eligibility(eligible: bool = True) -> dict[str, object]:
     }
 
 
+def _rewrite_analysis(path: Path, analysis: dict) -> None:
+    analysis["candidate_count"] = len(analysis.get("candidates", []))
+    write_json(path, analysis)
+
+
 def _workspace(tmp_path: Path):
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
     data = tmp_path / "desktop-data"
@@ -58,8 +64,7 @@ def _workspace(tmp_path: Path):
         runs=RunHistoryStore(projects), pipeline=PipelineFacade(root), system=SystemService(root),
     )
     analysis_path = tmp_path / "analysis.json"
-    write_json(analysis_path, {
-        "candidates": [
+    candidates = [
             {
                 "candidate_id": "candidate-recommended", "title": "Сильное начало", "start_seconds": 1.0,
                 "end_seconds": 18.0, "potential": "high", "confidence": 0.9, "recommended": True,
@@ -72,8 +77,23 @@ def _workspace(tmp_path: Path):
                 "eligibility_decision": _eligibility(),
                 "reasons": ["Есть самостоятельная мысль."], "preview": {"thumbnail": {"timestamp_seconds": 20.0}},
             },
-        ],
-    })
+        ]
+    new_analysis_artifact(
+        analysis_id="analysis-test",
+        project_id=project.project_id,
+        source={"id": "source-test"},
+        source_fingerprint="source-test",
+        analysis_fingerprint="analysis-test-fingerprint",
+        work_directory=str(tmp_path),
+        candidate_data_ref=str(tmp_path / "candidate-data.json"),
+        references={},
+        candidates=candidates,
+        recommendation={},
+        summary={},
+        content_profile={},
+        duration_seconds=30.0,
+        candidate_count=len(candidates),
+    ).write(analysis_path)
     project.analysis_artifact_path = str(analysis_path)
     project.analysis_id = "analysis-test"
     project.status = ProjectStatus.ANALYSIS_READY
@@ -245,7 +265,7 @@ def test_moments_view_all_and_select_all_exclude_ineligible_and_legacy_candidate
             "recommended": True,
         },
     ]
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     candidate_ids = [f"candidate-{index}" for index in range(7)]
     project.candidate_states = {
         candidate_id: "analyzed" for candidate_id in [*candidate_ids, ineligible_id, legacy_id]
@@ -297,7 +317,7 @@ def test_draft_button_mouse_click_starts_selected_drafts_shows_progress_and_open
         "reasons": ["Подходит для черновика."], "preview": {"thumbnail": {"timestamp_seconds": 6.0}},
     }
     analysis["candidates"].append(third_candidate)
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     selected_ids = ["candidate-recommended", "candidate-other", "candidate-third"]
     project.candidate_states = {candidate_id: "analyzed" for candidate_id in selected_ids}
     project.review_selected_candidate_ids = list(selected_ids)
@@ -1058,7 +1078,7 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
     analysis = read_json(analysis_path, {})
     analysis["candidates"][0]["title"] = "Очень длинное название момента для проверки адаптивной карточки " * 12
     analysis["candidates"][0]["reasons"] = ["Подробное объяснение выбора должно переноситься без скрытого горизонтального переполнения."]
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     viewmodel = ProjectViewModel(services)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(VideoPreview, "set_range", lambda *_args, **_kwargs: None)
@@ -1164,7 +1184,7 @@ def test_candidate_detail_releases_narrow_height_after_width_grows(
         "Длинный сохранённый фрагмент расшифровки должен менять высоту вместе с шириной. " * 36
     ) + hostile_token
     candidate["reasons"] = ["Подробная сохранённая причина. " * 20]
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     viewmodel = ProjectViewModel(services)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     screen = ProjectScreen(viewmodel)
@@ -1216,7 +1236,7 @@ def test_long_candidate_title_is_elided_with_its_full_tooltip(tmp_path: Path, mo
     analysis_path = Path(project.analysis_artifact_path or "")
     analysis = read_json(analysis_path, {})
     analysis["candidates"][0]["title"] = long_title
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     viewmodel = ProjectViewModel(services)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     screen = ProjectScreen(viewmodel)
@@ -1300,7 +1320,7 @@ def test_real_shell_client_matrix_keeps_project_ctas_and_persisted_text_responsi
         "reasons": ["Причина из сохранённого анализа: " + hostile_token],
         "transcript_excerpt": ("Фрагмент расшифровки с реальными словами. " * 20) + hostile_token,
     })
-    write_json(analysis_path, analysis)
+    _rewrite_analysis(analysis_path, analysis)
     services.projects.save(project)
     project = services.projects.load(project.project_id)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
@@ -1639,7 +1659,7 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
         third_candidate["candidate_id"] = "candidate-third"
         third_candidate["title"] = "Третий неготовый черновик"
         analysis["candidates"].append(third_candidate)
-        write_json(analysis_path, analysis)
+        _rewrite_analysis(analysis_path, analysis)
         failed_ids = [candidate_id, "candidate-other", "candidate-third"]
         project.review_selected_candidate_ids = failed_ids
         for failed_id in failed_ids:

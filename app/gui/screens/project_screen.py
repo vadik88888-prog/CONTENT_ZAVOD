@@ -121,6 +121,7 @@ class ProjectScreen(QWidget):
         self._processing_structure_key: tuple[object, ...] | None = None
         self._analysis_cache_key: tuple[Path, int, int] | None = None
         self._analysis_cache: dict[str, Any] = {}
+        self._analysis_load_error: str | None = None
         self._active_candidate_id: str | None = None
         # The player is shared by Moments and Drafts.  Keep its review binding
         # separate from the user choices persisted in the project: a project
@@ -1706,20 +1707,25 @@ class ProjectScreen(QWidget):
         self.viewmodel.start_analysis()
 
     def _analysis_artifact(self, project: DesktopProject) -> dict[str, Any]:
-        path = Path(project.analysis_artifact_path) if project.analysis_artifact_path else None
-        if path is None:
+        if not project.analysis_artifact_path:
+            self._analysis_load_error = None
             return {}
         try:
-            resolved = path.resolve()
+            resolved = Path(project.analysis_artifact_path).resolve()
             stat = resolved.stat()
-        except OSError:
+            artifact = self.viewmodel.services.pipeline.load_verified_analysis(project, required=True)
+        except (OSError, ValueError) as error:
+            self._analysis_load_error = str(error)
+            self._analysis_cache_key = None
+            self._analysis_cache = {}
             return {}
+        assert artifact is not None
+        self._analysis_load_error = None
         key = (resolved, stat.st_size, stat.st_mtime_ns)
         if key == self._analysis_cache_key:
             return self._analysis_cache
-        raw = read_json(resolved, {})
         self._analysis_cache_key = key
-        self._analysis_cache = raw if isinstance(raw, dict) else {}
+        self._analysis_cache = artifact.to_dict()
         return self._analysis_cache
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
@@ -1792,8 +1798,17 @@ class ProjectScreen(QWidget):
                 self._draft_preview_paths[candidate_id] = preview_file
         if not candidates:
             self._set_workflow_hint(
-                "После поиска здесь появятся подходящие моменты и готовая рекомендация."
+                self._analysis_load_error
+                or "После поиска здесь появятся подходящие моменты и готовая рекомендация."
             )
+            if self._analysis_load_error:
+                integrity_notice = QLabel(
+                    "Сохранённый анализ повреждён или изменён. Данные моментов не были открыты. "
+                    "Повторите анализ видео."
+                )
+                integrity_notice.setObjectName("analysisIntegrityError")
+                integrity_notice.setWordWrap(True)
+                layout.addWidget(integrity_notice)
             self.workflow_hint.show()
             self.view_all_button.hide()
             self.draft_button.hide()

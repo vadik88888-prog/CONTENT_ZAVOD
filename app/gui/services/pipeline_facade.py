@@ -163,19 +163,12 @@ class PipelineFacade:
         config = load_config(base_config if base_config.is_file() else None)
         intent = project.settings.processing_intent()
         source_metadata = dict(project.source_metadata)
-        analysis_path = Path(str(project.analysis_artifact_path or ""))
-        if analysis_path.is_file():
-            try:
-                artifact = AnalysisArtifact.read(analysis_path)
-            except (AnalysisArtifactError, OSError):
-                artifact = None
-            if artifact is not None and (
-                not project.analysis_id or artifact.analysis_id == project.analysis_id
-            ):
-                # Draft/render planning happens after content understanding.
-                # Feed that persisted evidence into auto selection instead of
-                # relying only on a filename heuristic.
-                source_metadata.update(artifact.content_profile)
+        artifact = self.load_verified_analysis(project, required=False)
+        if artifact is not None:
+            # Draft/render planning happens after content understanding.
+            # Feed that persisted evidence into auto selection instead of
+            # relying only on a filename heuristic.
+            source_metadata.update(artifact.content_profile)
         resolved = resolve_processing_intent(intent, source_metadata)
         ai_available = not settings.local_test_mode and config.ai.provider != "mock"
         tts_available = not settings.local_test_mode and config.tts.provider == "openai"
@@ -259,6 +252,7 @@ class PipelineFacade:
             raise InputValidationError("Сначала завершите анализ и сохраните analysis.json.")
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один кандидат для чернового просмотра.")
+        self.load_verified_analysis(project, required=True)
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         arguments = [
             "draft", "--input", str(source_path), "--config", str(config_path),
@@ -290,6 +284,7 @@ class PipelineFacade:
             raise InputValidationError("Сначала подготовьте и проверьте предпросмотр черновика.")
         if not candidate_ids:
             raise InputValidationError("Выберите черновики, из которых нужно создать готовые ролики.")
+        self.load_verified_analysis(project, required=True)
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
         draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
@@ -404,6 +399,37 @@ class PipelineFacade:
                 continue
             valid.append(candidate_id)
         return ApprovedDraftSelection(valid, errors)
+
+    @staticmethod
+    def load_verified_analysis(
+        project: DesktopProject, *, required: bool = True,
+    ) -> AnalysisArtifact | None:
+        """Load the desktop Analysis hand-off through the engine integrity contract."""
+
+        raw_path = str(project.analysis_artifact_path or "").strip()
+        if not raw_path:
+            if required:
+                raise InputValidationError("Сначала завершите анализ и сохраните analysis.json.")
+            return None
+        try:
+            path = Path(raw_path).resolve()
+        except OSError as error:
+            raise InputValidationError("Сохранённый анализ нельзя открыть; повторите анализ видео.") from error
+        if not path.is_file():
+            if required:
+                raise InputValidationError("Сохранённый анализ больше недоступен; повторите анализ видео.")
+            return None
+        try:
+            artifact = AnalysisArtifact.read_verified(path)
+        except (AnalysisArtifactError, OSError, ValueError) as error:
+            raise InputValidationError(f"Сохранённый анализ нельзя использовать: {error}") from error
+        if project.analysis_id and artifact.analysis_id != project.analysis_id:
+            raise InputValidationError("Сохранённый анализ относится к другой версии проекта; повторите анализ видео.")
+        if project.analysis_fingerprint and artifact.analysis_fingerprint != project.analysis_fingerprint:
+            raise InputValidationError("Сохранённый анализ относится к другой версии проекта; повторите анализ видео.")
+        if artifact.project_id and artifact.project_id != project.project_id:
+            raise InputValidationError("Сохранённый анализ относится к другому проекту; повторите анализ видео.")
+        return artifact
 
     @staticmethod
     def _same_draft_context(left: DraftArtifact, right: DraftArtifact) -> bool:

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
+from app.analysis_artifact import AnalysisArtifactError
 from app.candidate_review import validate_boundary_override
 from app.gui.models import (
     DesktopProject,
@@ -590,6 +591,9 @@ class DesktopServices:
             raise RuntimeError("Этот проект уже обрабатывается.")
         if not project.analysis_artifact_path:
             raise InputValidationError("Сначала выполните анализ видео.")
+        # Verify before lifecycle changes or run creation.  The child process
+        # must never be the first consumer to discover corrupted Analysis data.
+        self.pipeline.load_verified_analysis(project, required=True)
         requested_ids = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
         if not requested_ids:
             raise InputValidationError("Выберите хотя бы один момент для подготовки черновика.")
@@ -748,9 +752,9 @@ class DesktopServices:
 
         if boundary not in {"start", "end"} or delta_seconds not in {-1.0, -0.5, 0.5, 1.0}:
             raise InputValidationError("Доступны только шаги границы ±0.5 или ±1.0 секунды.")
-        artifact_path = Path(str(project.analysis_artifact_path or ""))
-        artifact = read_json(artifact_path, {}) if artifact_path.is_file() else {}
-        candidates = artifact.get("candidates", []) if isinstance(artifact, dict) else []
+        artifact = self.pipeline.load_verified_analysis(project, required=True)
+        assert artifact is not None
+        candidates = artifact.candidates
         candidate = next((item for item in candidates if isinstance(item, dict) and str(item.get("candidate_id")) == candidate_id), None)
         if not candidate:
             raise InputValidationError("Кандидат не найден в сохранённом анализе.")
@@ -768,9 +772,11 @@ class DesktopServices:
             start += delta_seconds
         else:
             end += delta_seconds
-        references = artifact.get("references", {}) if isinstance(artifact, dict) else {}
-        transcript_features = read_json(Path(str(references.get("transcript_features") or "")), {}) if references.get("transcript_features") else {}
-        scenes = read_json(Path(str(references.get("scene_boundaries") or "")), {}) if references.get("scene_boundaries") else {}
+        try:
+            transcript_features = artifact.load_reference("transcript_features")
+            scenes = artifact.load_reference("scene_boundaries")
+        except AnalysisArtifactError as error:
+            raise InputValidationError(f"Сохранённый анализ нельзя использовать: {error}") from error
         validation = validate_boundary_override(
             start, end,
             source_duration=float(project.source_metadata.get("duration")) if project.source_metadata.get("duration") is not None else None,

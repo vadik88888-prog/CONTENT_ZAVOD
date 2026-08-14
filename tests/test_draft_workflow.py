@@ -128,7 +128,9 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
 def test_targeted_preview_failure_keeps_previous_valid_candidate_preview(tmp_path: Path) -> None:
     services, project, _source = _services(tmp_path)
     analysis_path = tmp_path / "analysis.json"
-    analysis_path.write_text("{}", encoding="utf-8")
+    _write_analysis_artifact(
+        analysis_path, project.project_id, "analysis-targeted", "fingerprint-targeted", ["candidate-a"],
+    )
     previous_draft = tmp_path / "previous-draft.json"
     previous_draft.write_text("{}", encoding="utf-8")
     project.analysis_artifact_path = str(analysis_path)
