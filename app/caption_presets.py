@@ -8,6 +8,7 @@ from typing import Literal
 
 CAPTION_PRESET_REGISTRY_VERSION = "production.captions.2"
 CAPTION_PRESET_VERSION = "2.0.0"
+CAPTION_CALIBRATED_PRESET_VERSION = "2.1.0"
 
 CaptionPresetId = Literal[
     "clean_white",
@@ -82,20 +83,20 @@ CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
         motion_profile_id="semantic_fade", allowed_primitives=("static", "fade"),
     ),
     "minimal_light": CaptionPresetDefinition(
-        preset_id="minimal_light", preset_version=CAPTION_PRESET_VERSION, label="Minimal Premium",
+        preset_id="minimal_light", preset_version=CAPTION_CALIBRATED_PRESET_VERSION, label="Minimal Premium",
         style_family="minimal", legacy_style_id="minimal",
         preferred_font_asset_id="font.commissioner.light", semantic_font_asset_id=None,
-        font_weight="normal", font_size_ratio=0.029, minimum_font_scale=0.78,
+        font_weight="normal", font_size_ratio=0.036, minimum_font_scale=0.78,
         line_height=1.20, text_color="#FFFFFF", highlight_color="#FFFFFF",
-        outline_color="#202020", outline_width_ratio=0.00078, shadow_ratio=0.00026,
+        outline_color="#202020", outline_width_ratio=0.00105, shadow_ratio=0.00039,
         max_width_ratio=0.80, uppercase_emphasis=False,
         motion_profile_id="static_safe", allowed_primitives=("static", "fade"),
     ),
     "accent_yellow": CaptionPresetDefinition(
-        preset_id="accent_yellow", preset_version=CAPTION_PRESET_VERSION, label="Impact",
+        preset_id="accent_yellow", preset_version=CAPTION_CALIBRATED_PRESET_VERSION, label="Impact",
         style_family="emphasis", legacy_style_id="dynamic",
         preferred_font_asset_id="font.oswald.bold", semantic_font_asset_id=None,
-        font_weight="bold", font_size_ratio=0.039, minimum_font_scale=0.72,
+        font_weight="bold", font_size_ratio=0.043, minimum_font_scale=0.72,
         line_height=1.08, text_color="#FFFFFF", highlight_color="#FFD54A",
         outline_color="#111111", outline_width_ratio=0.00208, shadow_ratio=0.00104,
         max_width_ratio=0.84, uppercase_emphasis=True,
@@ -104,13 +105,13 @@ CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
         reduced_motion_fallback="fade",
     ),
     "editorial_narrow": CaptionPresetDefinition(
-        preset_id="editorial_narrow", preset_version=CAPTION_PRESET_VERSION, label="Editorial",
+        preset_id="editorial_narrow", preset_version=CAPTION_CALIBRATED_PRESET_VERSION, label="Editorial",
         style_family="editorial", legacy_style_id="documentary",
         preferred_font_asset_id="font.pt-sans-narrow.regular",
         semantic_font_asset_id="font.pt-sans-narrow.bold",
-        font_weight="normal", font_size_ratio=0.034, minimum_font_scale=0.76,
+        font_weight="normal", font_size_ratio=0.040, minimum_font_scale=0.76,
         line_height=1.14, text_color="#FFFFFF", highlight_color="#FFFFFF",
-        outline_color="#101010", outline_width_ratio=0.00078, shadow_ratio=0.0,
+        outline_color="#101010", outline_width_ratio=0.00105, shadow_ratio=0.0,
         max_width_ratio=0.84, uppercase_emphasis=False, semantic_bold=True,
         motion_profile_id="semantic_fade",
         allowed_primitives=("static", "fade", "scale", "karaoke"),
@@ -138,10 +139,10 @@ CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
         box_padding_ratio=0.008,
     ),
     "word_pop": CaptionPresetDefinition(
-        preset_id="word_pop", preset_version=CAPTION_PRESET_VERSION, label="Word Pop",
+        preset_id="word_pop", preset_version=CAPTION_CALIBRATED_PRESET_VERSION, label="Word Pop",
         style_family="emphasis", legacy_style_id="dynamic",
         preferred_font_asset_id="font.unbounded.bold", semantic_font_asset_id=None,
-        font_weight="bold", font_size_ratio=0.044, minimum_font_scale=0.68,
+        font_weight="bold", font_size_ratio=0.049, minimum_font_scale=0.68,
         line_height=1.05, text_color="#FFFFFF", highlight_color="#C6FF00",
         outline_color="#111111", outline_width_ratio=0.00182, shadow_ratio=0.00052,
         max_width_ratio=0.78, uppercase_emphasis=False,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import struct
@@ -53,7 +55,18 @@ def test_caption_presets_have_stable_versioned_tokens_and_valid_font_assets() ->
     tokens = {item.token_id for item in CAPTION_PRESET_DEFINITIONS.values()}
     assert len(tokens) == len(CAPTION_PRESET_DEFINITIONS)
     assert len(CAPTION_PRESET_VERSIONS) == 13
-    assert all(token.endswith(":2.0.0") for token in tokens)
+    assert {
+        item.preset_id: item.preset_version
+        for item in CAPTION_PRESET_DEFINITIONS.values()
+    } == {
+        "clean_white": "2.0.0",
+        "minimal_light": "2.1.0",
+        "accent_yellow": "2.1.0",
+        "editorial_narrow": "2.1.0",
+        "karaoke_yellow": "2.0.0",
+        "contrast_box": "2.0.0",
+        "word_pop": "2.1.0",
+    }
     assert all(
         set(item.font_asset_ids).issubset(FONT_ASSET_DEFINITIONS)
         for item in CAPTION_PRESET_DEFINITIONS.values()
@@ -61,6 +74,49 @@ def test_caption_presets_have_stable_versioned_tokens_and_valid_font_assets() ->
     assert CAPTION_PRESET_DEFINITIONS["word_pop"].highlight_color == "#C6FF00"
     assert CAPTION_PRESET_DEFINITIONS["word_pop"].pop_scale_keyframes == (88, 112, 100)
     assert CAPTION_PRESET_DEFINITIONS["word_pop"].semantic_pop_scale_keyframes == (84, 118, 100)
+
+
+def test_final_visual_calibration_changes_only_the_four_approved_policies() -> None:
+    minimal = CAPTION_PRESET_DEFINITIONS["minimal_light"]
+    impact = CAPTION_PRESET_DEFINITIONS["accent_yellow"]
+    editorial = CAPTION_PRESET_DEFINITIONS["editorial_narrow"]
+    word_pop = CAPTION_PRESET_DEFINITIONS["word_pop"]
+
+    assert (minimal.font_size_ratio, minimal.outline_width_ratio, minimal.shadow_ratio) == (
+        0.036, 0.00105, 0.00039,
+    )
+    assert minimal.preferred_font_asset_id == "font.commissioner.light"
+    assert minimal.font_weight == "normal"
+    assert impact.font_size_ratio == 0.043
+    assert impact.preferred_font_asset_id == "font.oswald.bold"
+    assert (impact.text_color, impact.highlight_color) == ("#FFFFFF", "#FFD54A")
+    assert (editorial.font_size_ratio, editorial.outline_width_ratio) == (0.040, 0.00105)
+    assert editorial.font_asset_ids == (
+        "font.pt-sans-narrow.regular", "font.pt-sans-narrow.bold",
+    )
+    assert editorial.semantic_bold
+    assert word_pop.font_size_ratio == 0.049
+    assert word_pop.preferred_font_asset_id == "font.unbounded.bold"
+    assert (word_pop.text_color, word_pop.highlight_color) == ("#FFFFFF", "#C6FF00")
+    assert word_pop.display_mode == "single_spoken_word"
+    assert word_pop.pop_scale_keyframes == (88, 112, 100)
+    assert word_pop.semantic_pop_scale_keyframes == (84, 118, 100)
+
+
+def test_locked_caption_policies_remain_byte_stable() -> None:
+    expected = {
+        "clean_white": "4be7f555674812f677b9ff40d951dedbe4ccd31fb10f5307a01e8d9d6a194e4a",
+        "karaoke_yellow": "a4039798dbf35a485b55511838ff400a2586bf9b36331ce3a12f66c50745ccb7",
+        "contrast_box": "c22b083731a91fcacd180b7c4a976594c4303bf8dc2196d20206eafb65ae68b8",
+    }
+    for preset_id, digest in expected.items():
+        payload = json.dumps(
+            asdict(CAPTION_PRESET_DEFINITIONS[preset_id]),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        assert sha256(payload).hexdigest() == digest
 
 
 def test_curated_font_registry_separates_regular_bold_and_records_license() -> None:
