@@ -1943,11 +1943,12 @@ def aggregate_viral_potential(
     return result
 
 
-def apply_virality_ranking(
+def _apply_virality_ranking(
     scored: list[Any], assessment_data: dict[str, Any], settings: Any,
     content_profile: dict[str, Any] | None = None,
+    production_feasibility: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Attach code-owned scoring to existing candidates before Goal 5A coverage selection."""
+    """Attach code-owned scoring, applying profile weights only after hard gates."""
 
     strategy = resolve_virality_strategy(content_profile)
     all_weights = getattr(settings, "strategy_weights", {})
@@ -1955,6 +1956,14 @@ def apply_virality_ranking(
     profile_weights = dict(all_weights.get(strategy) or base_weights)
     raw_items = assessment_data.get("candidates", []) if isinstance(assessment_data, dict) else []
     by_id = {str(item.get("candidate_id") or ""): item for item in raw_items if isinstance(item, dict)}
+    raw_feasibility = (
+        production_feasibility.get("candidates")
+        if isinstance(production_feasibility, Mapping) else None
+    )
+    feasibility_by_id = {
+        str(item.get("candidate_id") or ""): item
+        for item in raw_feasibility if isinstance(item, Mapping)
+    } if isinstance(raw_feasibility, list) else {}
     ranked: list[Any] = []
     diagnostics: list[dict[str, Any]] = []
     for item in scored:
@@ -1978,7 +1987,20 @@ def apply_virality_ranking(
         eligibility_passed = eligibility.status in {
             "publishable_now", "publishable_with_minor_adjustment",
         }
-        profile_weighting_applied = eligibility_passed and boundary_passed
+        phase6_decision = item.candidate.eligibility_decision
+        phase6_eligibility_passed = bool(
+            phase6_decision is not None and phase6_decision.explicitly_eligible
+        )
+        feasibility_status = str(
+            feasibility_by_id.get(item.candidate.id, {}).get("status") or "UNASSESSED"
+        )
+        feasibility_viable = feasibility_status == "VIABLE"
+        profile_weighting_applied = bool(
+            eligibility_passed
+            and phase6_eligibility_passed
+            and boundary_passed
+            and feasibility_viable
+        )
         potential = (
             aggregate_viral_potential(
                 item.candidate, feature, retention, publishability, eligibility,
@@ -2015,6 +2037,13 @@ def apply_virality_ranking(
             "base_ranking_sort_score": base_potential.viral_potential_score,
             "profile_weighting_applied": profile_weighting_applied,
             "profile_strategy_id": strategy,
+            "profile_weighting_gates": {
+                "virality_eligibility_passed": eligibility_passed,
+                "phase6_eligibility_passed": phase6_eligibility_passed,
+                "boundary_passed": boundary_passed,
+                "feasibility_status": feasibility_status,
+                "feasibility_viable": feasibility_viable,
+            },
             "profile_axes": {
                 key: value
                 for key, value in dict(_structured_effective_profile(content_profile) or {}).items()
@@ -2027,6 +2056,9 @@ def apply_virality_ranking(
             "publishability_score": potential.publishability_score, "eligibility": eligibility.status,
             "passes_quality_floor": passes_floor, "passes_publishability_floor": publishable,
             "profile_weighting_applied": profile_weighting_applied,
+            "phase6_eligibility_passed": phase6_eligibility_passed,
+            "boundary_passed": boundary_passed,
+            "feasibility_status": feasibility_status,
         })
         ranked.append(item)
     confidence_weight = _bounded(float(getattr(settings, "uncertainty_tiebreak_weight", 0.08)))
@@ -2045,3 +2077,27 @@ def apply_virality_ranking(
         "minimum_quality_score": float(getattr(settings, "minimum_quality_score", 0.52)),
         "minimum_publishability_score": float(getattr(settings, "minimum_publishability_score", 0.55)),
     }
+
+
+def apply_virality_ranking(
+    scored: list[Any], assessment_data: dict[str, Any], settings: Any,
+    content_profile: dict[str, Any] | None = None,
+    production_feasibility: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Cached preselection entrypoint; feasibility is optional for direct consumers."""
+
+    return _apply_virality_ranking(
+        scored, assessment_data, settings, content_profile, production_feasibility,
+    )
+
+
+def apply_profile_weighting_after_hard_gates(
+    scored: list[Any], assessment_data: dict[str, Any], settings: Any,
+    content_profile: dict[str, Any] | None,
+    production_feasibility: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Finalize profile rank only after Phase-6 and feasibility evidence exists."""
+
+    return _apply_virality_ranking(
+        scored, assessment_data, settings, content_profile, production_feasibility,
+    )

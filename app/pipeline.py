@@ -104,7 +104,11 @@ from app.utils import AtomicWriteError, read_json, safe_name, stable_file_hash, 
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
 from app.vision_intelligence import VisionGateway, validate_vision_artifact
-from app.virality import apply_virality_ranking, build_virality_assessments
+from app.virality import (
+    apply_profile_weighting_after_hard_gates,
+    apply_virality_ranking,
+    build_virality_assessments,
+)
 
 
 INTELLIGENCE_STAGES = (
@@ -848,6 +852,19 @@ class Pipeline:
             cache_tracker=source_cache,
             validator=validate_production_feasibility_artifact,
         )
+        if self.config.virality.enabled:
+            # The pre-feasibility virality artifact is intentionally neutral.
+            # Apply structured profile weights only to the in-memory selection
+            # pool after Phase-6 eligibility, boundary, and feasibility facts
+            # are all available; final_selection persists the resulting rank.
+            ranked_data = apply_profile_weighting_after_hard_gates(
+                scored,
+                virality_profiles,
+                self.config.virality,
+                content_profile,
+                production_feasibility,
+            )
+            scored = [scored_from_dict(item) for item in ranked_data.get("candidates", [])]
         final_data = self._cached(
             tracker, "final_selection", work_directory / "final_selection.json",
             {
