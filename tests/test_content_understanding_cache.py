@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.cli import main
 from app.config import AppConfig
+from app.errors import ClipEngineError
 from app.pipeline import Pipeline, PipelineResult
 from app.run_artifacts import run_metadata_path
 from app.utils import read_json, write_json
@@ -277,12 +280,15 @@ def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_pat
     assert result.output_files == []
     assert result.analysis_path and result.analysis_path.is_file()
     analysis = read_json(result.analysis_path, {})
-    assert analysis["schema_version"] == "1.0"
+    assert analysis["schema_version"] == "1.1"
     assert analysis["status"] == "analysis_ready"
     assert analysis["analysis_id"] == result.analysis_id
     assert analysis["source_fingerprint"]
-    assert analysis["candidate_data_ref"].endswith("candidates.scored.json")
+    assert analysis["candidate_data_ref"].endswith("candidate_data.json")
     assert Path(analysis["candidate_data_ref"]).is_file()
+    assert analysis["analysis_run_id"] == result.output_directory.name
+    assert "final_selection" in analysis["references"]
+    assert set(analysis["references"]) == set(analysis["reference_integrity"])
     assert analysis["candidates"]
     first = analysis["candidates"][0]
     assert {"story_unit_id", "chapter_id", "start_seconds", "end_seconds", "duration_seconds"} <= set(first)
@@ -367,7 +373,7 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert report["run"]["analysis_id"] == analysis.analysis_id
 
 
-def test_draft_preflight_rejects_stale_overlong_candidate_before_transformation(
+def test_draft_rejects_tampered_overlong_snapshot_before_transformation(
     tmp_path: Path, monkeypatch,
 ) -> None:
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
@@ -393,19 +399,16 @@ def test_draft_preflight_rejects_stale_overlong_candidate_before_transformation(
     config = AppConfig(score_threshold=0)
     config.transformation.enabled = True
     config.production.enabled = True
-    result = Pipeline(
-        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
-        selected_candidate_ids=[candidate_id], draft_only=True,
-    ).run(input_path=str(source))
+    with pytest.raises(ClipEngineError, match="ANALYSIS_INTEGRITY_MISMATCH"):
+        Pipeline(
+            tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+            selected_candidate_ids=[candidate_id], draft_only=True,
+        ).run(input_path=str(source))
 
-    assert transformed == [[]]
-    report = read_json(result.report_path, {})
-    failed = report["candidate_flow"]["draft_candidates"][0]
-    assert failed["stage"] == f"candidate_preflight:{candidate_id}"
-    assert "DURATION_OUT_OF_RANGE" in failed["error"]
+    assert transformed == []
 
 
-def test_cached_incomplete_story_is_blocked_before_transformation(
+def test_draft_rejects_tampered_incomplete_story_snapshot_before_transformation(
     tmp_path: Path, monkeypatch,
 ) -> None:
     source = tmp_path / "source.mp4"; source.write_bytes(b"source")
@@ -444,18 +447,14 @@ def test_cached_incomplete_story_is_blocked_before_transformation(
     config = AppConfig(score_threshold=0)
     config.transformation.enabled = True
     config.production.enabled = True
-    result = Pipeline(
-        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
-        selected_candidate_ids=[candidate_id], draft_only=True,
-    ).run(input_path=str(source))
+    with pytest.raises(ClipEngineError, match="ANALYSIS_INTEGRITY_MISMATCH"):
+        Pipeline(
+            tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+            selected_candidate_ids=[candidate_id], draft_only=True,
+        ).run(input_path=str(source))
 
-    assert transformed == [[]]
-    assert rendered == [[]]
-    report = read_json(result.report_path, {})
-    failed = report["candidate_flow"]["draft_candidates"][0]
-    assert failed["stage"] == f"candidate_preflight:{candidate_id}"
-    assert "SEMANTIC_INCOMPLETE" in failed["error"]
-    assert "NO_PAYOFF" in failed["error"]
+    assert transformed == []
+    assert rendered == []
 
 
 def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_invalid(tmp_path: Path, monkeypatch) -> None:
@@ -666,8 +665,6 @@ def test_production_cannot_start_directly_from_analysis(tmp_path: Path, monkeypa
     _wire_pipeline(monkeypatch, calls)
     analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
 
-    import pytest
-    from app.errors import ClipEngineError
     with pytest.raises(ClipEngineError, match="draft preview first"):
         Pipeline(
             tmp_path, AppConfig(score_threshold=0), mock_ai=True,
@@ -683,9 +680,6 @@ def test_changed_source_fingerprint_requires_fresh_analysis_before_draft(tmp_pat
     analysis = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
     candidate_id = read_json(analysis.analysis_path, {})["candidates"][0]["candidate_id"]
     source.write_bytes(b"changed source fingerprint")
-
-    import pytest
-    from app.errors import ClipEngineError
 
     with pytest.raises(ClipEngineError, match="different source file"):
         Pipeline(
@@ -717,9 +711,9 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     persisted_decision = draft_data["candidates"][0]["eligibility_decision"]
     assert persisted_decision["state"] == "assessed"
 
-    # Simulate the old cached analysis shape that previously reached Final as
-    # legacy_unassessed.  The approved Draft owns the exact assessed decision.
-    candidate_path = Path(read_json(analysis.analysis_path, {})["candidate_data_ref"])
+    # Mutate only the reusable source cache after Draft(A). Final must still
+    # read Analysis A's immutable snapshot and the Draft-owned decision.
+    candidate_path = analysis.work_directory / "candidates.scored.json"
     candidate_data = read_json(candidate_path, {})
     cached_candidate = next(item for item in candidate_data["candidates"] if item["id"] == candidate_id)
     cached_candidate.pop("eligibility_decision", None)

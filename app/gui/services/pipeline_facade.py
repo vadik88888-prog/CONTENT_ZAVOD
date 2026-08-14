@@ -363,7 +363,18 @@ class PipelineFacade:
                 errors[candidate_id] = "Для этого черновика исходный анализ больше недоступен."
                 continue
             try:
-                analysis = analyses.setdefault(analysis_path, AnalysisArtifact.read(analysis_path))
+                analysis = analyses.get(analysis_path)
+                if analysis is None:
+                    analysis = AnalysisArtifact.read_verified(
+                        analysis_path,
+                        expected_sha256=artifact.analysis_artifact_sha256 or None,
+                    )
+                    analyses[analysis_path] = analysis
+                elif (
+                    artifact.analysis_artifact_sha256
+                    and analysis.verified_sha256 != artifact.analysis_artifact_sha256
+                ):
+                    raise AnalysisArtifactError("Draft analysis checksum does not match the verified artifact.")
             except (AnalysisArtifactError, OSError, ValueError):
                 errors[candidate_id] = "Сохранённый анализ повреждён; повторите анализ видео."
                 continue
@@ -372,6 +383,10 @@ class PipelineFacade:
                 or analysis.analysis_fingerprint != artifact.analysis_fingerprint
                 or analysis.source_fingerprint != artifact.source_fingerprint
                 or (analysis.project_id and analysis.project_id != project.project_id)
+                or (
+                    artifact.analysis_run_id
+                    and artifact.analysis_run_id != (analysis.analysis_run_id or analysis.analysis_id)
+                )
             ):
                 errors[candidate_id] = "Этот предпросмотр не совпадает с текущей версией проекта; обновите его."
                 continue
@@ -396,6 +411,8 @@ class PipelineFacade:
             left.analysis_id == right.analysis_id
             and left.analysis_fingerprint == right.analysis_fingerprint
             and left.analysis_artifact_path == right.analysis_artifact_path
+            and left.analysis_run_id == right.analysis_run_id
+            and left.analysis_artifact_sha256 == right.analysis_artifact_sha256
             and left.source_fingerprint == right.source_fingerprint
             and left.project_id == right.project_id
         )
@@ -427,6 +444,8 @@ class PipelineFacade:
                 artifact.analysis_id != baseline.analysis_id
                 or artifact.analysis_fingerprint != baseline.analysis_fingerprint
                 or artifact.analysis_artifact_path != baseline.analysis_artifact_path
+                or artifact.analysis_run_id != baseline.analysis_run_id
+                or artifact.analysis_artifact_sha256 != baseline.analysis_artifact_sha256
                 or artifact.source_fingerprint != baseline.source_fingerprint
                 or artifact.project_id != baseline.project_id
             ):
@@ -449,6 +468,8 @@ class PipelineFacade:
             source_fingerprint=baseline.source_fingerprint,
             candidates=records,
             warnings=[warning for artifact in artifacts.values() for warning in artifact.warnings],
+            analysis_run_id=baseline.analysis_run_id,
+            analysis_artifact_sha256=baseline.analysis_artifact_sha256,
         )
         path = run_directory / "approved-draft.json"
         approved.write(path)

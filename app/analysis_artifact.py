@@ -7,15 +7,22 @@ cache.  It contains the immutable identifiers, a compact review payload and
 references needed to load the full scored candidates again for rendering.
 """
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from app.candidate_quality import EligibilityDecision, legacy_eligibility_decision
-from app.utils import read_json, utc_now, write_json
+from app.utils import read_json, stable_file_hash, utc_now, write_json
 
 
-ANALYSIS_ARTIFACT_SCHEMA_VERSION = "1.0"
+ANALYSIS_ARTIFACT_SCHEMA_VERSION = "1.1"
+LEGACY_ANALYSIS_ARTIFACT_SCHEMA_VERSION = "1.0"
+LEGACY_ANALYSIS_WARNING = (
+    "LEGACY_ANALYSIS_ARTIFACT_1_0: references are mutable and do not carry producer-bound integrity metadata."
+)
+ANALYSIS_INTEGRITY_SCHEMA_VERSION = "analysis-integrity.1"
 
 
 class AnalysisArtifactError(ValueError):
@@ -38,14 +45,22 @@ class AnalysisArtifact:
     summary: dict[str, Any]
     content_profile: dict[str, Any]
     duration_seconds: float | None
+    analysis_run_id: str = ""
+    snapshot_directory: str = ""
+    reference_integrity: dict[str, dict[str, Any]] = field(default_factory=dict)
+    producer: dict[str, Any] = field(default_factory=dict)
     candidate_count: int = 0
     recommended_count: dict[str, int] = field(default_factory=dict)
     status: str = "analysis_ready"
     schema_version: str = ANALYSIS_ARTIFACT_SCHEMA_VERSION
     warnings: list[str] = field(default_factory=list)
+    verified_sha256: str = field(default="", init=False, repr=False, compare=False)
+    verified_byte_size: int = field(default=0, init=False, repr=False, compare=False)
 
     def validate(self) -> None:
-        if self.schema_version != ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+        if self.schema_version not in {
+            ANALYSIS_ARTIFACT_SCHEMA_VERSION, LEGACY_ANALYSIS_ARTIFACT_SCHEMA_VERSION,
+        }:
             raise AnalysisArtifactError("Unsupported analysis artifact schema.")
         if self.status != "analysis_ready":
             raise AnalysisArtifactError("Analysis artifact is not ready for rendering.")
@@ -63,19 +78,91 @@ class AnalysisArtifact:
             for key, value in self.recommended_count.items()
         ):
             raise AnalysisArtifactError("Analysis artifact recommendation range is invalid.")
+        if self.schema_version == ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            self._validate_v11()
+
+    def _validate_v11(self) -> None:
+        if not self.analysis_run_id.strip() or not self.snapshot_directory.strip():
+            raise AnalysisArtifactError("Analysis artifact is missing immutable run lineage.")
+        if not isinstance(self.producer, dict) or not all(
+            str(self.producer.get(key) or "").strip() for key in ("name", "version", "analysis_run_id")
+        ):
+            raise AnalysisArtifactError("Analysis artifact producer metadata is invalid.")
+        if str(self.producer.get("analysis_run_id")) != self.analysis_run_id:
+            raise AnalysisArtifactError("Analysis artifact producer run identity mismatch.")
+        if "final_selection" not in self.references or "candidate_data" not in self.references:
+            raise AnalysisArtifactError("Analysis artifact snapshot is missing required final references.")
+        if self.references.get("candidate_data") != self.candidate_data_ref:
+            raise AnalysisArtifactError("Analysis artifact candidate reference is not snapshot-bound.")
+        if set(self.reference_integrity) != set(self.references):
+            raise AnalysisArtifactError("Analysis artifact integrity manifest does not cover every reference.")
+        for name, descriptor in self.reference_integrity.items():
+            if not isinstance(descriptor, dict):
+                raise AnalysisArtifactError(f"Analysis reference integrity is invalid: {name}.")
+            checksum = str(descriptor.get("sha256") or "")
+            byte_size = descriptor.get("byte_size")
+            producer = descriptor.get("producer")
+            if len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum):
+                raise AnalysisArtifactError(f"Analysis reference checksum is invalid: {name}.")
+            if isinstance(byte_size, bool) or not isinstance(byte_size, int) or byte_size < 0:
+                raise AnalysisArtifactError(f"Analysis reference byte size is invalid: {name}.")
+            if not isinstance(producer, dict) or not all(
+                str(producer.get(key) or "").strip() for key in ("name", "version", "analysis_run_id")
+            ):
+                raise AnalysisArtifactError(f"Analysis reference producer metadata is invalid: {name}.")
+            if str(producer.get("analysis_run_id")) != self.analysis_run_id:
+                raise AnalysisArtifactError(f"Analysis reference producer run mismatch: {name}.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return asdict(self)
+        data = asdict(self)
+        data.pop("verified_sha256", None)
+        data.pop("verified_byte_size", None)
+        return data
 
     def write(self, path: Path) -> None:
         write_json(path, self.to_dict())
+
+    def write_with_integrity(self, path: Path) -> str:
+        """Write the hand-off plus a producer-bound checksum sidecar."""
+
+        if self.schema_version != ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            raise AnalysisArtifactError("Only AnalysisArtifact 1.1 can emit an integrity sidecar.")
+        data = self.to_dict()
+        if path.exists():
+            if read_json(path, None) != data:
+                raise AnalysisArtifactError("Immutable analysis artifact already exists with different content.")
+        else:
+            write_json(path, data)
+        checksum = stable_file_hash(path)
+        byte_size = path.stat().st_size
+        sidecar = analysis_integrity_path(path)
+        payload = {
+            "schema_version": ANALYSIS_INTEGRITY_SCHEMA_VERSION,
+            "analysis_id": self.analysis_id,
+            "analysis_run_id": self.analysis_run_id,
+            "analysis_artifact_sha256": checksum,
+            "byte_size": byte_size,
+            "producer": dict(self.producer),
+        }
+        if sidecar.exists():
+            if read_json(sidecar, None) != payload:
+                raise AnalysisArtifactError("Immutable analysis integrity sidecar already exists with different content.")
+        else:
+            write_json(sidecar, payload)
+        self.verified_sha256 = checksum
+        self.verified_byte_size = byte_size
+        return checksum
 
     @classmethod
     def read(cls, path: Path) -> "AnalysisArtifact":
         raw = read_json(path, None)
         if not isinstance(raw, dict):
             raise AnalysisArtifactError("Analysis artifact file is missing or corrupted.")
+        return cls._from_raw(raw)
+
+    @classmethod
+    def _from_raw(cls, raw: dict[str, Any]) -> "AnalysisArtifact":
         artifact = cls(
             analysis_id=str(raw.get("analysis_id") or ""),
             project_id=str(raw["project_id"]) if raw.get("project_id") else None,
@@ -91,14 +178,115 @@ class AnalysisArtifact:
             summary=dict(raw.get("summary") or {}),
             content_profile=dict(raw.get("content_profile") or {}),
             duration_seconds=_optional_float(raw.get("duration_seconds")),
+            analysis_run_id=str(raw.get("analysis_run_id") or ""),
+            snapshot_directory=str(raw.get("snapshot_directory") or ""),
+            reference_integrity={
+                str(key): dict(value) for key, value in dict(raw.get("reference_integrity") or {}).items()
+                if isinstance(value, dict)
+            },
+            producer=dict(raw.get("producer") or {}),
             candidate_count=_candidate_count(raw),
             recommended_count=_recommended_count(raw),
             status=str(raw.get("status") or ""),
             schema_version=str(raw.get("schema_version") or ""),
             warnings=[str(item) for item in raw.get("warnings", [])],
         )
+        if artifact.schema_version == LEGACY_ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            _append_warning(artifact.warnings, LEGACY_ANALYSIS_WARNING)
         artifact.validate()
         return artifact
+
+    @classmethod
+    def read_verified(cls, path: Path, *, expected_sha256: str | None = None) -> "AnalysisArtifact":
+        """Read only after checksum verification, then verify every v1.1 snapshot member."""
+
+        if not path.is_file():
+            raise AnalysisArtifactError("Analysis artifact file is missing or corrupted.")
+        try:
+            payload = path.read_bytes()
+            raw = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise AnalysisArtifactError("Analysis artifact file is missing or corrupted.") from error
+        if not isinstance(raw, dict):
+            raise AnalysisArtifactError("Analysis artifact file is missing or corrupted.")
+        checksum = hashlib.sha256(payload).hexdigest()
+        byte_size = len(payload)
+        artifact = cls._from_raw(raw)
+        if expected_sha256 is not None and checksum != expected_sha256:
+            raise AnalysisArtifactError("ANALYSIS_INTEGRITY_MISMATCH: analysis artifact checksum mismatch.")
+        if artifact.schema_version == ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            try:
+                sidecar = read_json(analysis_integrity_path(path), None)
+            except (OSError, json.JSONDecodeError) as error:
+                raise AnalysisArtifactError(
+                    "ANALYSIS_INTEGRITY_MISMATCH: analysis integrity sidecar is corrupted."
+                ) from error
+            if not isinstance(sidecar, dict):
+                raise AnalysisArtifactError("ANALYSIS_INTEGRITY_MISMATCH: analysis integrity sidecar is missing.")
+            if (
+                sidecar.get("schema_version") != ANALYSIS_INTEGRITY_SCHEMA_VERSION
+                or sidecar.get("analysis_id") != artifact.analysis_id
+                or sidecar.get("analysis_run_id") != artifact.analysis_run_id
+                or sidecar.get("analysis_artifact_sha256") != checksum
+                or sidecar.get("byte_size") != byte_size
+                or sidecar.get("producer") != artifact.producer
+            ):
+                raise AnalysisArtifactError("ANALYSIS_INTEGRITY_MISMATCH: analysis integrity sidecar is invalid.")
+            artifact.verify_snapshot()
+        else:
+            _append_warning(
+                artifact.warnings,
+                "LEGACY_ANALYSIS_CHECKSUM_ONLY: checksum was established at read time; no immutable snapshot manifest exists.",
+            )
+        artifact.verified_sha256 = checksum
+        artifact.verified_byte_size = byte_size
+        return artifact
+
+    def verify_snapshot(self) -> None:
+        if self.schema_version != ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            return
+        root = Path(self.snapshot_directory).resolve()
+        if not root.is_dir():
+            raise AnalysisArtifactError("ANALYSIS_INTEGRITY_MISMATCH: immutable snapshot directory is missing.")
+        for name, raw_path in self.references.items():
+            path = Path(raw_path).resolve()
+            descriptor = self.reference_integrity[name]
+            if not path.is_relative_to(root) or not path.is_file():
+                raise AnalysisArtifactError(f"ANALYSIS_INTEGRITY_MISMATCH: unsafe or missing snapshot reference: {name}.")
+            try:
+                matches = path.stat().st_size == descriptor["byte_size"] and stable_file_hash(path) == descriptor["sha256"]
+            except OSError as error:
+                raise AnalysisArtifactError(
+                    f"ANALYSIS_INTEGRITY_MISMATCH: snapshot reference is unreadable: {name}."
+                ) from error
+            if not matches:
+                raise AnalysisArtifactError(f"ANALYSIS_INTEGRITY_MISMATCH: snapshot reference changed: {name}.")
+
+    def load_reference(self, name: str) -> dict[str, Any]:
+        raw_path = self.references.get(name)
+        if not raw_path:
+            raise AnalysisArtifactError(f"Analysis artifact is missing its {name} reference.")
+        path = Path(raw_path).resolve()
+        root = Path(
+            self.snapshot_directory if self.schema_version == ANALYSIS_ARTIFACT_SCHEMA_VERSION else self.work_directory
+        ).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise AnalysisArtifactError(f"Analysis reference is unavailable or unsafe: {name}.")
+        if self.schema_version == ANALYSIS_ARTIFACT_SCHEMA_VERSION:
+            descriptor = self.reference_integrity.get(name, {})
+            try:
+                matches = path.stat().st_size == descriptor.get("byte_size") and stable_file_hash(path) == descriptor.get("sha256")
+            except OSError as error:
+                raise AnalysisArtifactError(f"Analysis reference is unreadable: {name}.") from error
+            if not matches:
+                raise AnalysisArtifactError(f"ANALYSIS_INTEGRITY_MISMATCH: snapshot reference changed: {name}.")
+        try:
+            value = read_json(path, None)
+        except (OSError, json.JSONDecodeError) as error:
+            raise AnalysisArtifactError(f"Analysis reference is corrupted: {name}.") from error
+        if not isinstance(value, dict):
+            raise AnalysisArtifactError(f"Analysis reference is corrupted: {name}.")
+        return value
 
 
 def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) -> dict[str, Any]:
@@ -376,4 +564,15 @@ def _recommended_count(raw: dict[str, Any]) -> dict[str, int]:
 def new_analysis_artifact(**kwargs: Any) -> AnalysisArtifact:
     """Small constructor boundary that keeps the timestamp creation consistent."""
 
+    if not kwargs.get("analysis_run_id"):
+        kwargs.setdefault("schema_version", LEGACY_ANALYSIS_ARTIFACT_SCHEMA_VERSION)
     return AnalysisArtifact(created_at=utc_now(), **kwargs)
+
+
+def analysis_integrity_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.integrity.json")
+
+
+def _append_warning(warnings: list[str], value: str) -> None:
+    if value not in warnings:
+        warnings.append(value)

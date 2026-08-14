@@ -113,7 +113,7 @@ INTELLIGENCE_STAGES = (
     "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
     "production_feasibility", "coverage_map", "clip_count_recommendation", "render", "report",
 )
-INTELLIGENCE_ENGINE_VERSION = "1.8.0"
+INTELLIGENCE_ENGINE_VERSION = "1.9.0"
 TRANSFORMATION_STAGES = (
     "transformation_source_context", "transformation_semantic_representation",
     "transformation_narrative_plan", "transformation_script_draft",
@@ -563,7 +563,7 @@ class Pipeline:
                 "source": source.id,
                 "timeline_analysis_run_id": multimodal_timeline["analysis_run_id"],
                 "timeline": _hash(multimodal_timeline),
-                "content_type": content_profile.get("detected_content_type", "unknown"),
+                "boundary_evidence_profile": "genre_neutral",
                 "processing_mode": self.config.product_flow.processing_mode,
                 "vision": self.config.vision,
                 "provider": "mock" if self.mock_ai else self.config.ai.provider,
@@ -578,7 +578,7 @@ class Pipeline:
                 ).analyze_pass1(
                     source=source.path,
                     timeline=multimodal_timeline,
-                    content_type=str(content_profile.get("detected_content_type") or "unknown"),
+                    content_type="unknown",
                 ),
             ),
             cache_tracker=source_cache,
@@ -935,6 +935,7 @@ class Pipeline:
                 visual_analysis=visual_analysis,
                 multimodal_timeline=multimodal_timeline,
                 vision_analysis=vision_analysis,
+                vision_pass2=pass2_data,
                 content_profile=content_profile,
                 content_map=content_map,
                 story_units=story_units,
@@ -945,6 +946,7 @@ class Pipeline:
                 virality_profiles=virality_profiles,
                 virality_ranking=virality_ranking,
                 final_data=final_data,
+                production_feasibility=production_feasibility,
                 coverage_map=coverage_map,
                 clip_count_recommendation=clip_count_recommendation,
                 final_scored=final_scored,
@@ -1235,6 +1237,7 @@ class Pipeline:
         visual_analysis: dict[str, Any],
         multimodal_timeline: dict[str, Any],
         vision_analysis: dict[str, Any],
+        vision_pass2: dict[str, Any],
         content_profile: dict[str, Any],
         content_map: dict[str, Any],
         story_units: dict[str, Any],
@@ -1245,6 +1248,7 @@ class Pipeline:
         virality_profiles: dict[str, Any],
         virality_ranking: dict[str, Any],
         final_data: dict[str, Any],
+        production_feasibility: dict[str, Any],
         coverage_map: dict[str, Any],
         clip_count_recommendation: dict[str, Any],
         final_scored: list[Any],
@@ -1255,32 +1259,11 @@ class Pipeline:
         """Persist a reusable intelligence result without starting delivery work."""
 
         scored_records = [item.to_dict() for item in final_scored]
-        candidate_data_path = work_directory / "candidates.scored.json"
-        # The source cache remains the authoritative large-data store.  This
-        # output-side artifact is the immutable hand-off for review and render.
-        references = {
-            "source": str(work_directory / "source.json"),
-            "metadata": str(work_directory / "metadata.json"),
-            "transcript": str(work_directory / "transcript.json"),
-            "transcript_features": str(work_directory / "transcript_features.json"),
-            "audio_features": str(work_directory / "audio_features.json"),
-            "scene_boundaries": str(work_directory / "scene_boundaries.json"),
-            "visual_analysis": str(work_directory / "visual_analysis.json"),
-            "multimodal_timeline": str(work_directory / "multimodal_timeline.json"),
-            "vision_observations": str(work_directory / "vision-observations.json"),
-            "vision_pass2": str(work_directory / "shortlist.vision.json"),
-            "content_profile": str(work_directory / "video_content_profile.json"),
-            "content_map": str(work_directory / "global_content_map.json"),
-            "story_units": str(work_directory / "story_units.json"),
-            "semantic_boundaries": str(work_directory / "semantic_boundaries.json"),
-            "production_feasibility": str(work_directory / "production_feasibility.json"),
-            "coverage_map": str(work_directory / "coverage_map.json"),
-            "clip_count_recommendation": str(work_directory / "clip_count_recommendation.json"),
-            "candidate_data": str(candidate_data_path),
+        candidate_data = {
+            "candidates": scored_records,
+            "ai": dict(ai_data.get("ai") or {}),
+            "virality": {key: value for key, value in virality_ranking.items() if key != "candidates"},
         }
-        if self.config.virality.enabled:
-            references["virality_profiles"] = str(work_directory / "virality_profiles.json")
-            references["virality_ranking"] = str(work_directory / "virality_ranking.json")
         analysis_fingerprint = _hash({
             "engine": INTELLIGENCE_ENGINE_VERSION,
             "source": source.id,
@@ -1294,6 +1277,40 @@ class Pipeline:
         })
         analysis_id = f"analysis-{analysis_fingerprint[:16]}"
         artifact_path = output_directory / "analysis.json"
+        snapshot_directory = output_directory / "analysis-snapshot"
+        producer = {
+            "name": "Pipeline._finish_analysis_only",
+            "version": INTELLIGENCE_ENGINE_VERSION,
+            "analysis_run_id": self.run_id,
+        }
+        snapshot_objects: dict[str, dict[str, Any]] = {
+            "source": source_data,
+            "metadata": metadata,
+            "transcript": transcript,
+            "transcript_features": transcript_features,
+            "audio_features": audio_features,
+            "scene_boundaries": scenes,
+            "visual_analysis": visual_analysis,
+            "multimodal_timeline": multimodal_timeline,
+            "vision_observations": vision_analysis,
+            "vision_pass2": vision_pass2,
+            "content_profile": content_profile,
+            "content_map": content_map,
+            "story_units": story_units,
+            "semantic_boundaries": raw_candidates,
+            "production_feasibility": production_feasibility,
+            "coverage_map": coverage_map,
+            "clip_count_recommendation": clip_count_recommendation,
+            "candidate_data": candidate_data,
+            "final_selection": final_data,
+        }
+        if self.config.virality.enabled:
+            snapshot_objects["virality_profiles"] = virality_profiles
+            snapshot_objects["virality_ranking"] = virality_ranking
+        references, reference_integrity = _write_analysis_snapshot(
+            snapshot_directory, snapshot_objects, producer,
+        )
+        candidate_data_path = Path(references["candidate_data"])
         review_candidates = [candidate_review_payload(record, selected_ids) for record in scored_records]
         artifact = new_analysis_artifact(
             analysis_id=analysis_id,
@@ -1327,6 +1344,10 @@ class Pipeline:
                 "manual_override": content_profile.get("manual_override"),
             },
             duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
+            analysis_run_id=self.run_id,
+            snapshot_directory=str(snapshot_directory),
+            reference_integrity=reference_integrity,
+            producer=producer,
             candidate_count=len(review_candidates),
             recommended_count={
                 "min": int(clip_count_recommendation.get("estimated_publishable_clip_range", {}).get("min", len(selected_ids)) or 0),
@@ -1336,7 +1357,7 @@ class Pipeline:
             warnings=list(self.warnings),
         )
         tracker.start("analysis_artifact", analysis_fingerprint)
-        artifact.write(artifact_path)
+        artifact.write_with_integrity(artifact_path)
         tracker.finish("analysis_artifact")
         for stage in (
             *TRANSFORMATION_STAGES, *PRODUCTION_PLAN_STAGES, *TTS_STAGES,
@@ -1435,9 +1456,10 @@ class Pipeline:
 
         assert self.analysis_artifact_path is not None
         try:
-            analysis = AnalysisArtifact.read(self.analysis_artifact_path)
+            analysis = AnalysisArtifact.read_verified(self.analysis_artifact_path)
         except AnalysisArtifactError as error:
             raise ClipEngineError(f"Analysis artifact cannot be used: {error}") from error
+        self.warnings.extend(warning for warning in analysis.warnings if warning not in self.warnings)
         if analysis.project_id and self.project_id and analysis.project_id != self.project_id:
             raise ClipEngineError("Analysis artifact belongs to a different project.")
         if self.expected_analysis_id and analysis.analysis_id != self.expected_analysis_id:
@@ -1450,30 +1472,18 @@ class Pipeline:
             raise ClipEngineError("Selected candidate IDs must not contain duplicates.")
         if not self.selected_candidate_ids:
             raise ClipEngineError("Render requires at least one explicit selected candidate ID.")
-
-        analysis_work_directory = Path(analysis.work_directory).resolve()
-        root_work_directory = (self.root / "work").resolve()
-        if not analysis_work_directory.is_relative_to(root_work_directory):
-            raise ClipEngineError("Analysis artifact work reference is outside this engine workspace.")
+        if analysis.schema_version == "1.0" and not Path(analysis.work_directory).resolve().is_relative_to(
+            (self.root / "work").resolve()
+        ):
+            raise ClipEngineError("Legacy analysis work reference is outside this engine workspace.")
 
         def load_reference(name: str) -> dict[str, Any]:
-            raw_path = analysis.references.get(name)
-            if not raw_path:
-                raise ClipEngineError(f"Analysis artifact is missing its {name} reference.")
-            path = Path(raw_path).resolve()
-            if not path.is_relative_to(analysis_work_directory) or not path.is_file():
-                raise ClipEngineError(f"Analysis reference is unavailable or unsafe: {name}.")
-            value = read_json(path, None)
-            if not isinstance(value, dict):
-                raise ClipEngineError(f"Analysis reference is corrupted: {name}.")
-            return value
+            try:
+                return analysis.load_reference(name)
+            except AnalysisArtifactError as error:
+                raise ClipEngineError(f"Analysis artifact cannot be used: {error}") from error
 
-        candidate_path = Path(analysis.candidate_data_ref).resolve()
-        if not candidate_path.is_relative_to(analysis_work_directory) or not candidate_path.is_file():
-            raise ClipEngineError("Analysis candidate data is unavailable or unsafe.")
-        candidate_data = read_json(candidate_path, None)
-        if not isinstance(candidate_data, dict):
-            raise ClipEngineError("Analysis candidate data is corrupted.")
+        candidate_data = load_reference("candidate_data")
         final_scored = [
             scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
         ]
@@ -1914,6 +1924,8 @@ class Pipeline:
             status=artifact_status,
             warnings=list(self.warnings),
             run_id=self.run_id,
+            analysis_run_id=analysis.analysis_run_id or analysis.analysis_id,
+            analysis_artifact_sha256=analysis.verified_sha256,
         )
         tracker.start("draft_artifact", draft_fingerprint)
         draft.write(draft_path)
@@ -2053,6 +2065,8 @@ class Pipeline:
             status="draft_partial",
             warnings=list(self.warnings),
             run_id=self.run_id,
+            analysis_run_id=analysis.analysis_run_id or analysis.analysis_id,
+            analysis_artifact_sha256=analysis.verified_sha256,
         )
         path = output_directory / "draft-progress.json"
         progress.write(path)
@@ -2071,13 +2085,29 @@ class Pipeline:
         assert self.draft_artifact_path is not None
         try:
             draft = DraftArtifact.read(self.draft_artifact_path)
-            analysis = AnalysisArtifact.read(Path(draft.analysis_artifact_path))
+            analysis = AnalysisArtifact.read_verified(
+                Path(draft.analysis_artifact_path),
+                expected_sha256=draft.analysis_artifact_sha256 or None,
+            )
         except (DraftArtifactError, AnalysisArtifactError) as error:
             raise ClipEngineError(f"Draft hand-off cannot be used: {error}") from error
+        self.warnings.extend(warning for warning in (*draft.warnings, *analysis.warnings) if warning not in self.warnings)
         if draft.project_id and self.project_id and draft.project_id != self.project_id:
             raise ClipEngineError("Draft artifact belongs to a different project.")
         if draft.source_fingerprint != source.id or analysis.source_fingerprint != source.id:
             raise ClipEngineError("The selected draft belongs to a different source file.")
+        if (
+            draft.analysis_id != analysis.analysis_id
+            or draft.analysis_fingerprint != analysis.analysis_fingerprint
+        ):
+            raise ClipEngineError("Draft hand-off analysis identity mismatch.")
+        expected_analysis_run_id = analysis.analysis_run_id or analysis.analysis_id
+        if draft.analysis_run_id and draft.analysis_run_id != expected_analysis_run_id:
+            raise ClipEngineError("Draft hand-off analysis run identity mismatch.")
+        if analysis.schema_version == "1.0" and not Path(analysis.work_directory).resolve().is_relative_to(
+            (self.root / "work").resolve()
+        ):
+            raise ClipEngineError("Legacy analysis work reference is outside this engine workspace.")
         if not self.selected_candidate_ids:
             raise ClipEngineError("Production render requires explicit approved candidate IDs.")
         if len(self.selected_candidate_ids) != len(set(self.selected_candidate_ids)):
@@ -2207,20 +2237,11 @@ class Pipeline:
                 "timeline_version": timeline["timeline_version"],
             })
         production = self._preflight_semantic_content(tracker, production)
-        analysis_work = Path(analysis.work_directory).resolve()
-        root_work = (self.root / "work").resolve()
-        if not analysis_work.is_relative_to(root_work):
-            raise ClipEngineError("Analysis work reference is outside this engine workspace.")
-
         def load_reference(name: str) -> dict[str, Any]:
-            raw = analysis.references.get(name)
-            path = Path(str(raw or "")).resolve()
-            if not raw or not path.is_relative_to(analysis_work) or not path.is_file():
-                raise ClipEngineError(f"Approved draft is missing a safe {name} analysis reference.")
-            value = read_json(path, None)
-            if not isinstance(value, dict):
-                raise ClipEngineError(f"Approved draft has corrupted {name} analysis data.")
-            return value
+            try:
+                return analysis.load_reference(name)
+            except AnalysisArtifactError as error:
+                raise ClipEngineError(f"Approved draft cannot use analysis data: {error}") from error
 
         source_data = load_reference("source")
         metadata = load_reference("metadata")
@@ -2233,8 +2254,7 @@ class Pipeline:
         multimodal_timeline = load_reference("multimodal_timeline")
         coverage_map = load_reference("coverage_map")
         recommendation = load_reference("clip_count_recommendation")
-        candidate_data_path = Path(analysis.candidate_data_ref).resolve()
-        candidate_data = read_json(candidate_data_path, {}) if candidate_data_path.is_file() else {}
+        candidate_data = load_reference("candidate_data")
         final_scored = [
             scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
         ] if isinstance(candidate_data, dict) else []
@@ -4681,6 +4701,34 @@ def _prepared_source_audio_path(work_directory: Path) -> Path | None:
 
 def _write(path: Path, data: dict[str, Any]) -> dict[str, Any]:
     write_json(path, data); return data
+
+
+def _write_analysis_snapshot(
+    directory: Path,
+    objects: dict[str, dict[str, Any]],
+    producer: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """Materialize immutable run lineage from analysis objects already in memory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    references: dict[str, str] = {}
+    integrity: dict[str, dict[str, Any]] = {}
+    for name, value in objects.items():
+        path = directory / f"{name}.json"
+        if path.exists():
+            if read_json(path, None) != value:
+                raise ClipEngineError(
+                    f"ANALYSIS_SNAPSHOT_IMMUTABLE: run snapshot member already differs: {name}."
+                )
+        else:
+            write_json(path, value)
+        references[name] = str(path)
+        integrity[name] = {
+            "sha256": stable_file_hash(path),
+            "byte_size": path.stat().st_size,
+            "producer": {**producer, "artifact_name": name},
+        }
+    return references, integrity
 
 
 def _write_candidates(path: Path, candidates: list[Candidate]) -> dict[str, Any]:

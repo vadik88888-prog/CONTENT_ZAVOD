@@ -339,6 +339,7 @@ def test_normal_draft_planning_uses_persisted_content_profile_for_auto_preset(tm
         summary={},
         content_profile={"detected_content_type": "podcast"},
         duration_seconds=600.0,
+        schema_version="1.0",
     )
     artifact.write(analysis_path)
     project.analysis_artifact_path = str(analysis_path)
