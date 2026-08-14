@@ -49,8 +49,28 @@ def test_creative_profile_adapter_prefers_structured_effective_profile() -> None
         },
     }
 
-    assert creative_profile_signal(profile) == "gameplay commentary gaming visual_led high_pacing"
+    assert creative_profile_signal(profile) == "gameplay commentary gaming"
     assert recommend_preset_family(profile) == "minimal"
+
+
+def test_creative_auto_mapping_ignores_traits_until_an_approved_mapping_exists() -> None:
+    base = {
+        "effective_profile": {
+            "format": "talking_head",
+            "editorial_mode": "commentary",
+            "domain": "general",
+            "traits": [],
+        },
+    }
+    trait_only_change = {
+        "effective_profile": {
+            **base["effective_profile"],
+            "traits": ["scene_driven", "high_pacing", "visual_led"],
+        },
+    }
+
+    assert creative_profile_signal(base) == creative_profile_signal(trait_only_change)
+    assert recommend_preset_family(base) == recommend_preset_family(trait_only_change) == "clean"
 
 
 def test_explicit_user_preset_always_wins_over_content_recommendation() -> None:

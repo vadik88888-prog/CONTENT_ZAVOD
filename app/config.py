@@ -814,7 +814,7 @@ class ProductFlowConfig:
     preset_selection_mode: str = "auto"
     preset_provenance: str = "content_recommendation"
     audio_mode: str = "original"
-    preset_version: str = "4B.1"
+    preset_version: str = "1.0.0"
 
     def validate(self) -> None:
         if self.audio_mode not in {"original", "original_enhanced", "voiceover", "replace_voice", "mixed"}:

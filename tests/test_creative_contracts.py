@@ -565,6 +565,9 @@ def test_preview_and_final_profiles_share_semantic_timing_layout_parity() -> Non
         ),
     )
 
+    assert intent.policy.preset_version == "1"
+    assert preview.plan_hash == final.plan_hash == plan.plan_hash
+    assert preview.parity_signature == final.parity_signature == plan.parity_signature
     assert check_preview_final_parity(preview, final).status == "matched"
     assert_preview_final_parity(preview, final)
     mismatch = final.model_copy(update={"resolved_lines_hash": "f" * 64})

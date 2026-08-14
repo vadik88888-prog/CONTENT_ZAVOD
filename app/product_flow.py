@@ -21,7 +21,7 @@ from app.content_profile_taxonomy import (
 )
 from app.creative_policy import (
     PresetFamily,
-    creative_profile_signal,
+    creative_preset_definition,
     recommend_preset_family,
     resolve_preset_family,
 )
@@ -186,6 +186,7 @@ class ResolvedProcessingConfig:
     recommended_subtitle_preset: str
     preset_selection_mode: str
     preset_provenance: str
+    preset_version: str
     audio_mode: str
     editorial_intent: str
     manual_profile_override: dict[str, Any]
@@ -210,6 +211,7 @@ class ResolvedProcessingConfig:
             "recommended_subtitle_preset": self.recommended_subtitle_preset,
             "preset_selection_mode": self.preset_selection_mode,
             "preset_provenance": self.preset_provenance,
+            "preset_version": self.preset_version,
             "audio_mode": self.audio_mode,
             "editorial_intent": self.editorial_intent,
             "manual_profile_override": self.manual_profile_override,
@@ -342,8 +344,8 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         "maximum": {"clips": 5, "candidates": 160, "shortlist": 30, "reranking": True, "strategy": "staged", "bitrate": "8M", "crop": "center_crop"},
     }[intent.processing_mode]
     clip_count = requested_count or int(defaults["clips"])
-    content_type = _preset_content_type(source_metadata)
-    recommended_preset = recommend_preset_family(content_type)
+    content_profile = source_metadata
+    recommended_preset = recommend_preset_family(content_profile)
     explicit_choice = (
         cast(PresetFamily, intent.subtitle_preset)
         if intent.preset_selection_mode == "explicit"
@@ -351,8 +353,9 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
     )
     effective_preset = resolve_preset_family(
         user_choice=explicit_choice,
-        content_type=content_type,
+        content_type=content_profile,
     )
+    preset_version = creative_preset_definition(effective_preset).preset_version
     return ResolvedProcessingConfig(
         processing_mode=intent.processing_mode,
         deep_analysis=deep_analysis,
@@ -367,6 +370,7 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
             if intent.preset_selection_mode == "explicit"
             else "content_recommendation"
         ),
+        preset_version=preset_version,
         audio_mode=intent.audio_mode,
         editorial_intent=intent.editorial_intent.strip(),
         manual_profile_override={
@@ -551,12 +555,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     flow.preset_selection_mode = resolved.preset_selection_mode
     flow.preset_provenance = resolved.preset_provenance
     flow.audio_mode = resolved.audio_mode
-    flow.preset_version = resolved.resolver_version
-
-
-def _preset_content_type(source_metadata: dict[str, Any] | None) -> str:
-    return creative_profile_signal(source_metadata)
-
+    flow.preset_version = resolved.preset_version
 
 def _number(value: Any) -> float | None:
     if isinstance(value, bool):

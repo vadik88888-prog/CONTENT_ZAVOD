@@ -2171,6 +2171,12 @@ def select_with_coverage(
                     or "Guaranteed blocked by provider-free production feasibility."
                 ),
             )
+        elif boundary and not bool(boundary.get("eligible", False)):
+            reject(
+                item,
+                "BOUNDARY_REJECTED",
+                str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation."),
+            )
         elif not item.selected and not allow_ranked_replacements:
             reject(item, "BASE_SELECTION_REJECTED", item.rejection_reason or "Не прошёл базовый quality ranking.")
         elif item.candidate.duration < float(config.min_clip_duration):
@@ -2186,12 +2192,6 @@ def select_with_coverage(
             not strong_story or item.score < settings.coverage_min_quality_score
         ):
             reject(item, "QUALITY_BELOW_THRESHOLD", "Оценка ниже порога.")
-        elif boundary and not bool(boundary.get("eligible", False)):
-            reject(
-                item,
-                "BOUNDARY_REJECTED",
-                str(boundary.get("fallback_reason") or "Semantic boundary не прошла validation."),
-            )
     while len(selected) < requested:
         ranked: list[tuple[float, float, str, ScoredCandidate, dict[str, Any], ScoredCandidate | None, DiversitySimilarity | None]] = []
         for item in scored:
@@ -2229,7 +2229,7 @@ def select_with_coverage(
                 str(getattr(settings, "editorial_intent", "") or ""),
             )
             score = (
-                (item.score / 100) * weights["base_quality"]
+                float(item.virality.get("ranking_sort_score", item.score / 100)) * weights["base_quality"]
                 + standalone * weights["standalone"]
                 + completeness * weights["completeness"]
                 + boundary_score * weights["boundary"]

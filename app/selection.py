@@ -29,7 +29,8 @@ def select_clips(
         isinstance(production_feasibility, dict)
         and production_feasibility.get("allow_ranked_replacements")
     )
-    for item in sorted(scored, key=lambda value: value.score, reverse=True):
+    rankable: list[ScoredCandidate] = []
+    for item in scored:
         if not item.selected and not allow_ranked_replacements:
             continue
         boundary = item.candidate.boundary_diagnostics
@@ -70,6 +71,19 @@ def select_clips(
             }
             item.selection_reason = "Оценка ниже порога."
             continue
+        rankable.append(item)
+
+    # Profile-aware rank is consumed only after every hard gate above has
+    # passed. It never participates in eligibility, boundary, feasibility, or
+    # threshold decisions.
+    for item in sorted(
+        rankable,
+        key=lambda value: float(
+            value.virality.get("ranking_sort_score", value.score / 100)
+        ),
+        reverse=True,
+    ):
+        feasibility = feasibility_by_id.get(item.candidate.id)
         duplicate = _duplicate_against(item, accepted, config)
         if duplicate is not None:
             kind, chosen, details = duplicate

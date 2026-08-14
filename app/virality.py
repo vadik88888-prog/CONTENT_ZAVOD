@@ -10,7 +10,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from app.audio_features import window_audio_features
 from app.content_understanding import StoryUnit
@@ -1722,7 +1722,38 @@ def assess_candidate_eligibility(
     return result
 
 
+def _structured_effective_profile(
+    content_profile: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    source: Mapping[str, Any] = content_profile or {}
+    nested = source.get("content_profile")
+    if isinstance(nested, Mapping):
+        source = nested
+    effective = source.get("effective_profile")
+    return effective if isinstance(effective, Mapping) else None
+
+
 def resolve_virality_strategy(content_profile: dict[str, Any] | None) -> str:
+    effective = _structured_effective_profile(content_profile)
+    if effective is not None:
+        # Only the approved structured axes participate. Traits are retained in
+        # the profile contract but deliberately have no scoring/effects mapping.
+        format_id = str(effective.get("format") or "unknown")
+        editorial_mode = str(effective.get("editorial_mode") or "unknown")
+        domain = str(effective.get("domain") or "unknown")
+        if editorial_mode == "motivational" and format_id == "talking_head":
+            return "motivational_monologue"
+        if format_id == "dialogue" or editorial_mode == "interview":
+            return "generic_dialogue"
+        if format_id == "gameplay" or domain == "gaming":
+            return "generic_scene_driven"
+        if editorial_mode in {"explanatory", "demonstration"} or domain == "education":
+            return "generic_educational"
+        if format_id in {"screen_demo", "scene_driven"}:
+            return "generic_scene_driven"
+        if format_id == "talking_head":
+            return "generic_monologue"
+        return "generic_fallback"
     strategy = str((content_profile or {}).get("strategy_id") or "generic_fallback")
     return strategy if strategy in {
         "motivational_monologue", "generic_monologue", "generic_dialogue", "generic_educational",
@@ -1920,7 +1951,8 @@ def apply_virality_ranking(
 
     strategy = resolve_virality_strategy(content_profile)
     all_weights = getattr(settings, "strategy_weights", {})
-    weights = dict(all_weights.get(strategy) or getattr(settings, "weights", {}))
+    base_weights = dict(getattr(settings, "weights", {}))
+    profile_weights = dict(all_weights.get(strategy) or base_weights)
     raw_items = assessment_data.get("candidates", []) if isinstance(assessment_data, dict) else []
     by_id = {str(item.get("candidate_id") or ""): item for item in raw_items if isinstance(item, dict)}
     ranked: list[Any] = []
@@ -1937,14 +1969,32 @@ def apply_virality_ranking(
         retention = EstimatedRetentionProfile.from_dict(dict(raw.get("retention_profile") or {}))
         publishability = PublishabilityAssessment.from_dict(dict(raw.get("publishability") or {}))
         eligibility = EligibilityAssessment.from_dict(dict(raw.get("eligibility") or {}))
-        potential = aggregate_viral_potential(
-            item.candidate, feature, retention, publishability, eligibility, weights, content_profile,
+        base_potential = aggregate_viral_potential(
+            item.candidate, feature, retention, publishability, eligibility, base_weights, content_profile,
             dead_zone_penalty_weight=float(getattr(settings, "dead_zone_penalty_weight", 0.10)),
         )
-        passes_floor = potential.viral_potential_score >= float(getattr(settings, "minimum_quality_score", 0.52))
+        boundary = item.candidate.boundary_diagnostics or {}
+        boundary_passed = not boundary or bool(boundary.get("eligible", False))
+        eligibility_passed = eligibility.status in {
+            "publishable_now", "publishable_with_minor_adjustment",
+        }
+        profile_weighting_applied = eligibility_passed and boundary_passed
+        potential = (
+            aggregate_viral_potential(
+                item.candidate, feature, retention, publishability, eligibility,
+                profile_weights, content_profile,
+                dead_zone_penalty_weight=float(getattr(settings, "dead_zone_penalty_weight", 0.10)),
+            )
+            if profile_weighting_applied
+            else base_potential
+        )
+        # Profile weights are ranking preferences, not eligibility thresholds.
+        # Keep the neutral/base score as the candidate quality score so a hard
+        # reject can never be numerically rescued by its source profile.
+        passes_floor = base_potential.viral_potential_score >= float(getattr(settings, "minimum_quality_score", 0.52))
         publishable = publishability.publishability_score.score >= float(getattr(settings, "minimum_publishability_score", 0.55))
-        allowed = eligibility.status in {"publishable_now", "publishable_with_minor_adjustment"} and passes_floor and publishable
-        item.score = int(round(potential.viral_potential_score * 100))
+        allowed = eligibility_passed and boundary_passed and passes_floor and publishable
+        item.score = int(round(base_potential.viral_potential_score * 100))
         item.hook_score = int(round(feature.hook_assessment.hook_strength.score * 100))
         item.completeness_score = int(round(publishability.story_completeness.score * 100))
         item.emotional_score = int(round(feature.features["emotional_progression"].score * 100))
@@ -1962,16 +2012,26 @@ def apply_virality_ranking(
             "viral_potential": potential.to_dict(),
             "selection_eligible": allowed,
             "ranking_sort_score": potential.viral_potential_score,
+            "base_ranking_sort_score": base_potential.viral_potential_score,
+            "profile_weighting_applied": profile_weighting_applied,
+            "profile_strategy_id": strategy,
+            "profile_axes": {
+                key: value
+                for key, value in dict(_structured_effective_profile(content_profile) or {}).items()
+                if key in {"format", "editorial_mode", "domain"}
+            },
         }
         diagnostics.append({
             "candidate_id": item.candidate.id, "viral_potential_score": potential.viral_potential_score,
             "retention_potential_score": potential.retention_potential_score,
             "publishability_score": potential.publishability_score, "eligibility": eligibility.status,
             "passes_quality_floor": passes_floor, "passes_publishability_floor": publishable,
+            "profile_weighting_applied": profile_weighting_applied,
         })
         ranked.append(item)
     confidence_weight = _bounded(float(getattr(settings, "uncertainty_tiebreak_weight", 0.08)))
     ranked.sort(key=lambda value: (
+        -int(bool(value.virality.get("selection_eligible", False))),
         -float(value.virality.get("ranking_sort_score", value.score / 100)),
         -float(value.virality.get("viral_potential", {}).get("confidence", {}).get("overall", {}).get("score", 0)) * confidence_weight,
         value.candidate.id,

@@ -13,6 +13,7 @@ from app.virality import (
     build_publishability_assessment,
     build_virality_assessments,
     build_virality_feature_profile,
+    resolve_virality_strategy,
 )
 
 
@@ -83,6 +84,29 @@ def test_strategy_weights_are_complete_and_materially_different():
     assert ViralPotentialScore.from_dict(motivational.to_dict()).to_dict() == motivational.to_dict()
 
 
+def test_structured_effective_profile_owns_strategy_and_traits_are_inert() -> None:
+    profile = {
+        "strategy_id": "motivational_monologue",
+        "effective_profile": {
+            "format": "dialogue",
+            "editorial_mode": "interview",
+            "domain": "business",
+            "traits": ["high_pacing", "visual_led"],
+        },
+    }
+    trait_only_change = {
+        **profile,
+        "effective_profile": {
+            **profile["effective_profile"],
+            "traits": ["scene_driven", "instructional"],
+        },
+    }
+
+    assert resolve_virality_strategy(profile) == "generic_dialogue"
+    assert resolve_virality_strategy(trait_only_change) == "generic_dialogue"
+    assert resolve_virality_strategy({"strategy_id": "generic_educational"}) == "generic_educational"
+
+
 def test_complete_story_beats_hook_without_payoff_and_confidence_stays_separate():
     complete = _diagnostics([
         "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",
@@ -117,3 +141,61 @@ def test_ranking_respects_eligibility_floor_and_uses_stable_tie_break():
     assert ranked["virality"]["selection_eligible"] is False
     assert ranked["selected"] is False
     assert ranked["rejection_reason"] == "semantic_boundary_violation"
+
+
+def test_profile_weights_apply_only_after_hard_gates_and_cannot_raise_reject() -> None:
+    candidate, story, transcript, audio, _profile, _retention, _publishability, _eligibility = _diagnostics([
+        "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",
+    ], boundary=False)
+    config = AppConfig()
+
+    def rank(effective_profile: dict) -> dict:
+        content_profile = {
+            "effective_profile": {**effective_profile, "traits": ["high_pacing", "visual_led"]},
+            "analysis_confidence": 0.9,
+        }
+        assessments = build_virality_assessments(
+            [candidate], {"story_units": [story.to_dict()]}, transcript, audio, {},
+            content_profile, config.virality,
+        )
+        base = ScoredCandidate(candidate, "title", "hook", "summary", 99, 99, 99, 99, 99, 0, None, True)
+        return apply_virality_ranking([base], assessments, config.virality, content_profile)["candidates"][0]
+
+    motivational = rank({"format": "talking_head", "editorial_mode": "motivational", "domain": "general"})
+    educational = rank({"format": "screen_demo", "editorial_mode": "explanatory", "domain": "education"})
+
+    assert motivational["score"] == educational["score"]
+    assert motivational["virality"]["ranking_sort_score"] == educational["virality"]["ranking_sort_score"]
+    assert motivational["virality"]["profile_weighting_applied"] is False
+    assert educational["virality"]["profile_weighting_applied"] is False
+    assert motivational["virality"]["selection_eligible"] is False
+    assert educational["virality"]["selection_eligible"] is False
+
+
+def test_structured_profile_changes_only_downstream_rank_for_eligible_candidate() -> None:
+    candidate, story, transcript, audio, _profile, _retention, _publishability, _eligibility = _diagnostics([
+        "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",
+    ])
+    config = AppConfig()
+
+    def rank(effective_profile: dict) -> dict:
+        content_profile = {
+            "effective_profile": {**effective_profile, "traits": []},
+            "analysis_confidence": 0.9,
+        }
+        assessments = build_virality_assessments(
+            [candidate], {"story_units": [story.to_dict()]}, transcript, audio, {},
+            content_profile, config.virality,
+        )
+        base = ScoredCandidate(candidate, "title", "hook", "summary", 99, 99, 99, 99, 99, 0, None, True)
+        return apply_virality_ranking([base], assessments, config.virality, content_profile)["candidates"][0]
+
+    motivational = rank({"format": "talking_head", "editorial_mode": "motivational", "domain": "general"})
+    educational = rank({"format": "screen_demo", "editorial_mode": "explanatory", "domain": "education"})
+
+    assert motivational["virality"]["profile_weighting_applied"] is True
+    assert educational["virality"]["profile_weighting_applied"] is True
+    assert motivational["virality"]["profile_strategy_id"] == "motivational_monologue"
+    assert educational["virality"]["profile_strategy_id"] == "generic_educational"
+    assert motivational["score"] == educational["score"]
+    assert motivational["virality"]["ranking_sort_score"] != educational["virality"]["ranking_sort_score"]

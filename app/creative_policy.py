@@ -7,7 +7,6 @@ import re
 from typing import Any, Literal, Mapping
 
 from app.caption_presets import CaptionPresetId, CaptionStyleFamily
-from app.content_profile_taxonomy import PROFILE_AXIS_ORDER
 from app.creative_contracts import Intensity
 
 
@@ -74,6 +73,10 @@ CREATIVE_PRESET_VERSIONS: dict[tuple[PresetFamily, str], CreativePresetDefinitio
     (item.preset_id, item.preset_version): item
     for item in CREATIVE_PRESET_DEFINITIONS.values()
 }
+# Production plans created before creative presets received their own revision
+# stored the product-flow resolver version.  Keep those identities readable;
+# new plans pin the actual creative preset revision below.
+LEGACY_CREATIVE_PRESET_VERSION_ALIASES = ("4B.1",)
 CURRENT_CREATIVE_PRESET_VERSIONS: dict[PresetFamily, str] = {
     item.preset_id: item.preset_version for item in CREATIVE_PRESET_DEFINITIONS.values()
 }
@@ -100,13 +103,14 @@ def creative_profile_signal(content_profile: str | Mapping[str, Any] | None) -> 
     profile = nested if isinstance(nested, Mapping) else content_profile
     effective = profile.get("effective_profile")
     if isinstance(effective, Mapping):
-        signals: list[str] = []
-        for axis_id in PROFILE_AXIS_ORDER:
-            value = effective.get(axis_id)
-            if isinstance(value, (list, tuple)):
-                signals.extend(str(item) for item in value if item)
-            elif value:
-                signals.append(str(value))
+        # Traits remain descriptive until a separately approved effects
+        # mapping exists.  Auto creative policy consumes only the three
+        # explicitly approved structured axes.
+        signals = [
+            str(effective.get(axis_id) or "")
+            for axis_id in ("format", "editorial_mode", "domain")
+        ]
+        signals = [value for value in signals if value]
         if signals:
             return " ".join(signals)
     legacy_structured = " ".join(
@@ -123,6 +127,33 @@ def creative_profile_signal(content_profile: str | Mapping[str, Any] | None) -> 
 
 def recommend_preset_family(content_type: str | Mapping[str, Any] | None) -> PresetFamily:
     """Return a conservative recommendation; this never represents a user choice."""
+
+    profile: Mapping[str, Any] | None = None
+    if isinstance(content_type, Mapping):
+        nested = content_type.get("content_profile")
+        source = nested if isinstance(nested, Mapping) else content_type
+        effective = source.get("effective_profile")
+        if isinstance(effective, Mapping):
+            profile = effective
+    if profile is not None:
+        format_id = str(profile.get("format") or "unknown")
+        editorial_mode = str(profile.get("editorial_mode") or "unknown")
+        domain = str(profile.get("domain") or "unknown")
+        if format_id == "gameplay" or domain == "gaming":
+            return "minimal"
+        if (
+            format_id == "scene_driven"
+            or editorial_mode in {"narrative", "entertainment"}
+            or domain in {"food", "lifestyle", "entertainment"}
+        ):
+            return "dynamic"
+        if format_id == "dialogue" or editorial_mode == "interview":
+            return "documentary"
+        if format_id == "talking_head":
+            return "clean"
+        # screen demos, explanatory/news material, and unknown structured
+        # profiles use the conservative educational/editorial family.
+        return "documentary"
 
     normalized = re.sub(r"[^a-z0-9]+", "_", creative_profile_signal(content_type).casefold()).strip("_")
     tokens = frozenset(filter(None, normalized.split("_")))
@@ -154,4 +185,6 @@ def creative_preset_definition(
     preset_version: str | None = None,
 ) -> CreativePresetDefinition:
     version = preset_version or CURRENT_CREATIVE_PRESET_VERSIONS[preset_id]
+    if version in LEGACY_CREATIVE_PRESET_VERSION_ALIASES:
+        return CREATIVE_PRESET_DEFINITIONS[preset_id]
     return CREATIVE_PRESET_VERSIONS[(preset_id, version)]

@@ -27,7 +27,11 @@ from app.creative_contracts import (
     compile_render_plan,
     seconds_to_output_frame,
 )
-from app.creative_policy import CREATIVE_POLICY_VERSION, preset_family_policy
+from app.creative_policy import (
+    CREATIVE_POLICY_VERSION,
+    creative_preset_definition,
+    preset_family_policy,
+)
 from app.motion_planning import build_motion_plan
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence, build_source_broll_plan
@@ -58,7 +62,18 @@ def default_native_creative_intent(
 
     envelope = plan.envelope
     assert envelope is not None
-    family_policy = preset_family_policy(config.product_flow.subtitle_preset)  # type: ignore[arg-type]
+    try:
+        family_policy = creative_preset_definition(
+            envelope.preset.preset_id,  # type: ignore[arg-type]
+            envelope.preset.preset_version,
+        )
+    except KeyError:
+        # Compatibility-only envelopes (for example legacy/3A) predate the
+        # creative registry. Preserve their pinned envelope identity while
+        # retaining the established configured safe-family adaptation.
+        family_policy = preset_family_policy(
+            config.product_flow.subtitle_preset,  # type: ignore[arg-type]
+        )
     policy = CreativePolicy(
         preset_id=envelope.preset.preset_id,
         preset_version=envelope.preset.preset_version,

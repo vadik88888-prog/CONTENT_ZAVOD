@@ -23,7 +23,7 @@ from app.creative_contracts import (
     SourceInterval,
     canonical_hash,
 )
-from app.creative_policy import CREATIVE_POLICY_VERSION, preset_family_policy
+from app.creative_policy import CREATIVE_POLICY_VERSION, creative_preset_definition
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 from app.utils import read_json, stable_file_hash, utc_now, write_json
@@ -470,7 +470,10 @@ def creative_policy_for_config(
         # policy-table changes may affect new drafts, never a rerender of this
         # identity. Platform is still an explicit render revision input.
         return parent.model_copy(update={"platform": config.product_flow.platform})
-    family_policy = preset_family_policy(config.product_flow.subtitle_preset)  # type: ignore[arg-type]
+    family_policy = creative_preset_definition(
+        config.product_flow.subtitle_preset,  # type: ignore[arg-type]
+        config.product_flow.preset_version,
+    )
     return parent.model_copy(update={
         "preset_id": config.product_flow.subtitle_preset,
         "preset_version": config.product_flow.preset_version,

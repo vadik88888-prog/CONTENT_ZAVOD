@@ -147,6 +147,7 @@ def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() 
     assert resolved.subtitle_preset == "minimal"
     assert resolved.preset_selection_mode == "auto"
     assert resolved.preset_provenance == "content_recommendation"
+    assert resolved.preset_version == "1.0.0"
     assert resolved.to_dict()["effective_subtitle_preset"] == "minimal"
 
 
@@ -186,6 +187,7 @@ def test_explicit_preset_beats_content_recommendation_and_is_applied_to_runtime(
     assert config.product_flow.configured_subtitle_preset == "dynamic"
     assert config.product_flow.subtitle_preset == "dynamic"
     assert config.product_flow.preset_selection_mode == "explicit"
+    assert config.product_flow.preset_version == "1.0.0"
 
 
 def test_legacy_processing_intent_without_mode_remains_explicit_and_pinned() -> None:
