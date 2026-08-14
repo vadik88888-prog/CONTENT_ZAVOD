@@ -14,7 +14,14 @@ from app.content_transformation import run_content_transformation
 from app.errors import ProductionPlanError
 from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker
-from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan, validate_audio_handoff, validate_renderer_handoff
+from app.production_models import (
+    ContinuityDecision,
+    DialogueSegment,
+    NarrationSegment,
+    ProductionPlan,
+    validate_audio_handoff,
+    validate_renderer_handoff,
+)
 from app.production_plan import ProductionPlanEnvelopeContext, build_production_plan, production_summary
 from app.reporting import make_report
 from app.semantic_extraction import build_source_context
@@ -116,6 +123,31 @@ def _native_plan() -> ProductionPlan:
         AppConfig().production,
         envelope_context=_native_envelope_context(),
     )
+
+
+def _legacy_plan_with_internal_source_gap() -> dict:
+    raw = _native_plan().model_dump(mode="json")
+    raw["schema_version"] = "3A.2"
+    raw["metadata"]["plan_version"] = "3A.2"
+    raw["envelope"]["compatibility_mode"] = "legacy_adapter"
+    raw["envelope"]["legacy_source_version"] = "3A.2"
+    original = raw["segments"][0]
+    left = deepcopy(original)
+    right = deepcopy(original)
+    left.update({"segment_id": "dialogue-left", "order": 1, "source_end_seconds": 8.0, "estimated_duration_seconds": 4.0})
+    right.update({"segment_id": "dialogue-right", "order": 2, "source_start_seconds": 12.0, "estimated_duration_seconds": 8.0})
+    raw["segments"] = [left, right]
+    raw["dialogue_mappings"] = [deepcopy(left), deepcopy(right)]
+    raw["timeline"]["dialogue_count"] = 2
+    raw["timeline"]["entries"] = [
+        {
+            "segment_id": item["segment_id"], "order": item["order"],
+            "estimated_start_seconds": 0.0, "estimated_end_seconds": 0.0,
+            "included_in_master_timeline": False, "linked_segment_ids": [],
+        }
+        for item in (left, right)
+    ]
+    return raw
 
 
 def test_pydantic_production_models_reject_invalid_narration() -> None:
@@ -316,6 +348,25 @@ def test_source_audio_internal_cut_requires_persisted_typed_omission_rationale()
     assert [(item.source_start_seconds, item.source_end_seconds) for item in plan.dialogue_mappings] == [
         (4.0, 8.0), (12.0, 20.0),
     ]
+
+    mismatched = plan.continuity_decision.model_dump(mode="json")
+    mismatched["omitted_spans"][0]["source_range"] = {"start_seconds": 8.1, "end_seconds": 12.0}
+    mismatched["omitted_spans"][0]["evidence"]["duration_seconds"] = 3.9
+    outcome["source_context"]["continuity_decision"] = mismatched
+    with pytest.raises(ProductionPlanError, match="CONTINUITY_DECISION_EVIDENCE_MISMATCH"):
+        build_production_plan(
+            outcome, AppConfig().production, envelope_context=_native_envelope_context(),
+        )
+
+    raw_plan = plan.model_dump(mode="json")
+    raw_plan["continuity_decision"]["omitted_spans"][0].update({
+        "source_range": {"start_seconds": 7.5, "end_seconds": 12.0},
+        "evidence": {"source": "silence_detector", "duration_seconds": 4.5},
+    })
+    widened = ContinuityDecision.model_validate(raw_plan["continuity_decision"])
+    raw_plan["envelope"]["input_fingerprints"]["continuity_decision_sha256"] = widened.fingerprint()
+    with pytest.raises(ValidationError, match="CONTINUITY_OMISSION_INTERVAL_MISMATCH"):
+        ProductionPlan.model_validate(raw_plan)
 
 
 def test_native_envelope_is_deterministic_and_binds_v2_identity_contract() -> None:
@@ -621,6 +672,38 @@ def test_native_source_plan_rejects_unexplained_physical_media_cut() -> None:
 
     with pytest.raises(ValidationError, match="CONTINUITY_UNEXPLAINED_MEDIA_CUT"):
         ProductionPlan.model_validate(raw)
+
+
+def test_legacy_source_plan_rejects_unexplained_physical_media_cut() -> None:
+    with pytest.raises(ValidationError, match="CONTINUITY_UNEXPLAINED_MEDIA_CUT"):
+        ProductionPlan.model_validate(_legacy_plan_with_internal_source_gap())
+
+
+def test_cached_legacy_cut_rebuilds_native_plan_from_existing_transformation(tmp_path: Path) -> None:
+    pipeline = Pipeline(tmp_path, AppConfig())
+    tracker = StageTracker(tmp_path / "state.json")
+    transformation = {"items": [_outcome_with_boundary()]}
+    context = _native_envelope_context()
+    work = tmp_path / "work"
+    output = tmp_path / "output"
+    first = pipeline._build_production_plans(
+        tracker, transformation, work, output, envelope_context=context,
+    )
+    artifact = next(work.glob("production-plan-*.json"))
+    write_json(artifact, _legacy_plan_with_internal_source_gap())
+
+    rebuilt = pipeline._build_production_plans(
+        tracker, transformation, work, output, envelope_context=context,
+    )
+
+    assert first["status"] == rebuilt["status"] == "completed"
+    assert rebuilt["cache"]["hit_count"] == 0
+    rebuilt_plan = ProductionPlan.model_validate(rebuilt["items"][0]["plan"])
+    assert rebuilt_plan.envelope and rebuilt_plan.envelope.compatibility_mode == "native"
+    assert rebuilt_plan.envelope.input_fingerprints.analysis_sha256 == context.analysis_fingerprint
+    assert [(item.source_start_seconds, item.source_end_seconds) for item in rebuilt_plan.dialogue_mappings] == [
+        (4.0, 20.0),
+    ]
 
 
 def test_native_plan_carries_approved_boundary_pre_and_post_roll_into_source_dialogue() -> None:

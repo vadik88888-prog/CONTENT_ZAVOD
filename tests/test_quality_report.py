@@ -219,6 +219,26 @@ def test_real_large_unexplained_source_omission_remains_blocked_by_a2(tmp_path: 
     assert finding.measured_value == {"mode": "uncertain", "unexplained_omission_count": 1}
 
 
+def test_fake_silence_without_evidence_is_blocked_as_invalid_continuity(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    plan["continuity_decision"]["mode"] = "compact_dialogue"
+    plan["continuity_decision"]["omitted_spans"] = [{
+        "source_range": {"start_seconds": 2.0, "end_seconds": 3.0},
+        "rationale_type": "silence",
+        "rationale": "Claimed silence without persisted measurement.",
+        "evidence": {},
+    }]
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    assert any(item.code == "CONTINUITY_DECISION_INVALID" for item in report.findings)
+
+
 def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     _artifact, _result, report = _report(tmp_path)
 
@@ -551,6 +571,25 @@ def test_legacy_adapter_keeps_legacy_subtitle_and_reframe_qc(tmp_path: Path) -> 
     assert report.status == "BLOCKED"
     assert any(item.provenance.get("producer") == "composition_quality_decision" for item in report.findings)
     assert any(item.provenance.get("producer") == "subtitle_quality_decision" for item in report.findings)
+
+
+def test_legacy_source_gap_requires_native_plan_rebuild(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    plan["envelope"]["compatibility_mode"] = "legacy_adapter"
+    plan.pop("audio_mode", None)
+    plan["dialogue_mappings"] = [
+        {"source_start_seconds": 1.0, "source_end_seconds": 2.0},
+        {"source_start_seconds": 3.0, "source_end_seconds": 5.0},
+    ]
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    assert any(item.code == "LEGACY_PLAN_REBUILD_REQUIRED" for item in report.findings)
 
 
 def test_quality_blocker_cannot_be_hidden_by_ready_mp4_count(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -13,6 +14,7 @@ BOUNDARY_EPSILON_SECONDS = 0.001
 PRODUCTION_PLAN_ENVELOPE_VERSION = "5F.1"
 SUPPORTED_LEGACY_PLAN_VERSIONS = frozenset({"3A.0", "3A.1", "3A.2"})
 CONTINUITY_DECISION_VERSION = "A-2.continuity.1"
+SUPPORTED_PHYSICAL_CUT_RATIONALE_TYPES = frozenset({"silence"})
 
 
 class ProductionPlanIdentity(BaseModel):
@@ -229,6 +231,38 @@ class ContinuityOmittedSpan(BaseModel):
     ]
     rationale: str = Field(min_length=1)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _typed_rationale_has_persisted_evidence(self) -> "ContinuityOmittedSpan":
+        if self.rationale_type != "unexplained" and not self.authorizes_physical_cut():
+            raise ValueError(
+                f"{self.rationale_type} omission requires valid persisted type-specific evidence"
+            )
+        return self
+
+    def authorizes_physical_cut(self) -> bool:
+        """Return whether persisted evidence proves this typed omission."""
+
+        if self.rationale_type not in SUPPORTED_PHYSICAL_CUT_RATIONALE_TYPES:
+            return False
+        duration = self.source_range.end_seconds - self.source_range.start_seconds
+        if duration <= BOUNDARY_EPSILON_SECONDS:
+            return False
+        source = str(self.evidence.get("source") or "").strip()
+        if not source:
+            return False
+        if self.rationale_type == "silence":
+            measured = self.evidence.get("silence_seconds", self.evidence.get("duration_seconds"))
+            try:
+                seconds = float(measured)
+            except (TypeError, ValueError):
+                return False
+            return (
+                math.isfinite(seconds)
+                and seconds > 0
+                and abs(seconds - duration) <= BOUNDARY_EPSILON_SECONDS
+            )
+        return False
 
 
 class ContinuityDecision(BaseModel):
@@ -533,8 +567,16 @@ class ProductionPlan(BaseModel):
             raise ValueError("ProductionPlan segment ids must be unique")
         if [segment.order for segment in self.segments] != sorted(segment.order for segment in self.segments):
             raise ValueError("ProductionPlan segments must be ordered")
-        dialogue_ids = {segment.segment_id for segment in self.segments if isinstance(segment, DialogueSegment)}
-        if {segment.segment_id for segment in self.dialogue_mappings} != dialogue_ids:
+        dialogue_segments = {
+            segment.segment_id: segment
+            for segment in self.segments if isinstance(segment, DialogueSegment)
+        }
+        dialogue_mappings = {segment.segment_id: segment for segment in self.dialogue_mappings}
+        if dialogue_mappings.keys() != dialogue_segments.keys() or any(
+            dialogue_mappings[segment_id].model_dump(mode="json")
+            != dialogue_segments[segment_id].model_dump(mode="json")
+            for segment_id in dialogue_segments
+        ):
             raise ValueError("dialogue_mappings must mirror dialogue placeholder segments")
         if {entry.segment_id for entry in self.timeline.entries} != set(segment_ids):
             raise ValueError("Timeline must contain every production segment")
@@ -565,6 +607,8 @@ class ProductionPlan(BaseModel):
                 raise ValueError("IDENTITY_MISMATCH: continuity_decision_ref")
             if envelope.input_fingerprints.final_script_sha256 != self.metadata.final_script_hash:
                 raise ValueError("EDIT_PLAN_SCHEMA_INVALID: final_script fingerprint")
+        elif self.audio_mode in {"original", "original_enhanced"} and _legacy_source_plan_has_gap(self):
+            raise ValueError("CONTINUITY_UNEXPLAINED_MEDIA_CUT: legacy source plan must be rebuilt")
         if self.continuity_decision is not None:
             continuity_errors = _continuity_handoff_errors(self)
             if continuity_errors:
@@ -839,7 +883,7 @@ def _continuity_handoff_errors(plan: ProductionPlan) -> list[str]:
         errors.append("CONTINUITY_BOUNDARY_FINGERPRINT_MISMATCH")
     source_ranges = [
         BoundaryRange(start_seconds=item.source_start_seconds, end_seconds=item.source_end_seconds)
-        for item in plan.dialogue_mappings
+        for item in plan.segments if isinstance(item, DialogueSegment)
     ]
     if plan.envelope and plan.envelope.compatibility_mode == "native" and plan.audio_mode in {
         "original", "original_enhanced",
@@ -848,25 +892,30 @@ def _continuity_handoff_errors(plan: ProductionPlan) -> list[str]:
             errors.append("DIALOGUE_EVIDENCE_MAPPING_MISSING")
         explained = [
             item.source_range for item in decision.omitted_spans
-            if item.rationale_type != "unexplained"
+            if item.authorizes_physical_cut()
         ]
         approved = decision.approved_source_range
         cursor = approved.start_seconds
+        physical_gaps: list[BoundaryRange] = []
         for source_range in sorted(source_ranges, key=lambda item: (item.start_seconds, item.end_seconds)):
             if source_range.end_seconds <= approved.start_seconds + BOUNDARY_EPSILON_SECONDS:
                 continue
             if source_range.start_seconds >= approved.end_seconds - BOUNDARY_EPSILON_SECONDS:
                 break
             gap_end = min(source_range.start_seconds, approved.end_seconds)
-            if gap_end > cursor + BOUNDARY_EPSILON_SECONDS and not _range_is_covered(
-                BoundaryRange(start_seconds=cursor, end_seconds=gap_end), explained,
-            ):
-                errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
+            if gap_end > cursor + BOUNDARY_EPSILON_SECONDS:
+                gap = BoundaryRange(start_seconds=cursor, end_seconds=gap_end)
+                physical_gaps.append(gap)
+                if not _range_is_covered(gap, explained):
+                    errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
             cursor = max(cursor, min(source_range.end_seconds, approved.end_seconds))
-        if cursor < approved.end_seconds - BOUNDARY_EPSILON_SECONDS and not _range_is_covered(
-            BoundaryRange(start_seconds=cursor, end_seconds=approved.end_seconds), explained,
-        ):
-            errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
+        if cursor < approved.end_seconds - BOUNDARY_EPSILON_SECONDS:
+            gap = BoundaryRange(start_seconds=cursor, end_seconds=approved.end_seconds)
+            physical_gaps.append(gap)
+            if not _range_is_covered(gap, explained):
+                errors.append("CONTINUITY_UNEXPLAINED_MEDIA_CUT")
+        if any(not _range_is_covered(source_range, physical_gaps) for source_range in explained):
+            errors.append("CONTINUITY_OMISSION_INTERVAL_MISMATCH")
     for requirement in decision.required_spans:
         if not _range_is_covered(requirement.source_range, source_ranges):
             errors.append(f"CONTINUITY_{requirement.requirement_type.upper()}_LOST")
@@ -970,10 +1019,35 @@ def _is_safe_point(
     # A persisted typed omission is an explicit edit decision.  Unexplained
     # gaps never authorize a physical cut.
     return any(
-        span.rationale_type != "unexplained"
+        span.authorizes_physical_cut()
         and abs(timestamp - point) <= BOUNDARY_EPSILON_SECONDS
         for span in continuity.omitted_spans
         for point in (span.source_range.start_seconds, span.source_range.end_seconds)
+    )
+
+
+def _legacy_source_plan_has_gap(plan: ProductionPlan) -> bool:
+    ordered = sorted(
+        (item for item in plan.segments if isinstance(item, DialogueSegment)),
+        key=lambda value: (value.source_start_seconds, value.source_end_seconds),
+    )
+    approved = (
+        plan.continuity_decision.approved_source_range
+        if plan.continuity_decision is not None
+        else plan.boundary_decision.refined_range if plan.boundary_decision is not None else None
+    )
+    cursor: float | None = approved.start_seconds if approved is not None else None
+    for item in ordered:
+        if approved is not None and item.source_end_seconds <= approved.start_seconds + BOUNDARY_EPSILON_SECONDS:
+            continue
+        if approved is not None and item.source_start_seconds >= approved.end_seconds - BOUNDARY_EPSILON_SECONDS:
+            break
+        if cursor is not None and item.source_start_seconds > cursor + BOUNDARY_EPSILON_SECONDS:
+            return True
+        cursor = max(cursor or item.source_end_seconds, item.source_end_seconds)
+    return bool(
+        approved is not None
+        and (cursor is None or cursor < approved.end_seconds - BOUNDARY_EPSILON_SECONDS)
     )
 
 

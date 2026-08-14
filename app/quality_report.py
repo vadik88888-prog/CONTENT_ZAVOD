@@ -496,10 +496,17 @@ def _collect_plan_and_boundary(
 ) -> None:
     envelope = plan.get("envelope") if isinstance(plan, dict) else None
     if not isinstance(envelope, dict) or envelope.get("compatibility_mode") == "legacy_adapter":
+        legacy_gap = _legacy_source_plan_has_gap(plan)
         finding(
-            "QUALITY_CONFIDENCE_LOW", "warning", {"plan_envelope": envelope or None},
+            "LEGACY_PLAN_REBUILD_REQUIRED" if legacy_gap else "QUALITY_CONFIDENCE_LOW",
+            "blocker" if legacy_gap else "warning",
+            {"plan_envelope": envelope or None, "physical_source_gap": legacy_gap},
             measured_value="legacy_adapter", threshold="native ProductionPlan envelope",
-            producer="production_plan", message="Production plan uses an explicit legacy compatibility contract.",
+            producer="production_plan",
+            message=(
+                "Legacy source plan contains an unexplained physical cut and must be rebuilt from cached analysis."
+                if legacy_gap else "Production plan uses an explicit legacy compatibility contract."
+            ),
         )
         return
     raw_identity = envelope.get("identity")
@@ -544,6 +551,62 @@ def _collect_plan_and_boundary(
             threshold={"semantic_completion": True, "payoff_preserved": True}, producer="boundary_decision",
             message="Boundary decision reports an incomplete semantic ending.", interval=interval,
         )
+
+
+def _legacy_source_plan_has_gap(plan: dict[str, Any]) -> bool:
+    audio_mode = plan.get("audio_mode")
+    if audio_mode is None:
+        segments = plan.get("segments") if isinstance(plan.get("segments"), list) else []
+        has_narration = any(
+            isinstance(item, dict) and item.get("segment_type") == "narration"
+            for item in segments
+        )
+        audio_mode = "voiceover" if has_narration else "original"
+    if audio_mode not in {"original", "original_enhanced"}:
+        return False
+    segments = plan.get("segments")
+    source_items = [
+        item for item in segments
+        if isinstance(item, dict) and item.get("segment_type") == "original_dialogue"
+    ] if isinstance(segments, list) else []
+    if not source_items:
+        mappings = plan.get("dialogue_mappings")
+        source_items = mappings if isinstance(mappings, list) else []
+    if not source_items:
+        return False
+    ranges: list[tuple[float, float]] = []
+    for item in source_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item["source_start_seconds"])
+            end = float(item["source_end_seconds"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            ranges.append((start, end))
+    approved: dict[str, Any] | None = None
+    continuity = plan.get("continuity_decision")
+    boundary = plan.get("boundary_decision")
+    if isinstance(continuity, dict) and isinstance(continuity.get("approved_source_range"), dict):
+        approved = continuity["approved_source_range"]
+    elif isinstance(boundary, dict) and isinstance(boundary.get("refined_range"), dict):
+        approved = boundary["refined_range"]
+    try:
+        approved_start = float(approved["start_seconds"]) if approved is not None else None
+        approved_end = float(approved["end_seconds"]) if approved is not None else None
+    except (KeyError, TypeError, ValueError):
+        approved_start = approved_end = None
+    cursor: float | None = approved_start
+    for start, end in sorted(ranges):
+        if approved_start is not None and end <= approved_start + 0.001:
+            continue
+        if approved_end is not None and start >= approved_end - 0.001:
+            break
+        if cursor is not None and start > cursor + 0.001:
+            return True
+        cursor = max(cursor or end, end)
+    return bool(approved_end is not None and (cursor is None or cursor < approved_end - 0.001))
 
 
 def _collect_continuity(finding: Any, plan: dict[str, Any], render: dict[str, Any]) -> None:

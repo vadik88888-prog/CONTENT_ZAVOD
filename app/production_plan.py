@@ -603,7 +603,7 @@ def _build_continuous_source_dialogue(
     )
     explained_omissions = [
         span for span in (continuity_decision.omitted_spans if continuity_decision else [])
-        if span.rationale_type != "unexplained"
+        if span.authorizes_physical_cut()
     ]
     for omission in explained_omissions:
         if continuity_decision and any(
@@ -784,16 +784,10 @@ def _continuity_decision_from_context(
     """Read A-2 provenance or deterministically derive it from cached evidence."""
 
     raw = context.get("continuity_decision")
-    if raw not in (None, {}):
-        if not isinstance(raw, dict):
-            raise ProductionPlanError("CONTINUITY_DECISION_INVALID: SourceContext continuity_decision must be an object.")
+    derived: ContinuityDecision | None = None
+    if boundary_decision is not None:
         try:
-            decision = ContinuityDecision.model_validate(raw)
-        except Exception as error:
-            raise ProductionPlanError(f"CONTINUITY_DECISION_INVALID: {error}") from error
-    elif boundary_decision is not None:
-        try:
-            decision = build_continuity_decision(
+            derived = build_continuity_decision(
                 candidate_id=candidate_id,
                 boundary_decision=boundary_decision,
                 primary_evidence=[
@@ -806,6 +800,19 @@ def _continuity_decision_from_context(
             )
         except Exception as error:
             raise ProductionPlanError(f"CONTINUITY_DECISION_INVALID: {error}") from error
+    if raw not in (None, {}):
+        if not isinstance(raw, dict):
+            raise ProductionPlanError("CONTINUITY_DECISION_INVALID: SourceContext continuity_decision must be an object.")
+        try:
+            decision = ContinuityDecision.model_validate(raw)
+        except Exception as error:
+            raise ProductionPlanError(f"CONTINUITY_DECISION_INVALID: {error}") from error
+        if derived is None or decision.model_dump(mode="json") != derived.model_dump(mode="json"):
+            raise ProductionPlanError(
+                "CONTINUITY_DECISION_EVIDENCE_MISMATCH: persisted decision does not match cached source evidence."
+            )
+    elif derived is not None:
+        decision = derived
     else:
         return None
     if decision is None:

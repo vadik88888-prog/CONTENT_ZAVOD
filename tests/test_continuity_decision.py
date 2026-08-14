@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.clip_results import ClipResult
 from app.continuity import build_continuity_decision
+from app.production_models import ContinuityOmittedSpan
 from app.quality_report import build_quality_report
 
 
@@ -193,6 +197,47 @@ def test_evidence_backed_compaction_does_not_retain_the_whole_boundary(tmp_path:
         mapped_ranges=[(267.92, 268.56), (269.28, 275.69)],
     )
     assert report.status == "PASS"
+
+
+def test_fake_silence_without_persisted_measurement_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="silence omission requires valid persisted"):
+        ContinuityOmittedSpan.model_validate({
+            "rationale_type": "silence",
+            "source_range": {"start_seconds": 2.0, "end_seconds": 3.0},
+            "rationale": "Claimed silence without measurement.",
+            "evidence": {},
+        })
+
+
+@pytest.mark.parametrize(
+    ("rationale_type", "source_range", "evidence"),
+    [
+        (
+            "silence",
+            {"start_seconds": 2.0, "end_seconds": 3.0},
+            {"source": "silence_detector", "silence_seconds": 0.5},
+        ),
+        (
+            "dialogue_compaction",
+            {"start_seconds": 2.0, "end_seconds": 3.0},
+            {
+                "source": "generic_claim",
+                "transcript_segment_ids": [1, 2],
+                "similarity_score": 1.0,
+            },
+        ),
+    ],
+)
+def test_non_matching_or_unsupported_typed_evidence_cannot_authorize_cut(
+    rationale_type: str, source_range: dict, evidence: dict,
+) -> None:
+    with pytest.raises(ValidationError, match="requires valid persisted type-specific evidence"):
+        ContinuityOmittedSpan.model_validate({
+            "rationale_type": rationale_type,
+            "source_range": source_range,
+            "rationale": "A label is not evidence.",
+            "evidence": evidence,
+        })
 
 
 def test_content_labels_cannot_turn_interview_or_story_into_full_boundary_retention() -> None:
