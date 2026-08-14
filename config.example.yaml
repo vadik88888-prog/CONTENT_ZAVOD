@@ -75,8 +75,14 @@ content_understanding:
   # Goal 5A: source-scoped semantic analysis. These settings never depend on
   # subtitle style, export bitrate or render-only revisions.
   enabled: true
-  strategy_version: 5A.1
-  profile_schema_version: 5A.1
+  strategy_version: 5A.3
+  profile_schema_version: 5A.2
+  # Optional product intent affects ranking only after evidence-driven eligibility
+  # and boundary checks. Profile overrides never replace detected_profile.
+  editorial_intent: ""
+  manual_override: {}
+  profile_detection_min_confidence: 0.45
+  editorial_intent_weight: 0.08
   content_map_schema_version: 5A.1
   story_unit_schema_version: 5A.1
   boundary_schema_version: 5C.1

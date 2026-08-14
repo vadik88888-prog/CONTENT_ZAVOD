@@ -250,6 +250,28 @@ def test_coverage_selection_is_deterministic() -> None:
     assert [item.candidate.id for item in first] == [item.candidate.id for item in second]
 
 
+def test_editorial_intent_reranks_only_boundary_eligible_candidates() -> None:
+    content_map = _content_map([
+        "Практическая ошибка в бюджете приводит к лишним расходам и важному выводу.",
+        "История команды показывает другой самостоятельный результат проекта.",
+    ])
+    config = AppConfig(score_threshold=0)
+    config.ai_reranking.final_clip_count = 1
+    config.content_understanding.editorial_intent = "ошибка"
+    config.content_understanding.editorial_intent_weight = 0.25
+
+    ranked = _scored(content_map, [90, 90])
+    selected, _coverage = select_with_coverage(ranked, config, content_map)
+    assert selected[0] is ranked[0]
+    assert ranked[0].selection_diagnostics["editorial_intent"]["matched_terms"] == ["ошибка"]
+
+    blocked = _scored(content_map, [90, 90])
+    blocked[0].candidate.boundary_diagnostics = {"eligible": False, "fallback_reason": "unsafe boundary"}
+    selected, _coverage = select_with_coverage(blocked, config, content_map)
+    assert selected == [blocked[1]]
+    assert blocked[0].selection_diagnostics["reason_code"] == "BOUNDARY_REJECTED"
+
+
 def test_coverage_selection_rejects_subminimum_duration_candidates() -> None:
     content_map = _content_map([
         "Discipline creates progress when motivation disappears at the end of a hard day.",

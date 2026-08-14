@@ -231,7 +231,19 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
     changed_boundary.content_understanding.target_tail_padding_seconds = 0.9
     Pipeline(tmp_path, changed_boundary, mock_ai=True).run(input_path=str(source))
 
-    assert calls == {"profile": 1, "map": 1, "boundaries": 2}
+    editorial_intent = AppConfig(score_threshold=0)
+    editorial_intent.content_understanding.target_tail_padding_seconds = 0.9
+    editorial_intent.content_understanding.editorial_intent = "найти практический вывод"
+    Pipeline(tmp_path, editorial_intent, mock_ai=True).run(input_path=str(source))
+
+    profile_override = AppConfig(score_threshold=0)
+    profile_override.content_understanding.target_tail_padding_seconds = 0.9
+    profile_override.content_understanding.manual_override = {
+        "format": "gameplay", "editorial_mode": "commentary", "domain": "gaming",
+    }
+    Pipeline(tmp_path, profile_override, mock_ai=True).run(input_path=str(source))
+
+    assert calls == {"profile": 2, "map": 1, "boundaries": 2}
     report = read_json(first_result.report_path, {})
     understanding = report["content_understanding"]
     assert understanding["coverage_map"]["schema_version"] == "5A.1"
@@ -244,7 +256,7 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
 
     changed_transcript = AppConfig(score_threshold=0, whisper_model="base")
     Pipeline(tmp_path, changed_transcript, mock_ai=True).run(input_path=str(source))
-    assert calls["profile"] == 2
+    assert calls["profile"] == 3
     assert calls["map"] == 2
 
 

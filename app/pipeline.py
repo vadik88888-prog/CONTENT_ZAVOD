@@ -39,6 +39,7 @@ from app.content_understanding import (
     select_with_coverage,
     story_units_artifact,
     ensure_candidate_boundary_decision,
+    validate_video_content_profile,
 )
 from app.candidate_quality import EligibilityDecision, resolve_eligibility_decision
 from app.content_transformation import (
@@ -531,6 +532,9 @@ class Pipeline:
                 "visual_analysis": _hash(visual_analysis),
                 "strategy_version": self.config.content_understanding.strategy_version,
                 "profile_schema_version": self.config.content_understanding.profile_schema_version,
+                "enabled": self.config.content_understanding.enabled,
+                "manual_override": self.config.content_understanding.manual_override,
+                "profile_detection_min_confidence": self.config.content_understanding.profile_detection_min_confidence,
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
@@ -541,6 +545,7 @@ class Pipeline:
                 ),
             ),
             cache_tracker=source_cache,
+            validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
         )
         vision_provider = None
         if (
@@ -589,7 +594,14 @@ class Pipeline:
                 "scenes": _hash(scenes),
                 "visual_analysis": _hash(visual_analysis),
                 "multimodal_timeline": _hash(multimodal_timeline),
-                "profile": _hash(content_profile),
+                # ContentMap and semantic boundaries are evidence-driven. A
+                # manual profile override must not invalidate them.
+                "profile_evidence": _hash({
+                    "source_id": content_profile.get("source_id"),
+                    "source_duration_seconds": content_profile.get("source_duration_seconds"),
+                    "analysis_confidence": content_profile.get("analysis_confidence"),
+                    "warnings": content_profile.get("warnings"),
+                }),
                 "content_map_settings": {
                     "strategy_version": self.config.content_understanding.strategy_version,
                     "content_map_schema_version": self.config.content_understanding.content_map_schema_version,
@@ -864,6 +876,10 @@ class Pipeline:
                     "minimum_quality_score": self.config.virality.minimum_quality_score,
                     "minimum_publishability_score": self.config.virality.minimum_publishability_score,
                 },
+                "editorial_intent": {
+                    "value": self.config.content_understanding.editorial_intent,
+                    "weight": self.config.content_understanding.editorial_intent_weight,
+                },
             },
             lambda: self._final_selection(
                 scored,
@@ -1080,7 +1096,7 @@ class Pipeline:
             candidate_flow=candidate_flow,
             terminal=terminal,
             content_understanding={
-                "enabled": True,
+                "enabled": self.config.content_understanding.enabled,
                 "profile": content_profile,
                 "content_map": content_map,
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
@@ -1304,8 +1320,11 @@ class Pipeline:
             },
             content_profile={
                 "detected_content_type": content_profile.get("detected_content_type"),
-                "confidence": content_profile.get("confidence"),
-                "strategy": content_profile.get("strategy"),
+                "content_type_confidence": content_profile.get("content_type_confidence"),
+                "strategy_id": content_profile.get("strategy_id"),
+                "detected_profile": content_profile.get("detected_profile"),
+                "effective_profile": content_profile.get("effective_profile"),
+                "manual_override": content_profile.get("manual_override"),
             },
             duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
             candidate_count=len(review_candidates),
@@ -1359,7 +1378,7 @@ class Pipeline:
                 "analysis_id": analysis_id,
             },
             content_understanding={
-                "enabled": True,
+                "enabled": self.config.content_understanding.enabled,
                 "profile": content_profile,
                 "content_map": content_map,
                 "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"),
@@ -1471,6 +1490,7 @@ class Pipeline:
         scenes = load_reference("scene_boundaries")
         visual_analysis = load_reference("visual_analysis")
         content_profile = load_reference("content_profile")
+        validate_video_content_profile(content_profile, expected_source_id=str(source_data.get("id") or ""))
         content_map = load_reference("content_map")
         coverage_map = load_reference("coverage_map")
         clip_count_recommendation = load_reference("clip_count_recommendation")
@@ -1959,7 +1979,7 @@ class Pipeline:
             },
             terminal=terminal,
             content_understanding={
-                "enabled": True, "profile": content_profile, "content_map": content_map,
+                "enabled": self.config.content_understanding.enabled, "profile": content_profile, "content_map": content_map,
                 "story_units_ref": analysis.references["story_units"],
                 "coverage_map_ref": analysis.references["coverage_map"],
                 "clip_count_recommendation_ref": analysis.references["clip_count_recommendation"],
@@ -2207,6 +2227,7 @@ class Pipeline:
         transcript = load_reference("transcript")
         visual_analysis = load_reference("visual_analysis")
         content_profile = load_reference("content_profile")
+        validate_video_content_profile(content_profile, expected_source_id=str(source_data.get("id") or ""))
         content_map = load_reference("content_map")
         story_units = load_reference("story_units")
         multimodal_timeline = load_reference("multimodal_timeline")
@@ -2297,7 +2318,7 @@ class Pipeline:
             production_plan=production, tts=tts, audio=audio, production_render=production_render,
             candidate_flow=candidate_flow, terminal=terminal,
             content_understanding={
-                "enabled": True, "profile": content_profile, "content_map": content_map,
+                "enabled": self.config.content_understanding.enabled, "profile": content_profile, "content_map": content_map,
                 "story_units_ref": analysis.references["story_units"],
                 "coverage_map_ref": analysis.references["coverage_map"],
                 "clip_count_recommendation_ref": analysis.references["clip_count_recommendation"],

@@ -12,13 +12,18 @@ from app.content_understanding import (
     build_video_content_profile,
     story_units_artifact,
     validate_global_content_map,
+    validate_video_content_profile,
 )
 from app.pipeline import Pipeline, StageTracker
 from app.transcript_features import analyse_transcript
 from app.utils import write_json
 
 
-def _profile(text: str, *, speakers: list[str] | None = None, filename: str = "source.mp4") -> dict:
+def _profile(
+    text: str, *, speakers: list[str] | None = None, filename: str = "source.mp4",
+    config: AppConfig | None = None, audio_features: dict | None = None,
+    visual_analysis: dict | None = None, scenes: dict | None = None,
+) -> dict:
     speakers = speakers or []
     segments = []
     for index, sentence in enumerate(text.split("|")):
@@ -32,16 +37,17 @@ def _profile(text: str, *, speakers: list[str] | None = None, filename: str = "s
             segment["speaker_id"] = speakers[index]
         segments.append(segment)
     transcript = {"source_id": "source-1", "language": "ru", "duration": max(10.0, len(segments) * 12.0), "segments": segments}
-    features = analyse_transcript(transcript, AppConfig().transcript_features)
+    active_config = config or AppConfig()
+    features = analyse_transcript(transcript, active_config.transcript_features)
     return build_video_content_profile(
         {"id": "source-1", "display_name": filename},
         {"duration": transcript["duration"]},
         transcript,
         features,
-        {"windows": []},
-        {"boundaries": []},
-        {"samples": []},
-        AppConfig(),
+        audio_features or {"energy_frames": []},
+        scenes or {"boundaries": []},
+        visual_analysis or {"status": "skipped", "evidence_status": "skipped", "subject_keyframes": [], "sample_count": 0},
+        active_config,
     )
 
 
@@ -75,11 +81,97 @@ def test_unknown_profile_uses_safe_fallback_and_filename_is_only_weak_signal() -
         "Как работает этот метод? Объясню каждый шаг и приведу пример.",
         filename="мотивация-название.mp4",
     )
+    filename_only = _profile("Ладно.", filename="pubg-gameplay.mp4")
 
     assert unknown["detected_content_type"] == "unknown"
     assert unknown["strategy_id"] == "generic_monologue"
     assert educational["detected_content_type"] == "educational"
     assert educational["evidence"]["filename_signal_used"] is False
+    assert filename_only["detected_profile"]["format"]["value"] == "gameplay"
+    assert filename_only["effective_profile"]["format"] == "unknown"
+    assert filename_only["effective_profile"]["resolution"]["format"] == "safe_fallback"
+
+
+def test_profile_v2_auto_detection_keeps_detected_and_effective_axes() -> None:
+    data = _profile(
+        "В этой катке PUBG разберём матч и покажем решающий момент gameplay.",
+        filename="pubg-stream.mp4",
+        scenes={"boundaries": [{"timestamp": float(index)} for index in range(10)]},
+    )
+
+    assert data["schema_version"] == "5A.2"
+    assert data["detected_profile"]["format"]["value"] == "gameplay"
+    assert data["detected_profile"]["domain"]["value"] == "gaming"
+    assert data["effective_profile"]["format"] == "gameplay"
+    assert data["effective_profile"]["resolution"]["format"] == "detected"
+    assert data["detected_content_type"] == "gameplay"
+    assert data["evidence"]["filename_signal_used"] is True
+
+
+def test_manual_override_changes_effective_profile_without_replacing_detection() -> None:
+    config = AppConfig()
+    config.content_understanding.manual_override = {
+        "format": "dialogue", "editorial_mode": "interview", "domain": "business",
+        "traits": ["question_answer"],
+    }
+    data = _profile("Как работает этот урок? Объясню каждый шаг и приведу пример.", config=config)
+
+    assert data["detected_profile"]["editorial_mode"]["value"] == "explanatory"
+    assert data["effective_profile"] == {
+        "format": "dialogue",
+        "editorial_mode": "interview",
+        "domain": "business",
+        "traits": ["question_answer"],
+        "resolution": {
+            "format": "manual_override", "editorial_mode": "manual_override",
+            "domain": "manual_override", "traits": "manual_override",
+        },
+    }
+    assert data["manual_override"]["provenance"] == "user"
+    assert data["manual_override"]["revision_id"]
+    assert data["detected_content_type"] == "interview"
+
+
+def test_profile_reads_current_audio_and_visual_evidence_contracts() -> None:
+    data = _profile(
+        "Спокойное объяснение с примером и понятным итогом для зрителя.",
+        audio_features={"energy_frames": [{"normalized_loudness": 0.9}]},
+        visual_analysis={
+            "status": "completed", "evidence_status": "observed", "sample_count": 20,
+            "subject_keyframes": [{"timestamp": 1.0}],
+        },
+    )
+
+    assert data["emotional_curve_summary"] == "выраженные эмоциональные пики"
+    assert data["visual_density"] > 0
+    assert data["analysis_confidence"] >= 0.75
+
+
+def test_profile_validator_migrates_legacy_shape_and_checks_source_identity() -> None:
+    current = _profile("Как работает урок? Объясню метод и приведу пример.")
+    legacy = {key: value for key, value in current.items() if key not in {"detected_profile", "effective_profile", "manual_override"}}
+    legacy["schema_version"] = "5A.1"
+
+    migrated = VideoContentProfile.from_dict(legacy)
+    assert migrated.schema_version == "5A.2"
+    assert migrated.effective_profile["resolution"]["format"] == "legacy_migration"
+    validate_video_content_profile(current, expected_source_id="source-1")
+    with pytest.raises(ValueError, match="source_id"):
+        validate_video_content_profile(current, expected_source_id="other-source")
+
+
+def test_disabled_detection_ignores_filename_but_keeps_manual_override() -> None:
+    config = AppConfig()
+    config.content_understanding.enabled = False
+    config.content_understanding.manual_override = {"domain": "business"}
+
+    data = _profile("PUBG gameplay match and decisive win.", filename="pubg-gameplay.mp4", config=config)
+
+    assert data["evidence"]["detection_enabled"] is False
+    assert data["detected_profile"]["format"]["value"] == "unknown"
+    assert data["evidence"]["filename_signal_used"] is False
+    assert data["effective_profile"]["domain"] == "business"
+    assert data["effective_profile"]["resolution"]["domain"] == "manual_override"
 
 
 def test_profile_cache_is_source_scoped_and_stable(tmp_path: Path) -> None:

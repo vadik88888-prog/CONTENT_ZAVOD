@@ -11,7 +11,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -234,6 +234,17 @@ class ProjectScreen(QWidget):
         self.setup_source.setObjectName("muted")
         make_label_shrinkable(self.setup_source)
         setup_layout.addWidget(self.setup_source)
+        setup_layout.addWidget(QLabel("Что искать?"))
+        self.setup_editorial_intent = QLineEdit()
+        self.setup_editorial_intent.setMaxLength(500)
+        self.setup_editorial_intent.setPlaceholderText("Например: практические советы, ошибки и сильные выводы")
+        self.setup_editorial_intent.setToolTip(
+            "Уточняет ранжирование подходящих моментов. Не меняет безопасные границы фрагментов."
+        )
+        self.setup_editorial_intent.editingFinished.connect(
+            lambda: self.viewmodel.save_options(editorial_intent=self.setup_editorial_intent.text().strip())
+        )
+        setup_layout.addWidget(self.setup_editorial_intent)
         setup_layout.addWidget(QLabel("Как искать моменты"))
         self.setup_processing_mode = QComboBox()
         self.setup_processing_mode.addItem("Быстрее — для разговорных видео", "fast")
@@ -403,6 +414,59 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(deep_analysis=str(self.deep_analysis.currentData()))
         )
         settings.addWidget(self.deep_analysis)
+        settings.addWidget(QLabel("Профиль источника: формат"))
+        self.profile_format_override = QComboBox()
+        for label, value in (
+            ("Авто", "auto"), ("Говорящая голова", "talking_head"), ("Диалог", "dialogue"),
+            ("Демонстрация экрана", "screen_demo"), ("Геймплей", "gameplay"),
+            ("Сценовое видео", "scene_driven"), ("Смешанный", "mixed"),
+        ):
+            self.profile_format_override.addItem(label, value)
+        self.profile_format_override.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(profile_format_override=str(self.profile_format_override.currentData()))
+        )
+        settings.addWidget(self.profile_format_override)
+        settings.addWidget(QLabel("Редакционный режим источника"))
+        self.profile_editorial_mode_override = QComboBox()
+        for label, value in (
+            ("Авто", "auto"), ("Объяснение", "explanatory"), ("Интервью", "interview"),
+            ("Комментарий", "commentary"), ("Мотивация", "motivational"), ("История", "narrative"),
+            ("Демонстрация", "demonstration"), ("Развлечение", "entertainment"), ("Новости / аналитика", "news_analysis"),
+        ):
+            self.profile_editorial_mode_override.addItem(label, value)
+        self.profile_editorial_mode_override.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(profile_editorial_mode_override=str(self.profile_editorial_mode_override.currentData()))
+        )
+        settings.addWidget(self.profile_editorial_mode_override)
+        settings.addWidget(QLabel("Тематика источника"))
+        self.profile_domain_override = QComboBox()
+        for label, value in (
+            ("Авто", "auto"), ("Бизнес", "business"), ("Технологии", "technology"),
+            ("Образование", "education"), ("Игры", "gaming"), ("Еда", "food"),
+            ("Здоровье", "health"), ("Финансы", "finance"), ("Лайфстайл", "lifestyle"),
+            ("Развлечения", "entertainment"), ("Новости", "news"), ("Общее", "general"),
+        ):
+            self.profile_domain_override.addItem(label, value)
+        self.profile_domain_override.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(profile_domain_override=str(self.profile_domain_override.currentData()))
+        )
+        settings.addWidget(self.profile_domain_override)
+        settings.addWidget(QLabel("Главный признак источника"))
+        self.profile_trait_override = QComboBox()
+        for label, value in (
+            ("Авто", "auto"), ("Ведёт речь", "speech_led"), ("Ведёт визуал", "visual_led"),
+            ("Вопрос — ответ", "question_answer"), ("Высокий темп", "high_pacing"),
+            ("Спокойный темп", "low_pacing"), ("Плотная информация", "dense_information"),
+            ("Экранный контент", "screen_content"), ("Обучающий", "instructional"),
+        ):
+            self.profile_trait_override.addItem(label, value)
+        self.profile_trait_override.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(
+                profile_traits_override=[] if self.profile_trait_override.currentData() == "auto"
+                else [str(self.profile_trait_override.currentData())]
+            )
+        )
+        settings.addWidget(self.profile_trait_override)
         settings.addWidget(QLabel("Площадка"))
         self.platform = QComboBox()
         self.platform.addItem("TikTok", "tiktok")
@@ -1259,6 +1323,16 @@ class ProjectScreen(QWidget):
         self._set_combo_data(self.setup_platform, project.settings.platform)
         self._set_combo_data(self.clip_count, str(project.settings.clip_count))
         self._set_combo_data(self.setup_clip_count, str(project.settings.clip_count))
+        self.setup_editorial_intent.blockSignals(True)
+        self.setup_editorial_intent.setText(project.settings.editorial_intent)
+        self.setup_editorial_intent.blockSignals(False)
+        self._set_combo_data(self.profile_format_override, project.settings.profile_format_override)
+        self._set_combo_data(self.profile_editorial_mode_override, project.settings.profile_editorial_mode_override)
+        self._set_combo_data(self.profile_domain_override, project.settings.profile_domain_override)
+        self._set_combo_data(
+            self.profile_trait_override,
+            project.settings.profile_traits_override[0] if project.settings.profile_traits_override else "auto",
+        )
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
         self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
         self.same_source_broll.blockSignals(True)
@@ -3173,6 +3247,8 @@ class ProjectScreen(QWidget):
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.composition_strategy, self.same_source_broll,
             self.subtitles, self.subtitle_style, self.cache,
+            self.setup_editorial_intent, self.profile_format_override, self.profile_editorial_mode_override,
+            self.profile_domain_override, self.profile_trait_override,
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
         ):
             widget.setDisabled(active)

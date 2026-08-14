@@ -50,6 +50,27 @@ def test_presets_resolve_to_distinct_real_pipeline_values() -> None:
     assert config.virality.semantic_ai_mode == "auto"
 
 
+def test_editorial_intent_and_profile_override_resolve_into_existing_pipeline_config() -> None:
+    intent = ProcessingIntent(
+        editorial_intent="  Найти практические ошибки и сильный вывод  ",
+        profile_format_override="gameplay",
+        profile_editorial_mode_override="commentary",
+        profile_domain_override="gaming",
+        profile_traits_override=("visual_led", "high_pacing"),
+    )
+    resolved = resolve_processing_intent(intent, _metadata())
+    config = load_config()
+    apply_resolved_processing_config(config, resolved)
+
+    assert resolved.editorial_intent == "Найти практические ошибки и сильный вывод"
+    assert config.content_understanding.editorial_intent == resolved.editorial_intent
+    assert config.content_understanding.manual_override == {
+        "format": "gameplay", "editorial_mode": "commentary", "domain": "gaming",
+        "traits": ["visual_led", "high_pacing"],
+    }
+    config.validate()
+
+
 def test_deep_analysis_auto_is_conservative_and_manual_choice_wins() -> None:
     static = resolve_processing_intent(
         ProcessingIntent(deep_analysis="auto"), _metadata(content_kind="podcast", visual_activity_score=0.1)

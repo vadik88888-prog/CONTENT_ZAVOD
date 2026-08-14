@@ -213,7 +213,11 @@ class DesktopServices:
         has_analysis = bool(project.analysis_artifact_path)
         # Clip count is a post-analysis Top-N choice over the saved ranking;
         # changing it must never re-run Brain/Vision.
-        analysis_options = {"processing_mode", "deep_analysis"}
+        analysis_options = {
+            "processing_mode", "deep_analysis", "editorial_intent",
+            "profile_format_override", "profile_editorial_mode_override",
+            "profile_domain_override", "profile_traits_override",
+        }
         needs_analysis = has_analysis and bool(analysis_options.intersection(changed))
         preview_options = {
             "platform", "subtitles_enabled", "subtitle_style", "preset_selection_mode",
@@ -237,10 +241,10 @@ class DesktopServices:
             ]
         if needs_analysis:
             summary = (
-                "Настройки сохранены для следующего анализа. Текущие найденные моменты и черновики не изменены; "
-                "чтобы применить этот режим, выполните новый анализ видео."
+                "Настройки сохранены: нужен новый анализ зависимого ранжирования. Текущие найденные моменты и "
+                "черновики не изменены; при повторном запуске транскрипт и Brain/Vision evidence будут переиспользованы."
             )
-            reused = ["текущие моменты и черновики остаются доступными для просмотра"]
+            reused = ["транскрипт", "Brain/Vision evidence", "semantic boundaries", "текущие моменты и черновики остаются доступными"]
         elif stale_preview_ids:
             summary = (
                 "Настройки сохранены. Предпросмотр нужно обновить только для выбранных черновиков; "
@@ -469,7 +473,12 @@ class DesktopServices:
         self._require_idle_heavy_job()
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
-        if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
+        if (
+            not project.settings.recompute_all
+            and not project.setup_state.needs_new_analysis
+            and project.analysis_artifact_path
+            and Path(project.analysis_artifact_path).is_file()
+        ):
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
             raise InputValidationError(
@@ -494,6 +503,11 @@ class DesktopServices:
                     "subtitle_style": project.settings.subtitle_style,
                     "preset_selection_mode": project.settings.preset_selection_mode,
                     "audio_mode": project.settings.audio_mode,
+                    "editorial_intent": project.settings.editorial_intent,
+                    "profile_format_override": project.settings.profile_format_override,
+                    "profile_editorial_mode_override": project.settings.profile_editorial_mode_override,
+                    "profile_domain_override": project.settings.profile_domain_override,
+                    "profile_traits_override": list(project.settings.profile_traits_override),
                     "composition_strategy": project.settings.composition_strategy,
                     "same_source_broll_allowed": project.settings.same_source_broll_allowed,
                     "encoder": project.settings.encoder,

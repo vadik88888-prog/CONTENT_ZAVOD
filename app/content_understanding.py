@@ -31,8 +31,9 @@ from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
 
-VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
-CONTENT_STRATEGY_VERSION = "5A.2"
+VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.2"
+LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = "5A.1"
+CONTENT_STRATEGY_VERSION = "5A.3"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
@@ -46,6 +47,22 @@ DOMINANT_FORMATS = frozenset({
     "single_speaker_monologue", "multi_speaker_dialogue", "host_guest",
     "narrated_visual", "scene_driven", "gameplay_commentary",
     "screen_recording", "mixed", "unknown",
+})
+PROFILE_FORMATS = frozenset({
+    "talking_head", "dialogue", "screen_demo", "gameplay", "scene_driven", "mixed", "unknown",
+})
+PROFILE_EDITORIAL_MODES = frozenset({
+    "explanatory", "interview", "commentary", "motivational", "narrative",
+    "demonstration", "entertainment", "news_analysis", "unknown",
+})
+PROFILE_DOMAINS = frozenset({
+    "business", "technology", "education", "gaming", "food", "health", "finance",
+    "lifestyle", "entertainment", "news", "general", "unknown",
+})
+PROFILE_TRAITS = frozenset({
+    "speech_led", "visual_led", "single_speaker", "multi_speaker", "question_answer",
+    "high_pacing", "low_pacing", "high_emotion", "dense_information", "repetitive",
+    "screen_content", "scene_driven", "instructional",
 })
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+", re.UNICODE)
@@ -95,6 +112,9 @@ class VideoContentProfile:
     strategy_id: str = "generic_fallback"
     fallback_used: bool = True
     evidence: dict[str, Any] = field(default_factory=dict)
+    detected_profile: dict[str, Any] = field(default_factory=dict)
+    effective_profile: dict[str, Any] = field(default_factory=dict)
+    manual_override: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.schema_version != VIDEO_CONTENT_PROFILE_SCHEMA_VERSION:
@@ -105,6 +125,9 @@ class VideoContentProfile:
             raise ValueError("Unsupported VideoContentProfile content type.")
         if self.dominant_format not in DOMINANT_FORMATS:
             raise ValueError("Unsupported VideoContentProfile dominant format.")
+        _validate_detected_profile(self.detected_profile)
+        _validate_effective_profile(self.effective_profile)
+        _validate_manual_override(self.manual_override)
         if not 0 <= self.content_type_confidence <= 1 or not 0 <= self.analysis_confidence <= 1:
             raise ValueError("VideoContentProfile confidence must be between zero and one.")
         if self.speaker_count_estimate < 0:
@@ -128,36 +151,46 @@ class VideoContentProfile:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VideoContentProfile":
+        migrated = _migrate_legacy_profile(data)
         profile = cls(
-            schema_version=str(data.get("schema_version", "")),
-            source_id=str(data.get("source_id", "")),
-            source_duration_seconds=float(data.get("source_duration_seconds", 0)),
-            language=str(data.get("language") or "unknown"),
-            detected_content_type=str(data.get("detected_content_type") or "unknown"),
-            content_type_confidence=float(data.get("content_type_confidence", 0)),
-            secondary_content_types=[str(item) for item in data.get("secondary_content_types", [])],
-            dominant_format=str(data.get("dominant_format") or "unknown"),
-            speaker_count_estimate=int(data.get("speaker_count_estimate", 0)),
-            dialogue_style=str(data.get("dialogue_style") or "unknown"),
-            narrative_style=str(data.get("narrative_style") or "unknown"),
-            pacing_profile=str(data.get("pacing_profile") or "unknown"),
-            emotional_curve_summary=str(data.get("emotional_curve_summary") or "unknown"),
-            visual_density=float(data.get("visual_density", 0)),
-            speech_density=float(data.get("speech_density", 0)),
-            useful_content_density=float(data.get("useful_content_density", 0)),
-            repetition_level=float(data.get("repetition_level", 0)),
-            recommended_short_strategy=str(data.get("recommended_short_strategy") or "generic_fallback"),
-            recommended_clip_duration_range=dict(data.get("recommended_clip_duration_range", {})),
-            estimated_story_count=int(data.get("estimated_story_count", 0)),
-            estimated_publishable_clip_range=dict(data.get("estimated_publishable_clip_range", {})),
-            analysis_confidence=float(data.get("analysis_confidence", 0)),
-            warnings=[str(item) for item in data.get("warnings", [])],
-            strategy_id=str(data.get("strategy_id") or "generic_fallback"),
-            fallback_used=bool(data.get("fallback_used", True)),
-            evidence=dict(data.get("evidence", {})),
+            schema_version=str(migrated.get("schema_version", "")),
+            source_id=str(migrated.get("source_id", "")),
+            source_duration_seconds=float(migrated.get("source_duration_seconds", 0)),
+            language=str(migrated.get("language") or "unknown"),
+            detected_content_type=str(migrated.get("detected_content_type") or "unknown"),
+            content_type_confidence=float(migrated.get("content_type_confidence", 0)),
+            secondary_content_types=[str(item) for item in migrated.get("secondary_content_types", [])],
+            dominant_format=str(migrated.get("dominant_format") or "unknown"),
+            speaker_count_estimate=int(migrated.get("speaker_count_estimate", 0)),
+            dialogue_style=str(migrated.get("dialogue_style") or "unknown"),
+            narrative_style=str(migrated.get("narrative_style") or "unknown"),
+            pacing_profile=str(migrated.get("pacing_profile") or "unknown"),
+            emotional_curve_summary=str(migrated.get("emotional_curve_summary") or "unknown"),
+            visual_density=float(migrated.get("visual_density", 0)),
+            speech_density=float(migrated.get("speech_density", 0)),
+            useful_content_density=float(migrated.get("useful_content_density", 0)),
+            repetition_level=float(migrated.get("repetition_level", 0)),
+            recommended_short_strategy=str(migrated.get("recommended_short_strategy") or "generic_fallback"),
+            recommended_clip_duration_range=dict(migrated.get("recommended_clip_duration_range", {})),
+            estimated_story_count=int(migrated.get("estimated_story_count", 0)),
+            estimated_publishable_clip_range=dict(migrated.get("estimated_publishable_clip_range", {})),
+            analysis_confidence=float(migrated.get("analysis_confidence", 0)),
+            warnings=[str(item) for item in migrated.get("warnings", [])],
+            strategy_id=str(migrated.get("strategy_id") or "generic_fallback"),
+            fallback_used=bool(migrated.get("fallback_used", True)),
+            evidence=dict(migrated.get("evidence", {})),
+            detected_profile=dict(migrated.get("detected_profile", {})),
+            effective_profile=dict(migrated.get("effective_profile", {})),
+            manual_override=dict(migrated.get("manual_override", {})),
         )
         profile.validate()
         return profile
+
+
+def validate_video_content_profile(data: dict[str, Any], *, expected_source_id: str | None = None) -> None:
+    profile = VideoContentProfile.from_dict(data)
+    if expected_source_id is not None and profile.source_id != expected_source_id:
+        raise ValueError("VideoContentProfile source_id does not match the active source.")
 
 
 @dataclass(slots=True)
@@ -442,8 +475,6 @@ class DeterministicContentStrategy:
         tokens = _tokens(text)
         duration = max(0.0, float(metadata.get("duration") or transcript.get("duration") or 0.0))
         speaker_count = _speaker_count(raw_segments)
-        content_type, confidence, secondary = _content_type(text, str(source.get("display_name") or ""), speaker_count)
-        dominant_format = _dominant_format(content_type, speaker_count, text, scenes)
         speech_density = _speech_density(tokens, duration, feature_segments)
         repetition = _average(feature_segments, "repetition_score")
         filler = _average(feature_segments, "filler_word_ratio")
@@ -451,7 +482,32 @@ class DeterministicContentStrategy:
         useful_density = _bounded(speech_density * (1 - filler) * (1 - repetition * 0.45))
         emotion = _emotional_summary(text, audio_features)
         pacing = _pacing(tokens, duration)
+        filename = str(source.get("display_name") or source.get("path") or "")
+        detected_profile = _detect_profile_axes(
+            text=text,
+            filename=filename,
+            speaker_count=speaker_count,
+            speech_density=speech_density,
+            visual_density=visual_density,
+            repetition=repetition,
+            pacing=pacing,
+            emotional_summary=emotion,
+            scenes=scenes,
+            visual_analysis=visual_analysis,
+        )
+        settings = config.content_understanding
+        manual_override = _normalise_manual_override(getattr(settings, "manual_override", {}))
+        effective_profile = _resolve_effective_profile(
+            detected_profile,
+            manual_override,
+            min_confidence=float(getattr(settings, "profile_detection_min_confidence", 0.45)),
+        )
+        content_type, confidence, secondary = _legacy_content_type_projection(detected_profile, effective_profile)
+        dominant_format = _legacy_format_projection(effective_profile["format"])
         strategy = _strategy_id(content_type, dominant_format)
+        profile_fallback_used = any(
+            value == "safe_fallback" for value in effective_profile["resolution"].values()
+        )
         estimated_stories = _preliminary_story_count(duration, useful_density, repetition, raw_segments)
         clip_range = _clip_range(estimated_stories, useful_density, repetition)
         warnings: list[str] = []
@@ -461,12 +517,14 @@ class DeterministicContentStrategy:
             warnings.append("Не удалось оценить число говорящих по исходному транскрипту.")
         if duration <= 0:
             warnings.append("Длительность источника недоступна; профиль имеет пониженную уверенность.")
+        if str(getattr(settings, "profile_schema_version", VIDEO_CONTENT_PROFILE_SCHEMA_VERSION)) != VIDEO_CONTENT_PROFILE_SCHEMA_VERSION:
+            warnings.append("Конфигурация профиля 5A.1 совместимо обновлена до схемы 5A.2.")
         analysis_confidence = _bounded(
             (0.45 if raw_segments else 0.05)
             + min(0.25, len(tokens) / 800)
             + (0.15 if feature_segments else 0.0)
             + (0.10 if duration > 0 else 0.0)
-            + (0.05 if visual_analysis else 0.0)
+            + (0.05 if _visual_evidence_available(visual_analysis) else 0.0)
         )
         profile = VideoContentProfile(
             schema_version=VIDEO_CONTENT_PROFILE_SCHEMA_VERSION,
@@ -496,14 +554,18 @@ class DeterministicContentStrategy:
             analysis_confidence=round(analysis_confidence, 3),
             warnings=warnings,
             strategy_id=strategy,
-            fallback_used=True,
+            fallback_used=profile_fallback_used,
             evidence={
                 "transcript_segment_count": len(raw_segments),
                 "word_count": len(tokens),
                 "speaker_ids": _speaker_ids(raw_segments),
                 "scene_boundary_count": len(scenes.get("boundaries", [])),
-                "filename_signal_used": False,
+                "filename_signal_used": bool(detected_profile.get("provenance", {}).get("filename_signal_used")),
+                "profile_axes": ["format", "editorial_mode", "domain", "traits"],
             },
+            detected_profile=detected_profile,
+            effective_profile=effective_profile,
+            manual_override=manual_override,
         )
         profile.validate()
         return profile
@@ -542,9 +604,20 @@ def build_video_content_profile(
 ) -> dict[str, Any]:
     """Build a validated profile without treating filename data as primary evidence."""
 
+    enabled = bool(getattr(config.content_understanding, "enabled", True))
     profile = DeterministicContentStrategy().build_profile(
-        source, metadata, transcript, transcript_features, audio_features, scenes, visual_analysis, config,
+        source if enabled else {"id": source.get("id")},
+        metadata,
+        transcript if enabled else {"source_id": transcript.get("source_id"), "language": transcript.get("language"), "segments": []},
+        transcript_features if enabled else {"segments": []},
+        audio_features if enabled else {},
+        scenes if enabled else {},
+        visual_analysis if enabled else {},
+        config,
     )
+    profile.evidence["detection_enabled"] = enabled
+    if not enabled:
+        profile.warnings.append("Автоопределение профиля отключено; применён manual override или безопасный fallback.")
     return profile.to_dict()
 
 
@@ -561,34 +634,310 @@ def _speaker_count(segments: list[dict[str, Any]]) -> int:
     return len(identifiers) if identifiers else (1 if segments else 0)
 
 
-def _content_type(text: str, filename: str, speaker_count: int) -> tuple[str, float, list[str]]:
+def _axis(value: str, confidence: float, evidence: list[str]) -> dict[str, Any]:
+    return {"value": value, "confidence": round(_bounded(confidence), 3), "evidence": evidence}
+
+
+def _keyword_score(text: str, terms: tuple[str, ...]) -> int:
+    return sum(1 for term in terms if term in text)
+
+
+def _detect_profile_axes(
+    *, text: str, filename: str, speaker_count: int, speech_density: float,
+    visual_density: float, repetition: float, pacing: str, emotional_summary: str,
+    scenes: dict[str, Any], visual_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    """Return evidence-bearing proposals; executable consumers use only the validated effective profile."""
+
     lowered = text.casefold()
-    motivational = sum(term in lowered for term in _MOTIVATIONAL_TERMS)
-    educational = sum(term in lowered for term in _EDUCATIONAL_TERMS)
-    dialogue = sum(term in lowered for term in _DIALOGUE_TERMS) + (2 if speaker_count >= 2 else 0)
-    # Filename is intentionally only a weak, tie-breaking signal.
-    filename_hint = "мотив" in filename.casefold() or "motivat" in filename.casefold()
-    scores = {"motivational": motivational, "educational": educational, "interview": dialogue}
-    best_type, best_score = max(scores.items(), key=lambda item: item[1])
-    if best_score <= 0:
-        return "unknown", 0.35 if text else 0.1, []
-    if best_type == "interview" and speaker_count < 2:
-        best_type = "commentary"
-    confidence = min(0.92, 0.45 + best_score * 0.10 + (0.08 if speaker_count >= 2 and best_type == "interview" else 0.0))
-    if filename_hint and best_type == "motivational":
-        confidence = min(0.94, confidence + 0.02)
-    secondary = [name for name, score in sorted(scores.items(), key=lambda item: item[1], reverse=True) if name != best_type and score > 0]
-    return best_type, confidence, secondary[:2]
+    filename_lower = filename.casefold()
+    visual_blob = json.dumps(visual_analysis, ensure_ascii=False).casefold() if isinstance(visual_analysis, dict) else ""
+    scene_count = len(scenes.get("boundaries", []))
+    filename_signal_used = False
 
+    gameplay_terms = ("gameplay", "стрим", "матч", "катка", "pubg", "minecraft", "fortnite")
+    screen_terms = ("экран", "интерфейс", "нажмите", "click", "screen", "dashboard", "код")
+    gameplay_text = _keyword_score(lowered, gameplay_terms)
+    gameplay_file = _keyword_score(filename_lower, gameplay_terms)
+    screen_text = _keyword_score(lowered, screen_terms)
+    screen_file = _keyword_score(filename_lower, screen_terms)
+    gameplay_visual = any(term in visual_blob for term in ("gameplay", "game ui", "video game"))
+    screen_visual = any(term in visual_blob for term in ("screen recording", "software ui", "computer screen"))
+    if gameplay_text or gameplay_file or gameplay_visual:
+        filename_signal_used = bool(gameplay_file)
+        format_axis = _axis(
+            "gameplay",
+            (0.62 + min(0.25, gameplay_text * 0.08) if gameplay_text or gameplay_visual else 0.3)
+            + (0.04 if gameplay_file else 0),
+            (["transcript:gameplay_terms"] if gameplay_text else [])
+            + (["filename:weak_gameplay_hint"] if gameplay_file else [])
+            + (["visual:gameplay_label"] if gameplay_visual else []),
+        )
+    elif screen_text or screen_file or screen_visual:
+        filename_signal_used = bool(screen_file)
+        format_axis = _axis(
+            "screen_demo",
+            (0.58 + min(0.28, screen_text * 0.08) if screen_text or screen_visual else 0.3)
+            + (0.04 if screen_file else 0),
+            (["transcript:screen_terms"] if screen_text else [])
+            + (["filename:weak_screen_hint"] if screen_file else [])
+            + (["visual:screen_label"] if screen_visual else []),
+        )
+    elif speaker_count >= 2:
+        format_axis = _axis("dialogue", 0.82, ["transcript:multiple_speakers"])
+    elif speaker_count == 1 and text.strip():
+        format_axis = _axis("talking_head", 0.68, ["transcript:single_speaker", "transcript:speech_present"])
+    elif scene_count >= 8 or visual_density >= 0.55:
+        format_axis = _axis("scene_driven", 0.62, ["scenes:high_visual_activity"])
+    else:
+        format_axis = _axis("unknown", 0.2, ["fallback:insufficient_format_evidence"])
 
-def _dominant_format(content_type: str, speaker_count: int, text: str, scenes: dict[str, Any]) -> str:
+    editorial_terms = {
+        "interview": _DIALOGUE_TERMS,
+        "motivational": _MOTIVATIONAL_TERMS,
+        "explanatory": _EDUCATIONAL_TERMS,
+        "demonstration": ("покажу", "смотрите", "делаем", "нажмите", "demo", "demonstrat", "step by step"),
+        "news_analysis": ("новост", "сегодня", "событи", "аналитик", "news", "breaking", "report"),
+        "narrative": ("однажды", "история", "случилось", "сначала", "потом", "story", "once", "then"),
+        "entertainment": ("смешн", "шут", "прикол", "развлеч", "funny", "joke", "entertain"),
+    }
+    editorial_scores = {name: _keyword_score(lowered, terms) for name, terms in editorial_terms.items()}
     if speaker_count >= 2:
-        return "multi_speaker_dialogue"
-    if speaker_count == 1 and text.strip():
-        return "single_speaker_monologue"
-    if len(scenes.get("boundaries", [])) >= 8:
-        return "scene_driven"
-    return "unknown"
+        editorial_scores["interview"] += 2
+    editorial_mode, editorial_score = max(editorial_scores.items(), key=lambda item: (item[1], item[0]))
+    if editorial_score <= 0:
+        enough_speech = len(_tokens(text)) >= 6
+        editorial_mode = "commentary" if enough_speech else "unknown"
+        editorial_confidence = 0.52 if enough_speech else 0.2
+        editorial_evidence = ["transcript:speech_present"] if enough_speech else ["fallback:insufficient_editorial_evidence"]
+    else:
+        editorial_confidence = min(0.93, 0.48 + editorial_score * 0.11)
+        editorial_evidence = [f"transcript:{editorial_mode}_terms"]
+        if editorial_mode == "interview" and speaker_count >= 2:
+            editorial_evidence.append("transcript:multiple_speakers")
+    editorial_axis = _axis(editorial_mode, editorial_confidence, editorial_evidence)
+
+    domain_terms = {
+        "gaming": gameplay_terms,
+        "technology": ("технолог", "программ", "компьют", "нейросет", "код", "software", "tech", " ai "),
+        "education": ("обуч", "урок", "учеб", "экзамен", "learn", "lesson", "course"),
+        "business": ("бизнес", "компан", "продаж", "клиент", "market", "business", "startup"),
+        "finance": ("деньг", "инвест", "кредит", "банк", "акци", "finance", "invest", "stock"),
+        "food": ("еда", "рецепт", "готов", "кухн", "блюд", "food", "recipe", "cook"),
+        "health": ("здоров", "врач", "лечен", "трениров", "health", "doctor", "fitness"),
+        "news": ("новост", "репортаж", "событи", "news", "breaking"),
+        "lifestyle": ("влог", "путешеств", "дом", "семь", "vlog", "travel", "lifestyle"),
+        "entertainment": ("фильм", "сериал", "музык", "шоу", "movie", "series", "music", "show"),
+    }
+    domain_scores = {name: _keyword_score(lowered, terms) for name, terms in domain_terms.items()}
+    filename_domain_scores = {name: _keyword_score(filename_lower, terms) for name, terms in domain_terms.items()}
+    domain, domain_score = max(domain_scores.items(), key=lambda item: (item[1], item[0]))
+    filename_domain = max(filename_domain_scores.items(), key=lambda item: (item[1], item[0]))
+    if domain_score <= 0 and filename_domain[1] > 0:
+        domain, domain_score = filename_domain
+        filename_signal_used = True
+        domain_axis = _axis(domain, 0.3 + min(0.08, domain_score * 0.03), [f"filename:weak_{domain}_hint"])
+    elif domain_score > 0:
+        domain_axis = _axis(domain, min(0.9, 0.5 + domain_score * 0.1), [f"transcript:{domain}_terms"])
+    else:
+        domain_axis = _axis("general" if text.strip() else "unknown", 0.45 if text.strip() else 0.2,
+                            ["fallback:general_spoken_content"] if text.strip() else ["fallback:insufficient_domain_evidence"])
+
+    traits: list[dict[str, Any]] = []
+    def add_trait(value: str, confidence: float, evidence: str) -> None:
+        traits.append(_axis(value, confidence, [evidence]))
+    if speech_density >= 0.3:
+        add_trait("speech_led", 0.75, "transcript:speech_density")
+    if visual_density >= 0.5:
+        add_trait("visual_led", 0.68, "scenes:visual_density")
+    if speaker_count == 1:
+        add_trait("single_speaker", 0.9, "transcript:speaker_ids")
+    elif speaker_count >= 2:
+        add_trait("multi_speaker", 0.9, "transcript:speaker_ids")
+    if editorial_mode == "interview":
+        add_trait("question_answer", editorial_confidence, "transcript:question_answer_terms")
+    if pacing == "fast":
+        add_trait("high_pacing", 0.72, "transcript:words_per_second")
+    elif pacing == "slow":
+        add_trait("low_pacing", 0.72, "transcript:words_per_second")
+    if "пики" in emotional_summary:
+        add_trait("high_emotion", 0.66, "audio:energy_frames_or_punctuation")
+    if speech_density >= 0.58:
+        add_trait("dense_information", 0.65, "transcript:speech_density")
+    if repetition >= 0.45:
+        add_trait("repetitive", 0.7, "transcript:repetition_score")
+    if format_axis["value"] == "screen_demo":
+        add_trait("screen_content", format_axis["confidence"], "profile:format")
+    if format_axis["value"] in {"scene_driven", "gameplay"}:
+        add_trait("scene_driven", format_axis["confidence"], "profile:format")
+    if editorial_mode in {"explanatory", "demonstration"}:
+        add_trait("instructional", editorial_confidence, "profile:editorial_mode")
+    return {
+        "format": format_axis,
+        "editorial_mode": editorial_axis,
+        "domain": domain_axis,
+        "traits": traits,
+        "provenance": {"filename_signal_used": filename_signal_used, "detector": CONTENT_STRATEGY_VERSION},
+    }
+
+
+def _normalise_manual_override(value: Any) -> dict[str, Any]:
+    raw = dict(value) if isinstance(value, dict) else {}
+    override = {
+        "format": raw.get("format") or None,
+        "editorial_mode": raw.get("editorial_mode") or None,
+        "domain": raw.get("domain") or None,
+        "traits": sorted({str(item) for item in raw.get("traits", [])}) if isinstance(raw.get("traits", []), list) else [],
+    }
+    active = any(override[name] for name in ("format", "editorial_mode", "domain")) or bool(override["traits"])
+    override["provenance"] = "user" if active else "none"
+    override["revision_id"] = stable_text_hash(json.dumps(override, ensure_ascii=False, sort_keys=True))[:16] if active else None
+    _validate_manual_override(override)
+    return override
+
+
+def _resolve_effective_profile(
+    detected: dict[str, Any], manual_override: dict[str, Any], *, min_confidence: float,
+) -> dict[str, Any]:
+    effective: dict[str, Any] = {"resolution": {}}
+    for name in ("format", "editorial_mode", "domain"):
+        override_value = manual_override.get(name)
+        proposal = detected[name]
+        if override_value:
+            effective[name] = override_value
+            effective["resolution"][name] = "manual_override"
+        elif float(proposal["confidence"]) >= min_confidence:
+            effective[name] = proposal["value"]
+            effective["resolution"][name] = "detected"
+        else:
+            effective[name] = "unknown"
+            effective["resolution"][name] = "safe_fallback"
+    if manual_override.get("traits"):
+        effective["traits"] = list(manual_override["traits"])
+        effective["resolution"]["traits"] = "manual_override"
+    else:
+        effective["traits"] = sorted({
+            str(item["value"]) for item in detected.get("traits", [])
+            if float(item.get("confidence", 0)) >= min_confidence
+        })
+        effective["resolution"]["traits"] = "detected"
+    _validate_effective_profile(effective)
+    return effective
+
+
+def _legacy_content_type_projection(
+    detected: dict[str, Any], effective: dict[str, Any],
+) -> tuple[str, float, list[str]]:
+    editorial = effective["editorial_mode"]
+    format_value = effective["format"]
+    domain = effective["domain"]
+    content_type = {
+        "interview": "interview", "motivational": "motivational", "explanatory": "educational",
+        "demonstration": "tutorial", "news_analysis": "news_or_analysis", "narrative": "movie_or_series",
+        "entertainment": "commentary", "commentary": "commentary",
+    }.get(editorial, "unknown")
+    if format_value == "gameplay" or domain == "gaming":
+        content_type = "gameplay"
+    elif domain == "entertainment" and editorial == "narrative":
+        content_type = "movie_or_series"
+    confidences = [
+        float(detected[name]["confidence"]) for name in ("format", "editorial_mode", "domain")
+        if effective["resolution"][name] == "detected"
+    ]
+    confidence = sum(confidences) / len(confidences) if confidences else (1.0 if "manual_override" in effective["resolution"].values() else 0.2)
+    return content_type, _bounded(confidence), []
+
+
+def _legacy_format_projection(value: str) -> str:
+    return {
+        "talking_head": "single_speaker_monologue", "dialogue": "multi_speaker_dialogue",
+        "screen_demo": "screen_recording", "gameplay": "gameplay_commentary",
+        "scene_driven": "scene_driven", "mixed": "mixed", "unknown": "unknown",
+    }[value]
+
+
+def _validate_detected_profile(profile: dict[str, Any]) -> None:
+    if set(profile) != {"format", "editorial_mode", "domain", "traits", "provenance"}:
+        raise ValueError("VideoContentProfile detected_profile has an invalid shape.")
+    for name, allowed in (("format", PROFILE_FORMATS), ("editorial_mode", PROFILE_EDITORIAL_MODES), ("domain", PROFILE_DOMAINS)):
+        proposal = profile.get(name)
+        if not isinstance(proposal, dict) or proposal.get("value") not in allowed:
+            raise ValueError(f"VideoContentProfile detected {name} is invalid.")
+        if not 0 <= float(proposal.get("confidence", -1)) <= 1 or not isinstance(proposal.get("evidence"), list):
+            raise ValueError(f"VideoContentProfile detected {name} evidence is invalid.")
+    traits = profile.get("traits")
+    if not isinstance(traits, list) or any(
+        not isinstance(item, dict) or item.get("value") not in PROFILE_TRAITS
+        or not 0 <= float(item.get("confidence", -1)) <= 1 or not isinstance(item.get("evidence"), list)
+        for item in traits
+    ):
+        raise ValueError("VideoContentProfile detected traits are invalid.")
+    if not isinstance(profile.get("provenance"), dict):
+        raise ValueError("VideoContentProfile detected provenance is invalid.")
+
+
+def _validate_effective_profile(profile: dict[str, Any]) -> None:
+    if profile.get("format") not in PROFILE_FORMATS or profile.get("editorial_mode") not in PROFILE_EDITORIAL_MODES or profile.get("domain") not in PROFILE_DOMAINS:
+        raise ValueError("VideoContentProfile effective axes are invalid.")
+    if not isinstance(profile.get("traits"), list) or any(item not in PROFILE_TRAITS for item in profile["traits"]):
+        raise ValueError("VideoContentProfile effective traits are invalid.")
+    resolution = profile.get("resolution")
+    if not isinstance(resolution, dict) or set(resolution) != {"format", "editorial_mode", "domain", "traits"}:
+        raise ValueError("VideoContentProfile effective resolution is invalid.")
+    if any(value not in {"detected", "manual_override", "safe_fallback", "legacy_migration"} for value in resolution.values()):
+        raise ValueError("VideoContentProfile effective resolution provenance is invalid.")
+
+
+def _validate_manual_override(override: dict[str, Any]) -> None:
+    if override.get("format") not in PROFILE_FORMATS | {None}:
+        raise ValueError("Unsupported manual profile format override.")
+    if override.get("editorial_mode") not in PROFILE_EDITORIAL_MODES | {None}:
+        raise ValueError("Unsupported manual profile editorial_mode override.")
+    if override.get("domain") not in PROFILE_DOMAINS | {None}:
+        raise ValueError("Unsupported manual profile domain override.")
+    if not isinstance(override.get("traits"), list) or any(item not in PROFILE_TRAITS for item in override["traits"]):
+        raise ValueError("Unsupported manual profile traits override.")
+    if override.get("provenance") not in {"none", "user"}:
+        raise ValueError("Unsupported manual profile override provenance.")
+
+
+def _migrate_legacy_profile(data: dict[str, Any]) -> dict[str, Any]:
+    if str(data.get("schema_version")) != LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION:
+        return dict(data)
+    migrated = dict(data)
+    format_value = {
+        "single_speaker_monologue": "talking_head", "multi_speaker_dialogue": "dialogue",
+        "host_guest": "dialogue", "screen_recording": "screen_demo",
+        "gameplay_commentary": "gameplay", "narrated_visual": "scene_driven",
+        "scene_driven": "scene_driven", "mixed": "mixed",
+    }.get(str(data.get("dominant_format")), "unknown")
+    editorial_mode = {
+        "interview": "interview", "motivational": "motivational", "educational": "explanatory",
+        "lecture": "explanatory", "tutorial": "demonstration", "commentary": "commentary",
+        "news_or_analysis": "news_analysis", "movie_or_series": "narrative",
+    }.get(str(data.get("detected_content_type")), "unknown")
+    confidence = _bounded(float(data.get("content_type_confidence", 0)))
+    migrated["schema_version"] = VIDEO_CONTENT_PROFILE_SCHEMA_VERSION
+    migrated["detected_profile"] = {
+        "format": _axis(format_value, confidence, ["migration:legacy_dominant_format"]),
+        "editorial_mode": _axis(editorial_mode, confidence, ["migration:legacy_content_type"]),
+        "domain": _axis("gaming" if data.get("detected_content_type") == "gameplay" else "unknown", confidence, ["migration:legacy_content_type"]),
+        "traits": [],
+        "provenance": {
+            "filename_signal_used": bool(
+                (data.get("evidence") if isinstance(data.get("evidence"), dict) else {}).get("filename_signal_used")
+            ),
+            "detector": "legacy_5A.1",
+        },
+    }
+    migrated["effective_profile"] = {
+        "format": format_value, "editorial_mode": editorial_mode,
+        "domain": "gaming" if data.get("detected_content_type") == "gameplay" else "unknown",
+        "traits": [],
+        "resolution": {name: "legacy_migration" for name in ("format", "editorial_mode", "domain", "traits")},
+    }
+    migrated["manual_override"] = _normalise_manual_override({})
+    return migrated
 
 
 def _strategy_id(content_type: str, dominant_format: str) -> str:
@@ -623,13 +972,28 @@ def _speech_density(tokens: list[str], duration: float, features: list[dict[str,
 
 def _visual_density(duration: float, scenes: dict[str, Any], visual_analysis: dict[str, Any]) -> float:
     per_minute = len(scenes.get("boundaries", [])) / max(duration / 60.0, 1.0)
-    sampled = len(visual_analysis.get("samples", [])) if isinstance(visual_analysis, dict) else 0
+    if not isinstance(visual_analysis, dict):
+        sampled = 0
+    else:
+        sampled = int(visual_analysis.get("sample_count") or len(visual_analysis.get("subject_keyframes", [])))
     return _bounded(min(1.0, per_minute / 12.0 + min(0.2, sampled / 100.0)))
+
+
+def _visual_evidence_available(visual_analysis: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(visual_analysis, dict)
+        and str(visual_analysis.get("evidence_status") or visual_analysis.get("status") or "").lower()
+        not in {"", "skipped", "unavailable", "failed"}
+        and (visual_analysis.get("sample_count") or visual_analysis.get("subject_keyframes"))
+    )
 
 
 def _emotional_summary(text: str, audio_features: dict[str, Any]) -> str:
     punctuation = text.count("!") + text.count("?")
-    energy = _average([item for item in audio_features.get("windows", []) if isinstance(item, dict)], "energy")
+    energy = _average(
+        [item for item in audio_features.get("energy_frames", []) if isinstance(item, dict)],
+        "normalized_loudness",
+    )
     if punctuation >= 4 or energy >= 0.65:
         return "выраженные эмоциональные пики"
     if punctuation >= 1 or energy >= 0.35:
@@ -711,7 +1075,7 @@ def build_global_content_map(
             source_duration_seconds=float(metadata.get("duration") or profile.source_duration_seconds),
             chapters=[], story_units=[], analysis_confidence=0.0, fallback_used=True,
             warnings=["ContentMap не построен: в транскрипте нет валидных сегментов."],
-            evidence={"transcript_segment_count": 0, "strategy_id": profile.strategy_id},
+            evidence={"transcript_segment_count": 0, "strategy_id": "evidence_driven"},
         )
         return empty.to_dict()
     feature_rows = [item for item in transcript_features.get("segments", []) if isinstance(item, dict)]
@@ -745,7 +1109,7 @@ def build_global_content_map(
         fallback_used=True,
         warnings=list(profile.warnings),
         evidence={
-            "strategy_id": profile.strategy_id,
+            "strategy_id": "evidence_driven",
             "transcript_segment_count": len(segments),
             "chaptering": "deterministic: pauses, speaker turns, topic markers, bounded chapter duration",
             "story_extraction": "deterministic: sentence closure, question-answer continuity, setup-payoff continuity",
@@ -1712,6 +2076,28 @@ def _boundary_failure_reason(
     return "Boundary не прошла безопасный semantic contract."
 
 
+def editorial_intent_affinity(candidate: Candidate, story: StoryUnit | None, intent: str) -> dict[str, Any]:
+    """Bounded lexical relevance used only after eligibility and boundary gates have passed."""
+
+    intent_tokens = {item for item in _tokens(intent) if len(item) > 2 and item not in _STOP_WORDS}
+    evidence_text = " ".join(filter(None, (
+        candidate.text,
+        story.title if story else "",
+        story.core_idea if story else "",
+        story.hook_seed if story else "",
+        story.payoff if story else "",
+    )))
+    evidence_tokens = set(_tokens(evidence_text))
+    matched = sorted(intent_tokens & evidence_tokens)
+    affinity = len(matched) / len(intent_tokens) if intent_tokens else 0.0
+    return {
+        "intent_present": bool(intent_tokens),
+        "affinity": round(_bounded(affinity), 6),
+        "matched_terms": matched[:12],
+        "policy": "post_eligibility_ranking_only",
+    }
+
+
 def select_with_coverage(
     scored: list[ScoredCandidate], config: Any, content_map_data: dict[str, Any],
     *, production_feasibility: dict[str, Any] | None = None,
@@ -1837,6 +2223,11 @@ def select_with_coverage(
             context_dependency = story.context_dependency_score if story else item.context_dependency_score / 100
             repetition = story.repetition_score if story else float(item.candidate.feature_vector.get("repetition_score", 0))
             boundary_score = float(item.candidate.boundary_diagnostics.get("overall_boundary_score", 0.65))
+            intent_details = editorial_intent_affinity(
+                item.candidate,
+                story,
+                str(getattr(settings, "editorial_intent", "") or ""),
+            )
             score = (
                 (item.score / 100) * weights["base_quality"]
                 + standalone * weights["standalone"]
@@ -1850,7 +2241,9 @@ def select_with_coverage(
                 - details["semantic_duplicate_similarity"] * weights["semantic_duplicate_penalty"]
                 - context_dependency * weights["context_dependency_penalty"]
                 - repetition * weights["repetition_penalty"]
+                + intent_details["affinity"] * float(getattr(settings, "editorial_intent_weight", 0.08))
             )
+            details["editorial_intent"] = intent_details
             details["coverage_selection_score"] = round(score, 6)
             mmr_score = diversity_lambda * score - (1 - diversity_lambda) * max_similarity
             details["diversity"] = {

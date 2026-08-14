@@ -27,6 +27,10 @@ SUBTITLE_PRESETS = frozenset({"minimal", "documentary", "dynamic", "clean"})
 PRESET_SELECTION_MODES = frozenset({"auto", "explicit"})
 CLIP_COUNTS = frozenset({"auto", "1", "3", "5"})
 AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
+PROFILE_FORMAT_OVERRIDES = frozenset({"auto", "talking_head", "dialogue", "screen_demo", "gameplay", "scene_driven", "mixed", "unknown"})
+PROFILE_EDITORIAL_MODE_OVERRIDES = frozenset({"auto", "explanatory", "interview", "commentary", "motivational", "narrative", "demonstration", "entertainment", "news_analysis", "unknown"})
+PROFILE_DOMAIN_OVERRIDES = frozenset({"auto", "business", "technology", "education", "gaming", "food", "health", "finance", "lifestyle", "entertainment", "news", "general", "unknown"})
+PROFILE_TRAIT_OVERRIDES = frozenset({"speech_led", "visual_led", "single_speaker", "multi_speaker", "question_answer", "high_pacing", "low_pacing", "high_emotion", "dense_information", "repetitive", "screen_content", "scene_driven", "instructional"})
 PRESET_RESOLVER_VERSION = "4B.1"
 
 
@@ -68,6 +72,11 @@ class ProcessingIntent:
     subtitle_preset: str = "documentary"
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
+    editorial_intent: str = ""
+    profile_format_override: str = "auto"
+    profile_editorial_mode_override: str = "auto"
+    profile_domain_override: str = "auto"
+    profile_traits_override: tuple[str, ...] = ()
 
     def validate(self) -> None:
         if self.processing_mode not in PROCESSING_MODES:
@@ -84,12 +93,22 @@ class ProcessingIntent:
             raise ValueError("Unsupported preset selection mode.")
         if self.audio_mode not in AUDIO_MODES:
             raise ValueError("Unsupported audio mode.")
+        if not isinstance(self.editorial_intent, str) or len(self.editorial_intent.strip()) > 500:
+            raise ValueError("Editorial intent must be a string up to 500 characters.")
+        if self.profile_format_override not in PROFILE_FORMAT_OVERRIDES:
+            raise ValueError("Unsupported profile format override.")
+        if self.profile_editorial_mode_override not in PROFILE_EDITORIAL_MODE_OVERRIDES:
+            raise ValueError("Unsupported profile editorial mode override.")
+        if self.profile_domain_override not in PROFILE_DOMAIN_OVERRIDES:
+            raise ValueError("Unsupported profile domain override.")
+        if any(item not in PROFILE_TRAIT_OVERRIDES for item in self.profile_traits_override):
+            raise ValueError("Unsupported profile traits override.")
 
     @property
     def requested_clip_count(self) -> int | None:
         return None if str(self.clip_count) == "auto" else int(self.clip_count)
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
             "processing_mode": self.processing_mode,
@@ -99,6 +118,11 @@ class ProcessingIntent:
             "subtitle_preset": self.subtitle_preset,
             "preset_selection_mode": self.preset_selection_mode,
             "audio_mode": self.audio_mode,
+            "editorial_intent": self.editorial_intent.strip(),
+            "profile_format_override": self.profile_format_override,
+            "profile_editorial_mode_override": self.profile_editorial_mode_override,
+            "profile_domain_override": self.profile_domain_override,
+            "profile_traits_override": list(self.profile_traits_override),
         }
 
     @classmethod
@@ -113,6 +137,17 @@ class ProcessingIntent:
             # stored preset is user-owned/pinned and must remain effective.
             preset_selection_mode=str(value.get("preset_selection_mode", "explicit")),
             audio_mode=str(value.get("audio_mode", "original")),
+            editorial_intent=str(value.get("editorial_intent", "")),
+            profile_format_override=str(value.get("profile_format_override", "auto")),
+            profile_editorial_mode_override=str(value.get("profile_editorial_mode_override", "auto")),
+            profile_domain_override=str(value.get("profile_domain_override", "auto")),
+            profile_traits_override=tuple(
+                str(item) for item in (
+                    value.get("profile_traits_override")
+                    if isinstance(value.get("profile_traits_override"), (list, tuple))
+                    else []
+                )
+            ),
         )
         intent.validate()
         return intent
@@ -144,6 +179,8 @@ class ResolvedProcessingConfig:
     preset_selection_mode: str
     preset_provenance: str
     audio_mode: str
+    editorial_intent: str
+    manual_profile_override: dict[str, Any]
     candidate_limit: int
     shortlist_size: int
     ai_reranking_enabled: bool
@@ -166,6 +203,8 @@ class ResolvedProcessingConfig:
             "preset_selection_mode": self.preset_selection_mode,
             "preset_provenance": self.preset_provenance,
             "audio_mode": self.audio_mode,
+            "editorial_intent": self.editorial_intent,
+            "manual_profile_override": self.manual_profile_override,
             "candidate_limit": self.candidate_limit,
             "shortlist_size": self.shortlist_size,
             "ai_reranking_enabled": self.ai_reranking_enabled,
@@ -321,6 +360,13 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
             else "content_recommendation"
         ),
         audio_mode=intent.audio_mode,
+        editorial_intent=intent.editorial_intent.strip(),
+        manual_profile_override={
+            **({"format": intent.profile_format_override} if intent.profile_format_override != "auto" else {}),
+            **({"editorial_mode": intent.profile_editorial_mode_override} if intent.profile_editorial_mode_override != "auto" else {}),
+            **({"domain": intent.profile_domain_override} if intent.profile_domain_override != "auto" else {}),
+            **({"traits": list(intent.profile_traits_override)} if intent.profile_traits_override else {}),
+        },
         candidate_limit=int(defaults["candidates"]),
         shortlist_size=max(clip_count, int(defaults["shortlist"])),
         ai_reranking_enabled=bool(defaults["reranking"]),
@@ -478,6 +524,8 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     config.production.audio_mode = resolved.audio_mode
     config.production_render.cache_enabled = resolved.cache_policy.startswith("reuse")
     config.optional_visual_features = resolved.deep_analysis.resolved
+    config.content_understanding.editorial_intent = resolved.editorial_intent
+    config.content_understanding.manual_override = dict(resolved.manual_profile_override)
     # Goal 5B is active for the product flow while AppConfig remains backward
     # compatible for external programmatic callers that did not opt in.
     config.virality.enabled = True

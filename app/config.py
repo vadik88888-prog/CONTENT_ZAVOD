@@ -199,8 +199,12 @@ class ContentUnderstandingConfig:
     """Versioned semantic-analysis settings, isolated from render-only options."""
 
     enabled: bool = True
-    strategy_version: str = "5A.1"
-    profile_schema_version: str = "5A.1"
+    strategy_version: str = "5A.3"
+    profile_schema_version: str = "5A.2"
+    editorial_intent: str = ""
+    manual_override: dict[str, Any] = field(default_factory=dict)
+    profile_detection_min_confidence: float = 0.45
+    editorial_intent_weight: float = 0.08
     content_map_schema_version: str = "5A.1"
     story_unit_schema_version: str = "5A.1"
     chapter_pause_seconds: float = 1.25
@@ -242,6 +246,34 @@ class ContentUnderstandingConfig:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
+        if self.strategy_version not in {"5A.1", "5A.2", "5A.3"}:
+            raise ClipEngineError("content_understanding.strategy_version не поддерживается.")
+        if self.profile_schema_version not in {"5A.1", "5A.2"}:
+            raise ClipEngineError("content_understanding.profile_schema_version не поддерживается.")
+        if not isinstance(self.editorial_intent, str) or len(self.editorial_intent.strip()) > 500:
+            raise ClipEngineError("content_understanding.editorial_intent должен быть строкой до 500 символов.")
+        if not isinstance(self.manual_override, dict):
+            raise ClipEngineError("content_understanding.manual_override должен быть объектом.")
+        allowed_override_keys = {"format", "editorial_mode", "domain", "traits"}
+        if set(self.manual_override) - allowed_override_keys:
+            raise ClipEngineError("content_understanding.manual_override содержит неизвестные поля.")
+        allowed_values = {
+            "format": {"talking_head", "dialogue", "screen_demo", "gameplay", "scene_driven", "mixed", "unknown"},
+            "editorial_mode": {"explanatory", "interview", "commentary", "motivational", "narrative", "demonstration", "entertainment", "news_analysis", "unknown"},
+            "domain": {"business", "technology", "education", "gaming", "food", "health", "finance", "lifestyle", "entertainment", "news", "general", "unknown"},
+        }
+        for key, choices in allowed_values.items():
+            value = self.manual_override.get(key)
+            if value is not None and value not in choices:
+                raise ClipEngineError(f"content_understanding.manual_override.{key} не поддерживается.")
+        traits = self.manual_override.get("traits", [])
+        allowed_traits = {"speech_led", "visual_led", "single_speaker", "multi_speaker", "question_answer", "high_pacing", "low_pacing", "high_emotion", "dense_information", "repetitive", "screen_content", "scene_driven", "instructional"}
+        if not isinstance(traits, list) or any(item not in allowed_traits for item in traits):
+            raise ClipEngineError("content_understanding.manual_override.traits не поддерживается.")
+        if not 0 <= self.profile_detection_min_confidence <= 1:
+            raise ClipEngineError("content_understanding.profile_detection_min_confidence должен быть от 0 до 1.")
+        if not 0 <= self.editorial_intent_weight <= 0.25:
+            raise ClipEngineError("content_understanding.editorial_intent_weight должен быть от 0 до 0.25.")
         if not 0 <= self.chapter_pause_seconds <= 20:
             raise ClipEngineError("content_understanding.chapter_pause_seconds должен быть от 0 до 20.")
         if not 10 <= self.max_chapter_seconds <= 900:

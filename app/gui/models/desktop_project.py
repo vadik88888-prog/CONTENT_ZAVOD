@@ -49,6 +49,11 @@ class ProjectOptions:
     subtitle_style: str = "documentary"
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
+    editorial_intent: str = ""
+    profile_format_override: str = "auto"
+    profile_editorial_mode_override: str = "auto"
+    profile_domain_override: str = "auto"
+    profile_traits_override: list[str] = field(default_factory=list)
     composition_strategy: str = "safe_auto"
     same_source_broll_allowed: bool = False
     encoder: str = "auto"
@@ -75,6 +80,11 @@ class ProjectOptions:
             subtitle_preset=self.subtitle_style,
             preset_selection_mode=self.preset_selection_mode,
             audio_mode=self.audio_mode,
+            editorial_intent=self.editorial_intent,
+            profile_format_override=self.profile_format_override,
+            profile_editorial_mode_override=self.profile_editorial_mode_override,
+            profile_domain_override=self.profile_domain_override,
+            profile_traits_override=tuple(self.profile_traits_override),
         )
 
 
@@ -246,6 +256,8 @@ class DesktopProject:
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
             "subtitles_enabled", "subtitle_style", "preset_selection_mode", "audio_mode", "composition_strategy",
+            "editorial_intent", "profile_format_override", "profile_editorial_mode_override",
+            "profile_domain_override", "profile_traits_override",
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
