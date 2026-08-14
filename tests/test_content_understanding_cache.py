@@ -72,8 +72,8 @@ def _wire_two_candidate_pipeline(monkeypatch, calls: dict[str, int]) -> None:
         result = {
             "source_id": source_id, "language": "en", "duration": duration,
             "segments": [
-                {"start": 1.0, "end": 19.0, "text": "The first independent story reaches a clear conclusion."},
-                {"start": 25.0, "end": 43.0, "text": "A separate second story ends with a different conclusion."},
+                {"start": 1.0, "end": 19.0, "text": "The first independent story develops. In the end, the result is clear."},
+                {"start": 25.0, "end": 43.0, "text": "A separate second story develops. In the end, the result is different."},
             ],
             "words": [], "model": config.whisper_model, "runtime": {"device": "cpu"},
         }
@@ -103,9 +103,9 @@ def _wire_three_candidate_pipeline(monkeypatch, calls: dict[str, int]) -> None:
         result = {
             "source_id": source_id, "language": "en", "duration": duration,
             "segments": [
-                {"start": 1.0, "end": 19.0, "text": "The first independent story reaches a clear conclusion."},
-                {"start": 27.0, "end": 45.0, "text": "The second independent story reaches another clear conclusion."},
-                {"start": 53.0, "end": 71.0, "text": "The third independent story reaches its own clear conclusion."},
+                {"start": 1.0, "end": 19.0, "text": "The first independent story develops. In the end, the result is clear."},
+                {"start": 27.0, "end": 45.0, "text": "The second independent story develops. In the end, the result is different."},
+                {"start": 53.0, "end": 71.0, "text": "The third independent story develops. In the end, the result is distinct."},
             ],
             "words": [], "model": config.whisper_model, "runtime": {"device": "cpu"},
         }
@@ -347,6 +347,8 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert first_draft["candidate_boundary_fingerprint"]
     assert first_draft["transformation_fingerprint"]
     assert first_draft["production_plan_fingerprint"]
+    assert first_draft["eligibility_decision"]["state"] == "assessed"
+    assert first_draft["eligibility_decision"]["eligible"] is True
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "draft_ready"
     assert [item["candidate_id"] for item in report["candidate_flow"]["draft_candidates"]] == requested_ids
@@ -389,6 +391,59 @@ def test_draft_preflight_rejects_stale_overlong_candidate_before_transformation(
     failed = report["candidate_flow"]["draft_candidates"][0]
     assert failed["stage"] == f"candidate_preflight:{candidate_id}"
     assert "DURATION_OUT_OF_RANGE" in failed["error"]
+
+
+def test_cached_incomplete_story_is_blocked_before_transformation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source.mp4"; source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    analysis = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True,
+    ).run(input_path=str(source))
+    artifact = read_json(analysis.analysis_path, {})
+    candidate_id = artifact["candidates"][0]["candidate_id"]
+    candidate_path = Path(artifact["candidate_data_ref"])
+    candidate_data = read_json(candidate_path, {})
+    candidate = next(item for item in candidate_data["candidates"] if item["id"] == candidate_id)
+    candidate["rejection_reason"] = "incomplete_story"
+    candidate.setdefault("virality", {})["eligibility"] = {
+        "status": "rejected",
+        "critical_failures": ["incomplete_story"],
+    }
+    write_json(candidate_path, candidate_data)
+    transformed: list[list[str]] = []
+    rendered: list[list[str]] = []
+
+    def transform(_self, _tracker, _source, _metadata, selected, *_args, **_kwargs):
+        transformed.append([item.candidate.id for item in selected])
+        return {"enabled": True, "status": "completed", "items": [], "warnings": []}
+
+    def render(_self, _tracker, production, *_args, **_kwargs):
+        rendered.append([
+            str(item["candidate_id"])
+            for item in production.get("items", []) if item.get("status") == "completed"
+        ])
+        return {"enabled": True, "status": "completed", "items": []}
+
+    monkeypatch.setattr(Pipeline, "_transform_selected", transform)
+    monkeypatch.setattr(Pipeline, "_run_production_render", render)
+    config = AppConfig(score_threshold=0)
+    config.transformation.enabled = True
+    config.production.enabled = True
+    result = Pipeline(
+        tmp_path, config, mock_ai=True, analysis_artifact_path=analysis.analysis_path,
+        selected_candidate_ids=[candidate_id], draft_only=True,
+    ).run(input_path=str(source))
+
+    assert transformed == [[]]
+    assert rendered == [[]]
+    report = read_json(result.report_path, {})
+    failed = report["candidate_flow"]["draft_candidates"][0]
+    assert failed["stage"] == f"candidate_preflight:{candidate_id}"
+    assert "SEMANTIC_INCOMPLETE" in failed["error"]
+    assert "NO_PAYOFF" in failed["error"]
 
 
 def test_three_selected_drafts_keep_two_ready_when_one_boundary_override_is_invalid(tmp_path: Path, monkeypatch) -> None:
@@ -646,6 +701,17 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
         analysis_artifact_path=analysis.analysis_path,
         selected_candidate_ids=[candidate_id], draft_only=True,
     ).run(input_path=str(source))
+    draft_data = read_json(draft.draft_path, {})
+    persisted_decision = draft_data["candidates"][0]["eligibility_decision"]
+    assert persisted_decision["state"] == "assessed"
+
+    # Simulate the old cached analysis shape that previously reached Final as
+    # legacy_unassessed.  The approved Draft owns the exact assessed decision.
+    candidate_path = Path(read_json(analysis.analysis_path, {})["candidate_data_ref"])
+    candidate_data = read_json(candidate_path, {})
+    cached_candidate = next(item for item in candidate_data["candidates"] if item["id"] == candidate_id)
+    cached_candidate.pop("eligibility_decision", None)
+    write_json(candidate_path, candidate_data)
 
     def tts(_self, _tracker, _production, _work, _output):
         return {"enabled": False, "status": "skipped", "items": []}
@@ -668,6 +734,18 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     monkeypatch.setattr(Pipeline, "_run_tts", tts)
     monkeypatch.setattr(Pipeline, "_run_audio", audio)
     monkeypatch.setattr(Pipeline, "_run_production_render", render)
+    persisted_at_final: list[dict] = []
+    original_quality_reports = Pipeline._persist_quality_reports
+
+    def persist_quality_reports(self, *args, **kwargs):
+        item = next(
+            scored for scored in kwargs["final_scored"]
+            if scored.candidate.id == candidate_id
+        )
+        persisted_at_final.append(item.candidate.eligibility_decision.to_dict())
+        return original_quality_reports(self, *args, **kwargs)
+
+    monkeypatch.setattr(Pipeline, "_persist_quality_reports", persist_quality_reports)
     before_production = dict(calls)
     result = Pipeline(
         tmp_path, AppConfig(score_threshold=0), mock_ai=True,
@@ -686,6 +764,7 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     }]
     assert report["run"]["render_settings_fingerprint"]
     assert report["production_render"]["render_settings_fingerprint"] == report["run"]["render_settings_fingerprint"]
+    assert persisted_at_final == [persisted_decision]
 
 
 def test_approved_draft_render_keeps_valid_candidate_when_another_plan_is_malformed(tmp_path: Path, monkeypatch) -> None:

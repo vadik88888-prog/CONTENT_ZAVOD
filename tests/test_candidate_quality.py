@@ -6,6 +6,7 @@ from app.candidate_quality import (
     CANDIDATE_QUALITY_SCHEMA_VERSION,
     EligibilityReasonCode,
     assess_context_debt,
+    resolve_eligibility_decision,
 )
 from app.config import AppConfig
 from app.content_understanding import ensure_candidate_boundary_decision, select_with_coverage
@@ -65,6 +66,30 @@ def test_eligible_candidate_persists_versioned_decision_score_and_evidence() -> 
     assert serialized["candidate_score_v2"]["component_scores"]
     assert serialized["candidate_score_v2"]["penalties"] == []
     assert candidate_from_dict(serialized).eligibility_decision is not None
+
+
+def test_cached_hard_story_rejection_cannot_be_promoted_by_boundary_evidence() -> None:
+    candidate = _candidate("candidate-cached-incomplete")
+    config = AppConfig()
+
+    decision = resolve_eligibility_decision(
+        candidate,
+        candidate.feature_vector,
+        config_version=config.scoring.candidate_quality_config_version,
+        min_duration_seconds=config.min_clip_duration,
+        max_duration_seconds=config.max_clip_duration,
+        visual_analysis={"status": "completed", "subject_keyframes": [{"timestamp": 1.0}]},
+        cached_eligibility={
+            "status": "rejected",
+            "critical_failures": ["incomplete_story"],
+        },
+    )
+
+    assert decision.eligible is False
+    assert EligibilityReasonCode.SEMANTIC_INCOMPLETE in decision.reason_codes
+    assert EligibilityReasonCode.NO_PAYOFF in decision.reason_codes
+    evidence = next(item for item in decision.evidence_refs if item.code == "cached_hard_eligibility")
+    assert evidence.details["critical_failures"] == ["incomplete_story"]
 
 
 def test_complete_legacy_boundary_evidence_is_promoted_to_typed_decision() -> None:

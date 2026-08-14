@@ -66,6 +66,43 @@ class EligibilityReasonCode(StrEnum):
     LEGACY_UNASSESSED = "LEGACY_UNASSESSED"
 
 
+_CACHED_HARD_FAILURE_REASON_CODES: dict[str, tuple[EligibilityReasonCode, ...]] = {
+    "incomplete_story": (
+        # A sentence may end cleanly while the story still has no resolution.
+        # Preserve both facts carried by the cached publishability assessment.
+        EligibilityReasonCode.SEMANTIC_INCOMPLETE,
+        EligibilityReasonCode.NO_PAYOFF,
+    ),
+    "critical_context_dependency": (EligibilityReasonCode.CONTEXT_DEBT_CRITICAL,),
+    "semantic_boundary_violation": (EligibilityReasonCode.SEMANTIC_INCOMPLETE,),
+}
+
+
+def cached_hard_eligibility_reason_codes(
+    cached_eligibility: dict[str, Any] | None,
+) -> tuple[list[EligibilityReasonCode], list[str]]:
+    """Map an explicit cached hard verdict into the typed eligibility vocabulary.
+
+    The raw failures are returned as well so callers can preserve exact evidence.
+    A hard verdict requires both parts of the old contract: ``status=rejected``
+    and at least one ``critical_failures`` item.
+    """
+
+    cached = cached_eligibility if isinstance(cached_eligibility, dict) else {}
+    critical_failures = [
+        str(item) for item in cached.get("critical_failures", [])
+        if str(item).strip()
+    ]
+    if str(cached.get("status") or "") != "rejected" or not critical_failures:
+        return [], []
+    mapped: list[EligibilityReasonCode] = []
+    for failure in critical_failures:
+        for code in _CACHED_HARD_FAILURE_REASON_CODES.get(failure, ()):
+            if code not in mapped:
+                mapped.append(code)
+    return mapped, critical_failures
+
+
 @dataclass(slots=True)
 class EvidenceReference:
     code: str
@@ -405,14 +442,6 @@ def build_eligibility_decision(
     semantic_completeness = semantic.get("completeness_score", features.get("completeness_score"))
     if semantic_completeness is not None and float(semantic_completeness) < 50 and float(semantic_completeness) <= 1:
         semantic_completeness = float(semantic_completeness) * 100
-    boundary_completion = boundary.get("semantic_completion")
-    if boundary_completion is not None:
-        boundary_completion = float(boundary_completion)
-        if boundary_completion <= 1:
-            boundary_completion *= 100
-        # A resolved semantic boundary is the final source-range decision.  A
-        # lower rough StoryUnit precheck must not overturn that later evidence.
-        semantic_completeness = max(float(semantic_completeness or 0), boundary_completion)
     if semantic_completeness is not None and float(semantic_completeness) < 50:
         reason(EligibilityReasonCode.SEMANTIC_INCOMPLETE)
     evidence.append(EvidenceReference(
@@ -487,6 +516,67 @@ def build_eligibility_decision(
     )
 
 
+def resolve_eligibility_decision(
+    candidate: Any,
+    features: dict[str, Any],
+    *,
+    config_version: str,
+    min_duration_seconds: float | None,
+    max_duration_seconds: float | None,
+    visual_analysis: dict[str, Any] | None,
+    cached_eligibility: dict[str, Any] | None,
+) -> EligibilityDecision:
+    """Resolve current evidence without upgrading an explicit cached rejection."""
+
+    decision = build_eligibility_decision(
+        candidate,
+        features,
+        config_version=config_version,
+        min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
+        visual_analysis=visual_analysis,
+    )
+    cached_codes, critical_failures = cached_hard_eligibility_reason_codes(cached_eligibility)
+    if not critical_failures:
+        return decision
+
+    actions_by_code = {
+        EligibilityReasonCode.SEMANTIC_INCOMPLETE: "restore_semantic_completion",
+        EligibilityReasonCode.NO_PAYOFF: "extend_to_payoff",
+        EligibilityReasonCode.CONTEXT_DEBT_CRITICAL: "include_required_context",
+    }
+    reasons = list(decision.reason_codes)
+    actions = list(decision.required_boundary_actions)
+    for code in cached_codes:
+        if code not in reasons:
+            reasons.append(code)
+        action = actions_by_code.get(code)
+        if action and action not in actions:
+            actions.append(action)
+    return EligibilityDecision(
+        schema_version=decision.schema_version,
+        config_version=decision.config_version,
+        state=EligibilityState.ASSESSED,
+        eligible=False,
+        reason_codes=reasons,
+        recoverable_issues=list(decision.recoverable_issues),
+        required_boundary_actions=actions,
+        evidence_refs=[
+            *decision.evidence_refs,
+            EvidenceReference(
+                "cached_hard_eligibility",
+                EvidenceState.AVAILABLE,
+                "cached_candidate.virality.eligibility",
+                {
+                    "status": "rejected",
+                    "critical_failures": critical_failures,
+                    "mapped_reason_codes": [code.value for code in cached_codes],
+                },
+            ),
+        ],
+    )
+
+
 def assess_hook_and_payoff(
     candidate: Any, features: dict[str, Any], boundary: dict[str, Any] | None = None,
 ) -> tuple[float, bool, EvidenceReference, EvidenceReference, bool]:
@@ -504,8 +594,11 @@ def assess_hook_and_payoff(
     generation = (candidate.multimodal_provenance or {}).get("generation", {})
     generation_reasons = generation.get("reasons", []) if isinstance(generation, dict) else []
     linked_payoff = any("payoff" in str(item) for item in generation_reasons)
-    payoff_present = bool(payoff_text) or visible_payoff or linked_payoff or any(marker in ending for marker in _PAYOFF_MARKERS) or (
-        natural_end and float(boundary.get("semantic_completion", features.get("completeness_score", 0))) >= 0.5
+    payoff_present = (
+        bool(payoff_text)
+        or visible_payoff
+        or linked_payoff
+        or any(marker in ending for marker in _PAYOFF_MARKERS)
     )
     hook_evidence = EvidenceReference("hook", EvidenceState.AVAILABLE, "story_unit" if hook_text else "transcript_features", {
         "hook_strength": round(hook_score, 3), "hook_text_available": bool(hook_text),

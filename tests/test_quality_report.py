@@ -254,6 +254,48 @@ def test_quality_report_clean_v2_artifact_passes(tmp_path: Path) -> None:
     assert data["artifact_id"] and data["artifact_sha256"]
 
 
+def test_legacy_cached_incomplete_story_is_a_semantic_blocker(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    candidate["eligibility_decision"] = {
+        "state": "legacy_unassessed", "eligible": None, "reason_codes": [],
+    }
+    candidate["virality"] = {
+        "eligibility": {
+            "status": "rejected",
+            "critical_failures": ["incomplete_story"],
+        },
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    finding = next(item for item in report.findings if item.provenance["producer"] == "eligibility")
+    assert finding.code == "SEMANTIC_INCOMPLETE"
+    assert finding.measured_value == ["incomplete_story"]
+
+
+def test_unknown_legacy_eligibility_without_hard_evidence_remains_warning(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    candidate["eligibility_decision"] = {
+        "state": "legacy_unassessed", "eligible": None, "reason_codes": [],
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "PASS_WITH_WARNINGS"
+    finding = next(item for item in report.findings if item.provenance["producer"] == "eligibility")
+    assert finding.code == "QUALITY_CONFIDENCE_LOW"
+    assert finding.severity == "warning"
+
+
 def test_compact_dialogue_without_omissions_warns_when_render_map_is_unavailable(tmp_path: Path) -> None:
     artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
     render.pop("source_output_time_map")

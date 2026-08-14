@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.analysis_artifact import AnalysisArtifact
-from app.candidate_quality import build_eligibility_decision
+from app.candidate_quality import resolve_eligibility_decision
 from app.config import load_config
 from app.content_understanding import ensure_candidate_boundary_decision, select_with_coverage
 from app.models import scored_from_dict
@@ -97,13 +97,14 @@ def probe_holdout(name: str, path: Path, config: Any) -> dict[str, Any]:
     visual_analysis = _reference(analysis, "visual_analysis")
     for item in scored:
         candidate = item.candidate
-        candidate.eligibility_decision = build_eligibility_decision(
+        candidate.eligibility_decision = resolve_eligibility_decision(
             candidate,
             candidate.feature_vector,
             config_version=config.scoring.candidate_quality_config_version,
             min_duration_seconds=config.candidate_generation.min_duration_seconds,
             max_duration_seconds=config.candidate_generation.max_duration_seconds,
             visual_analysis=visual_analysis,
+            cached_eligibility=dict(item.virality.get("eligibility") or {}),
         )
         ensure_candidate_boundary_decision(candidate)
     feasibility = resolve_recommendation_production_feasibility(

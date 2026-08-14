@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+from app.candidate_quality import cached_hard_eligibility_reason_codes
 from app.clip_results import ClipResult
 from app.utils import stable_file_hash, stable_text_hash, utc_now
 
@@ -435,6 +436,25 @@ def _collect_artifact_identity(
 def _collect_eligibility(finding: Any, candidate: dict[str, Any]) -> None:
     decision = candidate.get("eligibility_decision") if isinstance(candidate, dict) else None
     if not isinstance(decision, dict) or decision.get("state") == "legacy_unassessed":
+        virality = candidate.get("virality") if isinstance(candidate, dict) else None
+        cached = virality.get("eligibility") if isinstance(virality, dict) else None
+        cached_codes, critical_failures = cached_hard_eligibility_reason_codes(cached)
+        if critical_failures:
+            codes = [code.value for code in cached_codes]
+            code = "CONTEXT_DEBT_CRITICAL" if "CONTEXT_DEBT_CRITICAL" in codes else "SEMANTIC_INCOMPLETE"
+            finding(
+                code,
+                "blocker",
+                {
+                    "eligibility_decision": decision or None,
+                    "cached_eligibility": cached,
+                },
+                measured_value=critical_failures,
+                threshold="no explicit cached critical failures",
+                producer="eligibility",
+                message="Legacy candidate has an explicit cached hard eligibility rejection.",
+            )
+            return
         finding(
             "QUALITY_CONFIDENCE_LOW", "warning", {"eligibility_decision": decision or None},
             measured_value="legacy_unassessed", threshold="assessed eligible candidate",

@@ -40,7 +40,7 @@ from app.content_understanding import (
     story_units_artifact,
     ensure_candidate_boundary_decision,
 )
-from app.candidate_quality import build_eligibility_decision
+from app.candidate_quality import EligibilityDecision, resolve_eligibility_decision
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -1585,13 +1585,14 @@ class Pipeline:
                 "quality_config": self.config.scoring.candidate_quality_config_version,
             })
             tracker.start(stage_name, fingerprint)
-            decision = build_eligibility_decision(
+            decision = resolve_eligibility_decision(
                 candidate,
                 candidate.feature_vector,
                 config_version=self.config.scoring.candidate_quality_config_version,
                 min_duration_seconds=self.config.candidate_generation.min_duration_seconds,
                 max_duration_seconds=self.config.candidate_generation.max_duration_seconds,
                 visual_analysis=visual_analysis,
+                cached_eligibility=dict(scored.virality.get("eligibility") or {}),
             )
             candidate.eligibility_decision = decision
             if not decision.eligible:
@@ -1722,6 +1723,7 @@ class Pipeline:
             item.candidate.id: (float(item.candidate.start), float(item.candidate.end))
             for item in selected
         }
+        selected_by_id = {item.candidate.id: item for item in selected}
         tts = self._run_tts(tracker, production, work_directory, output_directory)
         audio = self._run_audio(
             tracker, production, tts, source, transcript, work_directory, output_directory,
@@ -1754,6 +1756,7 @@ class Pipeline:
                 "requested_index": index,
                 "source_start_seconds": selected_ranges[candidate_id][0],
                 "source_end_seconds": selected_ranges[candidate_id][1],
+                "eligibility_decision": selected_by_id[candidate_id].candidate.eligibility_decision.to_dict(),
                 "output_file": None,
                 "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
@@ -2214,6 +2217,13 @@ class Pipeline:
         final_scored = [
             scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
         ] if isinstance(candidate_data, dict) else []
+        final_by_id = {item.candidate.id: item for item in final_scored}
+        for candidate_id in self.selected_candidate_ids:
+            record = by_id.get(candidate_id)
+            raw_decision = record.get("eligibility_decision") if isinstance(record, dict) else None
+            final_item = final_by_id.get(candidate_id)
+            if isinstance(raw_decision, dict) and final_item is not None:
+                final_item.candidate.eligibility_decision = EligibilityDecision.from_dict(raw_decision)
         selected_ids = set(self.selected_candidate_ids)
         tracker.start("approved_draft_handoff", _hash({"draft": draft.draft_id, "selected": self.selected_candidate_ids}), cache_hit=True)
         tracker.finish("approved_draft_handoff")
@@ -2495,13 +2505,14 @@ class Pipeline:
 
         for item in scored:
             candidate = item.candidate
-            candidate.eligibility_decision = build_eligibility_decision(
+            candidate.eligibility_decision = resolve_eligibility_decision(
                 candidate,
                 candidate.feature_vector,
                 config_version=self.config.scoring.candidate_quality_config_version,
                 min_duration_seconds=self.config.candidate_generation.min_duration_seconds,
                 max_duration_seconds=self.config.candidate_generation.max_duration_seconds,
                 visual_analysis=visual_analysis,
+                cached_eligibility=dict(item.virality.get("eligibility") or {}),
             )
             ensure_candidate_boundary_decision(candidate)
 
