@@ -425,6 +425,72 @@ def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_repor
     assert next(item for item in report.checks if item["code"] == "SEMANTIC_CAPTIONS")["status"] == "blocked"
 
 
+def test_native_qg_detects_caption_collision_and_routes_it_to_subtitles(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    _set_native_rich_render(render)
+    render["caption_plan"]["cues"] = [
+        {
+            "cue_id": "caption-008",
+            "output": {"start_frame": 549, "end_frame": 573},
+            "normalized_bounds": {"x": 0.1, "y": 0.7, "width": 0.8, "height": 0.15},
+        },
+        {
+            "cue_id": "caption-009",
+            "output": {"start_frame": 562, "end_frame": 596},
+            "normalized_bounds": {"x": 0.1, "y": 0.7, "width": 0.8, "height": 0.15},
+        },
+    ]
+    render["caption_plan"]["quality_report"] = {
+        "schema_version": "7C.caption-quality.1",
+        "status": "PASS",
+        "metrics": {},
+        "findings": [],
+    }
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    checks = {item["code"]: item for item in report.checks}
+    assert report.status == "BLOCKED"
+    assert checks["SUBTITLES"]["status"] == "blocked"
+    assert checks["SUBTITLES"]["provenance"]["producer"] == "caption_quality_report"
+    assert checks["SEMANTIC_CAPTIONS"]["status"] == "blocked"
+    finding = next(item for item in report.findings if item.code == "CAPTION_SIMULTANEOUS_OVERLAP")
+    assert finding.measured_value == 11
+
+
+def test_native_qg_does_not_block_touching_half_open_caption_events(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    _set_native_rich_render(render)
+    render["caption_plan"]["cues"] = [
+        {
+            "cue_id": "caption-left",
+            "output": {"start_frame": 0, "end_frame": 10},
+            "normalized_bounds": {"x": 0.1, "y": 0.7, "width": 0.8, "height": 0.15},
+        },
+        {
+            "cue_id": "caption-right",
+            "output": {"start_frame": 10, "end_frame": 20},
+            "normalized_bounds": {"x": 0.1, "y": 0.7, "width": 0.8, "height": 0.15},
+        },
+    ]
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio,
+        all_results=[result],
+    )
+
+    checks = {item["code"]: item for item in report.checks}
+    assert not any(item.code == "CAPTION_SIMULTANEOUS_OVERLAP" for item in report.findings)
+    assert checks["SUBTITLES"]["status"] == "passed"
+
+
 def test_dynamic_composition_jitter_and_unsafe_crop_flow_into_quality_report(tmp_path: Path) -> None:
     artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
     render["composition_plan"] = {

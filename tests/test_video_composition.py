@@ -1090,6 +1090,10 @@ def test_creative_preview_and_final_render_the_same_compiled_plan(tmp_path: Path
     assert (preview.canvas.width, preview.canvas.height) == (540, 960)
     assert preview.metadata.compiled_plan_hash == final.metadata.compiled_plan_hash == compiled.plan_hash
     assert preview.metadata.parity_signature == final.metadata.parity_signature == compiled.parity_signature
+    assert all(
+        left.output.end_frame <= right.output.start_frame
+        for left, right in zip(compiled.caption_plan.cues, compiled.caption_plan.cues[1:])
+    )
     assert_preview_final_parity(preview_manifest, final_manifest)
     approved = service.compose(
         plan, audio, source, transcript, tmp_path / "work", tmp_path / "out",

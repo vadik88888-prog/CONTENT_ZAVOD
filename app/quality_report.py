@@ -810,6 +810,59 @@ def _continuity_metrics(plan: dict[str, Any], render: dict[str, Any]) -> dict[st
     }
 
 
+def _native_caption_event_collisions(render: dict[str, Any]) -> list[dict[str, Any]]:
+    caption_plan = render.get("caption_plan")
+    if not isinstance(caption_plan, dict):
+        compiled = render.get("compiled_render_plan")
+        caption_plan = compiled.get("caption_plan") if isinstance(compiled, dict) else None
+    raw_cues = caption_plan.get("cues") if isinstance(caption_plan, dict) else None
+    if not isinstance(raw_cues, list):
+        return []
+
+    cues: list[dict[str, Any]] = []
+    for cue in raw_cues:
+        if not isinstance(cue, dict):
+            continue
+        output = cue.get("output")
+        bounds = cue.get("normalized_bounds")
+        if not isinstance(output, dict) or not isinstance(bounds, dict):
+            continue
+        try:
+            cues.append({
+                "cue_id": str(cue.get("cue_id") or "unknown-caption"),
+                "start": int(output["start_frame"]),
+                "end": int(output["end_frame"]),
+                "x": float(bounds["x"]),
+                "y": float(bounds["y"]),
+                "width": float(bounds["width"]),
+                "height": float(bounds["height"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    cues.sort(key=lambda item: (item["start"], item["end"], item["cue_id"]))
+
+    collisions: list[dict[str, Any]] = []
+    for left_index, left in enumerate(cues):
+        for right in cues[left_index + 1:]:
+            if right["start"] >= left["end"]:
+                break
+            overlap_frames = min(left["end"], right["end"]) - max(left["start"], right["start"])
+            if overlap_frames <= 0:
+                continue
+            width = max(0.0, min(left["x"] + left["width"], right["x"] + right["width"]) - max(left["x"], right["x"]))
+            height = max(0.0, min(left["y"] + left["height"], right["y"] + right["height"]) - max(left["y"], right["y"]))
+            if width <= 0 or height <= 0:
+                continue
+            collisions.append({
+                "left_cue_id": left["cue_id"],
+                "right_cue_id": right["cue_id"],
+                "overlap_frames": overlap_frames,
+                "start_frame": max(left["start"], right["start"]),
+                "end_frame": min(left["end"], right["end"]),
+            })
+    return collisions
+
+
 def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> None:
     native = render.get("compatibility_mode") == "native"
     compiled = render.get("compiled_render_plan")
@@ -868,6 +921,7 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 message="Subtitle quality decision requires attention.",
             )
     caption = _caption_quality(render)
+    reported_overlap_cues: set[str] = set()
     if caption is not None:
         raw_caption_findings = caption.get("findings")
         caption_findings: list[Any] = raw_caption_findings if isinstance(raw_caption_findings, list) else []
@@ -876,6 +930,8 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 continue
             severity = "blocker" if item.get("severity") == "blocker" else "warning"
             code = str(item.get("code") or "CAPTION_QUALITY_DEGRADED")
+            if code == "CAPTION_SIMULTANEOUS_OVERLAP" and severity == "blocker":
+                reported_overlap_cues.add(str(item.get("cue_id") or ""))
             finding(
                 code, severity, {"caption_quality_report": caption, "caption_finding": item},
                 measured_value=item.get("measured_value"), threshold=item.get("threshold"),
@@ -888,6 +944,19 @@ def _collect_composition_and_subtitles(finding: Any, render: dict[str, Any]) -> 
                 measured_value="BLOCKED", threshold="PASS or PASS_WITH_WARNINGS",
                 producer="caption_quality_report",
                 message="Semantic caption quality blocks the final artifact.",
+            )
+    if native:
+        for overlap in _native_caption_event_collisions(render):
+            if overlap["right_cue_id"] in reported_overlap_cues:
+                continue
+            finding(
+                "CAPTION_SIMULTANEOUS_OVERLAP",
+                "blocker",
+                {"caption_event_collision": overlap},
+                measured_value=overlap["overlap_frames"],
+                threshold=0,
+                producer="caption_quality_report",
+                message="Native caption events overlap in time and rendered screen area.",
             )
     composition_report = _composition_quality(render)
     if composition_report is not None:
@@ -1128,6 +1197,14 @@ def _check_catalog(
     )
     source_broll_quality = _source_broll_quality(render)
     motion_quality = _motion_quality(render)
+    caption_quality = _caption_quality(render)
+    native_captions = (
+        render.get("compatibility_mode") == "native"
+        and caption_quality is not None
+    )
+    subtitle_producer = (
+        "caption_quality_report" if native_captions else "subtitle_quality_decision"
+    )
     sources = [
         ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
@@ -1154,12 +1231,12 @@ def _check_catalog(
             "registry, cooldown, concurrency, readability and animation budget passed",
         ),
         (
-            "SUBTITLES", "subtitle_quality_decision",
+            "SUBTITLES", subtitle_producer,
             render.get("caption_plan") or render.get("subtitle_layout"),
             "subtitle and semantic caption decisions passed",
         ),
         (
-            "SEMANTIC_CAPTIONS", "caption_quality_report", _caption_quality(render),
+            "SEMANTIC_CAPTIONS", "caption_quality_report", caption_quality,
             "readability, timing, safe zones and protected-region overlap passed",
         ),
         ("AUDIO", "audio_validation", audio.get("validation"), "audio validation valid"),

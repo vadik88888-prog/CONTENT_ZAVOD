@@ -61,7 +61,7 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "7J.2A-3.caption-temporal-feasibility.1"
+CAPTION_PLANNER_VERSION = "7J.2A-3.caption-overlap-normalization.1"
 CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.1"
 CAPTION_HARD_CPS_CEILING = 20.0
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
@@ -269,7 +269,7 @@ class CaptionPlanner:
             max_width,
             protected_phrases,
         )
-        cue_outputs, readability_extended = _cue_outputs(layouts, intent, self.config)
+        cue_outputs, readability_extended, normalized_overlaps = _cue_outputs(layouts, intent, self.config)
         cues: list[CaptionCuePlan] = []
         previous_lane: CaptionLane | None = None
         last_motion_frame = -100_000
@@ -349,7 +349,7 @@ class CaptionPlanner:
         )
         findings = _assess_plan(
             cues, manifest, measurer, intent, self.config, intensity_degraded,
-            feasibility,
+            feasibility, normalized_overlaps,
         )
         report = _quality_report(cues, findings, manifest, measurer, intent)
         diagnostics.extend(_diagnostics(cues, manifest, measurer))
@@ -357,6 +357,8 @@ class CaptionPlanner:
             diagnostics.append("CAPTION_READABILITY_COALESCED")
         if readability_extended:
             diagnostics.append("CAPTION_PRESENTATION_WINDOW_EXTENDED")
+        if normalized_overlaps:
+            diagnostics.append("CAPTION_PRESENTATION_WINDOW_NORMALIZED")
         return CaptionPlan(
             schema_version=CAPTION_PLAN_SCHEMA_VERSION,
             intent_id=intent.intent_id,
@@ -680,6 +682,32 @@ def _mapped_words(
             source=source, map_ids=map_ids,
         ))
     result.sort(key=lambda item: (item.output.start_frame, item.output.end_frame, item.word_id))
+    untrusted = {"phrase", "estimated"}
+    for index in range(1, len(result)):
+        left = result[index - 1]
+        right = result[index]
+        if (
+            right.output.start_frame >= left.output.end_frame
+            or left.timing_source not in untrusted
+            or right.timing_source not in untrusted
+        ):
+            continue
+        lower = left.output.start_frame + 1
+        upper = right.output.end_frame - 1
+        if lower > upper:
+            continue
+        boundary = max(lower, min(upper, round(
+            (left.output.end_frame + right.output.start_frame) / 2,
+        )))
+        result[index - 1] = replace(left, output=OutputInterval(
+            start_frame=left.output.start_frame,
+            end_frame=boundary,
+        ))
+        result[index] = replace(right, output=OutputInterval(
+            start_frame=boundary,
+            end_frame=right.output.end_frame,
+        ))
+        diagnostics.append("CAPTION_UNTRUSTED_WORD_TIMING_NORMALIZED")
     return result, list(dict.fromkeys(diagnostics))
 
 
@@ -820,6 +848,10 @@ def _cue_groups(
     for end in range(1, len(words) + 1):
         if end < len(words) and _splits_protected_phrase(words, end, protected_phrases):
             continue
+        if end < len(words) and _cue_boundary_overlaps_words(words, end):
+            # A frame-mapped overlap is one piece of verified evidence. Keep
+            # both words in the same cue instead of cutting through it.
+            continue
         for start in range(max(0, end - config.subtitle_max_words_per_cue), end):
             previous = best.get(start)
             if previous is None:
@@ -923,6 +955,11 @@ def _fit_layout(
             return [_Layout(words, lines, size, size != base_size)]
     if len(words) > 1:
         split = _best_layout_split(words, protected_phrases)
+        if split is None:
+            # No legal cue boundary exists without cutting overlapping mapped
+            # word evidence. Keep one assessed cue; width/CPS policy can still
+            # report a genuine blocker if the combined fallback is unreadable.
+            return [_Layout(words, (" ".join(word.text for word in words),), minimum_size, True)]
         return [
             *_fit_layout(words[:split], measurer, base_size, minimum_size, maximum_width, protected_phrases),
             *_fit_layout(words[split:], measurer, base_size, minimum_size, maximum_width, protected_phrases),
@@ -958,19 +995,38 @@ def _best_lines(
 
 def _best_layout_split(
     words: tuple[_MappedWord, ...], protected_phrases: tuple[tuple[str, ...], ...],
-) -> int:
+) -> int | None:
     center = len(words) / 2
-    safe_choices = [
+    non_overlapping_choices = [
         index for index in range(1, len(words))
+        if not _cue_boundary_overlaps_words(words, index)
+    ]
+    safe_choices = [
+        index for index in non_overlapping_choices
         if not _splits_protected_phrase(words, index, protected_phrases)
     ]
-    choices: Iterable[int] = safe_choices or range(1, len(words))
+    choices: Iterable[int] = safe_choices or non_overlapping_choices
+    if not choices:
+        return None
     return max(
         choices,
         key=lambda index: (
             40 if words[index - 1].text.rstrip().endswith((".", "!", "?")) else
             20 if words[index - 1].text.rstrip().endswith((",", ";", ":")) else 0
         ) - abs(index - center),
+    )
+
+
+def _cue_boundary_overlaps_words(words: tuple[_MappedWord, ...], split: int) -> bool:
+    """Protect trusted word evidence from a real half-open boundary overlap."""
+
+    left = words[split - 1]
+    right = words[split]
+    trusted = {"verified", "aligned"}
+    return (
+        left.timing_source in trusted
+        and right.timing_source in trusted
+        and right.output.start_frame < left.output.end_frame
     )
 
 
@@ -1012,9 +1068,9 @@ def _coalesce_layouts_for_readability(
     limits, and never combines two protected hook/payoff/emphasis/motion cues.
     One protected cue may absorb a neutral neighbour: its frozen word timing
     and semantic event remain intact while the combined reading window fixes
-    an otherwise artificial local CPS spike. Adjacent Whisper word intervals
-    commonly overlap by one frame; the two-frame boundary allowance below
-    prevents that quantisation artifact from stealing readable cue time.
+    an otherwise artificial local CPS spike. Adjacent frame-mapped word
+    intervals that overlap remain inside one cue; cue boundaries are strict
+    half-open boundaries.
     """
 
     if not layouts:
@@ -1096,10 +1152,10 @@ def _coalesce_layouts_for_readability(
 
 def _cue_outputs(
     layouts: list[_Layout], intent: CreativeIntent, config: ProductionRenderConfig,
-) -> tuple[list[OutputInterval], set[int]]:
+) -> tuple[list[OutputInterval], set[int], dict[int, int]]:
     raw = [_words_output(layout.words) for layout in layouts]
     result = list(raw)
-    extended: set[int] = set()
+    normalized_overlaps: dict[int, int] = {}
     for run_start, run_end in _layout_run_ranges(layouts, intent):
         chain_start, chain_end = _mapping_chain_bounds(
             intent, layouts[run_start].words[0].map_id,
@@ -1108,7 +1164,7 @@ def _cue_outputs(
             output = raw[index]
             slot_start = (
                 chain_start if index == run_start
-                else max(chain_start, raw[index - 1].end_frame - 2)
+                else max(chain_start, raw[index - 1].end_frame)
             )
             slot_end = (
                 max(output.end_frame, raw[index + 1].start_frame) if index + 1 < run_end
@@ -1137,9 +1193,54 @@ def _cue_outputs(
             if not resolved.contains(output):
                 resolved = output
             result[index] = resolved
-            if resolved != output:
-                extended.add(index)
-    return result, extended
+
+        normalized_overlaps.update(_normalize_cue_output_overlaps(
+            raw, result, run_start=run_start, run_end=run_end,
+        ))
+
+    extended = {index for index, output in enumerate(result) if output != raw[index]}
+    return result, extended, normalized_overlaps
+
+
+def _normalize_cue_output_overlaps(
+    raw: Sequence[OutputInterval],
+    result: list[OutputInterval],
+    *,
+    run_start: int,
+    run_end: int,
+) -> dict[int, int]:
+    """Trim only presentation padding and preserve every raw word interval."""
+
+    normalized: dict[int, int] = {}
+    for right_index in range(run_start + 1, run_end):
+        left_index = right_index - 1
+        left = result[left_index]
+        right = result[right_index]
+        overlap_frames = left.end_frame - right.start_frame
+        if overlap_frames <= 0:
+            continue
+        raw_left = raw[left_index]
+        raw_right = raw[right_index]
+        if raw_left.end_frame > raw_right.start_frame:
+            # This should already have been coalesced by cue partitioning.
+            # Leave it visible for final collision assessment rather than
+            # destroying trusted timing to force a false repair.
+            continue
+        proposed_boundary = round((left.end_frame + right.start_frame) / 2)
+        boundary = max(
+            raw_left.end_frame,
+            min(raw_right.start_frame, proposed_boundary),
+        )
+        result[left_index] = OutputInterval(
+            start_frame=left.start_frame,
+            end_frame=boundary,
+        )
+        result[right_index] = OutputInterval(
+            start_frame=boundary,
+            end_frame=right.end_frame,
+        )
+        normalized[right_index] = overlap_frames
+    return normalized
 
 
 def _layout_run_ranges(
@@ -1391,6 +1492,8 @@ def _caption_run_is_feasible(
         for start in range(max(0, end - config.subtitle_max_words_per_cue), end):
             previous_end = best.get(start)
             if previous_end is None:
+                continue
+            if start > 0 and _cue_boundary_overlaps_words(words, start):
                 continue
             if end - start < config.subtitle_min_words_per_cue and end != len(words):
                 continue
@@ -1711,15 +1814,61 @@ def _rect_overlap_ratio(left: NormalizedRect, right: NormalizedRect) -> float:
     return (width * height) / max(1e-9, left.width * left.height)
 
 
+def _simultaneous_caption_collisions(
+    cues: Sequence[CaptionCuePlan],
+) -> list[tuple[int, int, int]]:
+    """Find unreadable half-open time collisions in intersecting screen areas."""
+
+    collisions: list[tuple[int, int, int]] = []
+    for left_index, left_cue in enumerate(cues):
+        for right_index in range(left_index + 1, len(cues)):
+            right_cue = cues[right_index]
+            if right_cue.output.start_frame >= left_cue.output.end_frame:
+                break
+            overlap_frames = min(
+                left_cue.output.end_frame, right_cue.output.end_frame,
+            ) - max(left_cue.output.start_frame, right_cue.output.start_frame)
+            if overlap_frames <= 0:
+                continue
+            if (
+                left_cue.normalized_bounds is None
+                or right_cue.normalized_bounds is None
+                or _rect_overlap_ratio(left_cue.normalized_bounds, right_cue.normalized_bounds) <= 0
+            ):
+                continue
+            collisions.append((left_index, right_index, overlap_frames))
+    return collisions
+
+
 def _assess_plan(
     cues: list[CaptionCuePlan], manifest: CaptionFontManifest, measurer: _FontMeasurer,
     intent: CreativeIntent, config: ProductionRenderConfig, intensity_degraded: set[str],
-    feasibility: CaptionFeasibilityDecision,
+    feasibility: CaptionFeasibilityDecision, normalized_overlaps: dict[int, int],
 ) -> tuple[CaptionQualityFinding, ...]:
     findings: list[CaptionQualityFinding] = []
     maximum_cps = CAPTION_HARD_CPS_CEILING
     left, _top, right, _bottom = _SAFE_INSETS.get(intent.policy.platform, _SAFE_INSETS["universal"])
     maximum_width = config.output_width * min(config.subtitle_max_rendered_width_ratio, 1 - left - right)
+    for right_index, overlap_frames in sorted(normalized_overlaps.items()):
+        findings.append(CaptionQualityFinding(
+            code="CAPTION_SIMULTANEOUS_OVERLAP",
+            severity="warning",
+            cue_id=cues[right_index].cue_id,
+            measured_value=overlap_frames,
+            threshold=0,
+            message="Overlapping presentation padding was safely normalized at a shared cue boundary.",
+        ))
+
+    for _left_index, right_index, overlap_frames in _simultaneous_caption_collisions(cues):
+        findings.append(CaptionQualityFinding(
+            code="CAPTION_SIMULTANEOUS_OVERLAP",
+            severity="blocker",
+            cue_id=cues[right_index].cue_id,
+            measured_value=overlap_frames,
+            threshold=0,
+            message="Caption events overlap in both time and rendered screen area and are unreadable.",
+        ))
+
     for cue in cues:
         duration = (cue.output.end_frame - cue.output.start_frame) / 30
         cps = len("".join(cue.resolved_lines).replace(" ", "")) / max(1 / 30, duration)

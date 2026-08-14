@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from app.caption_planning import (
     CaptionProtectedRegion,
+    _normalize_cue_output_overlaps,
+    _simultaneous_caption_collisions,
     build_caption_plan,
     resolve_caption_font_manifest,
     write_caption_plan_ass,
@@ -14,6 +16,7 @@ from app.caption_planning import (
 from app.config import AppConfig
 from app.creative_contracts import (
     BeatRole,
+    CaptionCuePlan,
     CaptionPlan,
     CreativeIntent,
     CreativePolicy,
@@ -227,7 +230,7 @@ def test_infeasible_micro_cut_keeps_reading_speed_ceiling_blocker() -> None:
     assert evidence.measured_cps == 60.0
 
 
-def test_real_interview_phrase_has_exact_temporal_infeasibility_evidence() -> None:
+def test_real_interview_overlapping_verified_words_coalesce_before_feasibility() -> None:
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="interview-dialogue-001",
         source=SourceInterval.from_seconds(1200.67, 1202.58),
@@ -253,14 +256,14 @@ def test_real_interview_phrase_has_exact_temporal_infeasibility_evidence() -> No
 
     assert plan.feasibility_decision is not None
     assert plan.feasibility_decision.status == "INFEASIBLE"
-    evidence = next(
-        item for item in plan.feasibility_decision.evidence
-        if item.text == "нужно вырастить покупатели,"
-    )
-    assert evidence.character_count == 25
-    assert evidence.available_frames == 30
-    assert evidence.required_frames == 38
-    assert evidence.measured_cps == 25.0
+    assert len(plan.cues) == 1
+    assert [word.text for word in plan.cues[0].words] == [item[0] for item in specs]
+    evidence = plan.feasibility_decision.evidence[0]
+    assert evidence.text == "Представьте, что вам нужно вырастить покупатели,"
+    assert evidence.character_count == 43
+    assert evidence.available_frames == 57
+    assert evidence.required_frames == 65
+    assert evidence.measured_cps == 22.631579
     assert evidence.hard_cps_ceiling == 20.0
     assert evidence.mapping_segment_ids == ("interview-dialogue-001",)
     assert any(
@@ -367,6 +370,102 @@ def test_frame_overlap_does_not_create_false_cps_blocker() -> None:
     assert plan.quality_report.metrics.max_cps <= 20.0
     assert "CAPTION_PRESENTATION_WINDOW_EXTENDED" in plan.diagnostics
     assert not any(item.code == "CAPTION_CPS_HIGH" for item in plan.quality_report.findings)
+    assert all(
+        left.output.end_frame <= right.output.start_frame
+        for left, right in zip(plan.cues, plan.cues[1:])
+    )
+
+
+@pytest.mark.parametrize(("source", "raw_ranges", "proposed_ranges", "overlap_frames"), (
+    ("podcast", ((365, 402), (411, 466)), ((365, 407), (402, 470)), 5),
+    ("interview", ((258, 289), (297, 349)), ((258, 296), (290, 358)), 6),
+    ("food", ((145, 180), (194, 276)), ((145, 189), (184, 282)), 5),
+    ("gameplay", ((549, 563), (574, 594)), ((549, 573), (562, 596)), 11),
+))
+def test_real_media_presentation_overlap_is_safely_normalized(
+    source: str,
+    raw_ranges: tuple[tuple[int, int], tuple[int, int]],
+    proposed_ranges: tuple[tuple[int, int], tuple[int, int]],
+    overlap_frames: int,
+) -> None:
+    raw = [OutputInterval(start_frame=start, end_frame=end) for start, end in raw_ranges]
+    resolved = [
+        OutputInterval(start_frame=start, end_frame=end)
+        for start, end in proposed_ranges
+    ]
+
+    normalized = _normalize_cue_output_overlaps(
+        raw, resolved, run_start=0, run_end=2,
+    )
+
+    assert normalized == {1: overlap_frames}, source
+    assert resolved[0].end_frame == resolved[1].start_frame
+    assert all(output.contains(words) for output, words in zip(resolved, raw))
+
+
+def test_simultaneous_caption_collision_uses_half_open_time_and_screen_area() -> None:
+    bounds = NormalizedRect(x=0.1, y=0.7, width=0.8, height=0.15)
+    left = CaptionCuePlan(
+        cue_id="caption-left",
+        output=OutputInterval(start_frame=0, end_frame=10),
+        resolved_lines=("left",),
+        lane="lower",
+        typography_token_id="caption-token-test",
+        normalized_bounds=bounds,
+    )
+    touching = left.model_copy(update={
+        "cue_id": "caption-touching",
+        "output": OutputInterval(start_frame=10, end_frame=20),
+    })
+    overlapping = touching.model_copy(update={
+        "cue_id": "caption-overlapping",
+        "output": OutputInterval(start_frame=8, end_frame=20),
+    })
+    separate_area = overlapping.model_copy(update={
+        "cue_id": "caption-separate-area",
+        "normalized_bounds": NormalizedRect(x=0.1, y=0.1, width=0.8, height=0.15),
+    })
+
+    assert _simultaneous_caption_collisions((left, touching)) == []
+    assert _simultaneous_caption_collisions((left, overlapping)) == [(0, 1, 2)]
+    assert _simultaneous_caption_collisions((left, separate_area)) == []
+
+
+def test_fixable_presentation_overlap_is_normalized_with_warning() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="presentation-padding",
+        source=SourceInterval.from_seconds(0, 4),
+        output=OutputInterval(start_frame=0, end_frame=120),
+    ),))
+    transcript = {"words": [
+        {
+            "text": text, "start": start / 30, "end": end / 30,
+            "confidence": 0.99, "timing_source": "verified",
+        }
+        for text, start, end in (
+            ("abcdefghij", 10, 20),
+            ("klmnopqrst", 30, 40),
+            ("uvwxyzabcd", 45, 55),
+        )
+    ]}
+    config = _config()
+    config.subtitle_min_words_per_cue = 1
+    config.subtitle_max_words_per_cue = 1
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, config)
+
+    assert plan.quality_report.status == "PASS_WITH_WARNINGS"
+    assert all(
+        left.output.end_frame <= right.output.start_frame
+        for left, right in zip(plan.cues, plan.cues[1:])
+    )
+    finding = next(
+        item for item in plan.quality_report.findings
+        if item.code == "CAPTION_SIMULTANEOUS_OVERLAP"
+    )
+    assert finding.severity == "warning"
+    assert finding.measured_value == 4
+    assert "CAPTION_PRESENTATION_WINDOW_NORMALIZED" in plan.diagnostics
 
 
 def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() -> None:

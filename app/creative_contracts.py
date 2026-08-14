@@ -1132,7 +1132,7 @@ class CaptionQualityFinding(FrozenContract):
         "CAPTION_METRICS_FALLBACK", "CAPTION_INTENSITY_DEGRADED",
         "CAPTION_SAFE_ZONE_VIOLATION", "CAPTION_PROTECTED_REGION_OVERLAP",
         "CAPTION_LANE_SWITCH_RATE_HIGH", "CAPTION_LINE_OVERFLOW",
-        "CAPTION_READABILITY_FALLBACK",
+        "CAPTION_READABILITY_FALLBACK", "CAPTION_SIMULTANEOUS_OVERLAP",
     ]
     severity: Literal["warning", "blocker"]
     cue_id: str | None = Field(default=None, pattern=ID_PATTERN)
