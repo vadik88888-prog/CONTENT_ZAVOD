@@ -21,6 +21,7 @@ from app.caption_presets import (
     CaptionPresetDefinition,
     caption_preset_definition,
     caption_preset_from_token_id,
+    caption_preset_from_policy_id,
     default_caption_preset_for_style,
 )
 from app.config import ProductionRenderConfig
@@ -31,6 +32,7 @@ from app.creative_contracts import (
     CaptionEmphasisPlan,
     CaptionFeasibilityDecision,
     CaptionFeasibilityEvidence,
+    CaptionFontFaceIdentity,
     CaptionFontManifest,
     CaptionPlan,
     CaptionQualityFinding,
@@ -55,13 +57,18 @@ from app.creative_contracts import (
     canonical_hash,
 )
 from app.creative_policy import CREATIVE_PRESET_DEFINITIONS
-from app.font_assets import curated_font_asset_for_face, resolved_font_asset_id
+from app.font_assets import (
+    bundled_font_asset_path,
+    curated_font_asset_for_face,
+    font_asset_definition,
+    resolved_font_asset_id,
+)
 from app.production_subtitles import resolve_subtitle_style
 from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "7J.2A-3.caption-overlap-normalization.1"
+CAPTION_PLANNER_VERSION = "caption-presets-tier1.3.caption-overlap.1"
 CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.1"
 CAPTION_HARD_CPS_CEILING = 20.0
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
@@ -92,7 +99,7 @@ _QT_APPLICATION: Any | None = None
 CaptionLane = Literal["lower", "lower_mid", "upper_mid", "upper"]
 CaptionFallbackReason = Literal[
     "weak_timing", "missing_font", "metrics_unavailable", "readability",
-    "collision", "unsupported_primitive",
+    "collision", "unsupported_primitive", "short_timing",
 ]
 CollisionReason = Literal[
     "preferred_lane", "protected_region_avoidance", "platform_safe_zone",
@@ -220,6 +227,11 @@ class CaptionPlanner:
             self.config.subtitle_font_family,
             weight=caption_preset.font_weight,
             supplied=font_manifest,
+            preferred_asset_id=caption_preset.preferred_font_asset_id,
+            companion_asset_ids=tuple(
+                asset_id for asset_id in caption_preset.font_asset_ids
+                if asset_id != caption_preset.preferred_font_asset_id
+            ),
         )
         style = _caption_style(self.config, manifest, caption_preset)
         measurer = _FontMeasurer(manifest, font_path, style)
@@ -252,24 +264,53 @@ class CaptionPlanner:
             tuple(_normalise(part) for part in emphasis.text_span.split() if _normalise(part))
             for emphasis in intent.semantic_emphasis
         )
-        for run in _word_runs(words, intent):
-            for group in _cue_groups(run, self.config, intent):
-                layouts.extend(_fit_layout(
-                    group, measurer, base_size, minimum_size, max_width,
-                    protected_phrases,
-                ))
+        word_pop_requested = caption_preset.display_mode == "single_spoken_word"
+        word_pop_word_ids: set[str] = set()
+        if word_pop_requested:
+            trusted_word_ids = _word_pop_trusted_word_ids(words)
+            for run in _word_runs(words, intent):
+                for chunk, trusted in _word_pop_chunks(run, trusted_word_ids):
+                    if trusted:
+                        for word in chunk:
+                            layouts.extend(_fit_layout(
+                                (word,), measurer, base_size, minimum_size, max_width,
+                                protected_phrases,
+                            ))
+                            word_pop_word_ids.add(word.word_id)
+                    else:
+                        for group in _cue_groups(chunk, self.config, intent):
+                            layouts.extend(_fit_layout(
+                                group, measurer, base_size, minimum_size, max_width,
+                                protected_phrases,
+                            ))
+            readability_coalesced = False
+            readability_extended = False
+            normalized_overlaps: dict[int, int] = {}
+            cue_outputs = _word_pop_cue_outputs(layouts)
+        else:
+            for run in _word_runs(words, intent):
+                for group in _cue_groups(run, self.config, intent):
+                    layouts.extend(_fit_layout(
+                        group, measurer, base_size, minimum_size, max_width,
+                        protected_phrases,
+                    ))
 
-        layouts, readability_coalesced = _coalesce_layouts_for_readability(
-            layouts,
-            intent,
-            self.config,
-            measurer,
-            base_size,
-            minimum_size,
-            max_width,
-            protected_phrases,
+            layouts, readability_coalesced = _coalesce_layouts_for_readability(
+                layouts,
+                intent,
+                self.config,
+                measurer,
+                base_size,
+                minimum_size,
+                max_width,
+                protected_phrases,
+            )
+            cue_outputs, readability_extended, normalized_overlaps = _cue_outputs(
+                layouts, intent, self.config,
+            )
+        word_pop_semantics = (
+            _word_pop_semantic_events(intent, words) if word_pop_requested else {}
         )
-        cue_outputs, readability_extended, normalized_overlaps = _cue_outputs(layouts, intent, self.config)
         cues: list[CaptionCuePlan] = []
         previous_lane: CaptionLane | None = None
         last_motion_frame = -100_000
@@ -278,8 +319,32 @@ class CaptionPlanner:
             timing_mode, timing_confidence = _timing_mode(layout.words)
             semantic_output = _words_output(layout.words)
             event = _semantic_event(intent, layout.words, semantic_output, last_motion_frame)
-            emphasis_event = _semantic_emphasis_event(intent, layout.words, semantic_output)
-            primitive = _primitive(intent, timing_mode, event, caption_preset)
+            word_pop_cue = (
+                len(layout.words) == 1
+                and layout.words[0].word_id in word_pop_word_ids
+            )
+            emphasis_event = (
+                word_pop_semantics.get(layout.words[0].word_id)
+                if word_pop_cue
+                else _semantic_emphasis_event(intent, layout.words, semantic_output)
+            )
+            cue_frames = output.end_frame - output.start_frame
+            if word_pop_cue:
+                primitive = (
+                    "word_pop"
+                    if not intent.policy.reduced_motion
+                    and cue_frames >= caption_preset.pop_minimum_frames
+                    else "static"
+                )
+            elif (
+                caption_preset.motion_profile_id == "semantic_karaoke"
+                and emphasis_event is not None
+                and timing_mode == "word"
+                and not intent.policy.reduced_motion
+            ):
+                primitive = "karaoke"
+            else:
+                primitive = _primitive(intent, timing_mode, event, caption_preset)
             if event is not None and primitive != "static":
                 last_motion_frame = output.start_frame
             elif event is not None and timing_mode != "word":
@@ -296,7 +361,15 @@ class CaptionPlanner:
             )
             cue_id = f"caption-{index:03d}"
             words_plan = tuple(CaptionWordPlan(
-                word_id=word.word_id, text=word.text, output=word.output,
+                word_id=word.word_id,
+                text=word.text,
+                output=(
+                    OutputInterval(
+                        start_frame=max(word.output.start_frame, output.start_frame),
+                        end_frame=min(word.output.end_frame, output.end_frame),
+                    )
+                    if word_pop_requested else word.output
+                ),
                 timing_source=word.timing_source, confidence=word.confidence,
                 source=word.source, mapping_segment_ids=word.map_ids,
             ) for word in layout.words)
@@ -311,8 +384,20 @@ class CaptionPlanner:
                 fallback_reason = fallback_reason or "readability"
             if collision.overlap_ratio > 0:
                 fallback_reason = fallback_reason or "collision"
+            if word_pop_cue and cue_frames < caption_preset.pop_minimum_frames:
+                fallback_reason = fallback_reason or "short_timing"
             scale_percent = 96 if primitive == "scale" else 100
             slide_distance = 0.025 if primitive == "slide" else 0.0
+            semantic_word = emphasis is not None
+            if word_pop_cue and primitive == "word_pop":
+                scale_keyframes = (
+                    caption_preset.semantic_pop_scale_keyframes
+                    if semantic_word else caption_preset.pop_scale_keyframes
+                )
+            elif word_pop_cue and intent.policy.reduced_motion and semantic_word:
+                scale_keyframes = (caption_preset.reduced_motion_semantic_scale,) * 3
+            else:
+                scale_keyframes = (100, 100, 100)
             cues.append(CaptionCuePlan(
                 cue_id=cue_id,
                 output=output,
@@ -325,7 +410,7 @@ class CaptionPlanner:
                     *(emphasis_event.evidence_refs if emphasis_event is not None else ()),
                 ))),
                 primitive_id=primitive,
-                easing_id="ease_in_out" if primitive in {"fade", "scale", "slide"} else "linear" if primitive == "karaoke" else "none",
+                easing_id="ease_in_out" if primitive in {"fade", "scale", "slide", "word_pop"} else "linear" if primitive == "karaoke" else "none",
                 normalized_bounds=bounds,
                 words=words_plan,
                 timing_mode=timing_mode,
@@ -334,8 +419,16 @@ class CaptionPlanner:
                 beat_role=event.beat.role if event is not None and event.beat is not None else None,
                 collision=collision,
                 resolved_font_size_ratio=layout.font_size / self.config.output_height,
-                motion_duration_frames=min(8, max(3, round((output.end_frame - output.start_frame) * 0.16))) if primitive in {"fade", "scale", "slide"} else 0,
+                motion_duration_frames=(
+                    min(9, cue_frames)
+                    if primitive == "word_pop"
+                    else min(8, max(3, round(cue_frames * 0.16)))
+                    if primitive in {"fade", "scale", "slide"}
+                    else 0
+                ),
                 scale_percent=scale_percent,
+                scale_keyframes=scale_keyframes,
+                display_mode="single_spoken_word" if word_pop_cue else "phrase",
                 slide_distance_ratio=slide_distance,
                 fallback_reason=fallback_reason,
             ))
@@ -393,7 +486,13 @@ def resolve_caption_font_manifest(
 ) -> CaptionFontManifest:
     """Resolve a family to an exact, checksummed system font when possible."""
 
-    manifest, _path = _resolve_font_manifest(requested_family, weight=weight, supplied=None)
+    manifest, _path = _resolve_font_manifest(
+        requested_family,
+        weight=weight,
+        supplied=None,
+        preferred_asset_id=None,
+        companion_asset_ids=(),
+    )
     return manifest
 
 
@@ -402,14 +501,62 @@ def _resolve_font_manifest(
     *,
     weight: Literal["normal", "bold"],
     supplied: CaptionFontManifest | None,
+    preferred_asset_id: str | None,
+    companion_asset_ids: tuple[str, ...],
 ) -> tuple[CaptionFontManifest, Path | None]:
-    if supplied is not None:
+    if supplied is not None and (
+        preferred_asset_id is None
+        or (
+            supplied.font_id == preferred_asset_id
+            and {item.font_id for item in supplied.companion_faces} == set(companion_asset_ids)
+        )
+    ):
         path = _find_manifest_file(supplied)
-        if path is not None:
+        if path is not None and all(
+            _find_font_face_file(face) is not None for face in supplied.companion_faces
+        ):
             return supplied, path
         # A persisted manifest from another host is not silently trusted by
         # family name. Re-resolve its request into a new deterministic plan.
         requested_family = supplied.requested_family
+    if preferred_asset_id is not None:
+        primary = font_asset_definition(preferred_asset_id)
+        companions = tuple(font_asset_definition(asset_id) for asset_id in companion_asset_ids)
+        path = bundled_font_asset_path(primary)
+        if not path.is_file() or _file_sha256(path) != primary.file_sha256:
+            raise ValueError(f"CAPTION_BUNDLED_FONT_CHECKSUM_MISMATCH: {primary.asset_id}")
+        companion_faces: list[CaptionFontFaceIdentity] = []
+        for item in companions:
+            companion_path = bundled_font_asset_path(item)
+            if not companion_path.is_file() or _file_sha256(companion_path) != item.file_sha256:
+                raise ValueError(f"CAPTION_BUNDLED_FONT_CHECKSUM_MISMATCH: {item.asset_id}")
+            companion_faces.append(CaptionFontFaceIdentity(
+                font_id=item.asset_id,
+                family=item.render_family,
+                subfamily=item.subfamily,
+                postscript_name=item.postscript_name,
+                style=item.style,
+                weight_class=item.weight_class,
+                file_name=item.file_name,
+                file_sha256=item.file_sha256,
+            ))
+        return CaptionFontManifest(
+            font_id=primary.asset_id,
+            requested_family=primary.family,
+            resolved_family=primary.render_family,
+            style=primary.style,
+            weight=primary.weight,
+            weight_class=primary.weight_class,
+            file_name=primary.file_name,
+            file_sha256=primary.file_sha256,
+            companion_faces=tuple(companion_faces),
+            supported_scripts=primary.supported_scripts,
+            metrics_backend="gdi_file_metrics" if os.name == "nt" else "qt_file_metrics",
+            shaping_backend="libass-harfbuzz",
+            fallback_chain=(),
+            deployment_status="bundled",
+            fallback_used=False,
+        ), path
     requested = requested_family.strip() or "Arial"
     unsafe = any(character in requested for character in "\\/\x00")
     families = (*(() if unsafe else (requested,)), *tuple(item for item in _FALLBACK_FONTS if item.casefold() != requested.casefold()))
@@ -422,7 +569,8 @@ def _resolve_font_manifest(
         fallback = unsafe or actual_family.casefold() != requested.casefold()
         return CaptionFontManifest(
             font_id=resolved_font_asset_id(actual_family, weight=weight), requested_family=requested,
-            resolved_family=actual_family, weight=weight, file_name=path.name,
+            resolved_family=actual_family, weight=weight,
+            weight_class=700 if weight == "bold" else 400, file_name=path.name,
             file_sha256=checksum, supported_scripts=scripts,
             metrics_backend="gdi_file_metrics" if os.name == "nt" else "qt_file_metrics",
             shaping_backend="libass-harfbuzz",
@@ -432,7 +580,8 @@ def _resolve_font_manifest(
     return CaptionFontManifest(
         font_id=f"font.unverified.arial.{weight}.{identity[:12]}",
         requested_family=requested, resolved_family="Arial",
-        weight=weight, supported_scripts=("unknown",), metrics_backend="heuristic",
+        weight=weight, weight_class=700 if weight == "bold" else 400,
+        supported_scripts=("unknown",), metrics_backend="heuristic",
         shaping_backend="libass-harfbuzz", fallback_chain=_FALLBACK_FONTS,
         deployment_status="unverified", fallback_used=True,
     ), None
@@ -594,6 +743,18 @@ def _find_manifest_file(manifest: CaptionFontManifest) -> Path | None:
     return None
 
 
+def _find_font_face_file(face: CaptionFontFaceIdentity) -> Path | None:
+    for root in _font_roots():
+        candidate = root / face.file_name
+        if candidate.is_file() and _file_sha256(candidate) == face.file_sha256:
+            return candidate.resolve()
+        if root.is_dir():
+            for nested in root.rglob(face.file_name):
+                if nested.is_file() and _file_sha256(nested) == face.file_sha256:
+                    return nested.resolve()
+    return None
+
+
 def materialize_caption_font_directory(
     manifest: CaptionFontManifest,
     directory: Path,
@@ -602,22 +763,36 @@ def materialize_caption_font_directory(
 
     if manifest.file_sha256 is None or manifest.file_name is None:
         raise ValueError("CAPTION_FONT_EXACT_FILE_REQUIRED")
-    source = _find_manifest_file(manifest)
-    if source is None:
+    primary = _find_manifest_file(manifest)
+    if primary is None:
         raise ValueError("CAPTION_FONT_CHECKSUM_MISMATCH")
     directory.mkdir(parents=True, exist_ok=True)
-    suffix = source.suffix.casefold() if source.suffix else ".ttf"
-    safe_asset_id = re.sub(r"[^A-Za-z0-9._-]+", "_", manifest.font_id)
-    target = directory / f"{safe_asset_id}.{manifest.file_sha256[:16]}{suffix}"
-    if target.is_file() and _file_sha256(target) == manifest.file_sha256:
-        return directory.resolve()
-    write_bytes_atomic(target, source.read_bytes())
-    if _file_sha256(target) != manifest.file_sha256:
-        raise ValueError("CAPTION_FONT_MATERIALIZATION_CHECKSUM_MISMATCH")
+    faces = ((
+        manifest.font_id,
+        manifest.file_sha256,
+        primary,
+    ), *tuple((
+        face.font_id,
+        face.file_sha256,
+        _find_font_face_file(face),
+    ) for face in manifest.companion_faces))
+    for asset_id, checksum, source in faces:
+        if source is None:
+            raise ValueError(f"CAPTION_FONT_CHECKSUM_MISMATCH: {asset_id}")
+        suffix = source.suffix.casefold() if source.suffix else ".ttf"
+        safe_asset_id = re.sub(r"[^A-Za-z0-9._-]+", "_", asset_id)
+        target = directory / f"{safe_asset_id}.{checksum[:16]}{suffix}"
+        if not target.is_file() or _file_sha256(target) != checksum:
+            write_bytes_atomic(target, source.read_bytes())
+        if _file_sha256(target) != checksum:
+            raise ValueError("CAPTION_FONT_MATERIALIZATION_CHECKSUM_MISMATCH")
     return directory.resolve()
 
 
 def _caption_preset(intent: CreativeIntent) -> CaptionPresetDefinition:
+    direct = caption_preset_from_policy_id(intent.policy.preset_id)
+    if direct is not None and direct.style_family == intent.policy.caption_style_family:
+        return direct
     creative = CREATIVE_PRESET_DEFINITIONS.get(intent.policy.preset_id)  # type: ignore[arg-type]
     if creative is not None and creative.caption_style_family == intent.policy.caption_style_family:
         return caption_preset_definition(creative.caption_preset_id)
@@ -632,7 +807,17 @@ def _caption_style(
     style_id = preset.legacy_style_id
     resolved = replace(config, subtitle_style=style_id, subtitle_font_family=manifest.resolved_family)
     style, _fallback, _warning = resolve_subtitle_style(resolved)
-    return style.model_copy(update={"uppercase": False})
+    return style.model_copy(update={
+        "font_family": manifest.resolved_family,
+        "font_size": max(12, round(preset.font_size_ratio * 1920)),
+        "font_weight": "bold" if manifest.weight_class >= 700 else "normal",
+        "text_color": preset.text_color,
+        "highlight_color": preset.highlight_color,
+        "outline_color": preset.outline_color,
+        "outline_width": preset.outline_width_ratio * 1920,
+        "shadow": preset.shadow_ratio * 1920,
+        "uppercase": False,
+    })
 
 
 def _typography(
@@ -643,17 +828,18 @@ def _typography(
 ) -> CaptionTypographyToken:
     return CaptionTypographyToken(
         token_id=preset.token_id,
-        font_size_ratio=style.font_size / 1920,
-        minimum_font_size_ratio=(style.font_size / 1920) * config.subtitle_min_font_scale,
-        font_weight=style.font_weight,
-        text_color=style.text_color,
-        highlight_color=style.highlight_color,
-        outline_color=style.outline_color,
-        outline_width_ratio=style.outline_width / 1920,
-        shadow_ratio=style.shadow / 1920,
-        max_width_ratio=config.subtitle_max_rendered_width_ratio,
+        font_size_ratio=preset.font_size_ratio,
+        minimum_font_size_ratio=preset.font_size_ratio * preset.minimum_font_scale,
+        line_height=preset.line_height,
+        font_weight=preset.font_weight,
+        text_color=preset.text_color,
+        highlight_color=preset.highlight_color,
+        outline_color=preset.outline_color,
+        outline_width_ratio=preset.outline_width_ratio,
+        shadow_ratio=preset.shadow_ratio,
+        max_width_ratio=min(config.subtitle_max_rendered_width_ratio, preset.max_width_ratio),
         alignment=style.alignment,
-        uppercase_emphasis=intent.policy.caption_style_family == "emphasis",
+        uppercase_emphasis=preset.uppercase_emphasis,
     )
 
 
@@ -825,6 +1011,111 @@ def _word_runs(words: list[_MappedWord], intent: CreativeIntent) -> list[tuple[_
     if current:
         runs.append(current)
     return [tuple(run) for run in runs]
+
+
+def _word_pop_trusted_word_ids(words: list[_MappedWord]) -> set[str]:
+    """Return only words whose real aligned interval is safe to animate alone."""
+
+    trusted = {
+        word.word_id for word in words
+        if _timing_mode((word,))[0] == "word"
+    }
+    for left, right in zip(words, words[1:]):
+        if (
+            left.source.end_tick > right.source.start_tick
+            or left.output.start_frame >= right.output.start_frame
+        ):
+            trusted.discard(left.word_id)
+            trusted.discard(right.word_id)
+    return trusted
+
+
+def _word_pop_chunks(
+    run: tuple[_MappedWord, ...],
+    trusted_word_ids: set[str],
+) -> list[tuple[tuple[_MappedWord, ...], bool]]:
+    """Keep trusted cadence local and coalesce weak timing into static phrases."""
+
+    if not run:
+        return []
+    chunks: list[tuple[tuple[_MappedWord, ...], bool]] = []
+    start = 0
+    current = run[0].word_id in trusted_word_ids
+    for index in range(1, len(run)):
+        state = run[index].word_id in trusted_word_ids
+        if state != current:
+            chunks.append((run[start:index], current))
+            start = index
+            current = state
+    chunks.append((run[start:], current))
+    return chunks
+
+
+def _word_pop_cue_outputs(layouts: Sequence[_Layout]) -> list[OutputInterval]:
+    result = [_words_output(layout.words) for layout in layouts]
+    for index, (left, right) in enumerate(zip(layouts, layouts[1:])):
+        left_output = result[index]
+        right_output = result[index + 1]
+        if (
+            left.words[-1].source.end_tick <= right.words[0].source.start_tick
+            and left_output.end_frame > right_output.start_frame
+            and left_output.start_frame < right_output.start_frame
+        ):
+            # Source timing is half-open and non-overlapping. Remove only the
+            # one-frame ceil/floor presentation overlap introduced by mapping;
+            # the next word still never starts before its verified boundary.
+            result[index] = OutputInterval(
+                start_frame=left_output.start_frame,
+                end_frame=right_output.start_frame,
+            )
+    return result
+
+
+def _word_pop_semantic_events(
+    intent: CreativeIntent,
+    words: list[_MappedWord],
+) -> dict[str, _SemanticEvent]:
+    """Choose at most one evidence-backed spoken word per semantic decision."""
+
+    selected: dict[str, tuple[float, _SemanticEvent]] = {}
+    threshold = {
+        Intensity.LOW: 0.78,
+        Intensity.BALANCED: 0.58,
+        Intensity.HIGH: 0.42,
+    }[intent.policy.intensity]
+    for emphasis in intent.semantic_emphasis:
+        if (
+            not emphasis.evidence_refs
+            or emphasis.confidence < SEMANTIC_PRESENTATION_MIN_CONFIDENCE
+            or emphasis.confidence * emphasis.importance < threshold
+        ):
+            continue
+        phrase = [_normalise(value) for value in emphasis.text_span.split() if _normalise(value)]
+        normalized_words = [_normalise(word.text) for word in words]
+        found = _find_phrase(normalized_words, phrase)
+        phrase_candidates = words[found:found + len(phrase)] if found is not None else []
+        candidates = [
+            word for word in phrase_candidates
+            if _overlaps(word.output, emphasis.output)
+        ] or [word for word in words if _overlaps(word.output, emphasis.output)]
+        if not candidates:
+            continue
+        word = max(
+            candidates,
+            key=lambda item: (len(_normalise(item.text)), item.confidence, -item.output.start_frame),
+        )
+        event = _SemanticEvent(
+            "emphasis",
+            emphasis.output,
+            emphasis.confidence,
+            emphasis.importance,
+            emphasis.evidence_refs,
+            emphasis=emphasis,
+        )
+        score = emphasis.confidence * emphasis.importance
+        if word.word_id not in selected or score > selected[word.word_id][0]:
+            selected[word.word_id] = (score, event)
+    return {word_id: value[1] for word_id, value in selected.items()}
 
 
 def _cue_groups(
@@ -1696,7 +1987,7 @@ def _emphasis_plan(
     treatment: Literal["color", "phrase_color", "karaoke", "bounded_scale"]
     if primitive == "karaoke" and timing_mode == "word":
         treatment = "karaoke"
-    elif primitive == "scale":
+    elif primitive in {"scale", "word_pop"}:
         treatment = "bounded_scale"
     elif timing_mode == "word":
         treatment = "color"
@@ -1872,7 +2163,7 @@ def _assess_plan(
     for cue in cues:
         duration = (cue.output.end_frame - cue.output.start_frame) / 30
         cps = len("".join(cue.resolved_lines).replace(" ", "")) / max(1 / 30, duration)
-        if cps > maximum_cps:
+        if cps > maximum_cps and cue.display_mode == "phrase":
             severity: Literal["warning", "blocker"] = "blocker" if cue.timing_mode == "word" else "warning"
             code: Literal["CAPTION_CPS_HIGH", "CAPTION_CPS_INFEASIBLE"] = (
                 "CAPTION_CPS_INFEASIBLE"
@@ -2030,9 +2321,14 @@ def write_caption_plan_ass(
     else:
         border_style = 1
         back_color = "&H00000000&"
+    face_identity = ";".join((
+        f"{manifest.font_id}:{manifest.file_sha256 or 'unverified'}",
+        *(f"{face.font_id}:{face.file_sha256}" for face in manifest.companion_faces),
+    ))
     header = f"""[Script Info]
 ; CaptionPlan: {plan.schema_version}
 ; FontSHA256: {manifest.file_sha256 or 'unverified'}
+; FontFaces: {face_identity}
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
@@ -2041,7 +2337,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: CaptionPlan,{_escape_style(manifest.resolved_family)},{font_size},{_ass_color(typography.text_color)},{_ass_color(typography.highlight_color)},{_ass_color(typography.outline_color)},{back_color},{-1 if typography.font_weight == 'bold' else 0},0,0,0,100,100,0,0,{border_style},{outline},{shadow},8,0,0,0,1
+Style: CaptionPlan,{_escape_style(manifest.resolved_family)},{font_size},{_ass_color(typography.text_color)},{_ass_color(typography.highlight_color)},{_ass_color(typography.outline_color)},{back_color},{-1 if manifest.weight_class >= 700 else 0},0,0,0,100,100,0,0,{border_style},{outline},{shadow},8,0,0,0,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -2077,6 +2373,17 @@ def _format_plan_cue(
         tags.append(fr"\fad({duration_ms},100)")
     elif cue.primitive_id == "scale":
         tags.extend((fr"\fscx{cue.scale_percent}\fscy{cue.scale_percent}", fr"\t(0,{duration_ms},\fscx100\fscy100)"))
+    elif cue.primitive_id == "word_pop":
+        start, peak, settled = cue.scale_keyframes
+        peak_ms = max(1, round(duration_ms * 0.36))
+        tags.extend((
+            fr"\fscx{start}\fscy{start}",
+            fr"\t(0,{peak_ms},\fscx{peak}\fscy{peak})",
+            fr"\t({peak_ms},{duration_ms},\fscx{settled}\fscy{settled})",
+        ))
+    elif cue.scale_keyframes[0] != 100:
+        fixed = cue.scale_keyframes[0]
+        tags.append(fr"\fscx{fixed}\fscy{fixed}")
     text = _format_plan_text(cue, typography)
     return "{" + "".join(tags) + "}" + text
 
@@ -2091,6 +2398,8 @@ def _format_plan_text(cue: CaptionCuePlan, typography: CaptionTypographyToken) -
         cursor += count
         boundaries.add(cursor)
     emphasis = set(cue.emphasis.word_indexes if cue.emphasis is not None else ())
+    preset = caption_preset_from_token_id(typography.token_id)
+    semantic_bold = preset is not None and preset.semantic_bold
     primary = _ass_color(typography.text_color)
     highlight = _ass_color(typography.highlight_color)
     pieces: list[str] = []
@@ -2103,11 +2412,18 @@ def _format_plan_text(cue: CaptionCuePlan, typography: CaptionTypographyToken) -
             # preserves the frozen word activation frames, including pauses.
             duration = max(1, round((next_start - word.output.start_frame) / 30 * 100))
             if index in emphasis:
-                piece = f"{{\\1c{highlight}\\2c{primary}\\kf{duration}}}{escaped}{{\\1c{primary}}}"
+                weight_on = r"\b1" if semantic_bold else ""
+                weight_off = r"\b0" if semantic_bold else ""
+                piece = (
+                    f"{{\\1c{highlight}\\2c{primary}{weight_on}\\kf{duration}}}"
+                    f"{escaped}{{\\1c{primary}{weight_off}}}"
+                )
             else:
                 piece = f"{{\\1c{primary}\\2c{primary}\\k{duration}}}{escaped}"
         elif index in emphasis:
-            piece = f"{{\\1c{highlight}}}{escaped}{{\\1c{primary}}}"
+            weight_on = r"\b1" if semantic_bold else ""
+            weight_off = r"\b0" if semantic_bold else ""
+            piece = f"{{\\1c{highlight}{weight_on}}}{escaped}{{\\1c{primary}{weight_off}}}"
         else:
             piece = escaped
         pieces.append(piece)

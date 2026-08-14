@@ -127,11 +127,18 @@ def compile_native_creative_plan(
     motion = build_motion_plan(intent, captions, composition, broll)
     assets: tuple[AssetManifestEntry, ...] = ()
     if captions.font_manifest is not None and captions.font_manifest.file_sha256 is not None:
-        assets = (AssetManifestEntry(
-            asset_id=captions.font_manifest.font_id,
-            asset_type="font",
-            checksum=captions.font_manifest.file_sha256,
-        ),)
+        assets = (
+            AssetManifestEntry(
+                asset_id=captions.font_manifest.font_id,
+                asset_type="font",
+                checksum=captions.font_manifest.file_sha256,
+            ),
+            *(AssetManifestEntry(
+                asset_id=face.font_id,
+                asset_type="font",
+                checksum=face.file_sha256,
+            ) for face in captions.font_manifest.companion_faces),
+        )
     return compile_render_plan(
         intent,
         captions,

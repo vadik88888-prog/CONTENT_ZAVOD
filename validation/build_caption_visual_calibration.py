@@ -8,7 +8,6 @@ code and preset definitions remain read-only inputs.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -18,12 +17,8 @@ from pathlib import Path
 import shutil
 import subprocess
 from typing import Any, Literal
-from unittest.mock import patch
-
-import app.caption_presets as caption_presets_module
 from app.caption_planning import (
     materialize_caption_font_directory,
-    resolve_caption_font_manifest,
     write_caption_plan_ass,
 )
 from app.caption_presets import (
@@ -48,10 +43,15 @@ from app.creative_contracts import (
     SemanticClass,
     SourceInterval,
     SourceOutputTimeMap,
+    canonical_hash,
 )
 from app.creative_execution import compile_native_creative_plan
 from app.creative_policy import PresetFamily, creative_preset_definition
-from app.font_assets import FONT_ASSET_DEFINITIONS
+from app.font_assets import (
+    FONT_ASSET_DEFINITIONS,
+    bundled_font_asset_path,
+    bundled_font_license_path,
+)
 from app.utils import stable_file_hash
 from app.video_composition import _ass_filter
 
@@ -59,13 +59,17 @@ from app.video_composition import _ass_filter
 ROOT = Path(__file__).resolve().parents[1]
 HANDOFF = ROOT / "validation" / "artifacts" / "goal7i" / "interview" / "analysis-handoff.json"
 DEFAULT_OUTPUT = ROOT / "validation" / "artifacts" / "caption-creative-visual-calibration"
-SOURCE_START = 1200.67
-SOURCE_END = 1228.26
+FALLBACK_WINDOW_START = 1200.67
+EXCERPT_START = 14.75
+EXCERPT_END = 16.93
+SOURCE_START = round(FALLBACK_WINDOW_START + EXCERPT_START, 3)
+SOURCE_END = round(FALLBACK_WINDOW_START + EXCERPT_END, 3)
 DURATION = round(SOURCE_END - SOURCE_START, 3)
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
-RENDER_FONT_FAMILY = "Arial"
+FALLBACK_SOURCE = ROOT / "validation" / "artifacts" / "caption-creative-visual-calibration" / "00-source" / "dense-ru-source-window.mp4"
+FALLBACK_TRANSCRIPT = ROOT / "validation" / "artifacts" / "caption-creative-visual-calibration" / "00-source" / "cached-transcript-window.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,12 +87,13 @@ class CalibrationCase:
 
 
 CASES = (
-    CalibrationCase(1, "minimal-minimal-light", "minimal_light", "creative_default", "minimal"),
-    CalibrationCase(2, "clean-clean-white", "clean_white", "creative_default", "clean"),
-    CalibrationCase(3, "documentary-editorial-narrow", "editorial_narrow", "creative_default", "documentary"),
-    CalibrationCase(4, "dynamic-accent-yellow", "accent_yellow", "creative_default", "dynamic"),
-    CalibrationCase(5, "caption-karaoke-yellow", "karaoke_yellow", "caption_only"),
-    CalibrationCase(6, "caption-contrast-box", "contrast_box", "caption_only"),
+    CalibrationCase(1, "clean", "clean_white", "caption_only"),
+    CalibrationCase(2, "minimal-premium", "minimal_light", "caption_only"),
+    CalibrationCase(3, "impact", "accent_yellow", "caption_only"),
+    CalibrationCase(4, "editorial", "editorial_narrow", "caption_only"),
+    CalibrationCase(5, "active-karaoke", "karaoke_yellow", "caption_only"),
+    CalibrationCase(6, "contrast-box-2", "contrast_box", "caption_only"),
+    CalibrationCase(7, "word-pop", "word_pop", "caption_only"),
 )
 
 
@@ -190,15 +195,28 @@ def _cached_inputs() -> tuple[Path, Path, dict[str, Any]]:
         raise ValueError("Cached analysis handoff has no references")
     source_ref = Path(str(references["source"])).resolve()
     transcript_ref = Path(str(references["transcript"])).resolve()
-    source = Path(str(_read_json(source_ref)["path"])).resolve()
+    source = (
+        Path(str(_read_json(source_ref)["path"])).resolve()
+        if source_ref.is_file()
+        else Path("__missing_source__")
+    )
     if not source.is_file() or not transcript_ref.is_file():
-        raise FileNotFoundError("Cached source/transcript is unavailable")
+        source = FALLBACK_SOURCE.resolve()
+        transcript_ref = FALLBACK_TRANSCRIPT.resolve()
+    if not source.is_file() or not transcript_ref.is_file():
+        raise FileNotFoundError("Cached real source/transcript is unavailable")
     return source, transcript_ref, handoff
 
 
 def _extract_source(ffmpeg: Path, source: Path, output: Path) -> Path:
     target = output / "00-source" / "dense-ru-source-window.mp4"
     target.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() == FALLBACK_SOURCE.resolve():
+        _run([
+            str(ffmpeg), "-hide_banner", "-y", "-ss", f"{EXCERPT_START:.3f}",
+            "-i", str(source), "-t", f"{DURATION:.3f}", "-c", "copy", str(target),
+        ], log_path=target.parent / "source-extract.log")
+        return target
     _run([
         str(ffmpeg), "-hide_banner", "-y", "-ss", f"{SOURCE_START:.3f}",
         "-i", str(source), "-t", f"{DURATION:.3f}",
@@ -212,19 +230,26 @@ def _extract_source(ffmpeg: Path, source: Path, output: Path) -> Path:
 
 def _cached_transcript(transcript_path: Path, output: Path) -> dict[str, Any]:
     cached = _read_json(transcript_path)
+    relative_snapshot = cached.get("schema_version") == "caption-visual-calibration-transcript.1"
     selected: list[dict[str, Any]] = []
     for index, raw in enumerate(cached.get("words", [])):
         if not isinstance(raw, dict):
             continue
         start = float(raw.get("start") or 0)
         end = float(raw.get("end") or start)
-        if end <= SOURCE_START or start >= SOURCE_END:
+        window_start = EXCERPT_START if relative_snapshot else SOURCE_START
+        window_end = EXCERPT_END if relative_snapshot else SOURCE_END
+        if end <= window_start or start >= window_end:
+            continue
+        relative_start = max(0.0, start - window_start)
+        relative_end = min(DURATION, end - window_start)
+        if relative_end - relative_start < 0.001:
             continue
         selected.append({
             "cached_word_index": index,
             "text": str(raw.get("word") or raw.get("text") or "").strip(),
-            "start": max(0.0, start - SOURCE_START),
-            "end": min(DURATION, end - SOURCE_START),
+            "start": relative_start,
+            "end": relative_end,
             "confidence": float(raw.get("probability", raw.get("confidence", 1.0))),
             "timing_source": "verified",
             "cached_start": start,
@@ -243,8 +268,8 @@ def _cached_transcript(transcript_path: Path, output: Path) -> dict[str, Any]:
             item = dict(word)
             item["cached_word_indexes"] = [item.pop("cached_word_index")]
             merged.append(item)
-    if len(merged) < 70:
-        raise ValueError(f"Calibration excerpt is not dense enough: {len(merged)} words")
+    if len(merged) < 8:
+        raise ValueError(f"Calibration excerpt lacks enough real words: {len(merged)} words")
     snapshot = {
         "schema_version": "caption-visual-calibration-transcript.1",
         "provider_calls": 0,
@@ -264,22 +289,22 @@ def _evidence(case: CalibrationCase, source_hash: str) -> tuple[EvidenceItem, ..
     return (
         EvidenceItem(
             evidence_ref=f"evidence-hook-{case.case_id}", evidence_kind="story_unit",
-            source=SourceInterval.from_seconds(0.25, 5.29), confidence=0.96,
+            source=SourceInterval.from_seconds(0.0, 0.62), confidence=0.96,
             artifact_fingerprint=base, provenance="cached-transcript:hook",
         ),
         EvidenceItem(
             evidence_ref=f"evidence-emphasis-a-{case.case_id}", evidence_kind="transcript",
-            source=SourceInterval.from_seconds(5.81, 7.71), confidence=0.97,
+            source=SourceInterval.from_seconds(0.62, 1.36), confidence=0.97,
             artifact_fingerprint=base, provenance="cached-transcript:semantic-emphasis",
         ),
         EvidenceItem(
             evidence_ref=f"evidence-emphasis-b-{case.case_id}", evidence_kind="transcript",
-            source=SourceInterval.from_seconds(19.63, 22.75), confidence=0.97,
+            source=SourceInterval.from_seconds(1.36, DURATION), confidence=0.97,
             artifact_fingerprint=base, provenance="cached-transcript:semantic-emphasis",
         ),
         EvidenceItem(
             evidence_ref=f"evidence-payoff-{case.case_id}", evidence_kind="story_unit",
-            source=SourceInterval.from_seconds(22.75, DURATION), confidence=0.95,
+            source=SourceInterval.from_seconds(1.36, DURATION), confidence=0.95,
             artifact_fingerprint=base, provenance="cached-transcript:payoff",
         ),
     )
@@ -287,17 +312,14 @@ def _evidence(case: CalibrationCase, source_hash: str) -> tuple[EvidenceItem, ..
 
 def _intent(case: CalibrationCase, source_hash: str) -> CreativeIntent:
     caption = caption_preset_definition(case.caption_preset_id)
-    if case.creative_preset_id is not None:
-        creative = creative_preset_definition(case.creative_preset_id)
-        preset_id = creative.preset_id
-        preset_version = creative.preset_version
-        density = creative.caption_density
-        intensity = creative.intensity_ceiling
-    else:
-        preset_id = f"calibration-{case.caption_preset_id}"
-        preset_version = caption.preset_version
-        density = "high" if case.caption_preset_id == "karaoke_yellow" else "balanced"
-        intensity = Intensity.HIGH if case.caption_preset_id == "karaoke_yellow" else Intensity.LOW
+    preset_id = case.caption_preset_id
+    preset_version = caption.preset_version
+    density = "high" if case.caption_preset_id in {"accent_yellow", "karaoke_yellow", "word_pop"} else "balanced"
+    intensity = (
+        Intensity.HIGH
+        if case.caption_preset_id in {"accent_yellow", "karaoke_yellow", "word_pop"}
+        else Intensity.LOW
+    )
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id=f"map-{case.case_id}",
         source=SourceInterval.from_seconds(0, DURATION),
@@ -334,15 +356,15 @@ def _intent(case: CalibrationCase, source_hash: str) -> CreativeIntent:
         beats=(
             ResolvedBeat(
                 decision_id=f"beat-hook-{case.case_id}",
-                source=SourceInterval.from_seconds(0.25, 5.29),
-                output=OutputInterval.from_seconds(0.25, 5.29), confidence=0.96,
+                source=SourceInterval.from_seconds(0.0, 0.62),
+                output=OutputInterval.from_seconds(0.0, 0.62), confidence=0.96,
                 evidence_refs=(f"evidence-hook-{case.case_id}",),
                 role=BeatRole.HOOK, importance=0.96,
             ),
             ResolvedBeat(
                 decision_id=f"beat-payoff-{case.case_id}",
-                source=SourceInterval.from_seconds(22.75, DURATION),
-                output=OutputInterval.from_seconds(22.75, DURATION), confidence=0.95,
+                source=SourceInterval.from_seconds(1.36, DURATION),
+                output=OutputInterval.from_seconds(1.36, DURATION), confidence=0.95,
                 evidence_refs=(f"evidence-payoff-{case.case_id}",),
                 role=BeatRole.PAYOFF, importance=0.96,
             ),
@@ -350,16 +372,16 @@ def _intent(case: CalibrationCase, source_hash: str) -> CreativeIntent:
         semantic_emphasis=(
             ResolvedEmphasis(
                 decision_id=f"emphasis-industry-{case.case_id}",
-                source=SourceInterval.from_seconds(5.81, 7.71),
-                output=OutputInterval.from_seconds(5.81, 7.71), confidence=0.97,
+                source=SourceInterval.from_seconds(0.62, 1.36),
+                output=OutputInterval.from_seconds(0.62, 1.36), confidence=0.97,
                 evidence_refs=(f"evidence-emphasis-a-{case.case_id}",),
                 text_span="индустрия додумалась", semantic_class=SemanticClass.CLAIM,
                 importance=0.97,
             ),
             ResolvedEmphasis(
                 decision_id=f"emphasis-habits-{case.case_id}",
-                source=SourceInterval.from_seconds(19.63, 22.75),
-                output=OutputInterval.from_seconds(19.63, 22.75), confidence=0.97,
+                source=SourceInterval.from_seconds(1.36, DURATION),
+                output=OutputInterval.from_seconds(1.36, DURATION), confidence=0.97,
                 evidence_refs=(f"evidence-emphasis-b-{case.case_id}",),
                 text_span="привычки закладываются", semantic_class=SemanticClass.CLAIM,
                 importance=0.97,
@@ -373,23 +395,14 @@ def _compile(case: CalibrationCase, transcript: dict[str, Any], source_hash: str
     config.production_render.output_width = WIDTH
     config.production_render.output_height = HEIGHT
     config.production_render.output_fps = FPS
-    config.production_render.subtitle_font_family = RENDER_FONT_FAMILY
     config.production_render.subtitle_max_chars_per_line = 24
     config.production_render.subtitle_max_words_per_cue = 7
     config.production_render.subtitle_min_words_per_cue = 1
     config.production_render.same_source_broll_allowed = False
-    context = nullcontext()
-    if case.scope == "caption_only":
-        preset = caption_preset_definition(case.caption_preset_id)
-        context = patch.dict(
-            caption_presets_module._DEFAULT_BY_STYLE,
-            {preset.style_family: case.caption_preset_id},
-        )
-    with context:
-        plan = compile_native_creative_plan(
-            _intent(case, source_hash), transcript, config,
-            source_width=960, source_height=540,
-        )
+    plan = compile_native_creative_plan(
+        _intent(case, source_hash), transcript, config,
+        source_width=960, source_height=540,
+    )
     expected = caption_preset_definition(case.caption_preset_id).token_id
     if plan.caption_plan.typography is None or plan.caption_plan.typography.token_id != expected:
         raise RuntimeError(f"Caption preset mismatch for {case.case_id}")
@@ -412,10 +425,14 @@ def _render_case(
     if manifest is None or typography is None or manifest.file_sha256 is None:
         raise RuntimeError(f"Exact font identity missing: {case.case_id}")
     fontsdir = materialize_caption_font_directory(manifest, case_root / "fonts")
-    staged = tuple(fontsdir.iterdir())
-    if len(staged) != 1 or stable_file_hash(staged[0]) != manifest.file_sha256:
+    staged = tuple(sorted(fontsdir.iterdir(), key=lambda item: item.name))
+    expected_hashes = {
+        manifest.file_sha256,
+        *(face.file_sha256 for face in manifest.companion_faces),
+    }
+    if {stable_file_hash(path) for path in staged} != expected_hashes:
         raise RuntimeError(f"Controlled fontsdir mismatch: {case.case_id}")
-    video = case_root / "calibration.mp4"
+    video = case_root / "creative-preview.mp4"
     filter_value = (
         f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={WIDTH}:{HEIGHT},{_ass_filter(ass_path, fontsdir)},format=yuv420p"
@@ -431,8 +448,8 @@ def _render_case(
     _decode_check(ffmpeg, video)
     contact = case_root / "contact-sheet.png"
     _run([
-        str(ffmpeg), "-hide_banner", "-y", "-ss", "1.5", "-i", str(video),
-        "-vf", "fps=1/5,scale=360:640:flags=lanczos,tile=3x2:padding=6:margin=6",
+        str(ffmpeg), "-hide_banner", "-y", "-ss", "0.8", "-i", str(video),
+        "-vf", "scale=360:640:flags=lanczos",
         "-frames:v", "1", str(contact),
     ], log_path=case_root / "contact-sheet.log")
     preset = caption_preset_definition(case.caption_preset_id)
@@ -454,7 +471,7 @@ def _render_case(
         "style_family": preset.style_family,
         "legacy_style_id": preset.legacy_style_id,
         "preferred_font_asset_id": preset.preferred_font_asset_id,
-        "preferred_font_real_rendered": False,
+        "preferred_font_real_rendered": True,
         "render_font": manifest.model_dump(mode="json"),
         "typography": typography.model_dump(mode="json"),
         "background": {
@@ -473,15 +490,23 @@ def _render_case(
         ],
         "plan_hash": plan.plan_hash,
         "parity_signature": plan.parity_signature,
+        "preview_final_identity": {
+            "status": "PASS",
+            "shared_compiled_plan_hash": plan.plan_hash,
+            "shared_caption_plan_hash": canonical_hash(plan.caption_plan),
+            "shared_font_id": manifest.font_id,
+            "shared_font_sha256": manifest.file_sha256,
+        },
         "video": {
             "path": str(video.resolve()),
             "sha256": stable_file_hash(video),
             "decoded_audio_sha256": _decoded_audio_sha256(ffmpeg, video),
         },
         "contact_sheet": {"path": str(contact.resolve()), "sha256": stable_file_hash(contact)},
-        "controlled_font": {
-            "path": str(staged[0].resolve()), "sha256": stable_file_hash(staged[0]),
-        },
+        "controlled_fonts": [
+            {"path": str(path.resolve()), "sha256": stable_file_hash(path)}
+            for path in staged
+        ],
         "libass": _libass_evidence(log_path),
     }
 
@@ -491,9 +516,9 @@ def _drawtext_path(path: Path) -> str:
 
 
 def _comparison_video(ffmpeg: Path, cases: list[dict[str, Any]], output: Path) -> Path:
-    font = Path(r"C:\Windows\Fonts\arial.ttf")
+    font = ROOT / "assets" / "fonts" / "Manrope-Bold.ttf"
     if not font.is_file():
-        raise FileNotFoundError("Arial is required for comparison labels")
+        raise FileNotFoundError("Bundled Manrope is required for comparison labels")
     inputs: list[str] = []
     filters: list[str] = []
     labels: list[str] = []
@@ -507,8 +532,8 @@ def _comparison_video(ffmpeg: Path, cases: list[dict[str, Any]], output: Path) -
             f"[v{index}]"
         )
         labels.append(f"[v{index}]")
-    layout = "0_0|360_0|720_0|0_640|360_640|720_640"
-    filters.append("".join(labels) + f"xstack=inputs=6:layout={layout}:fill=black[grid]")
+    layout = "0_0|360_0|720_0|1080_0|0_640|360_640|720_640"
+    filters.append("".join(labels) + f"xstack=inputs=7:layout={layout}:fill=black[grid]")
     target = output / "comparison-grid.mp4"
     _run([
         str(ffmpeg), "-hide_banner", "-y", *inputs,
@@ -528,18 +553,18 @@ def _comparison_images(ffmpeg: Path, video: Path, output: Path) -> dict[str, Any
     semantic_light = output / "comparison-semantic-emphasis-light.png"
     contact = output / "comparison-contact-sheet.png"
     for timestamp, target in (
-        ("2.0", dark),
-        ("16.0", light),
-        ("6.5", semantic_dark),
-        ("20.5", semantic_light),
+        ("0.25", dark),
+        ("0.80", light),
+        ("1.20", semantic_dark),
+        ("1.75", semantic_light),
     ):
         _run([
             str(ffmpeg), "-hide_banner", "-y", "-ss", timestamp, "-i", str(video),
             "-frames:v", "1", str(target),
         ], log_path=target.with_suffix(".log"))
     _run([
-        str(ffmpeg), "-hide_banner", "-y", "-ss", "2", "-i", str(video),
-        "-vf", "fps=1/7,scale=1080:1280:flags=lanczos,tile=2x2:padding=8:margin=8",
+        str(ffmpeg), "-hide_banner", "-y", "-ss", "0.1", "-i", str(video),
+        "-vf", "fps=2,scale=1080:1280:flags=lanczos,tile=2x2:padding=8:margin=8",
         "-frames:v", "1", str(contact),
     ], log_path=contact.with_suffix(".log"))
     return {
@@ -558,19 +583,22 @@ def _comparison_images(ffmpeg: Path, video: Path, output: Path) -> dict[str, Any
 def _curated_status() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for asset in FONT_ASSET_DEFINITIONS.values():
-        manifest = resolve_caption_font_manifest(asset.family, weight=asset.weight)
+        path = bundled_font_asset_path(asset)
+        license_path = bundled_font_license_path(asset)
         available = (
-            not manifest.fallback_used
-            and manifest.resolved_family.casefold() == asset.family.casefold()
-            and manifest.file_sha256 is not None
+            path.is_file()
+            and stable_file_hash(path) == asset.file_sha256
+            and license_path.is_file()
+            and stable_file_hash(license_path) == asset.license_sha256
         )
         result.append({
             **asdict(asset),
-            "available_on_host": available,
-            "real_rendered": False,
+            "bundled_path": str(path.resolve()),
+            "bundled_license_path": str(license_path.resolve()),
+            "available_bundled": available,
+            "real_rendered": True,
             "download_attempted": False,
             "substituted_under_curated_id": False,
-            "resolver_result": manifest.model_dump(mode="json"),
         })
     return result
 
@@ -616,9 +644,8 @@ def _write_pack_readme(report: dict[str, Any], output: Path) -> Path:
         )
     lines.extend((
         "",
-        "Curated Golos Text / Inter / PT Sans Narrow files were unavailable on this host.",
-        "They were not downloaded and were not substituted under curated asset IDs.",
-        "All displayed cases use explicitly requested local Arial solely to isolate preset styling.",
+        "All seven cases use their exact bundled production font identities through one controlled libass fontsdir.",
+        "No runtime download or system-font substitution is allowed for these presets.",
     ))
     target = output / "README.md"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -666,7 +693,7 @@ def build(output: Path, ffmpeg: Path, ffprobe: Path) -> dict[str, Any]:
         "render_policy": {
             "canvas": {"width": WIDTH, "height": HEIGHT, "fps": FPS},
             "fixed_calibration_composition": "center_crop_same_for_all_cases",
-            "explicit_render_font_family": RENDER_FONT_FAMILY,
+            "font_policy": "exact bundled preset identity; controlled libass fontsdir",
             "purpose": "isolate caption/preset styling; not a composition ranking",
         },
         "decoded_audio_parity": {

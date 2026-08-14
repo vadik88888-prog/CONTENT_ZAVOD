@@ -1016,6 +1016,19 @@ class CaptionEmphasisPlan(FrozenContract):
         return self
 
 
+class CaptionFontFaceIdentity(FrozenContract):
+    """One exact static face included in the controlled libass fontsdir."""
+
+    font_id: str = Field(pattern=ID_PATTERN)
+    family: str = Field(min_length=1, max_length=160)
+    subfamily: str = Field(min_length=1, max_length=80)
+    postscript_name: str = Field(min_length=1, max_length=160)
+    style: Literal["normal", "italic"] = "normal"
+    weight_class: int = Field(ge=1, le=1000)
+    file_name: str = Field(min_length=1, max_length=260)
+    file_sha256: str = Field(pattern=HASH_PATTERN)
+
+
 class CaptionFontManifest(FrozenContract):
     """Deterministic font identity used by both Preview and Final."""
 
@@ -1024,8 +1037,10 @@ class CaptionFontManifest(FrozenContract):
     resolved_family: str = Field(min_length=1, max_length=160)
     style: Literal["normal", "italic"] = "normal"
     weight: Literal["normal", "bold"] = "bold"
+    weight_class: int = Field(default=700, ge=1, le=1000)
     file_name: str | None = Field(default=None, max_length=260)
     file_sha256: str | None = Field(default=None, pattern=HASH_PATTERN)
+    companion_faces: tuple[CaptionFontFaceIdentity, ...] = ()
     supported_scripts: tuple[Literal["latin", "cyrillic", "unknown"], ...] = ("unknown",)
     metrics_backend: Literal["gdi_file_metrics", "qt_file_metrics", "qt_family_metrics", "heuristic"] = "heuristic"
     shaping_backend: str = Field(default="libass-harfbuzz", min_length=1, max_length=120)
@@ -1039,6 +1054,13 @@ class CaptionFontManifest(FrozenContract):
             raise ValueError("font file name and checksum must be provided together")
         if self.metrics_backend in {"gdi_file_metrics", "qt_file_metrics"} and self.file_sha256 is None:
             raise ValueError("file metrics require an exact font checksum")
+        identities = {(item.font_id, item.file_sha256) for item in self.companion_faces}
+        if len(identities) != len(self.companion_faces):
+            raise ValueError("caption font companion identities must be unique")
+        if any(item.file_name == self.file_name for item in self.companion_faces):
+            raise ValueError("caption font companion cannot duplicate the primary face")
+        if self.deployment_status == "bundled" and self.file_sha256 is None:
+            raise ValueError("bundled caption fonts require exact local bytes")
         return self
 
 
@@ -1187,7 +1209,9 @@ class CaptionCuePlan(FrozenContract):
     typography_token_id: str = Field(pattern=ID_PATTERN)
     semantic_class: SemanticClass | None = None
     evidence_refs: tuple[str, ...] = ()
-    primitive_id: Literal["legacy_passthrough", "static", "fade", "scale", "slide", "karaoke"] = "static"
+    primitive_id: Literal[
+        "legacy_passthrough", "static", "fade", "scale", "slide", "karaoke", "word_pop",
+    ] = "static"
     easing_id: Literal["none", "linear", "ease_in_out"] = "none"
     normalized_bounds: NormalizedRect | None = None
     words: tuple[CaptionWordPlan, ...] = ()
@@ -1199,10 +1223,12 @@ class CaptionCuePlan(FrozenContract):
     resolved_font_size_ratio: float | None = Field(default=None, gt=0, le=0.2)
     motion_duration_frames: int = Field(default=0, ge=0, le=30)
     scale_percent: int = Field(default=100, ge=94, le=108)
+    scale_keyframes: tuple[int, int, int] = (100, 100, 100)
+    display_mode: Literal["phrase", "single_spoken_word"] = "phrase"
     slide_distance_ratio: float = Field(default=0, ge=0, le=0.05)
     fallback_reason: Literal[
         "weak_timing", "missing_font", "metrics_unavailable", "readability",
-        "collision", "unsupported_primitive",
+        "collision", "unsupported_primitive", "short_timing",
     ] | None = None
 
     @model_validator(mode="after")
@@ -1216,10 +1242,20 @@ class CaptionCuePlan(FrozenContract):
                 raise ValueError("caption emphasis index is outside cue words")
         if self.timing_mode != "word" and self.primitive_id == "karaoke":
             raise ValueError("karaoke requires trusted word timing")
+        if any(value < 50 or value > 150 for value in self.scale_keyframes):
+            raise ValueError("caption scale keyframes must stay inside the Tier 1 safety envelope")
         if self.primitive_id == "scale" and self.scale_percent == 100:
             raise ValueError("scale primitive requires a bounded scale change")
         if self.primitive_id == "slide" and self.slide_distance_ratio == 0:
             raise ValueError("slide primitive requires a bounded distance")
+        if self.display_mode == "single_spoken_word":
+            if self.timing_mode != "word" or len(self.words) != 1:
+                raise ValueError("single spoken-word display requires one trusted word")
+        if self.primitive_id == "word_pop":
+            if self.display_mode != "single_spoken_word":
+                raise ValueError("word-pop primitive requires single spoken-word display")
+            if self.scale_keyframes == (100, 100, 100) or self.motion_duration_frames == 0:
+                raise ValueError("word-pop primitive requires bounded scale keyframes")
         return self
 
 

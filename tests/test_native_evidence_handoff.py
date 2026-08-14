@@ -433,6 +433,17 @@ def test_compiled_hook_motion_can_present_hook_alongside_semantic_emphasis_witho
     assert handoff.execution_status == "native_rich"
     assert not compiled.source_broll_plan.segments
     assert any(cue.emphasis is not None for cue in compiled.caption_plan.cues)
+    assert compiled.caption_plan.font_manifest is not None
+    expected_font_assets = {
+        compiled.caption_plan.font_manifest.font_id: compiled.caption_plan.font_manifest.file_sha256,
+        **{
+            face.font_id: face.file_sha256
+            for face in compiled.caption_plan.font_manifest.companion_faces
+        },
+    }
+    assert {
+        item.asset_id: item.checksum for item in compiled.assets if item.asset_type == "font"
+    } == expected_font_assets
     assert {
         event.purpose.value
         for event in compiled.motion_plan.events

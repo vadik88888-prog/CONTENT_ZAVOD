@@ -10,9 +10,11 @@ from app.caption_planning import (
     _normalize_cue_output_overlaps,
     _simultaneous_caption_collisions,
     build_caption_plan,
+    materialize_caption_font_directory,
     resolve_caption_font_manifest,
     write_caption_plan_ass,
 )
+from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.config import AppConfig
 from app.creative_contracts import (
     BeatRole,
@@ -123,6 +125,19 @@ def _plain_intent(mapping: SourceOutputTimeMap) -> CreativeIntent:
         "source_output_mapping": mapping,
         "beats": (),
         "semantic_emphasis": (),
+    })
+
+
+def _preset_intent(preset_id: str, *, reduced_motion: bool = False) -> CreativeIntent:
+    preset = CAPTION_PRESET_DEFINITIONS[preset_id]  # type: ignore[index]
+    intent = _intent()
+    return intent.model_copy(update={
+        "policy": intent.policy.model_copy(update={
+            "preset_id": preset_id,
+            "preset_version": preset.preset_version,
+            "caption_style_family": preset.style_family,
+            "reduced_motion": reduced_motion,
+        }),
     })
 
 
@@ -475,7 +490,7 @@ def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() ->
     assert plan.backend_id == "libass"
     assert plan.font_manifest is not None and plan.font_manifest.file_sha256
     assert plan.typography is not None
-    assert plan.typography.token_id == "caption-preset:accent_yellow:1.0.0"
+    assert plan.typography.token_id == "caption-preset:accent_yellow:2.0.0"
     assert any(cue.beat_role == BeatRole.HOOK and cue.primitive_id == "slide" for cue in plan.cues)
     assert any(cue.beat_role == BeatRole.PAYOFF and cue.primitive_id == "scale" for cue in plan.cues)
     emphasized = [cue for cue in plan.cues if cue.emphasis is not None]
@@ -598,7 +613,10 @@ def test_font_manifest_and_ass_preview_final_share_semantics_and_normalized_geom
     final_text = final.read_text(encoding="utf-8-sig")
 
     assert manifest.file_sha256 and manifest.file_name
-    assert f"FontSHA256: {manifest.file_sha256}" in preview_text
+    assert plan.font_manifest is not None
+    assert plan.font_manifest.font_id == "font.oswald.bold"
+    assert plan.font_manifest.file_sha256 != manifest.file_sha256
+    assert f"FontSHA256: {plan.font_manifest.file_sha256}" in preview_text
     assert [line.split(",", 3)[:3] for line in preview_text.splitlines() if line.startswith("Dialogue:")] == [
         line.split(",", 3)[:3] for line in final_text.splitlines() if line.startswith("Dialogue:")
     ]
@@ -609,15 +627,15 @@ def test_font_manifest_and_ass_preview_final_share_semantics_and_normalized_geom
     assert "\\kf" in final_text
 
 
-def test_missing_font_uses_approved_deterministic_fallback() -> None:
+def test_host_font_setting_cannot_override_approved_bundled_preset_font() -> None:
     config = _config()
     config.subtitle_font_family = "__definitely_missing_caption_font__"
     plan = build_caption_plan(_intent(), _word_transcript(), config)
 
-    assert plan.font_manifest is not None and plan.font_manifest.fallback_used is True
-    assert plan.font_manifest.resolved_family != "__definitely_missing_caption_font__"
-    assert "CAPTION_FONT_FALLBACK" in {finding.code for finding in plan.quality_report.findings}
-    assert all(cue.fallback_reason in {None, "missing_font"} or cue.fallback_reason == "readability" for cue in plan.cues)
+    assert plan.font_manifest is not None and plan.font_manifest.fallback_used is False
+    assert plan.font_manifest.font_id == "font.oswald.bold"
+    assert plan.font_manifest.deployment_status == "bundled"
+    assert "CAPTION_FONT_FALLBACK" not in {finding.code for finding in plan.quality_report.findings}
 
 
 def test_contrast_box_caption_token_maps_to_deterministic_ass_style(tmp_path: Path) -> None:
@@ -625,7 +643,7 @@ def test_contrast_box_caption_token_maps_to_deterministic_ass_style(tmp_path: Pa
     assert plan.typography is not None
     boxed = plan.model_copy(update={
         "typography": plan.typography.model_copy(update={
-            "token_id": "caption-preset:contrast_box:1.0.0",
+            "token_id": "caption-preset:contrast_box:2.0.0",
         }),
     })
     path = write_caption_plan_ass(boxed, tmp_path / "boxed.ass", 1080, 1920)
@@ -633,5 +651,149 @@ def test_contrast_box_caption_token_maps_to_deterministic_ass_style(tmp_path: Pa
         line for line in path.read_text(encoding="utf-8-sig").splitlines()
         if line.startswith("Style: CaptionPlan,")
     ).split(",")
-    assert style[6].startswith("&H52")
+    assert style[6].startswith("&H47")
     assert style[15] == "3"
+
+
+@pytest.mark.parametrize("preset_id", tuple(CAPTION_PRESET_DEFINITIONS))
+def test_all_approved_caption_presets_compile_with_exact_bundled_font_identity(
+    preset_id: str,
+    tmp_path: Path,
+) -> None:
+    preset = CAPTION_PRESET_DEFINITIONS[preset_id]  # type: ignore[index]
+    plan = build_caption_plan(_preset_intent(preset_id), _word_transcript(), _config())
+
+    assert plan.typography is not None and plan.typography.token_id == preset.token_id
+    assert plan.font_manifest is not None
+    assert plan.font_manifest.font_id == preset.preferred_font_asset_id
+    assert plan.font_manifest.deployment_status == "bundled"
+    assert plan.font_manifest.fallback_used is False
+    assert {item.font_id for item in plan.font_manifest.companion_faces} == (
+        set(preset.font_asset_ids) - {preset.preferred_font_asset_id}
+    )
+    controlled = materialize_caption_font_directory(plan.font_manifest, tmp_path / preset_id)
+    assert len(tuple(controlled.iterdir())) == len(preset.font_asset_ids)
+    ass = write_caption_plan_ass(plan, tmp_path / f"{preset_id}.ass", 540, 960)
+    assert f"FontSHA256: {plan.font_manifest.file_sha256}" in ass.read_text(encoding="utf-8-sig")
+
+
+@pytest.mark.parametrize(("preset_id", "render_family", "ass_bold"), (
+    ("minimal_light", "Commissioner Light", "0"),
+    ("contrast_box", "Rubik SemiBold", "0"),
+))
+def test_static_weight_family_names_are_exact_for_libass(
+    preset_id: str,
+    render_family: str,
+    ass_bold: str,
+    tmp_path: Path,
+) -> None:
+    plan = build_caption_plan(_preset_intent(preset_id), _word_transcript(), _config())
+    assert plan.font_manifest is not None
+    assert plan.font_manifest.resolved_family == render_family
+    ass = write_caption_plan_ass(plan, tmp_path / f"{preset_id}.ass", 540, 960)
+    style = next(
+        line for line in ass.read_text(encoding="utf-8-sig").splitlines()
+        if line.startswith("Style: CaptionPlan,")
+    ).split(",")
+    assert style[1] == render_family
+    assert style[7] == ass_bold
+
+
+def test_active_karaoke_uses_semantic_emphasis_even_when_a_beat_shares_the_cue() -> None:
+    plan = build_caption_plan(_preset_intent("karaoke_yellow"), _word_transcript(), _config())
+
+    semantic = [cue for cue in plan.cues if cue.emphasis is not None]
+    assert semantic
+    assert all(cue.primitive_id == "karaoke" for cue in semantic)
+
+
+def test_word_pop_is_one_aligned_word_at_a_time_with_bounded_evidence_pop(tmp_path: Path) -> None:
+    plan = build_caption_plan(_preset_intent("word_pop"), _word_transcript(), _config())
+
+    assert plan.typography is not None and plan.typography.highlight_color == "#C6FF00"
+    assert plan.cues and all(len(cue.words) == 1 for cue in plan.cues)
+    assert all(cue.display_mode == "single_spoken_word" for cue in plan.cues)
+    assert all(cue.output.start_frame == cue.words[0].output.start_frame for cue in plan.cues)
+    assert all(left.output.end_frame <= right.output.start_frame for left, right in zip(plan.cues, plan.cues[1:]))
+    assert all(cue.primitive_id == "word_pop" for cue in plan.cues)
+    semantic = [cue for cue in plan.cues if cue.emphasis is not None]
+    assert len(semantic) == 1
+    assert semantic[0].scale_keyframes == (84, 118, 100)
+    assert semantic[0].evidence_refs
+    assert all(cue.scale_keyframes == (88, 112, 100) for cue in plan.cues if cue.emphasis is None)
+    ass = write_caption_plan_ass(plan, tmp_path / "word-pop.ass", 1080, 1920).read_text(encoding="utf-8-sig")
+    assert "\\fscx84\\fscy84" in ass and "\\fscx118\\fscy118" in ass
+    assert "\\fscx88\\fscy88" in ass and "\\fscx112\\fscy112" in ass
+    assert "\\frz" not in ass and "\\blur" not in ass and "\\move" not in ass
+
+
+def test_word_pop_reduced_motion_and_short_timing_use_static_single_word_fallback(tmp_path: Path) -> None:
+    reduced = build_caption_plan(
+        _preset_intent("word_pop", reduced_motion=True), _word_transcript(), _config(),
+    )
+    assert all(cue.primitive_id == "static" for cue in reduced.cues)
+    semantic = [cue for cue in reduced.cues if cue.emphasis is not None]
+    assert len(semantic) == 1 and semantic[0].scale_keyframes == (106, 106, 106)
+    reduced_ass = write_caption_plan_ass(
+        reduced, tmp_path / "word-pop-reduced.ass", 1080, 1920,
+    ).read_text(encoding="utf-8-sig")
+    assert "\\fscx106\\fscy106" in reduced_ass
+    assert "\\t(" not in reduced_ass
+
+    short = build_caption_plan(
+        _preset_intent("word_pop"),
+        {"words": [{
+            "text": "Кратко", "start": 0.0, "end": 0.1,
+            "confidence": 0.99, "timing_source": "aligned",
+        }]},
+        _config(),
+    )
+    assert len(short.cues) == 1
+    assert short.cues[0].primitive_id == "static"
+    assert short.cues[0].fallback_reason == "short_timing"
+    assert short.cues[0].output.start_frame == short.cues[0].words[0].output.start_frame
+
+
+def test_word_pop_weak_timing_degrades_to_phrase_level_static_caption() -> None:
+    transcript = {"segments": [{
+        "start": 0.0, "end": 3.0,
+        "text": "Слабый тайминг остаётся статичной фразой",
+    }]}
+    plan = build_caption_plan(_preset_intent("word_pop"), transcript, _config())
+
+    assert plan.cues
+    assert all(cue.display_mode == "phrase" for cue in plan.cues)
+    assert all(cue.primitive_id == "static" for cue in plan.cues)
+    assert all(cue.timing_mode != "word" for cue in plan.cues)
+    assert "WEAK_TIMING_DEGRADED_TO_PHRASE_STATIC" in plan.diagnostics
+
+
+def test_word_pop_localizes_weak_timing_without_disabling_trusted_word_cadence() -> None:
+    transcript = {"words": [
+        {"text": "trusted-one", "start": 0.0, "end": 0.4, "confidence": 0.99, "timing_source": "aligned"},
+        {"text": "weak", "start": 0.5, "end": 0.9, "confidence": 0.40, "timing_source": "phrase"},
+        {"text": "timing", "start": 0.9, "end": 1.3, "confidence": 0.40, "timing_source": "phrase"},
+        {"text": "trusted-two", "start": 1.4, "end": 1.9, "confidence": 0.99, "timing_source": "verified"},
+    ]}
+    plan = build_caption_plan(_preset_intent("word_pop"), transcript, _config())
+
+    single_word = [cue for cue in plan.cues if cue.display_mode == "single_spoken_word"]
+    phrase = [cue for cue in plan.cues if cue.display_mode == "phrase"]
+    assert [cue.words[0].text for cue in single_word] == ["trusted-one", "trusted-two"]
+    assert all(cue.primitive_id == "word_pop" for cue in single_word)
+    assert phrase and all(cue.primitive_id == "static" for cue in phrase)
+    assert " ".join(word.text for cue in phrase for word in cue.words) == "weak timing"
+    assert all(cue.output.start_frame >= cue.words[0].output.start_frame for cue in plan.cues)
+
+
+def test_editorial_bundles_regular_and_bold_faces_and_marks_semantic_weight(tmp_path: Path) -> None:
+    plan = build_caption_plan(_preset_intent("editorial_narrow"), _word_transcript(), _config())
+    assert plan.font_manifest is not None
+    assert plan.font_manifest.font_id == "font.pt-sans-narrow.regular"
+    assert [face.font_id for face in plan.font_manifest.companion_faces] == [
+        "font.pt-sans-narrow.bold",
+    ]
+    controlled = materialize_caption_font_directory(plan.font_manifest, tmp_path / "editorial-fonts")
+    assert len(tuple(controlled.iterdir())) == 2
+    ass = write_caption_plan_ass(plan, tmp_path / "editorial.ass", 1080, 1920).read_text(encoding="utf-8-sig")
+    assert "\\b1" in ass and "\\b0" in ass
