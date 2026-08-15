@@ -1,0 +1,80 @@
+{
+  "schema_version": "moments-ineligible-real-window.1",
+  "captured_at": "2026-08-15T10:19:06.842860+00:00",
+  "os": "Windows-10-10.0.26200-SP0",
+  "qt_platform": "windows",
+  "source_project": {
+    "project_id": "3c21b1579922410b9b2f33080356f34f",
+    "analysis_path": "output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\62b19eaea3004d4e80016463044f18f0\\analysis.json",
+    "analysis_sha256": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+    "candidate_count": 95,
+    "draftable_count": 0,
+    "primary_reason_counts": {
+      "NO_PAYOFF": 46,
+      "DURATION_OUT_OF_RANGE": 42,
+      "SENTENCE_BOUNDARY_UNRECOVERABLE": 3,
+      "ANSWER_WITHOUT_QUESTION_CONTEXT": 2,
+      "UNRESOLVED_PRONOUN": 1,
+      "SEMANTIC_INCOMPLETE": 1
+    }
+  },
+  "window": {
+    "class": "ProjectScreen",
+    "title": "Content Factory — Moments blocked-candidates QA",
+    "native_window_id": 34016082,
+    "width": 1456,
+    "height": 736,
+    "quality_notice_position": {
+      "x": 34,
+      "y": -213
+    }
+  },
+  "observed": {
+    "initial_card_count": 12,
+    "loaded_card_count": 95,
+    "blocked_button_count": 95,
+    "primary_reason_label_count": 95,
+    "message": "Найдено 95 моментов, но ни один пока не прошёл проверку качества"
+  },
+  "checks": {
+    "qt_windows_platform": true,
+    "native_window_created": true,
+    "project_screen_visible": true,
+    "source_project_id_matches": true,
+    "all_candidates_95": true,
+    "draftable_candidates_0": true,
+    "initial_cards_paginated": true,
+    "view_all_visible": true,
+    "all_95_cards_loaded": true,
+    "quality_message_visible": true,
+    "quality_message_exact": true,
+    "bulk_selection_disabled": true,
+    "draft_action_hidden": true,
+    "no_selectable_candidate_buttons": true,
+    "all_blocked_buttons_disabled": true,
+    "all_cards_have_primary_reason": true,
+    "selection_remains_empty": true,
+    "blocked_detail_has_no_boundary_controls": true,
+    "original_project_unchanged": true,
+    "analysis_artifact_unchanged": true
+  },
+  "result": "PASS",
+  "screenshot": {
+    "path": "moments-95-ineligible.png",
+    "sha256": "412e1454405c22380646a74b8d02c818e9cbffa2cbeed31516b47def694b8f83",
+    "width": 1820,
+    "height": 920
+  },
+  "blocked_reasons_screenshot": {
+    "path": "moments-blocked-reasons.png",
+    "sha256": "4aca528c0e166a9d9335de0df2639f178f6152b182c80462593b1be03213e33b",
+    "width": 1820,
+    "height": 920
+  },
+  "blocked_card_screenshot": {
+    "path": "blocked-card-detail.png",
+    "sha256": "5d44a60672744143137edb244257e4bcafe5b9b887134299f8dc05a1d2d2e146",
+    "width": 1710,
+    "height": 193
+  }
+}
