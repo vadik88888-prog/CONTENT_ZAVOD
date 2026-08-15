@@ -709,7 +709,10 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     ).run(input_path=str(source))
     draft_data = read_json(draft.draft_path, {})
     persisted_decision = draft_data["candidates"][0]["eligibility_decision"]
+    persisted_editorial = draft_data["candidates"][0]["editorial_decision"]
     assert persisted_decision["state"] == "assessed"
+    assert persisted_editorial["surfacing_state"] in {"RECOMMENDED", "AVAILABLE"}
+    assert persisted_editorial["selectable"] is True
 
     # Mutate only the reusable source cache after Draft(A). Final must still
     # read Analysis A's immutable snapshot and the Draft-owned decision.
@@ -717,6 +720,7 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     candidate_data = read_json(candidate_path, {})
     cached_candidate = next(item for item in candidate_data["candidates"] if item["id"] == candidate_id)
     cached_candidate.pop("eligibility_decision", None)
+    cached_candidate.pop("editorial_decision", None)
     write_json(candidate_path, candidate_data)
 
     def tts(_self, _tracker, _production, _work, _output):
@@ -740,7 +744,7 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     monkeypatch.setattr(Pipeline, "_run_tts", tts)
     monkeypatch.setattr(Pipeline, "_run_audio", audio)
     monkeypatch.setattr(Pipeline, "_run_production_render", render)
-    persisted_at_final: list[dict] = []
+    persisted_at_final: list[tuple[dict, dict | None, dict]] = []
     original_quality_reports = Pipeline._persist_quality_reports
 
     def persist_quality_reports(self, *args, **kwargs):
@@ -748,7 +752,12 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
             scored for scored in kwargs["final_scored"]
             if scored.candidate.id == candidate_id
         )
-        persisted_at_final.append(item.candidate.eligibility_decision.to_dict())
+        override = kwargs["candidate_overrides"][candidate_id]
+        persisted_at_final.append((
+            item.candidate.eligibility_decision.to_dict(),
+            item.candidate.editorial_decision.to_dict() if item.candidate.editorial_decision else None,
+            override["editorial_final_handoff"],
+        ))
         return original_quality_reports(self, *args, **kwargs)
 
     monkeypatch.setattr(Pipeline, "_persist_quality_reports", persist_quality_reports)
@@ -770,7 +779,10 @@ def test_approved_draft_reuses_its_plan_and_reports_a_completed_candidate_flow(t
     }]
     assert report["run"]["render_settings_fingerprint"]
     assert report["production_render"]["render_settings_fingerprint"] == report["run"]["render_settings_fingerprint"]
-    assert persisted_at_final == [persisted_decision]
+    assert persisted_at_final[0][0] == persisted_decision
+    assert persisted_at_final[0][1] == persisted_editorial
+    assert persisted_at_final[0][2]["status"] == "passed"
+    assert persisted_at_final[0][2]["candidate_id"] == candidate_id
 
 
 def test_approved_draft_render_keeps_valid_candidate_when_another_plan_is_malformed(tmp_path: Path, monkeypatch) -> None:

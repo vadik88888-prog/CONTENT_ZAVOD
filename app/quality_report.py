@@ -7,19 +7,128 @@ existing producers remain the owners of those low-level checks.
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Mapping
 
 from app.candidate_quality import cached_hard_eligibility_reason_codes
 from app.clip_results import ClipResult
+from app.editorial_profile_policy import (
+    EDITORIAL_PROFILE_POLICIES,
+    EDITORIAL_PROFILE_POLICY_VERSION,
+    CandidateEditorialDecision,
+    EditorialSurfacingState,
+)
 from app.utils import stable_file_hash, stable_text_hash, utc_now
 
 
 QUALITY_REPORT_SCHEMA_VERSION = "5G.0"
 QUALITY_STATUSES = frozenset({"PASS", "PASS_WITH_WARNINGS", "BLOCKED"})
 SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD = 0.5
+EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION = "editorial-final-handoff.1"
 QualitySeverity = Literal["warning", "blocker"]
+
+
+def validate_persisted_editorial_decision(
+    value: Any,
+    *,
+    expected_candidate_id: str,
+    record_candidate_id: str,
+    expected_profile: Mapping[str, Any] | None = None,
+) -> tuple[CandidateEditorialDecision | None, list[str]]:
+    """Strictly validate the persisted editorial permission and its profile lineage."""
+
+    errors: list[str] = []
+    if expected_candidate_id != record_candidate_id or not expected_candidate_id:
+        errors.append("CANDIDATE_ID_MISMATCH")
+    if not isinstance(value, Mapping):
+        return None, [*errors, "EDITORIAL_DECISION_MISSING"]
+    required = {
+        "profile_id", "archetype", "editorial_score", "strengths", "soft_issues",
+        "hard_blockers", "surfacing_state", "selectable", "primary_reason",
+        "policy_version", "profile_provenance",
+    }
+    if missing := sorted(required.difference(value)):
+        errors.append("EDITORIAL_DECISION_FIELDS_MISSING:" + ",".join(missing))
+    if not all(isinstance(value.get(key), list) for key in ("strengths", "soft_issues", "hard_blockers")):
+        errors.append("EDITORIAL_DECISION_LISTS_INVALID")
+    if not isinstance(value.get("selectable"), bool):
+        errors.append("EDITORIAL_SELECTABLE_INVALID")
+    raw_score = value.get("editorial_score")
+    if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+        errors.append("EDITORIAL_SCORE_INVALID")
+    elif not math.isfinite(float(raw_score)) or not 0.0 <= float(raw_score) <= 100.0:
+        errors.append("EDITORIAL_SCORE_INVALID")
+    try:
+        decision = CandidateEditorialDecision.from_dict(value)
+    except (TypeError, ValueError):
+        return None, [*errors, "EDITORIAL_DECISION_MALFORMED"]
+    if decision.policy_version != EDITORIAL_PROFILE_POLICY_VERSION:
+        errors.append("EDITORIAL_POLICY_VERSION_MISMATCH")
+    if decision.profile_id not in EDITORIAL_PROFILE_POLICIES:
+        errors.append("EDITORIAL_PROFILE_UNKNOWN")
+    provenance = value.get("profile_provenance")
+    if not isinstance(provenance, Mapping):
+        errors.append("EDITORIAL_PROFILE_PROVENANCE_MISSING")
+        provenance = {}
+    if str(provenance.get("profile_id") or "") != decision.profile_id:
+        errors.append("EDITORIAL_PROFILE_PROVENANCE_MISMATCH")
+    for key in ("detected_profile", "effective_profile", "manual_override"):
+        if not isinstance(provenance.get(key), Mapping):
+            errors.append(f"EDITORIAL_PROFILE_{key.upper()}_MISSING")
+    if not str(provenance.get("resolution") or ""):
+        errors.append("EDITORIAL_PROFILE_RESOLUTION_MISSING")
+    if expected_profile is not None:
+        if str(expected_profile.get("profile_id") or "") != decision.profile_id:
+            errors.append("EDITORIAL_EFFECTIVE_PROFILE_MISMATCH")
+        for key in ("detected_profile", "effective_profile", "manual_override", "resolution"):
+            if provenance.get(key) != expected_profile.get(key):
+                errors.append(f"EDITORIAL_PROFILE_LINEAGE_{key.upper()}_MISMATCH")
+    if decision.surfacing_state is EditorialSurfacingState.BLOCKED:
+        if decision.selectable or not decision.hard_blockers:
+            errors.append("EDITORIAL_BLOCKED_STATE_INVALID")
+    elif not decision.selectable or decision.hard_blockers:
+        errors.append("EDITORIAL_SELECTABLE_STATE_INVALID")
+    if not decision.archetype.strip() or not decision.primary_reason.strip():
+        errors.append("EDITORIAL_REASONING_MISSING")
+    return decision, _unique(errors)
+
+
+def build_editorial_final_handoff(
+    value: Any,
+    *,
+    candidate_id: str,
+    record_candidate_id: str,
+    expected_profile: Mapping[str, Any],
+    draft_id: str,
+    analysis_id: str,
+    analysis_run_id: str,
+    analysis_sha256: str,
+) -> tuple[CandidateEditorialDecision | None, dict[str, Any]]:
+    """Build the verified Draft-to-Final editorial lineage record."""
+
+    decision, errors = validate_persisted_editorial_decision(
+        value,
+        expected_candidate_id=candidate_id,
+        record_candidate_id=record_candidate_id,
+        expected_profile=expected_profile,
+    )
+    fingerprint = _editorial_decision_fingerprint(value) if isinstance(value, Mapping) else ""
+    return decision, {
+        "schema_version": EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION,
+        "status": "blocked" if errors else "passed",
+        "candidate_id": candidate_id,
+        "profile_id": decision.profile_id if decision is not None else None,
+        "policy_version": decision.policy_version if decision is not None else None,
+        "decision_sha256": fingerprint or None,
+        "draft_id": draft_id,
+        "analysis_id": analysis_id,
+        "analysis_run_id": analysis_run_id,
+        "analysis_sha256": analysis_sha256,
+        "reason_codes": errors,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +366,7 @@ def build_quality_report(
         finding, resolved_path, artifact_sha256, result, run_id, source_id, artifact_id, render,
         all_results,
     )
-    _collect_eligibility(finding, candidate_data)
+    _collect_eligibility(finding, candidate_data, expected_candidate_id=result.candidate_id)
     _collect_diversity(finding, diversity_decision, result.candidate_id)
     _collect_plan_and_boundary(finding, plan_data, result, project_id, source_id)
     _collect_continuity(finding, plan_data, render)
@@ -333,7 +442,8 @@ def build_quality_report(
             "owner": "final_quality_gate",
             "quality_config_version": config_version,
             "low_level_checks_reused": [
-                "eligibility", "diversity", "boundary_decision", "production_plan_envelope",
+                "editorial_profile_policy", "legacy_eligibility_diagnostics", "diversity",
+                "boundary_decision", "production_plan_envelope",
                 "continuity_decision", "source_output_time_map",
                 *(
                     [
@@ -433,19 +543,49 @@ def _collect_artifact_identity(
         )
 
 
-def _collect_eligibility(finding: Any, candidate: dict[str, Any]) -> None:
+def _collect_eligibility(
+    finding: Any,
+    candidate: dict[str, Any],
+    *,
+    expected_candidate_id: str,
+) -> None:
     editorial = candidate.get("editorial_decision") if isinstance(candidate, dict) else None
-    if isinstance(editorial, dict):
-        hard_blockers = [str(item) for item in editorial.get("hard_blockers", []) if str(item)]
-        if editorial.get("selectable") is True and not hard_blockers:
+    handoff = candidate.get("editorial_final_handoff") if isinstance(candidate, dict) else None
+    if editorial is not None or handoff is not None:
+        record_candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "")
+        decision, errors = validate_persisted_editorial_decision(
+            editorial,
+            expected_candidate_id=expected_candidate_id,
+            record_candidate_id=record_candidate_id,
+        )
+        if handoff is not None:
+            errors.extend(_editorial_handoff_errors(handoff, editorial, decision, expected_candidate_id))
+        errors = _unique(errors)
+        evidence = _editorial_permission_evidence(candidate)
+        if errors:
+            finding(
+                "EDITORIAL_DECISION_LINEAGE_INVALID",
+                "blocker",
+                evidence,
+                measured_value=errors,
+                threshold="valid candidate/profile/policy Draft-to-Final lineage",
+                producer="editorial_profile_policy",
+                message="Persisted editorial permission is missing, malformed, or belongs to another lineage.",
+            )
             return
-        code = hard_blockers[0] if hard_blockers else "EDITORIAL_POLICY_BLOCKED"
+        assert decision is not None
+        if decision.surfacing_state in {
+            EditorialSurfacingState.RECOMMENDED,
+            EditorialSurfacingState.AVAILABLE,
+        }:
+            return
+        code = decision.hard_blockers[0] if decision.hard_blockers else "EDITORIAL_POLICY_BLOCKED"
         finding(
             code,
             "blocker",
-            {"editorial_decision": editorial},
-            measured_value=hard_blockers,
-            threshold="profile-aware editorial selectable=true",
+            evidence,
+            measured_value=list(decision.hard_blockers),
+            threshold="surfacing_state in {RECOMMENDED, AVAILABLE}",
             producer="editorial_profile_policy",
             message="Candidate has an evidence-backed structural or technical blocker.",
         )
@@ -485,6 +625,54 @@ def _collect_eligibility(finding: Any, candidate: dict[str, Any]) -> None:
             threshold="eligible=true", producer="eligibility",
             message="Candidate did not pass the persisted eligibility decision.",
         )
+
+
+def _editorial_permission_evidence(candidate: dict[str, Any]) -> dict[str, Any]:
+    virality = candidate.get("virality")
+    return {
+        "permission_owner": "editorial_profile_policy",
+        "editorial_decision": candidate.get("editorial_decision"),
+        "editorial_final_handoff": candidate.get("editorial_final_handoff"),
+        "legacy_eligibility_decision": candidate.get("eligibility_decision"),
+        "legacy_virality_eligibility": (
+            virality.get("eligibility") if isinstance(virality, dict) else None
+        ),
+    }
+
+
+def _editorial_handoff_errors(
+    handoff: Any,
+    editorial: Any,
+    decision: CandidateEditorialDecision | None,
+    expected_candidate_id: str,
+) -> list[str]:
+    if not isinstance(handoff, Mapping):
+        return ["EDITORIAL_HANDOFF_MALFORMED"]
+    errors: list[str] = []
+    if handoff.get("schema_version") != EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION:
+        errors.append("EDITORIAL_HANDOFF_SCHEMA_MISMATCH")
+    if handoff.get("status") != "passed" or handoff.get("reason_codes"):
+        errors.append("EDITORIAL_HANDOFF_NOT_PASSED")
+    if str(handoff.get("candidate_id") or "") != expected_candidate_id:
+        errors.append("EDITORIAL_HANDOFF_CANDIDATE_MISMATCH")
+    if decision is not None:
+        if handoff.get("profile_id") != decision.profile_id:
+            errors.append("EDITORIAL_HANDOFF_PROFILE_MISMATCH")
+        if handoff.get("policy_version") != decision.policy_version:
+            errors.append("EDITORIAL_HANDOFF_POLICY_MISMATCH")
+    if not isinstance(editorial, Mapping) or handoff.get("decision_sha256") != _editorial_decision_fingerprint(editorial):
+        errors.append("EDITORIAL_HANDOFF_DECISION_HASH_MISMATCH")
+    for key in ("draft_id", "analysis_id", "analysis_run_id", "analysis_sha256"):
+        if not str(handoff.get(key) or "").strip():
+            errors.append(f"EDITORIAL_HANDOFF_{key.upper()}_MISSING")
+    analysis_sha256 = str(handoff.get("analysis_sha256") or "")
+    if len(analysis_sha256) != 64 or any(character not in "0123456789abcdef" for character in analysis_sha256):
+        errors.append("EDITORIAL_HANDOFF_ANALYSIS_HASH_INVALID")
+    return errors
+
+
+def _editorial_decision_fingerprint(value: Mapping[str, Any]) -> str:
+    return stable_text_hash(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def _collect_diversity(finding: Any, decision: dict[str, Any] | None, candidate_id: str) -> None:
@@ -1225,8 +1413,18 @@ def _check_catalog(
         (
             "ELIGIBILITY",
             "editorial_profile_policy" if candidate.get("editorial_decision") else "eligibility",
-            candidate.get("editorial_decision") or candidate.get("eligibility_decision"),
-            "profile-aware editorial selectable=true",
+            (
+                _editorial_permission_evidence(candidate)
+                if candidate.get("editorial_decision") is not None
+                or candidate.get("editorial_final_handoff") is not None
+                else candidate.get("eligibility_decision")
+            ),
+            (
+                "surfacing_state in {RECOMMENDED, AVAILABLE} with valid lineage"
+                if candidate.get("editorial_decision") is not None
+                or candidate.get("editorial_final_handoff") is not None
+                else "eligible=true or explicit legacy compatibility"
+            ),
         ),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),

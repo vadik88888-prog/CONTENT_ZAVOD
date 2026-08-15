@@ -1,0 +1,3352 @@
+{
+  "schema_version": "5G.0",
+  "report_id": "quality-e3947788510a1a0f4ffd952f",
+  "artifact_id": "artifact-206d301411789e50034ee8b0",
+  "artifact_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\670f4563b56c4ae6acd1f00f2e499a7d\\results\\final-short-01.mp4",
+  "artifact_sha256": "09fc79f925177c72afd1ec6c880ab212d095f6f7776a1b8521a942cb97dd95b8",
+  "run_id": "670f4563b56c4ae6acd1f00f2e499a7d",
+  "project_id": "3c21b1579922410b9b2f33080356f34f",
+  "source_id": "3b9aac2f10b4e7c10de70567",
+  "candidate_id": "candidate-chapter-027-story-001",
+  "edit_plan_id": "production-candidate-chapter-027-story-001-e2919f7fe27a",
+  "render_id": "670f4563b56c4ae6acd1f00f2e499a7d:render-01",
+  "status": "PASS_WITH_WARNINGS",
+  "checks": [
+    {
+      "code": "ELIGIBILITY",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "permission_owner": "editorial_profile_policy",
+        "editorial_decision": {
+          "profile_id": "movie_series",
+          "archetype": "logical_scene_unit",
+          "editorial_score": 44.5,
+          "strengths": [
+            "logical_scene_unit",
+            "context_sufficient",
+            "evidence_confidence"
+          ],
+          "soft_issues": [
+            "NO_PAYOFF",
+            "FALSE_HOOK_RISK",
+            "VISUAL_EVIDENCE_UNAVAILABLE",
+            "SEMANTIC_INCOMPLETE"
+          ],
+          "hard_blockers": [],
+          "surfacing_state": "AVAILABLE",
+          "selectable": true,
+          "primary_reason": "NO_PAYOFF",
+          "policy_version": "editorial-profile-policy.1",
+          "profile_provenance": {
+            "profile_id": "movie_series",
+            "detected_profile": {
+              "format": {
+                "value": "gameplay",
+                "confidence": 0.7,
+                "evidence": [
+                  "transcript:gameplay_terms"
+                ]
+              },
+              "editorial_mode": {
+                "value": "narrative",
+                "confidence": 0.81,
+                "evidence": [
+                  "transcript:narrative_terms"
+                ]
+              },
+              "domain": {
+                "value": "lifestyle",
+                "confidence": 0.7,
+                "evidence": [
+                  "transcript:lifestyle_terms"
+                ]
+              },
+              "traits": [
+                {
+                  "value": "speech_led",
+                  "confidence": 0.75,
+                  "evidence": [
+                    "transcript:speech_density"
+                  ]
+                },
+                {
+                  "value": "single_speaker",
+                  "confidence": 0.9,
+                  "evidence": [
+                    "transcript:speaker_ids"
+                  ]
+                },
+                {
+                  "value": "low_pacing",
+                  "confidence": 0.72,
+                  "evidence": [
+                    "transcript:words_per_second"
+                  ]
+                },
+                {
+                  "value": "high_emotion",
+                  "confidence": 0.66,
+                  "evidence": [
+                    "audio:energy_frames_or_punctuation"
+                  ]
+                },
+                {
+                  "value": "dense_information",
+                  "confidence": 0.65,
+                  "evidence": [
+                    "transcript:speech_density"
+                  ]
+                },
+                {
+                  "value": "scene_driven",
+                  "confidence": 0.7,
+                  "evidence": [
+                    "profile:format"
+                  ]
+                }
+              ],
+              "provenance": {
+                "filename_signal_used": false,
+                "detector": "5A.3"
+              }
+            },
+            "effective_profile": {
+              "resolution": {
+                "format": "detected",
+                "editorial_mode": "detected",
+                "domain": "detected",
+                "traits": "detected"
+              },
+              "format": "gameplay",
+              "editorial_mode": "narrative",
+              "domain": "lifestyle",
+              "traits": [
+                "speech_led",
+                "single_speaker",
+                "low_pacing",
+                "high_emotion",
+                "dense_information",
+                "scene_driven"
+              ]
+            },
+            "manual_override": {
+              "format": null,
+              "editorial_mode": null,
+              "domain": null,
+              "traits": [],
+              "provenance": "none",
+              "revision_id": null
+            },
+            "resolution": "auto_source_metadata_hint",
+            "confidence": 0.75
+          }
+        },
+        "editorial_final_handoff": {
+          "schema_version": "editorial-final-handoff.1",
+          "status": "passed",
+          "candidate_id": "candidate-chapter-027-story-001",
+          "profile_id": "movie_series",
+          "policy_version": "editorial-profile-policy.1",
+          "decision_sha256": "564efe9e2cc3e1435d190dd1ede2e3e78fe15449cf8c8bdfc0be929588f42789",
+          "draft_id": "approved-670f4563b56c4ae6acd1f00f2e499a7d",
+          "analysis_id": "analysis-7a1acd4d3217760b",
+          "analysis_run_id": "62b19eaea3004d4e80016463044f18f0",
+          "analysis_sha256": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+          "reason_codes": []
+        },
+        "legacy_eligibility_decision": {
+          "schema_version": "6D.1",
+          "config_version": "6D.1",
+          "state": "assessed",
+          "eligible": false,
+          "reason_codes": [
+            "NO_PAYOFF",
+            "FALSE_HOOK_RISK",
+            "VISUAL_EVIDENCE_UNAVAILABLE",
+            "SEMANTIC_INCOMPLETE"
+          ],
+          "recoverable_issues": [
+            "VISUAL_EVIDENCE_UNAVAILABLE"
+          ],
+          "required_boundary_actions": [
+            "extend_to_payoff",
+            "restore_semantic_completion"
+          ],
+          "evidence_refs": [
+            {
+              "code": "source_range",
+              "state": "available",
+              "source": "candidate",
+              "details": {
+                "candidate_id": "candidate-chapter-027-story-001",
+                "source_start": 806.97,
+                "source_end": 828.6,
+                "valid": true
+              }
+            },
+            {
+              "code": "semantic_boundary",
+              "state": "available",
+              "source": "boundary_diagnostics",
+              "details": {
+                "eligible": true,
+                "word_integrity": true,
+                "sentence_integrity": true,
+                "semantic_completion": 0.95,
+                "payoff_preserved": true
+              }
+            },
+            {
+              "code": "semantic_story_unit",
+              "state": "available",
+              "source": "story_unit",
+              "details": {
+                "story_unit_id": "chapter-027-story-001",
+                "completeness_score": 75.0
+              }
+            },
+            {
+              "code": "hook",
+              "state": "available",
+              "source": "story_unit",
+              "details": {
+                "hook_strength": 55.0,
+                "hook_text_available": true
+              }
+            },
+            {
+              "code": "payoff",
+              "state": "unavailable",
+              "source": "semantic_boundary",
+              "details": {
+                "payoff_present": false,
+                "story_payoff_available": false,
+                "natural_end": true,
+                "visual_payoff_verified": false,
+                "linked_multimodal_payoff": false
+              }
+            },
+            {
+              "code": "speech_clarity",
+              "state": "available",
+              "source": "transcript_features",
+              "details": {
+                "transcript_confidence": 0.821
+              }
+            },
+            {
+              "code": "visual_viability",
+              "state": "unavailable",
+              "source": "visual_analysis",
+              "details": {
+                "status": "skipped",
+                "reason": "disabled"
+              }
+            },
+            {
+              "code": "cached_hard_eligibility",
+              "state": "available",
+              "source": "cached_candidate.virality.eligibility",
+              "details": {
+                "status": "rejected",
+                "critical_failures": [
+                  "incomplete_story"
+                ],
+                "mapped_reason_codes": [
+                  "SEMANTIC_INCOMPLETE",
+                  "NO_PAYOFF"
+                ]
+              }
+            }
+          ]
+        },
+        "legacy_virality_eligibility": {
+          "candidate_id": "candidate-chapter-027-story-001",
+          "status": "rejected",
+          "reasons": [
+            "clear_opening",
+            "standalone_story",
+            "payoff_is_weak_or_missing",
+            "boundary_safe",
+            "retention_low",
+            "critical_publishability_failure"
+          ],
+          "critical_failures": [
+            "incomplete_story"
+          ],
+          "reconstruction_opportunities": [],
+          "confidence": {
+            "score": 0.817841,
+            "confidence": 0.817841,
+            "evidence": [
+              {
+                "source": "eligibility_confidence",
+                "raw_value": 0.817841,
+                "normalized_value": 0.817841,
+                "confidence": 0.817841,
+                "segment_ids": [
+                  172,
+                  173,
+                  174,
+                  175,
+                  176
+                ],
+                "excerpt": "Когда будут похороны? Столько времени в себя не приходило. Мы думали, что и тебя потеряли. Столько цветов, все красиво.",
+                "feature_name": ""
+              }
+            ],
+            "explanation": "Уверенность в eligibility основана на доступных source diagnostics, а не на viral score."
+          }
+        }
+      },
+      "measured_value": "passed",
+      "threshold": "surfacing_state in {RECOMMENDED, AVAILABLE} with valid lineage",
+      "provenance": {
+        "producer": "editorial_profile_policy",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "DIVERSITY",
+      "severity": "warning",
+      "status": "warning",
+      "evidence": null,
+      "measured_value": [
+        "QUALITY_CONFIDENCE_LOW"
+      ],
+      "threshold": "candidate selected by versioned diversity decision",
+      "provenance": {
+        "producer": "diversity",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "BOUNDARIES",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "schema_version": "5C.1",
+        "decision_id": "boundary-candidate-chapter-027-story-001-dc3cb152a2ce",
+        "candidate_id": "candidate-chapter-027-story-001",
+        "rough_range": {
+          "start_seconds": 807.22,
+          "end_seconds": 827.95
+        },
+        "refined_range": {
+          "start_seconds": 806.97,
+          "end_seconds": 828.6
+        },
+        "allowed_source_range": {
+          "start_seconds": 806.97,
+          "end_seconds": 828.6
+        },
+        "start_reason": "Начало полного первого слова на границе предложения.",
+        "end_reason": "Конец полного последнего слова и завершённого предложения.",
+        "word_integrity": true,
+        "sentence_integrity": true,
+        "semantic_completion": true,
+        "payoff_preserved": true,
+        "continuation_risk": 0.15,
+        "continuation_risk_threshold": 0.65,
+        "pre_roll_seconds": 0.25,
+        "post_roll_seconds": 0.65,
+        "confidence": 0.964,
+        "start_evidence": {
+          "timestamp": 807.22,
+          "boundary_type": "strong_start",
+          "confidence": 0.95,
+          "supporting_signals": [
+            "sentence_start",
+            "pause_before"
+          ],
+          "penalties": [],
+          "transcript_segment_id": 172,
+          "word_index": 689,
+          "scene_boundary_distance": 1.18,
+          "silence_before": 2.93,
+          "silence_after": 0.0,
+          "speaker_change": false,
+          "sentence_completion": true,
+          "semantic_completion_score": 1.0,
+          "continuation_probability": 0.0,
+          "reason": "Начало полного первого слова на границе предложения."
+        },
+        "end_evidence": {
+          "timestamp": 827.95,
+          "boundary_type": "strong_end",
+          "confidence": 0.985,
+          "supporting_signals": [
+            "sentence_completion",
+            "silence_after",
+            "scene_boundary_nearby"
+          ],
+          "penalties": [],
+          "transcript_segment_id": 176,
+          "word_index": 706,
+          "scene_boundary_distance": 0.13,
+          "silence_before": 0.0,
+          "silence_after": 1.58,
+          "speaker_change": false,
+          "sentence_completion": true,
+          "semantic_completion_score": 0.95,
+          "continuation_probability": 0.15,
+          "reason": "Конец полного последнего слова и завершённого предложения."
+        },
+        "pause_evidence": {
+          "head_silence_seconds": 2.93,
+          "tail_silence_seconds": 1.58,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "intentional_pause_preserved": true
+        },
+        "question_context": {
+          "start_is_question": true,
+          "end_is_question": false,
+          "answer_or_completion_included": true
+        },
+        "required_evidence": [
+          {
+            "requirement_type": "hook",
+            "required": true,
+            "source_range": {
+              "start_seconds": 807.22,
+              "end_seconds": 808.22
+            },
+            "transcript_segment_id": 172,
+            "reason": "Hook must remain in the final source dialogue.",
+            "evidence": {
+              "text": "Когда будут похороны?",
+              "boundary_reason": "Начало полного первого слова на границе предложения."
+            }
+          },
+          {
+            "requirement_type": "completion",
+            "required": true,
+            "source_range": {
+              "start_seconds": 827.17,
+              "end_seconds": 827.95
+            },
+            "transcript_segment_id": 176,
+            "reason": "The final complete thought must remain in the final source dialogue.",
+            "evidence": {
+              "text": "Столько цветов, все красиво.",
+              "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+            }
+          },
+          {
+            "requirement_type": "payoff",
+            "required": false,
+            "source_range": {
+              "start_seconds": 827.17,
+              "end_seconds": 827.95
+            },
+            "transcript_segment_id": 176,
+            "reason": "Detected payoff must remain in the final source dialogue.",
+            "evidence": {
+              "text": "",
+              "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+            }
+          }
+        ],
+        "safe_start_points": [
+          806.97,
+          807.22,
+          807.46,
+          807.68,
+          813.0,
+          813.54,
+          813.9,
+          814.06,
+          814.22,
+          814.4,
+          814.92,
+          815.96,
+          816.1,
+          816.2,
+          816.34,
+          825.19,
+          825.55,
+          827.17,
+          827.35
+        ],
+        "safe_end_points": [
+          807.46,
+          807.68,
+          808.22,
+          813.54,
+          813.9,
+          814.06,
+          814.22,
+          814.4,
+          814.92,
+          815.9,
+          816.1,
+          816.2,
+          816.34,
+          816.86,
+          825.55,
+          826.05,
+          827.35,
+          827.95,
+          828.6
+        ],
+        "fallback_used": false,
+        "fallback_reason": null,
+        "multimodal_context": {
+          "schema_version": "6D.boundary-context.1",
+          "preserve_until_seconds": 828.6,
+          "visual_payoff_verified": false,
+          "visual_reaction_verified": false,
+          "multimodal_payoff_grounded": false,
+          "audio_or_visual_payoff_times": [
+            828.6
+          ],
+          "confidence": 0.0,
+          "evidence_refs": [
+            {
+              "source": "multimodal_candidate_provenance",
+              "analysis_run_id": "multimodal-1633629a6257205ffbb0"
+            },
+            {
+              "source": "vision_pass2",
+              "status": null
+            }
+          ],
+          "provenance": {
+            "mode": "observed_evidence_only",
+            "candidate_id": "candidate-chapter-027-story-001"
+          }
+        }
+      },
+      "measured_value": "passed",
+      "threshold": "safe complete boundary",
+      "provenance": {
+        "producer": "boundary_decision",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "CONTINUITY",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "schema_version": "A-2.continuity.1",
+        "decision_id": "continuity-candidate-chapter-027-story-001-383a04d5df593971",
+        "candidate_id": "candidate-chapter-027-story-001",
+        "boundary_decision_id": "boundary-candidate-chapter-027-story-001-dc3cb152a2ce",
+        "boundary_decision_sha256": "49c3019e80d70008ca646aab704ab733c53b998264167a8d4cf639d8369ce9e9",
+        "approved_source_range": {
+          "start_seconds": 806.97,
+          "end_seconds": 828.6
+        },
+        "mode": "uncertain",
+        "required_spans": [],
+        "omitted_spans": [
+          {
+            "source_range": {
+              "start_seconds": 808.22,
+              "end_seconds": 813.0
+            },
+            "rationale_type": "unexplained",
+            "rationale": "No persisted visual, semantic, reaction, payoff, or compaction evidence explains this non-dialogue gap.",
+            "evidence": {
+              "source": "transcript_primary_coverage",
+              "left_transcript_segment_id": 172,
+              "right_transcript_segment_id": 173
+            }
+          },
+          {
+            "source_range": {
+              "start_seconds": 816.86,
+              "end_seconds": 825.19
+            },
+            "rationale_type": "unexplained",
+            "rationale": "No persisted visual, semantic, reaction, payoff, or compaction evidence explains this non-dialogue gap.",
+            "evidence": {
+              "source": "transcript_primary_coverage",
+              "left_transcript_segment_id": 173,
+              "right_transcript_segment_id": 175
+            }
+          },
+          {
+            "source_range": {
+              "start_seconds": 826.05,
+              "end_seconds": 827.17
+            },
+            "rationale_type": "unexplained",
+            "rationale": "No persisted visual, semantic, reaction, payoff, or compaction evidence explains this non-dialogue gap.",
+            "evidence": {
+              "source": "transcript_primary_coverage",
+              "left_transcript_segment_id": 175,
+              "right_transcript_segment_id": 176
+            }
+          }
+        ],
+        "evidence": {
+          "producer": "A-2.continuity-decision",
+          "primary_coverage_span_count": 4,
+          "internal_gap_count": 3,
+          "internal_gap_duration_seconds": 14.23,
+          "multimodal_evidence_present": true
+        }
+      },
+      "measured_value": "passed",
+      "threshold": "every omitted non-dialogue span has a typed rationale and required spans survive",
+      "provenance": {
+        "producer": "continuity_decision",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "SEMANTIC_CONTENT",
+      "severity": "none",
+      "status": "passed",
+      "evidence": [
+        {
+          "segment_id": "dialogue-001",
+          "segment_type": "original_dialogue",
+          "order": 1,
+          "estimated_duration_seconds": 21.629999999999995,
+          "timeline_included": false,
+          "linked_segment_ids": [],
+          "fact_id": "fact-172",
+          "transcript_segment_id": 172,
+          "source_start_seconds": 806.97,
+          "source_end_seconds": 828.6,
+          "source_text": "Когда будут похороны? Столько времени в себя не приходило. Мы думали, что и тебя потеряли. Столько цветов, все красиво.",
+          "speaker": "original_speaker_unknown",
+          "confidence": 0.732,
+          "evidence_mappings": [
+            {
+              "fact_id": "fact-172",
+              "transcript_segment_id": 172,
+              "source_start_seconds": 807.22,
+              "source_end_seconds": 808.22,
+              "source_text": "Когда будут похороны?",
+              "confidence": 0.797
+            },
+            {
+              "fact_id": "fact-173",
+              "transcript_segment_id": 173,
+              "source_start_seconds": 813.0,
+              "source_end_seconds": 814.92,
+              "source_text": "Столько времени в себя не приходило.",
+              "confidence": 0.942
+            },
+            {
+              "fact_id": "fact-174",
+              "transcript_segment_id": 174,
+              "source_start_seconds": 814.92,
+              "source_end_seconds": 816.86,
+              "source_text": "Мы думали, что и тебя потеряли.",
+              "confidence": 0.732
+            },
+            {
+              "fact_id": "fact-175",
+              "transcript_segment_id": 175,
+              "source_start_seconds": 825.19,
+              "source_end_seconds": 826.05,
+              "source_text": "Столько цветов,",
+              "confidence": 0.877
+            },
+            {
+              "fact_id": "fact-176",
+              "transcript_segment_id": 176,
+              "source_start_seconds": 827.17,
+              "source_end_seconds": 827.95,
+              "source_text": "все красиво.",
+              "confidence": 0.759
+            }
+          ],
+          "boundary_decision_id": "boundary-candidate-chapter-027-story-001-dc3cb152a2ce",
+          "is_placeholder": true
+        }
+      ],
+      "measured_value": "passed",
+      "threshold": "every published dialogue mapping has grounded confidence >= 0.5",
+      "provenance": {
+        "producer": "semantic_content_quality",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "PLAN_IDENTITY",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "schema_version": "5F.1",
+        "identity": {
+          "project_id": "3c21b1579922410b9b2f33080356f34f",
+          "run_id": "63b0706c29cf4169844dc77fa5bb5829",
+          "analysis_id": "analysis-7a1acd4d3217760b",
+          "candidate_id": "candidate-chapter-027-story-001",
+          "source_id": "3b9aac2f10b4e7c10de70567"
+        },
+        "boundary_decision_ref": "boundary-candidate-chapter-027-story-001-dc3cb152a2ce",
+        "continuity_decision_ref": "continuity-candidate-chapter-027-story-001-383a04d5df593971",
+        "preset": {
+          "preset_id": "dynamic",
+          "preset_version": "1.0.0",
+          "platform": "universal"
+        },
+        "target": {
+          "width": 1080,
+          "height": 1920,
+          "fps": 30.0,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p"
+        },
+        "input_fingerprints": {
+          "source_sha256": "3b9aac2f10b4e7c10de7056708e583ba6880c483c9fb726b65223de65f8b9da3",
+          "transcript_sha256": "c4f077d27141ea8e5a3dd27bce47757591a9c7627999842951c0bbe2d83a6d56",
+          "analysis_sha256": "7a1acd4d3217760b9788f258441f4df32d13f0f2828607396e8011dc891fcf83",
+          "final_script_sha256": "e2919f7fe27a0bf61a3522aafe86d4a39b1c73941c1ccdd7d21fb606979ef421",
+          "boundary_decision_sha256": "49c3019e80d70008ca646aab704ab733c53b998264167a8d4cf639d8369ce9e9",
+          "continuity_decision_sha256": "27260ebb9baa4bd690e3eb2e15fd1c0d8f8559261b6ae136a4897b9e142ed97b"
+        },
+        "created_at": "2026-08-15T11:45:46.662725+00:00",
+        "warnings": [],
+        "compatibility_mode": "native",
+        "legacy_source_version": null
+      },
+      "measured_value": "passed",
+      "threshold": "plan parents match output",
+      "provenance": {
+        "producer": "production_plan_envelope",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "COMPOSITION",
+      "severity": "warning",
+      "status": "warning",
+      "evidence": {
+        "schema_version": "7D.composition-plan.1",
+        "intent_id": "intent-phase6-ccf872542835b8d44",
+        "segments": [
+          {
+            "segment_id": "composition-001",
+            "output": {
+              "start_frame": 0,
+              "end_frame": 43
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 0,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-002",
+            "output": {
+              "start_frame": 43,
+              "end_frame": 94
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 43,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-003",
+            "output": {
+              "start_frame": 94,
+              "end_frame": 166
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 94,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-004",
+            "output": {
+              "start_frame": 166,
+              "end_frame": 207
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 166,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-005",
+            "output": {
+              "start_frame": 207,
+              "end_frame": 239
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 207,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-006",
+            "output": {
+              "start_frame": 239,
+              "end_frame": 283
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 239,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-007",
+            "output": {
+              "start_frame": 283,
+              "end_frame": 340
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 283,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-008",
+            "output": {
+              "start_frame": 340,
+              "end_frame": 461
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 340,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-009",
+            "output": {
+              "start_frame": 461,
+              "end_frame": 528
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 461,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-010",
+            "output": {
+              "start_frame": 528,
+              "end_frame": 581
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 528,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-011",
+            "output": {
+              "start_frame": 581,
+              "end_frame": 634
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 581,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          },
+          {
+            "segment_id": "composition-012",
+            "output": {
+              "start_frame": 634,
+              "end_frame": 649
+            },
+            "layout": "fit_background",
+            "target": "stable_source",
+            "target_ref": null,
+            "crop": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 1.0,
+              "height": 1.0
+            },
+            "target_confidence": 0.0,
+            "target_bounds": null,
+            "protected_regions": [],
+            "geometry": {
+              "schema_version": "7D.composition-geometry.1",
+              "source_coordinate_space": "normalized_source",
+              "output_coordinate_space": "normalized_output",
+              "source_crop": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1.0,
+                "height": 1.0
+              },
+              "output_content_bounds": {
+                "x": 0.0,
+                "y": 0.34179688,
+                "width": 1.0,
+                "height": 0.31640625
+              },
+              "target_regions": [],
+              "protected_regions": []
+            },
+            "crop_keyframes": [
+              {
+                "frame": 634,
+                "crop": {
+                  "x": 0.0,
+                  "y": 0.0,
+                  "width": 1.0,
+                  "height": 1.0
+                },
+                "velocity_per_frame": 0.0,
+                "acceleration_per_frame_sq": 0.0,
+                "reason": "scene_reset"
+              }
+            ],
+            "movement_reason": "scene_reset",
+            "punch_in": null,
+            "easing_id": "none",
+            "evidence_refs": [],
+            "fallback": "fit_background"
+          }
+        ],
+        "ordered_fallbacks": [
+          "wider_crop",
+          "stable_source",
+          "fit_background"
+        ],
+        "quality_report": {
+          "schema_version": "7D.composition-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "COMPOSITION_LOW_CONFIDENCE",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Low-confidence evidence uses a calm stable or fit/background frame."
+            },
+            {
+              "code": "COMPOSITION_SAFE_FALLBACK",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Composition applied the declared wider, stable or fit/background fallback chain."
+            }
+          ],
+          "metrics": {
+            "segment_count": 12,
+            "target_switch_count": 0,
+            "layout_switch_count": 0,
+            "suppressed_switch_count": 0,
+            "fallback_count": 12,
+            "punch_in_count": 0,
+            "clipped_target_count": 0,
+            "unsafe_crop_count": 0,
+            "jitter_event_count": 0,
+            "minimum_hold_violation_count": 0,
+            "max_velocity_per_frame": 0.0,
+            "max_acceleration_per_frame_sq": 0.0,
+            "switches_per_minute": 0.0,
+            "layout_switches_per_minute": 0.0,
+            "minimum_target_containment": 1.0
+          },
+          "provenance": {
+            "producer": "composition_planner",
+            "planner_version": "7J.1.composition-calibration.1",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "diagnostics": [
+          "LOW_CONFIDENCE_SAFE_FRAME:0",
+          "LOW_CONFIDENCE_SAFE_FRAME:43",
+          "LOW_CONFIDENCE_SAFE_FRAME:94",
+          "LOW_CONFIDENCE_SAFE_FRAME:166",
+          "LOW_CONFIDENCE_SAFE_FRAME:207",
+          "LOW_CONFIDENCE_SAFE_FRAME:239",
+          "LOW_CONFIDENCE_SAFE_FRAME:283",
+          "LOW_CONFIDENCE_SAFE_FRAME:340",
+          "LOW_CONFIDENCE_SAFE_FRAME:461",
+          "LOW_CONFIDENCE_SAFE_FRAME:528",
+          "LOW_CONFIDENCE_SAFE_FRAME:581",
+          "LOW_CONFIDENCE_SAFE_FRAME:634"
+        ]
+      },
+      "measured_value": [
+        "COMPOSITION_LOW_CONFIDENCE",
+        "COMPOSITION_SAFE_FALLBACK"
+      ],
+      "threshold": "composition decision passed",
+      "provenance": {
+        "producer": "composition_quality_report",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "SOURCE_BROLL",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "schema_version": "7E.source-broll-quality.1",
+        "status": "PASS",
+        "findings": [],
+        "metrics": {
+          "proposal_count": 0,
+          "selected_count": 0,
+          "rejected_count": 0,
+          "a_roll_fallback_count": 0,
+          "repeated_range_count": 0,
+          "premature_reveal_count": 0,
+          "attribution_violation_count": 0,
+          "causality_violation_count": 0,
+          "chronology_violation_count": 0,
+          "selected_duration_frames": 0,
+          "semantic_kind_counts": []
+        },
+        "provenance": {
+          "producer": "source_broll_planner",
+          "planner_version": "7E.source-broll-planner.1",
+          "intent_id": "intent-phase6-ccf872542835b8d44",
+          "evidence_fingerprint": "37456564e13c0a8b76f98996689e488cd8f79ac25b769910b05a5ed427f7ec4b",
+          "composition_plan_sha256": "58af18e5d34e6428acee64da0765ba666003c83bff7ee30902ad10e0d83dccdb"
+        }
+      },
+      "measured_value": "passed",
+      "threshold": "evidence relevance and forbidden insertion checks passed",
+      "provenance": {
+        "producer": "source_broll_quality_report",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "EDITORIAL_MOTION",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "schema_version": "7F.motion-quality.1",
+        "status": "PASS",
+        "findings": [],
+        "metrics": {
+          "requested_event_count": 2,
+          "emitted_event_count": 2,
+          "animated_event_count": 2,
+          "suppressed_event_count": 0,
+          "cooldown_suppression_count": 0,
+          "concurrency_suppression_count": 0,
+          "budget_suppression_count": 0,
+          "readability_suppression_count": 0,
+          "fallback_count": 0,
+          "max_concurrent_layers": 1,
+          "animation_points_used": 2,
+          "animated_frames_used": 36,
+          "events_per_minute": 5.547
+        },
+        "provenance": {
+          "producer": "motion_planner",
+          "planner_version": "7J.1.motion-calibration.1",
+          "capability_registry_version": "7B.capability-registry.1",
+          "intent_id": "intent-phase6-ccf872542835b8d44",
+          "caption_plan_sha256": "2edac1a3ce0b285298569f1b5bd5722780b9d327dc7751bdb2d526d6cf1f18a3",
+          "composition_plan_sha256": "58af18e5d34e6428acee64da0765ba666003c83bff7ee30902ad10e0d83dccdb",
+          "source_broll_plan_sha256": "b570076c4b268246280a6853fe38f744d3ce8357beaf71dbf9a23e055b48e564"
+        }
+      },
+      "measured_value": "passed",
+      "threshold": "registry, cooldown, concurrency, readability and animation budget passed",
+      "provenance": {
+        "producer": "motion_quality_report",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "SUBTITLES",
+      "severity": "warning",
+      "status": "warning",
+      "evidence": {
+        "schema_version": "7C.caption-plan.1",
+        "intent_id": "intent-phase6-ccf872542835b8d44",
+        "cues": [
+          {
+            "cue_id": "caption-001",
+            "output": {
+              "start_frame": 7,
+              "end_frame": 45
+            },
+            "resolved_lines": [
+              "Когда будут похороны?"
+            ],
+            "lane": "lower",
+            "typography_token_id": "caption-preset:accent_yellow:2.1.0",
+            "semantic_class": null,
+            "evidence_refs": [
+              "story-candidate-chapter-027-story-001-chapter-027-story-001"
+            ],
+            "primitive_id": "static",
+            "easing_id": "none",
+            "normalized_bounds": {
+              "x": 0.1092681,
+              "y": 0.7935362,
+              "width": 0.7814637,
+              "height": 0.0529275
+            },
+            "words": [
+              {
+                "word_id": "word-00696",
+                "text": "Когда",
+                "output": {
+                  "start_frame": 7,
+                  "end_frame": 15
+                },
+                "timing_source": "verified",
+                "confidence": 0.6504648923873901,
+                "source": {
+                  "start_tick": 807220000,
+                  "end_tick": 807460000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-01"
+                ]
+              },
+              {
+                "word_id": "word-00697",
+                "text": "будут",
+                "output": {
+                  "start_frame": 14,
+                  "end_frame": 22
+                },
+                "timing_source": "verified",
+                "confidence": 0.8964556455612183,
+                "source": {
+                  "start_tick": 807460000,
+                  "end_tick": 807680000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-01"
+                ]
+              },
+              {
+                "word_id": "word-00698",
+                "text": "похороны?",
+                "output": {
+                  "start_frame": 21,
+                  "end_frame": 38
+                },
+                "timing_source": "verified",
+                "confidence": 0.8432662487030029,
+                "source": {
+                  "start_tick": 807680000,
+                  "end_tick": 808220000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-01"
+                ]
+              }
+            ],
+            "timing_mode": "phrase",
+            "timing_confidence": 0.65,
+            "emphasis": null,
+            "beat_role": null,
+            "collision": {
+              "lane": "lower",
+              "candidate_costs": [
+                [
+                  "lower",
+                  0.0
+                ],
+                [
+                  "lower_mid",
+                  0.8
+                ],
+                [
+                  "upper_mid",
+                  1.6
+                ],
+                [
+                  "upper",
+                  2.4
+                ]
+              ],
+              "overlap_ratio": 0.0,
+              "protected_region_ids": [],
+              "safe_zone_valid": true,
+              "switched_lane": false,
+              "reason": "preferred_lane"
+            },
+            "resolved_font_size_ratio": 0.043229166666666666,
+            "motion_duration_frames": 0,
+            "scale_percent": 100,
+            "scale_keyframes": [
+              100,
+              100,
+              100
+            ],
+            "display_mode": "phrase",
+            "slide_distance_ratio": 0.0,
+            "fallback_reason": "weak_timing"
+          },
+          {
+            "cue_id": "caption-002",
+            "output": {
+              "start_frame": 176,
+              "end_frame": 239
+            },
+            "resolved_lines": [
+              "Столько времени",
+              "в себя не приходило."
+            ],
+            "lane": "lower",
+            "typography_token_id": "caption-preset:accent_yellow:2.1.0",
+            "semantic_class": null,
+            "evidence_refs": [],
+            "primitive_id": "static",
+            "easing_id": "none",
+            "normalized_bounds": {
+              "x": 0.1463052,
+              "y": 0.7701925,
+              "width": 0.7073896,
+              "height": 0.099615
+            },
+            "words": [
+              {
+                "word_id": "word-00699",
+                "text": "Столько",
+                "output": {
+                  "start_frame": 181,
+                  "end_frame": 198
+                },
+                "timing_source": "verified",
+                "confidence": 0.8343863785266876,
+                "source": {
+                  "start_tick": 813000000,
+                  "end_tick": 813540000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-04"
+                ]
+              },
+              {
+                "word_id": "word-00700",
+                "text": "времени",
+                "output": {
+                  "start_frame": 197,
+                  "end_frame": 209
+                },
+                "timing_source": "verified",
+                "confidence": 0.9990890026092529,
+                "source": {
+                  "start_tick": 813540000,
+                  "end_tick": 813900000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-04",
+                  "legacy-visual-001-scene-05"
+                ]
+              },
+              {
+                "word_id": "word-00701",
+                "text": "в",
+                "output": {
+                  "start_frame": 208,
+                  "end_frame": 214
+                },
+                "timing_source": "verified",
+                "confidence": 0.9091482162475586,
+                "source": {
+                  "start_tick": 813900000,
+                  "end_tick": 814060000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-05"
+                ]
+              },
+              {
+                "word_id": "word-00702",
+                "text": "себя",
+                "output": {
+                  "start_frame": 213,
+                  "end_frame": 219
+                },
+                "timing_source": "verified",
+                "confidence": 0.9945587515830994,
+                "source": {
+                  "start_tick": 814060000,
+                  "end_tick": 814220000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-05"
+                ]
+              },
+              {
+                "word_id": "word-00703",
+                "text": "не",
+                "output": {
+                  "start_frame": 218,
+                  "end_frame": 224
+                },
+                "timing_source": "verified",
+                "confidence": 0.9603298306465149,
+                "source": {
+                  "start_tick": 814220000,
+                  "end_tick": 814400000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-05"
+                ]
+              },
+              {
+                "word_id": "word-00704",
+                "text": "приходило.",
+                "output": {
+                  "start_frame": 223,
+                  "end_frame": 239
+                },
+                "timing_source": "verified",
+                "confidence": 0.9523110389709473,
+                "source": {
+                  "start_tick": 814400000,
+                  "end_tick": 814920000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-05"
+                ]
+              }
+            ],
+            "timing_mode": "word",
+            "timing_confidence": 0.834,
+            "emphasis": null,
+            "beat_role": null,
+            "collision": {
+              "lane": "lower",
+              "candidate_costs": [
+                [
+                  "lower",
+                  0.0
+                ],
+                [
+                  "lower_mid",
+                  18.8
+                ],
+                [
+                  "upper_mid",
+                  19.6
+                ],
+                [
+                  "upper",
+                  20.4
+                ]
+              ],
+              "overlap_ratio": 0.0,
+              "protected_region_ids": [],
+              "safe_zone_valid": true,
+              "switched_lane": false,
+              "reason": "stable_lane"
+            },
+            "resolved_font_size_ratio": 0.043229166666666666,
+            "motion_duration_frames": 0,
+            "scale_percent": 100,
+            "scale_keyframes": [
+              100,
+              100,
+              100
+            ],
+            "display_mode": "phrase",
+            "slide_distance_ratio": 0.0,
+            "fallback_reason": null
+          },
+          {
+            "cue_id": "caption-003",
+            "output": {
+              "start_frame": 239,
+              "end_frame": 297
+            },
+            "resolved_lines": [
+              "думали, что",
+              "и тебя потеряли."
+            ],
+            "lane": "lower",
+            "typography_token_id": "caption-preset:accent_yellow:2.1.0",
+            "semantic_class": null,
+            "evidence_refs": [],
+            "primitive_id": "static",
+            "easing_id": "none",
+            "normalized_bounds": {
+              "x": 0.2217681,
+              "y": 0.7701925,
+              "width": 0.5564637,
+              "height": 0.099615
+            },
+            "words": [
+              {
+                "word_id": "word-00706",
+                "text": "думали,",
+                "output": {
+                  "start_frame": 239,
+                  "end_frame": 269
+                },
+                "timing_source": "verified",
+                "confidence": 0.9512246251106262,
+                "source": {
+                  "start_tick": 814920000,
+                  "end_tick": 815900000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-06"
+                ]
+              },
+              {
+                "word_id": "word-00707",
+                "text": "что",
+                "output": {
+                  "start_frame": 269,
+                  "end_frame": 275
+                },
+                "timing_source": "verified",
+                "confidence": 0.9940859079360962,
+                "source": {
+                  "start_tick": 815960000,
+                  "end_tick": 816100000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-06"
+                ]
+              },
+              {
+                "word_id": "word-00708",
+                "text": "и",
+                "output": {
+                  "start_frame": 274,
+                  "end_frame": 278
+                },
+                "timing_source": "verified",
+                "confidence": 0.34438183903694153,
+                "source": {
+                  "start_tick": 816100000,
+                  "end_tick": 816200000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-06"
+                ]
+              },
+              {
+                "word_id": "word-00709",
+                "text": "тебя",
+                "output": {
+                  "start_frame": 277,
+                  "end_frame": 282
+                },
+                "timing_source": "verified",
+                "confidence": 0.978670060634613,
+                "source": {
+                  "start_tick": 816200000,
+                  "end_tick": 816340000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-06"
+                ]
+              },
+              {
+                "word_id": "word-00710",
+                "text": "потеряли.",
+                "output": {
+                  "start_frame": 281,
+                  "end_frame": 297
+                },
+                "timing_source": "verified",
+                "confidence": 0.9892445206642151,
+                "source": {
+                  "start_tick": 816340000,
+                  "end_tick": 816860000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-06",
+                  "legacy-visual-001-scene-07"
+                ]
+              }
+            ],
+            "timing_mode": "static",
+            "timing_confidence": 0.344,
+            "emphasis": null,
+            "beat_role": null,
+            "collision": {
+              "lane": "lower",
+              "candidate_costs": [
+                [
+                  "lower",
+                  0.0
+                ],
+                [
+                  "lower_mid",
+                  18.8
+                ],
+                [
+                  "upper_mid",
+                  19.6
+                ],
+                [
+                  "upper",
+                  20.4
+                ]
+              ],
+              "overlap_ratio": 0.0,
+              "protected_region_ids": [],
+              "safe_zone_valid": true,
+              "switched_lane": false,
+              "reason": "stable_lane"
+            },
+            "resolved_font_size_ratio": 0.043229166666666666,
+            "motion_duration_frames": 0,
+            "scale_percent": 100,
+            "scale_keyframes": [
+              100,
+              100,
+              100
+            ],
+            "display_mode": "phrase",
+            "slide_distance_ratio": 0.0,
+            "fallback_reason": "weak_timing"
+          },
+          {
+            "cue_id": "caption-004",
+            "output": {
+              "start_frame": 546,
+              "end_frame": 574
+            },
+            "resolved_lines": [
+              "Столько цветов,"
+            ],
+            "lane": "lower",
+            "typography_token_id": "caption-preset:accent_yellow:2.1.0",
+            "semantic_class": null,
+            "evidence_refs": [],
+            "primitive_id": "static",
+            "easing_id": "none",
+            "normalized_bounds": {
+              "x": 0.2277867,
+              "y": 0.7935362,
+              "width": 0.5444267,
+              "height": 0.0529275
+            },
+            "words": [
+              {
+                "word_id": "word-00711",
+                "text": "Столько",
+                "output": {
+                  "start_frame": 546,
+                  "end_frame": 558
+                },
+                "timing_source": "verified",
+                "confidence": 0.7827611565589905,
+                "source": {
+                  "start_tick": 825190000,
+                  "end_tick": 825550000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-10"
+                ]
+              },
+              {
+                "word_id": "word-00712",
+                "text": "цветов,",
+                "output": {
+                  "start_frame": 557,
+                  "end_frame": 573
+                },
+                "timing_source": "verified",
+                "confidence": 0.9719025790691376,
+                "source": {
+                  "start_tick": 825550000,
+                  "end_tick": 826050000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-10"
+                ]
+              }
+            ],
+            "timing_mode": "word",
+            "timing_confidence": 0.783,
+            "emphasis": null,
+            "beat_role": null,
+            "collision": {
+              "lane": "lower",
+              "candidate_costs": [
+                [
+                  "lower",
+                  0.0
+                ],
+                [
+                  "lower_mid",
+                  18.8
+                ],
+                [
+                  "upper_mid",
+                  19.6
+                ],
+                [
+                  "upper",
+                  20.4
+                ]
+              ],
+              "overlap_ratio": 0.0,
+              "protected_region_ids": [],
+              "safe_zone_valid": true,
+              "switched_lane": false,
+              "reason": "stable_lane"
+            },
+            "resolved_font_size_ratio": 0.043229166666666666,
+            "motion_duration_frames": 0,
+            "scale_percent": 100,
+            "scale_keyframes": [
+              100,
+              100,
+              100
+            ],
+            "display_mode": "phrase",
+            "slide_distance_ratio": 0.0,
+            "fallback_reason": null
+          },
+          {
+            "cue_id": "caption-005",
+            "output": {
+              "start_frame": 606,
+              "end_frame": 631
+            },
+            "resolved_lines": [
+              "все красиво."
+            ],
+            "lane": "lower",
+            "typography_token_id": "caption-preset:accent_yellow:2.1.0",
+            "semantic_class": null,
+            "evidence_refs": [
+              "story-candidate-chapter-027-story-001-chapter-027-story-001"
+            ],
+            "primitive_id": "static",
+            "easing_id": "none",
+            "normalized_bounds": {
+              "x": 0.2875089,
+              "y": 0.7935362,
+              "width": 0.4249822,
+              "height": 0.0529275
+            },
+            "words": [
+              {
+                "word_id": "word-00713",
+                "text": "все",
+                "output": {
+                  "start_frame": 606,
+                  "end_frame": 613
+                },
+                "timing_source": "verified",
+                "confidence": 0.5210410952568054,
+                "source": {
+                  "start_tick": 827170000,
+                  "end_tick": 827350000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-11"
+                ]
+              },
+              {
+                "word_id": "word-00714",
+                "text": "красиво.",
+                "output": {
+                  "start_frame": 612,
+                  "end_frame": 631
+                },
+                "timing_source": "verified",
+                "confidence": 0.9962381720542908,
+                "source": {
+                  "start_tick": 827350000,
+                  "end_tick": 827950000
+                },
+                "mapping_segment_ids": [
+                  "legacy-visual-001-scene-11"
+                ]
+              }
+            ],
+            "timing_mode": "phrase",
+            "timing_confidence": 0.521,
+            "emphasis": null,
+            "beat_role": "payoff",
+            "collision": {
+              "lane": "lower",
+              "candidate_costs": [
+                [
+                  "lower",
+                  0.0
+                ],
+                [
+                  "lower_mid",
+                  18.8
+                ],
+                [
+                  "upper_mid",
+                  19.6
+                ],
+                [
+                  "upper",
+                  20.4
+                ]
+              ],
+              "overlap_ratio": 0.0,
+              "protected_region_ids": [],
+              "safe_zone_valid": true,
+              "switched_lane": false,
+              "reason": "stable_lane"
+            },
+            "resolved_font_size_ratio": 0.043229166666666666,
+            "motion_duration_frames": 0,
+            "scale_percent": 100,
+            "scale_keyframes": [
+              100,
+              100,
+              100
+            ],
+            "display_mode": "phrase",
+            "slide_distance_ratio": 0.0,
+            "fallback_reason": "weak_timing"
+          }
+        ],
+        "backend_id": "libass",
+        "intensity": "high",
+        "font_manifest": {
+          "font_id": "font.oswald.bold",
+          "requested_family": "Oswald",
+          "resolved_family": "Oswald",
+          "style": "normal",
+          "weight": "bold",
+          "weight_class": 700,
+          "file_name": "Oswald-Bold.ttf",
+          "file_sha256": "21843a0ccca2e97030da1330961646510ed6e9b8bb39620974c1195b9803034a",
+          "companion_faces": [],
+          "supported_scripts": [
+            "latin",
+            "cyrillic"
+          ],
+          "metrics_backend": "gdi_file_metrics",
+          "shaping_backend": "libass-harfbuzz",
+          "fallback_chain": [],
+          "deployment_status": "bundled",
+          "fallback_used": false
+        },
+        "typography": {
+          "token_id": "caption-preset:accent_yellow:2.1.0",
+          "font_size_ratio": 0.043,
+          "minimum_font_size_ratio": 0.030959999999999998,
+          "line_height": 1.08,
+          "font_weight": "bold",
+          "text_color": "#FFFFFF",
+          "highlight_color": "#FFD54A",
+          "outline_color": "#111111",
+          "outline_width_ratio": 0.00208,
+          "shadow_ratio": 0.00104,
+          "max_width_ratio": 0.84,
+          "alignment": "center",
+          "uppercase_emphasis": true
+        },
+        "feasibility_decision": {
+          "schema_version": "7J.2A-3.caption-feasibility.1",
+          "decision_id": "caption-feasibility-a727c0270ee72902aecba078",
+          "decision_version": "7J.2A-3.caption-feasibility.1",
+          "status": "FEASIBLE",
+          "reason_code": "CAPTION_TEMPORALLY_FEASIBLE",
+          "hard_cps_ceiling": 20.0,
+          "frozen_word_timing": true,
+          "speech_retiming_allowed": false,
+          "transcript_rewrite_allowed": false,
+          "evaluated_word_count": 18,
+          "evaluated_partition_count": 19,
+          "evidence": []
+        },
+        "quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "diagnostics": [
+          "UNMAPPED_WORD_DROPPED",
+          "INVALID_WORD_TIMING_DROPPED",
+          "WEAK_TIMING_DEGRADED_TO_PHRASE_STATIC",
+          "CAPTION_PRESENTATION_WINDOW_EXTENDED"
+        ]
+      },
+      "measured_value": [
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_INTENSITY_DEGRADED",
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_INTENSITY_DEGRADED"
+      ],
+      "threshold": "subtitle and semantic caption decisions passed",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "SEMANTIC_CAPTIONS",
+      "severity": "warning",
+      "status": "warning",
+      "evidence": {
+        "schema_version": "7C.caption-quality.1",
+        "status": "PASS_WITH_WARNINGS",
+        "findings": [
+          {
+            "code": "CAPTION_TIMING_WEAK",
+            "severity": "warning",
+            "cue_id": "caption-001",
+            "measured_value": "phrase",
+            "threshold": "trusted word timing",
+            "message": "Weak word timing was safely degraded to phrase/static caption timing."
+          },
+          {
+            "code": "CAPTION_INTENSITY_DEGRADED",
+            "severity": "warning",
+            "cue_id": "caption-001",
+            "measured_value": "high",
+            "threshold": "timing-safe primitive",
+            "message": "Requested intensity was reduced because the semantic event has weak timing."
+          },
+          {
+            "code": "CAPTION_TIMING_WEAK",
+            "severity": "warning",
+            "cue_id": "caption-003",
+            "measured_value": "static",
+            "threshold": "trusted word timing",
+            "message": "Weak word timing was safely degraded to phrase/static caption timing."
+          },
+          {
+            "code": "CAPTION_TIMING_WEAK",
+            "severity": "warning",
+            "cue_id": "caption-005",
+            "measured_value": "phrase",
+            "threshold": "trusted word timing",
+            "message": "Weak word timing was safely degraded to phrase/static caption timing."
+          },
+          {
+            "code": "CAPTION_INTENSITY_DEGRADED",
+            "severity": "warning",
+            "cue_id": "caption-005",
+            "measured_value": "high",
+            "threshold": "timing-safe primitive",
+            "message": "Requested intensity was reduced because the semantic event has weak timing."
+          }
+        ],
+        "metrics": {
+          "cue_count": 5,
+          "word_timed_cue_count": 2,
+          "weak_timing_cue_count": 3,
+          "semantic_emphasis_count": 0,
+          "motion_cue_count": 0,
+          "lane_switch_count": 0,
+          "protected_overlap_count": 0,
+          "safe_zone_violation_count": 0,
+          "max_cps": 15.0,
+          "font_exact": true,
+          "metrics_exact": true
+        },
+        "provenance": {
+          "producer": "app.caption_planning.CaptionPlanner",
+          "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+          "backend": "tier1-libass-7B",
+          "intent_id": "intent-phase6-ccf872542835b8d44"
+        }
+      },
+      "measured_value": [
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_INTENSITY_DEGRADED",
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_TIMING_WEAK",
+        "CAPTION_INTENSITY_DEGRADED"
+      ],
+      "threshold": "readability, timing, safe zones and protected-region overlap passed",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "AUDIO",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "status": "valid",
+        "checked_clip_count": 1,
+        "failed_clip_count": 0,
+        "mix_duration_seconds": 21.63,
+        "messages": []
+      },
+      "measured_value": "passed",
+      "threshold": "audio validation valid",
+      "provenance": {
+        "producer": "audio_validation",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "FFPROBE",
+      "severity": "none",
+      "status": "passed",
+      "evidence": "valid",
+      "measured_value": "passed",
+      "threshold": "ffprobe validation valid",
+      "provenance": {
+        "producer": "render_validation",
+        "config_version": "5G.0"
+      }
+    },
+    {
+      "code": "ARTIFACT_IDENTITY",
+      "severity": "none",
+      "status": "passed",
+      "evidence": {
+        "path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\670f4563b56c4ae6acd1f00f2e499a7d\\results\\final-short-01.mp4",
+        "sha256": "09fc79f925177c72afd1ec6c880ab212d095f6f7776a1b8521a942cb97dd95b8",
+        "artifact_id": "artifact-206d301411789e50034ee8b0"
+      },
+      "measured_value": "passed",
+      "threshold": "canonical bytes and parents match",
+      "provenance": {
+        "producer": "artifact_identity",
+        "config_version": "5G.0"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "code": "QUALITY_CONFIDENCE_LOW",
+      "severity": "warning",
+      "evidence": {
+        "diversity_decision": null
+      },
+      "measured_value": "legacy_unassessed",
+      "threshold": "versioned diversity decision",
+      "provenance": {
+        "producer": "diversity",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Diversity decision is legacy or unavailable.",
+      "technical_details": "Diversity decision is legacy or unavailable."
+    },
+    {
+      "code": "NATIVE_CREATIVE_FALLBACK",
+      "severity": "warning",
+      "evidence": {
+        "execution_status": "native_fallback",
+        "reason_codes": [
+          "COMPOSITION_EVIDENCE_UNAVAILABLE",
+          "STABLE_COMPOSITION_FALLBACK",
+          "SOURCE_BROLL_USAGE_NOT_AUTHORIZED",
+          "SAFE_A_ROLL_FALLBACK",
+          "NATIVE_REQUIRED_LAYER_FALLBACK",
+          "SEMANTIC_EMPHASIS_NOT_EXECUTED",
+          "COMPOSITION_REFRAME_NOT_EXECUTED"
+        ]
+      },
+      "measured_value": [
+        "COMPOSITION_EVIDENCE_UNAVAILABLE",
+        "STABLE_COMPOSITION_FALLBACK",
+        "SOURCE_BROLL_USAGE_NOT_AUTHORIZED",
+        "SAFE_A_ROLL_FALLBACK",
+        "NATIVE_REQUIRED_LAYER_FALLBACK",
+        "SEMANTIC_EMPHASIS_NOT_EXECUTED",
+        "COMPOSITION_REFRAME_NOT_EXECUTED"
+      ],
+      "threshold": "explicit safe fallback diagnostics",
+      "provenance": {
+        "producer": "creative_execution",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Native render used declared evidence-bounded fallbacks.",
+      "technical_details": "Native render used declared evidence-bounded fallbacks."
+    },
+    {
+      "code": "CAPTION_TIMING_WEAK",
+      "severity": "warning",
+      "evidence": {
+        "caption_quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "caption_finding": {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-001",
+          "measured_value": "phrase",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        }
+      },
+      "measured_value": "phrase",
+      "threshold": "trusted word timing",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Weak word timing was safely degraded to phrase/static caption timing.",
+      "technical_details": "Weak word timing was safely degraded to phrase/static caption timing."
+    },
+    {
+      "code": "CAPTION_INTENSITY_DEGRADED",
+      "severity": "warning",
+      "evidence": {
+        "caption_quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "caption_finding": {
+          "code": "CAPTION_INTENSITY_DEGRADED",
+          "severity": "warning",
+          "cue_id": "caption-001",
+          "measured_value": "high",
+          "threshold": "timing-safe primitive",
+          "message": "Requested intensity was reduced because the semantic event has weak timing."
+        }
+      },
+      "measured_value": "high",
+      "threshold": "timing-safe primitive",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Requested intensity was reduced because the semantic event has weak timing.",
+      "technical_details": "Requested intensity was reduced because the semantic event has weak timing."
+    },
+    {
+      "code": "CAPTION_TIMING_WEAK",
+      "severity": "warning",
+      "evidence": {
+        "caption_quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "caption_finding": {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-003",
+          "measured_value": "static",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        }
+      },
+      "measured_value": "static",
+      "threshold": "trusted word timing",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Weak word timing was safely degraded to phrase/static caption timing.",
+      "technical_details": "Weak word timing was safely degraded to phrase/static caption timing."
+    },
+    {
+      "code": "CAPTION_TIMING_WEAK",
+      "severity": "warning",
+      "evidence": {
+        "caption_quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "caption_finding": {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-005",
+          "measured_value": "phrase",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        }
+      },
+      "measured_value": "phrase",
+      "threshold": "trusted word timing",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Weak word timing was safely degraded to phrase/static caption timing.",
+      "technical_details": "Weak word timing was safely degraded to phrase/static caption timing."
+    },
+    {
+      "code": "CAPTION_INTENSITY_DEGRADED",
+      "severity": "warning",
+      "evidence": {
+        "caption_quality_report": {
+          "schema_version": "7C.caption-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-001",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-003",
+              "measured_value": "static",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_TIMING_WEAK",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "phrase",
+              "threshold": "trusted word timing",
+              "message": "Weak word timing was safely degraded to phrase/static caption timing."
+            },
+            {
+              "code": "CAPTION_INTENSITY_DEGRADED",
+              "severity": "warning",
+              "cue_id": "caption-005",
+              "measured_value": "high",
+              "threshold": "timing-safe primitive",
+              "message": "Requested intensity was reduced because the semantic event has weak timing."
+            }
+          ],
+          "metrics": {
+            "cue_count": 5,
+            "word_timed_cue_count": 2,
+            "weak_timing_cue_count": 3,
+            "semantic_emphasis_count": 0,
+            "motion_cue_count": 0,
+            "lane_switch_count": 0,
+            "protected_overlap_count": 0,
+            "safe_zone_violation_count": 0,
+            "max_cps": 15.0,
+            "font_exact": true,
+            "metrics_exact": true
+          },
+          "provenance": {
+            "producer": "app.caption_planning.CaptionPlanner",
+            "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+            "backend": "tier1-libass-7B",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "caption_finding": {
+          "code": "CAPTION_INTENSITY_DEGRADED",
+          "severity": "warning",
+          "cue_id": "caption-005",
+          "measured_value": "high",
+          "threshold": "timing-safe primitive",
+          "message": "Requested intensity was reduced because the semantic event has weak timing."
+        }
+      },
+      "measured_value": "high",
+      "threshold": "timing-safe primitive",
+      "provenance": {
+        "producer": "caption_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Requested intensity was reduced because the semantic event has weak timing.",
+      "technical_details": "Requested intensity was reduced because the semantic event has weak timing."
+    },
+    {
+      "code": "COMPOSITION_LOW_CONFIDENCE",
+      "severity": "warning",
+      "evidence": {
+        "composition_quality_report": {
+          "schema_version": "7D.composition-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "COMPOSITION_LOW_CONFIDENCE",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Low-confidence evidence uses a calm stable or fit/background frame."
+            },
+            {
+              "code": "COMPOSITION_SAFE_FALLBACK",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Composition applied the declared wider, stable or fit/background fallback chain."
+            }
+          ],
+          "metrics": {
+            "segment_count": 12,
+            "target_switch_count": 0,
+            "layout_switch_count": 0,
+            "suppressed_switch_count": 0,
+            "fallback_count": 12,
+            "punch_in_count": 0,
+            "clipped_target_count": 0,
+            "unsafe_crop_count": 0,
+            "jitter_event_count": 0,
+            "minimum_hold_violation_count": 0,
+            "max_velocity_per_frame": 0.0,
+            "max_acceleration_per_frame_sq": 0.0,
+            "switches_per_minute": 0.0,
+            "layout_switches_per_minute": 0.0,
+            "minimum_target_containment": 1.0
+          },
+          "provenance": {
+            "producer": "composition_planner",
+            "planner_version": "7J.1.composition-calibration.1",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "composition_finding": {
+          "code": "COMPOSITION_LOW_CONFIDENCE",
+          "severity": "warning",
+          "segment_id": null,
+          "measured_value": 12,
+          "threshold": 0,
+          "message": "Low-confidence evidence uses a calm stable or fit/background frame."
+        }
+      },
+      "measured_value": 12,
+      "threshold": 0,
+      "provenance": {
+        "producer": "composition_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Low-confidence evidence uses a calm stable or fit/background frame.",
+      "technical_details": "Low-confidence evidence uses a calm stable or fit/background frame."
+    },
+    {
+      "code": "COMPOSITION_SAFE_FALLBACK",
+      "severity": "warning",
+      "evidence": {
+        "composition_quality_report": {
+          "schema_version": "7D.composition-quality.1",
+          "status": "PASS_WITH_WARNINGS",
+          "findings": [
+            {
+              "code": "COMPOSITION_LOW_CONFIDENCE",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Low-confidence evidence uses a calm stable or fit/background frame."
+            },
+            {
+              "code": "COMPOSITION_SAFE_FALLBACK",
+              "severity": "warning",
+              "segment_id": null,
+              "measured_value": 12,
+              "threshold": 0,
+              "message": "Composition applied the declared wider, stable or fit/background fallback chain."
+            }
+          ],
+          "metrics": {
+            "segment_count": 12,
+            "target_switch_count": 0,
+            "layout_switch_count": 0,
+            "suppressed_switch_count": 0,
+            "fallback_count": 12,
+            "punch_in_count": 0,
+            "clipped_target_count": 0,
+            "unsafe_crop_count": 0,
+            "jitter_event_count": 0,
+            "minimum_hold_violation_count": 0,
+            "max_velocity_per_frame": 0.0,
+            "max_acceleration_per_frame_sq": 0.0,
+            "switches_per_minute": 0.0,
+            "layout_switches_per_minute": 0.0,
+            "minimum_target_containment": 1.0
+          },
+          "provenance": {
+            "producer": "composition_planner",
+            "planner_version": "7J.1.composition-calibration.1",
+            "intent_id": "intent-phase6-ccf872542835b8d44"
+          }
+        },
+        "composition_finding": {
+          "code": "COMPOSITION_SAFE_FALLBACK",
+          "severity": "warning",
+          "segment_id": null,
+          "measured_value": 12,
+          "threshold": 0,
+          "message": "Composition applied the declared wider, stable or fit/background fallback chain."
+        }
+      },
+      "measured_value": 12,
+      "threshold": 0,
+      "provenance": {
+        "producer": "composition_quality_report",
+        "config_version": "5G.0"
+      },
+      "interval": null,
+      "config_version": "5G.0",
+      "auto_fix_available": false,
+      "user_message": "Composition applied the declared wider, stable or fit/background fallback chain.",
+      "technical_details": "Composition applied the declared wider, stable or fit/background fallback chain."
+    }
+  ],
+  "metrics": {
+    "artifact": {
+      "byte_size": 15077285,
+      "sha256": "09fc79f925177c72afd1ec6c880ab212d095f6f7776a1b8521a942cb97dd95b8"
+    },
+    "technical": {
+      "duration": 21.633,
+      "audio_duration": 21.63,
+      "sync_difference_ms": 3.0,
+      "resolution": "1080x1920",
+      "fps": 30.0,
+      "validation": "valid"
+    },
+    "audio": {
+      "status": "valid",
+      "checked_clip_count": 1,
+      "failed_clip_count": 0,
+      "mix_duration_seconds": 21.63,
+      "messages": []
+    },
+    "captions": {
+      "schema_version": "7C.caption-quality.1",
+      "status": "PASS_WITH_WARNINGS",
+      "findings": [
+        {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-001",
+          "measured_value": "phrase",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        },
+        {
+          "code": "CAPTION_INTENSITY_DEGRADED",
+          "severity": "warning",
+          "cue_id": "caption-001",
+          "measured_value": "high",
+          "threshold": "timing-safe primitive",
+          "message": "Requested intensity was reduced because the semantic event has weak timing."
+        },
+        {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-003",
+          "measured_value": "static",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        },
+        {
+          "code": "CAPTION_TIMING_WEAK",
+          "severity": "warning",
+          "cue_id": "caption-005",
+          "measured_value": "phrase",
+          "threshold": "trusted word timing",
+          "message": "Weak word timing was safely degraded to phrase/static caption timing."
+        },
+        {
+          "code": "CAPTION_INTENSITY_DEGRADED",
+          "severity": "warning",
+          "cue_id": "caption-005",
+          "measured_value": "high",
+          "threshold": "timing-safe primitive",
+          "message": "Requested intensity was reduced because the semantic event has weak timing."
+        }
+      ],
+      "metrics": {
+        "cue_count": 5,
+        "word_timed_cue_count": 2,
+        "weak_timing_cue_count": 3,
+        "semantic_emphasis_count": 0,
+        "motion_cue_count": 0,
+        "lane_switch_count": 0,
+        "protected_overlap_count": 0,
+        "safe_zone_violation_count": 0,
+        "max_cps": 15.0,
+        "font_exact": true,
+        "metrics_exact": true
+      },
+      "provenance": {
+        "producer": "app.caption_planning.CaptionPlanner",
+        "planner_version": "caption-presets-tier1.3.caption-overlap.1",
+        "backend": "tier1-libass-7B",
+        "intent_id": "intent-phase6-ccf872542835b8d44"
+      }
+    },
+    "composition": {
+      "schema_version": "7D.composition-quality.1",
+      "status": "PASS_WITH_WARNINGS",
+      "findings": [
+        {
+          "code": "COMPOSITION_LOW_CONFIDENCE",
+          "severity": "warning",
+          "segment_id": null,
+          "measured_value": 12,
+          "threshold": 0,
+          "message": "Low-confidence evidence uses a calm stable or fit/background frame."
+        },
+        {
+          "code": "COMPOSITION_SAFE_FALLBACK",
+          "severity": "warning",
+          "segment_id": null,
+          "measured_value": 12,
+          "threshold": 0,
+          "message": "Composition applied the declared wider, stable or fit/background fallback chain."
+        }
+      ],
+      "metrics": {
+        "segment_count": 12,
+        "target_switch_count": 0,
+        "layout_switch_count": 0,
+        "suppressed_switch_count": 0,
+        "fallback_count": 12,
+        "punch_in_count": 0,
+        "clipped_target_count": 0,
+        "unsafe_crop_count": 0,
+        "jitter_event_count": 0,
+        "minimum_hold_violation_count": 0,
+        "max_velocity_per_frame": 0.0,
+        "max_acceleration_per_frame_sq": 0.0,
+        "switches_per_minute": 0.0,
+        "layout_switches_per_minute": 0.0,
+        "minimum_target_containment": 1.0
+      },
+      "provenance": {
+        "producer": "composition_planner",
+        "planner_version": "7J.1.composition-calibration.1",
+        "intent_id": "intent-phase6-ccf872542835b8d44"
+      }
+    },
+    "source_broll": {
+      "schema_version": "7E.source-broll-quality.1",
+      "status": "PASS",
+      "findings": [],
+      "metrics": {
+        "proposal_count": 0,
+        "selected_count": 0,
+        "rejected_count": 0,
+        "a_roll_fallback_count": 0,
+        "repeated_range_count": 0,
+        "premature_reveal_count": 0,
+        "attribution_violation_count": 0,
+        "causality_violation_count": 0,
+        "chronology_violation_count": 0,
+        "selected_duration_frames": 0,
+        "semantic_kind_counts": []
+      },
+      "provenance": {
+        "producer": "source_broll_planner",
+        "planner_version": "7E.source-broll-planner.1",
+        "intent_id": "intent-phase6-ccf872542835b8d44",
+        "evidence_fingerprint": "37456564e13c0a8b76f98996689e488cd8f79ac25b769910b05a5ed427f7ec4b",
+        "composition_plan_sha256": "58af18e5d34e6428acee64da0765ba666003c83bff7ee30902ad10e0d83dccdb"
+      }
+    },
+    "motion": {
+      "schema_version": "7F.motion-quality.1",
+      "status": "PASS",
+      "findings": [],
+      "metrics": {
+        "requested_event_count": 2,
+        "emitted_event_count": 2,
+        "animated_event_count": 2,
+        "suppressed_event_count": 0,
+        "cooldown_suppression_count": 0,
+        "concurrency_suppression_count": 0,
+        "budget_suppression_count": 0,
+        "readability_suppression_count": 0,
+        "fallback_count": 0,
+        "max_concurrent_layers": 1,
+        "animation_points_used": 2,
+        "animated_frames_used": 36,
+        "events_per_minute": 5.547
+      },
+      "provenance": {
+        "producer": "motion_planner",
+        "planner_version": "7J.1.motion-calibration.1",
+        "capability_registry_version": "7B.capability-registry.1",
+        "intent_id": "intent-phase6-ccf872542835b8d44",
+        "caption_plan_sha256": "2edac1a3ce0b285298569f1b5bd5722780b9d327dc7751bdb2d526d6cf1f18a3",
+        "composition_plan_sha256": "58af18e5d34e6428acee64da0765ba666003c83bff7ee30902ad10e0d83dccdb",
+        "source_broll_plan_sha256": "b570076c4b268246280a6853fe38f744d3ce8357beaf71dbf9a23e055b48e564"
+      }
+    },
+    "continuity": {
+      "decision_id": "continuity-candidate-chapter-027-story-001-383a04d5df593971",
+      "mode": "uncertain",
+      "required_span_count": 0,
+      "omitted_span_count": 3,
+      "source_output_mapping_present": true
+    }
+  },
+  "fallbacks": [
+    "Native captions quality report uses a declared warning/fallback.",
+    "Weak word timing was safely degraded to phrase/static caption timing.",
+    "Requested intensity was reduced because the semantic event has weak timing.",
+    "Native composition quality report uses a declared warning/fallback.",
+    "Low-confidence evidence uses a calm stable or fit/background frame.",
+    "Composition applied the declared wider, stable or fit/background fallback chain.",
+    "composition:composition-001:fit_background",
+    "composition:composition-002:fit_background",
+    "composition:composition-003:fit_background",
+    "composition:composition-004:fit_background",
+    "composition:composition-005:fit_background",
+    "composition:composition-006:fit_background",
+    "composition:composition-007:fit_background",
+    "composition:composition-008:fit_background",
+    "composition:composition-009:fit_background",
+    "composition:composition-010:fit_background",
+    "composition:composition-011:fit_background",
+    "composition:composition-012:fit_background"
+  ],
+  "created_at": "2026-08-15T12:12:48.591620+00:00",
+  "provenance": {
+    "owner": "final_quality_gate",
+    "quality_config_version": "5G.0",
+    "low_level_checks_reused": [
+      "editorial_profile_policy",
+      "legacy_eligibility_diagnostics",
+      "diversity",
+      "boundary_decision",
+      "production_plan_envelope",
+      "continuity_decision",
+      "source_output_time_map",
+      "compiled_render_plan",
+      "caption_quality_report",
+      "composition_quality_report",
+      "source_broll_quality_report",
+      "motion_quality_report",
+      "audio_validation",
+      "render_validation",
+      "artifact_identity"
+    ]
+  }
+}

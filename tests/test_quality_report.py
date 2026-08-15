@@ -7,7 +7,9 @@ from app.clip_results import ClipResult
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
 from app.pipeline import build_terminal_state
 from app.quality_report import (
+    EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION,
     SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD,
+    build_editorial_final_handoff,
     build_quality_report,
     exact_dialogue_semantic_blocker,
 )
@@ -107,6 +109,41 @@ def _report(tmp_path: Path, *, validation: str = "valid", word_integrity: bool =
         all_results=[result],
     )
     return artifact, result, report
+
+
+def _editorial_decision(
+    state: str = "AVAILABLE",
+    *,
+    selectable: bool = True,
+    hard_blockers: list[str] | None = None,
+) -> dict:
+    return {
+        "profile_id": "movie_series",
+        "archetype": "logical_scene_unit",
+        "editorial_score": 44.5,
+        "strengths": ["logical_scene_unit", "context_sufficient"],
+        "soft_issues": ["NO_PAYOFF", "FALSE_HOOK_RISK", "SEMANTIC_INCOMPLETE"],
+        "hard_blockers": list(hard_blockers or []),
+        "surfacing_state": state,
+        "selectable": selectable,
+        "primary_reason": (hard_blockers or ["NO_PAYOFF"])[0],
+        "policy_version": "editorial-profile-policy.1",
+        "profile_provenance": {
+            "profile_id": "movie_series",
+            "detected_profile": {"format": {"value": "gameplay", "confidence": 0.7}},
+            "effective_profile": {
+                "format": "gameplay", "editorial_mode": "narrative",
+                "domain": "lifestyle", "traits": ["scene_driven"],
+            },
+            "manual_override": {"provenance": "none", "revision_id": None},
+            "resolution": "auto_source_metadata_hint",
+            "confidence": 0.75,
+        },
+    }
+
+
+def _profile_lineage() -> dict:
+    return dict(_editorial_decision()["profile_provenance"])
 
 
 def _set_native_rich_render(render: dict) -> None:
@@ -276,6 +313,122 @@ def test_legacy_cached_incomplete_story_is_a_semantic_blocker(tmp_path: Path) ->
     finding = next(item for item in report.findings if item.provenance["producer"] == "eligibility")
     assert finding.code == "SEMANTIC_INCOMPLETE"
     assert finding.measured_value == ["incomplete_story"]
+
+
+def test_available_editorial_decision_owns_final_permission_and_keeps_legacy_diagnostics(
+    tmp_path: Path,
+) -> None:
+    artifact, result, plan, candidate, render, audio, _diversity = _inputs(tmp_path)
+    candidate["eligibility_decision"] = {
+        "state": "assessed", "eligible": False,
+        "reason_codes": ["NO_PAYOFF", "FALSE_HOOK_RISK", "SEMANTIC_INCOMPLETE"],
+    }
+    candidate["virality"] = {
+        "eligibility": {"status": "rejected", "critical_failures": ["incomplete_story"]},
+    }
+    candidate["editorial_decision"] = _editorial_decision()
+    _decision, candidate["editorial_final_handoff"] = build_editorial_final_handoff(
+        candidate["editorial_decision"],
+        candidate_id="candidate-1",
+        record_candidate_id="candidate-1",
+        expected_profile=_profile_lineage(),
+        draft_id="draft-1",
+        analysis_id="analysis-1",
+        analysis_run_id="analysis-run-1",
+        analysis_sha256="a" * 64,
+    )
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=None, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "PASS_WITH_WARNINGS"
+    assert not any(item.severity == "blocker" for item in report.findings)
+    eligibility = next(item for item in report.checks if item["code"] == "ELIGIBILITY")
+    assert eligibility["status"] == "passed"
+    assert eligibility["provenance"]["producer"] == "editorial_profile_policy"
+    assert eligibility["evidence"]["legacy_eligibility_decision"]["eligible"] is False
+    assert eligibility["evidence"]["legacy_virality_eligibility"]["critical_failures"] == ["incomplete_story"]
+
+
+def test_blocked_editorial_decision_remains_blocked_in_final(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    candidate["editorial_decision"] = _editorial_decision(
+        "BLOCKED", selectable=False, hard_blockers=["SEMANTIC_INCOMPLETE"],
+    )
+    _decision, candidate["editorial_final_handoff"] = build_editorial_final_handoff(
+        candidate["editorial_decision"],
+        candidate_id="candidate-1",
+        record_candidate_id="candidate-1",
+        expected_profile=_profile_lineage(),
+        draft_id="draft-1",
+        analysis_id="analysis-1",
+        analysis_run_id="analysis-run-1",
+        analysis_sha256="a" * 64,
+    )
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    finding = next(item for item in report.findings if item.code == "SEMANTIC_INCOMPLETE")
+    assert finding.provenance["producer"] == "editorial_profile_policy"
+
+
+def test_profile_aware_handoff_with_missing_decision_is_not_a_silent_pass(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    _decision, candidate["editorial_final_handoff"] = build_editorial_final_handoff(
+        None,
+        candidate_id="candidate-1",
+        record_candidate_id="candidate-1",
+        expected_profile=_profile_lineage(),
+        draft_id="draft-1",
+        analysis_id="analysis-1",
+        analysis_run_id="analysis-run-1",
+        analysis_sha256="a" * 64,
+    )
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    finding = next(item for item in report.findings if item.code == "EDITORIAL_DECISION_LINEAGE_INVALID")
+    assert "EDITORIAL_DECISION_MISSING" in finding.measured_value
+
+
+def test_editorial_profile_or_policy_lineage_mismatch_blocks_final(tmp_path: Path) -> None:
+    artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
+    candidate["editorial_decision"] = _editorial_decision()
+    mismatched_profile = {**_profile_lineage(), "profile_id": "podcast"}
+    _decision, candidate["editorial_final_handoff"] = build_editorial_final_handoff(
+        candidate["editorial_decision"],
+        candidate_id="candidate-1",
+        record_candidate_id="candidate-other",
+        expected_profile=mismatched_profile,
+        draft_id="draft-1",
+        analysis_id="analysis-1",
+        analysis_run_id="analysis-run-1",
+        analysis_sha256="a" * 64,
+    )
+
+    report = build_quality_report(
+        artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
+        source={"id": "source-1"}, plan=plan, candidate=candidate,
+        diversity_decision=diversity, render_report=render, audio_report=audio, all_results=[result],
+    )
+
+    assert report.status == "BLOCKED"
+    finding = next(item for item in report.findings if item.code == "EDITORIAL_DECISION_LINEAGE_INVALID")
+    assert "EDITORIAL_HANDOFF_NOT_PASSED" in finding.measured_value
+    assert candidate["editorial_final_handoff"]["schema_version"] == EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION
 
 
 def test_unknown_legacy_eligibility_without_hard_evidence_remains_warning(tmp_path: Path) -> None:

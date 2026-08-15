@@ -1,0 +1,321 @@
+{
+  "schema_version": "editorial-final-quality-gate-regression.1",
+  "captured_at": "2026-08-15T12:12:49.915037+00:00",
+  "run_id": "670f4563b56c4ae6acd1f00f2e499a7d",
+  "candidate_id": "candidate-chapter-027-story-001",
+  "source_quality_report_status": "BLOCKED",
+  "new_quality_report": {
+    "status": "PASS_WITH_WARNINGS",
+    "report_id": "quality-e3947788510a1a0f4ffd952f",
+    "path": "quality-report-available.json",
+    "sha256": "8dc10fb998276dbd6d68893e2cdf5ea18f9fe601b85b4f6e66361c8430859663"
+  },
+  "negative_control_quality_report": {
+    "status": "BLOCKED",
+    "report_id": "quality-a725adef6912500a2e247d89",
+    "blocker_codes": [
+      "SEMANTIC_INCOMPLETE"
+    ]
+  },
+  "editorial_permission": {
+    "profile_id": "movie_series",
+    "archetype": "logical_scene_unit",
+    "editorial_score": 44.5,
+    "strengths": [
+      "logical_scene_unit",
+      "context_sufficient",
+      "evidence_confidence"
+    ],
+    "soft_issues": [
+      "NO_PAYOFF",
+      "FALSE_HOOK_RISK",
+      "VISUAL_EVIDENCE_UNAVAILABLE",
+      "SEMANTIC_INCOMPLETE"
+    ],
+    "hard_blockers": [],
+    "surfacing_state": "AVAILABLE",
+    "selectable": true,
+    "primary_reason": "NO_PAYOFF",
+    "policy_version": "editorial-profile-policy.1",
+    "profile_provenance": {
+      "profile_id": "movie_series",
+      "detected_profile": {
+        "format": {
+          "value": "gameplay",
+          "confidence": 0.7,
+          "evidence": [
+            "transcript:gameplay_terms"
+          ]
+        },
+        "editorial_mode": {
+          "value": "narrative",
+          "confidence": 0.81,
+          "evidence": [
+            "transcript:narrative_terms"
+          ]
+        },
+        "domain": {
+          "value": "lifestyle",
+          "confidence": 0.7,
+          "evidence": [
+            "transcript:lifestyle_terms"
+          ]
+        },
+        "traits": [
+          {
+            "value": "speech_led",
+            "confidence": 0.75,
+            "evidence": [
+              "transcript:speech_density"
+            ]
+          },
+          {
+            "value": "single_speaker",
+            "confidence": 0.9,
+            "evidence": [
+              "transcript:speaker_ids"
+            ]
+          },
+          {
+            "value": "low_pacing",
+            "confidence": 0.72,
+            "evidence": [
+              "transcript:words_per_second"
+            ]
+          },
+          {
+            "value": "high_emotion",
+            "confidence": 0.66,
+            "evidence": [
+              "audio:energy_frames_or_punctuation"
+            ]
+          },
+          {
+            "value": "dense_information",
+            "confidence": 0.65,
+            "evidence": [
+              "transcript:speech_density"
+            ]
+          },
+          {
+            "value": "scene_driven",
+            "confidence": 0.7,
+            "evidence": [
+              "profile:format"
+            ]
+          }
+        ],
+        "provenance": {
+          "filename_signal_used": false,
+          "detector": "5A.3"
+        }
+      },
+      "effective_profile": {
+        "resolution": {
+          "format": "detected",
+          "editorial_mode": "detected",
+          "domain": "detected",
+          "traits": "detected"
+        },
+        "format": "gameplay",
+        "editorial_mode": "narrative",
+        "domain": "lifestyle",
+        "traits": [
+          "speech_led",
+          "single_speaker",
+          "low_pacing",
+          "high_emotion",
+          "dense_information",
+          "scene_driven"
+        ]
+      },
+      "manual_override": {
+        "format": null,
+        "editorial_mode": null,
+        "domain": null,
+        "traits": [],
+        "provenance": "none",
+        "revision_id": null
+      },
+      "resolution": "auto_source_metadata_hint",
+      "confidence": 0.75
+    }
+  },
+  "editorial_final_handoff": {
+    "schema_version": "editorial-final-handoff.1",
+    "status": "passed",
+    "candidate_id": "candidate-chapter-027-story-001",
+    "profile_id": "movie_series",
+    "policy_version": "editorial-profile-policy.1",
+    "decision_sha256": "564efe9e2cc3e1435d190dd1ede2e3e78fe15449cf8c8bdfc0be929588f42789",
+    "draft_id": "approved-670f4563b56c4ae6acd1f00f2e499a7d",
+    "analysis_id": "analysis-7a1acd4d3217760b",
+    "analysis_run_id": "62b19eaea3004d4e80016463044f18f0",
+    "analysis_sha256": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+    "reason_codes": []
+  },
+  "legacy_eligibility_decision": {
+    "schema_version": "6D.1",
+    "config_version": "6D.1",
+    "state": "assessed",
+    "eligible": false,
+    "reason_codes": [
+      "NO_PAYOFF",
+      "FALSE_HOOK_RISK",
+      "VISUAL_EVIDENCE_UNAVAILABLE",
+      "SEMANTIC_INCOMPLETE"
+    ],
+    "recoverable_issues": [
+      "VISUAL_EVIDENCE_UNAVAILABLE"
+    ],
+    "required_boundary_actions": [
+      "extend_to_payoff",
+      "restore_semantic_completion"
+    ],
+    "evidence_refs": [
+      {
+        "code": "source_range",
+        "state": "available",
+        "source": "candidate",
+        "details": {
+          "candidate_id": "candidate-chapter-027-story-001",
+          "source_start": 806.97,
+          "source_end": 828.6,
+          "valid": true
+        }
+      },
+      {
+        "code": "semantic_boundary",
+        "state": "available",
+        "source": "boundary_diagnostics",
+        "details": {
+          "eligible": true,
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": 0.95,
+          "payoff_preserved": true
+        }
+      },
+      {
+        "code": "semantic_story_unit",
+        "state": "available",
+        "source": "story_unit",
+        "details": {
+          "story_unit_id": "chapter-027-story-001",
+          "completeness_score": 75.0
+        }
+      },
+      {
+        "code": "hook",
+        "state": "available",
+        "source": "story_unit",
+        "details": {
+          "hook_strength": 55.0,
+          "hook_text_available": true
+        }
+      },
+      {
+        "code": "payoff",
+        "state": "unavailable",
+        "source": "semantic_boundary",
+        "details": {
+          "payoff_present": false,
+          "story_payoff_available": false,
+          "natural_end": true,
+          "visual_payoff_verified": false,
+          "linked_multimodal_payoff": false
+        }
+      },
+      {
+        "code": "speech_clarity",
+        "state": "available",
+        "source": "transcript_features",
+        "details": {
+          "transcript_confidence": 0.821
+        }
+      },
+      {
+        "code": "visual_viability",
+        "state": "unavailable",
+        "source": "visual_analysis",
+        "details": {
+          "status": "skipped",
+          "reason": "disabled"
+        }
+      },
+      {
+        "code": "cached_hard_eligibility",
+        "state": "available",
+        "source": "cached_candidate.virality.eligibility",
+        "details": {
+          "status": "rejected",
+          "critical_failures": [
+            "incomplete_story"
+          ],
+          "mapped_reason_codes": [
+            "SEMANTIC_INCOMPLETE",
+            "NO_PAYOFF"
+          ]
+        }
+      }
+    ]
+  },
+  "final_mp4": {
+    "path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\670f4563b56c4ae6acd1f00f2e499a7d\\results\\final-short-01.mp4",
+    "sha256": "09fc79f925177c72afd1ec6c880ab212d095f6f7776a1b8521a942cb97dd95b8",
+    "probe": {
+      "duration": 21.633008,
+      "width": 1080,
+      "height": 1920,
+      "fps": 30.0,
+      "video_codec": "h264",
+      "audio_streams": 1,
+      "audio_codecs": [
+        "aac"
+      ],
+      "format": "mov,mp4,m4a,3gp,3g2,mj2",
+      "source_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\670f4563b56c4ae6acd1f00f2e499a7d\\results\\final-short-01.mp4"
+    }
+  },
+  "lineage": {
+    "analysis_id": "analysis-7a1acd4d3217760b",
+    "analysis_run_id": "62b19eaea3004d4e80016463044f18f0",
+    "analysis_sha256": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+    "draft_id": "approved-670f4563b56c4ae6acd1f00f2e499a7d",
+    "boundary_decision_sha256": "eab543d880d14918a33818bda9bc587a0fa55b1f474e0f7bb425114bc299ec49",
+    "continuity_decision_sha256": "a959a8879ec65a88f4d7c393d12af005981ba45e882ea7ce23792e9de8564ed3",
+    "preview_plan_hash": "eeff2978b67e4ebe23de90d39fe5a7ac68d091316bc669de13bc82c419f38f6f",
+    "final_plan_hash": "eeff2978b67e4ebe23de90d39fe5a7ac68d091316bc669de13bc82c419f38f6f",
+    "preview_parity_signature": "f75a2b564cad948f838a1a3f7fa7835f27abd60f7bd0cc9bbc4d58f33e7538ce",
+    "final_parity_signature": "f75a2b564cad948f838a1a3f7fa7835f27abd60f7bd0cc9bbc4d58f33e7538ce"
+  },
+  "protected_artifact_hashes": {
+    "source": "3b9aac2f10b4e7c10de7056708e583ba6880c483c9fb726b65223de65f8b9da3",
+    "analysis": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+    "approved_draft": "a0e9a9f85be16f8a8dd346344f6f9c9d937802cd09e9faefcde53dc03c6cdb2d",
+    "production_plan": "60ec631801430667023b6326edda05ce2e7bb5b9fba463b182e05014cbe4ee21",
+    "creative_preview": "b420510645aab9f0fe8f3fe77791e2dae8b30d2e14fedb3d2eda21abd2dc2b8f",
+    "preview_parity_manifest": "e572967b80ce395b2ca1f0e9bfba3319d66a522a670328ae088e62da212a47ff",
+    "final_mp4": "09fc79f925177c72afd1ec6c880ab212d095f6f7776a1b8521a942cb97dd95b8",
+    "final_parity_manifest": "da2a0f5711ecb11e6030a8a48164a0099a85326f346d3ba396a57c547fa7d7d2",
+    "original_quality_report": "3d1cd4c835138d945428c31355b2a02f1466312e1be67ce24b04dfacaddc2895"
+  },
+  "checks": {
+    "real_candidate_available": true,
+    "legacy_incomplete_story_preserved": true,
+    "available_final_passes_with_warnings": true,
+    "available_final_has_no_blockers": true,
+    "available_terminal_accepted": true,
+    "blocked_editorial_final_blocked": true,
+    "blocked_editorial_finding_present": true,
+    "final_mp4_probe_valid": true,
+    "final_mp4_hash_matches_canonical_result": true,
+    "preview_final_plan_hash_match": true,
+    "preview_final_parity_signature_match": true,
+    "analysis_snapshot_verified": true,
+    "protected_artifacts_unchanged": true,
+    "boundary_decision_unchanged": true,
+    "continuity_decision_unchanged": true
+  },
+  "result": "PASS"
+}

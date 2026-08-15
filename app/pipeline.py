@@ -42,7 +42,7 @@ from app.content_understanding import (
     validate_video_content_profile,
 )
 from app.candidate_quality import EligibilityDecision, resolve_eligibility_decision
-from app.editorial_profile_policy import evaluate_editorial_candidate
+from app.editorial_profile_policy import evaluate_editorial_candidate, resolve_editorial_profile
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -79,7 +79,11 @@ from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
-from app.quality_report import build_quality_report, exact_dialogue_semantic_blocker
+from app.quality_report import (
+    build_editorial_final_handoff,
+    build_quality_report,
+    exact_dialogue_semantic_blocker,
+)
 from app.production_plan import (
     PRODUCTION_PLAN_VERSION,
     ProductionPlanEnvelopeContext,
@@ -2301,12 +2305,35 @@ class Pipeline:
             scored_from_dict(item) for item in candidate_data.get("candidates", []) if isinstance(item, dict)
         ] if isinstance(candidate_data, dict) else []
         final_by_id = {item.candidate.id: item for item in final_scored}
+        resolved_editorial_profile = resolve_editorial_profile(content_profile, source=source_data)
+        editorial_quality_overrides: dict[str, dict[str, Any]] = {}
         for candidate_id in self.selected_candidate_ids:
             record = by_id.get(candidate_id)
-            raw_decision = record.get("eligibility_decision") if isinstance(record, dict) else None
+            raw_eligibility = record.get("eligibility_decision") if isinstance(record, dict) else None
+            raw_editorial = record.get("editorial_decision") if isinstance(record, dict) else None
+            record_candidate_id = str(record.get("candidate_id") or "") if isinstance(record, dict) else ""
+            editorial, handoff = build_editorial_final_handoff(
+                raw_editorial,
+                candidate_id=candidate_id,
+                record_candidate_id=record_candidate_id,
+                expected_profile=resolved_editorial_profile.to_dict(),
+                draft_id=draft.draft_id,
+                analysis_id=analysis.analysis_id,
+                analysis_run_id=analysis.analysis_run_id or analysis.analysis_id,
+                analysis_sha256=analysis.verified_sha256,
+            )
+            editorial_quality_overrides[candidate_id] = {
+                "id": candidate_id,
+                "candidate_id": record_candidate_id,
+                "eligibility_decision": raw_eligibility,
+                "editorial_decision": raw_editorial,
+                "editorial_final_handoff": handoff,
+            }
             final_item = final_by_id.get(candidate_id)
-            if isinstance(raw_decision, dict) and final_item is not None:
-                final_item.candidate.eligibility_decision = EligibilityDecision.from_dict(raw_decision)
+            if isinstance(raw_eligibility, dict) and final_item is not None:
+                final_item.candidate.eligibility_decision = EligibilityDecision.from_dict(raw_eligibility)
+            if editorial is not None and final_item is not None:
+                final_item.candidate.editorial_decision = editorial
         selected_ids = set(self.selected_candidate_ids)
         tracker.start("approved_draft_handoff", _hash({"draft": draft.draft_id, "selected": self.selected_candidate_ids}), cache_hit=True)
         tracker.finish("approved_draft_handoff")
@@ -2338,6 +2365,7 @@ class Pipeline:
             production_render=production_render,
             final_scored=final_scored,
             diversity_decision=None,
+            candidate_overrides=editorial_quality_overrides,
         )
         production_render["quality_reports"] = quality_reports
         self._assert_current_run_results(registry, output_directory)
@@ -3474,6 +3502,7 @@ class Pipeline:
         production_render: dict[str, Any],
         final_scored: list[Any],
         diversity_decision: dict[str, Any] | None,
+        candidate_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[ClipResult], list[dict[str, Any]]]:
         """Persist one Final Quality Gate report for each canonical V2 MP4.
 
@@ -3499,6 +3528,8 @@ class Pipeline:
             str(getattr(item, "candidate", item).id): item.to_dict()
             for item in final_scored if getattr(getattr(item, "candidate", item), "id", None)
         }
+        for candidate_id, override in (candidate_overrides or {}).items():
+            candidates[candidate_id] = {**candidates.get(candidate_id, {}), **override}
         persisted: list[ClipResult] = []
         references: list[dict[str, Any]] = []
         for index, result in enumerate(registry, start=1):
