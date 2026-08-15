@@ -15,6 +15,8 @@ from typing import Any, cast
 
 from app.content_profile_taxonomy import (
     AUTO_PROFILE_INPUT,
+    content_profile_preset_ids,
+    content_profile_preset_mapping,
     order_profile_ids,
     profile_input_ids,
     user_override_ids,
@@ -39,6 +41,7 @@ PROFILE_FORMAT_OVERRIDES = frozenset(profile_input_ids("format"))
 PROFILE_EDITORIAL_MODE_OVERRIDES = frozenset(profile_input_ids("editorial_mode"))
 PROFILE_DOMAIN_OVERRIDES = frozenset(profile_input_ids("domain"))
 PROFILE_TRAIT_OVERRIDES = frozenset(user_override_ids("traits"))
+CONTENT_PROFILE_PRESET_INPUTS = frozenset(content_profile_preset_ids(include_auto=True))
 PRESET_RESOLVER_VERSION = "4B.1"
 
 
@@ -81,6 +84,7 @@ class ProcessingIntent:
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
     editorial_intent: str = ""
+    content_profile_preset: str = AUTO_PROFILE_INPUT
     profile_format_override: str = AUTO_PROFILE_INPUT
     profile_editorial_mode_override: str = AUTO_PROFILE_INPUT
     profile_domain_override: str = AUTO_PROFILE_INPUT
@@ -103,6 +107,8 @@ class ProcessingIntent:
             raise ValueError("Unsupported audio mode.")
         if not isinstance(self.editorial_intent, str) or len(self.editorial_intent.strip()) > 500:
             raise ValueError("Editorial intent must be a string up to 500 characters.")
+        if self.content_profile_preset not in CONTENT_PROFILE_PRESET_INPUTS:
+            raise ValueError("Unsupported content profile preset.")
         if self.profile_format_override not in PROFILE_FORMAT_OVERRIDES:
             raise ValueError("Unsupported profile format override.")
         if self.profile_editorial_mode_override not in PROFILE_EDITORIAL_MODE_OVERRIDES:
@@ -127,6 +133,7 @@ class ProcessingIntent:
             "preset_selection_mode": self.preset_selection_mode,
             "audio_mode": self.audio_mode,
             "editorial_intent": self.editorial_intent.strip(),
+            "content_profile_preset": self.content_profile_preset,
             "profile_format_override": self.profile_format_override,
             "profile_editorial_mode_override": self.profile_editorial_mode_override,
             "profile_domain_override": self.profile_domain_override,
@@ -146,6 +153,7 @@ class ProcessingIntent:
             preset_selection_mode=str(value.get("preset_selection_mode", "explicit")),
             audio_mode=str(value.get("audio_mode", "original")),
             editorial_intent=str(value.get("editorial_intent", "")),
+            content_profile_preset=str(value.get("content_profile_preset", AUTO_PROFILE_INPUT)),
             profile_format_override=str(value.get("profile_format_override", AUTO_PROFILE_INPUT)),
             profile_editorial_mode_override=str(value.get("profile_editorial_mode_override", AUTO_PROFILE_INPUT)),
             profile_domain_override=str(value.get("profile_domain_override", AUTO_PROFILE_INPUT)),
@@ -189,6 +197,7 @@ class ResolvedProcessingConfig:
     preset_version: str
     audio_mode: str
     editorial_intent: str
+    content_profile_preset: str
     manual_profile_override: dict[str, Any]
     candidate_limit: int
     shortlist_size: int
@@ -214,6 +223,7 @@ class ResolvedProcessingConfig:
             "preset_version": self.preset_version,
             "audio_mode": self.audio_mode,
             "editorial_intent": self.editorial_intent,
+            "content_profile_preset": self.content_profile_preset,
             "manual_profile_override": self.manual_profile_override,
             "candidate_limit": self.candidate_limit,
             "shortlist_size": self.shortlist_size,
@@ -344,7 +354,22 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         "maximum": {"clips": 5, "candidates": 160, "shortlist": 30, "reranking": True, "strategy": "staged", "bitrate": "8M", "crop": "center_crop"},
     }[intent.processing_mode]
     clip_count = requested_count or int(defaults["clips"])
-    content_profile = source_metadata
+    manual_profile_override = (
+        content_profile_preset_mapping(intent.content_profile_preset)
+        if intent.content_profile_preset != AUTO_PROFILE_INPUT
+        else {
+            **({"format": intent.profile_format_override} if intent.profile_format_override != AUTO_PROFILE_INPUT else {}),
+            **({"editorial_mode": intent.profile_editorial_mode_override} if intent.profile_editorial_mode_override != AUTO_PROFILE_INPUT else {}),
+            **({"domain": intent.profile_domain_override} if intent.profile_domain_override != AUTO_PROFILE_INPUT else {}),
+            **({"traits": list(order_profile_ids("traits", list(intent.profile_traits_override)))} if intent.profile_traits_override else {}),
+        }
+    )
+    content_profile: dict[str, Any] | None = source_metadata
+    if intent.content_profile_preset != AUTO_PROFILE_INPUT:
+        # A manual content category is already a complete validated structured
+        # profile, so downstream creative recommendation can use it before a
+        # new analysis artifact exists. Explicit creative selection still wins.
+        content_profile = {"effective_profile": manual_profile_override}
     recommended_preset = recommend_preset_family(content_profile)
     explicit_choice = (
         cast(PresetFamily, intent.subtitle_preset)
@@ -373,12 +398,8 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         preset_version=preset_version,
         audio_mode=intent.audio_mode,
         editorial_intent=intent.editorial_intent.strip(),
-        manual_profile_override={
-            **({"format": intent.profile_format_override} if intent.profile_format_override != AUTO_PROFILE_INPUT else {}),
-            **({"editorial_mode": intent.profile_editorial_mode_override} if intent.profile_editorial_mode_override != AUTO_PROFILE_INPUT else {}),
-            **({"domain": intent.profile_domain_override} if intent.profile_domain_override != AUTO_PROFILE_INPUT else {}),
-            **({"traits": list(order_profile_ids("traits", list(intent.profile_traits_override)))} if intent.profile_traits_override else {}),
-        },
+        content_profile_preset=intent.content_profile_preset,
+        manual_profile_override=manual_profile_override,
         candidate_limit=int(defaults["candidates"]),
         shortlist_size=max(clip_count, int(defaults["shortlist"])),
         ai_reranking_enabled=bool(defaults["reranking"]),

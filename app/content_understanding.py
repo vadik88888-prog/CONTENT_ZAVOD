@@ -42,7 +42,7 @@ from app.utils import stable_text_hash
 
 VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = CONTENT_PROFILE_SCHEMA_VERSION
 LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS[0]
-CONTENT_STRATEGY_VERSION = "5A.3"
+CONTENT_STRATEGY_VERSION = "5A.4"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
@@ -654,14 +654,29 @@ def _detect_profile_axes(
     scene_count = len(scenes.get("boundaries", []))
     filename_signal_used = False
 
-    gameplay_terms = ("gameplay", "стрим", "матч", "катка", "pubg", "minecraft", "fortnite")
+    gameplay_terms = ("gameplay", "геймплей", "матч", "катка", "pubg", "minecraft", "fortnite")
     screen_terms = ("экран", "интерфейс", "нажмите", "click", "screen", "dashboard", "код")
+    mixed_terms = (
+        "стрим", "stream", "livestream", "реакц", "reaction", "reacts",
+        "обзор", "product review", "tech review", "unboxing", "распаковк",
+    )
+    scene_driven_terms = (
+        "влог", "vlog", "путешеств", "travel", "trip", "туризм",
+        "рецепт", "recipe", "cooking", "фильм", "сериал", "movie", "series",
+        "спорт", "фитнес", "workout", "fitness",
+    )
     gameplay_text = _keyword_score(lowered, gameplay_terms)
     gameplay_file = _keyword_score(filename_lower, gameplay_terms)
     screen_text = _keyword_score(lowered, screen_terms)
     screen_file = _keyword_score(filename_lower, screen_terms)
+    mixed_text = _keyword_score(lowered, mixed_terms)
+    mixed_file = _keyword_score(filename_lower, mixed_terms)
+    scene_driven_text = _keyword_score(lowered, scene_driven_terms)
+    scene_driven_file = _keyword_score(filename_lower, scene_driven_terms)
     gameplay_visual = any(term in visual_blob for term in ("gameplay", "game ui", "video game"))
     screen_visual = any(term in visual_blob for term in ("screen recording", "software ui", "computer screen"))
+    mixed_visual = any(term in visual_blob for term in ("reaction video", "livestream", "product review"))
+    scene_driven_visual = any(term in visual_blob for term in ("vlog", "travel", "cooking", "movie", "sports", "workout"))
     if gameplay_text or gameplay_file or gameplay_visual:
         filename_signal_used = bool(gameplay_file)
         format_axis = _axis(
@@ -682,6 +697,26 @@ def _detect_profile_axes(
             + (["filename:weak_screen_hint"] if screen_file else [])
             + (["visual:screen_label"] if screen_visual else []),
         )
+    elif mixed_text or mixed_file or mixed_visual:
+        filename_signal_used = bool(mixed_file)
+        format_axis = _axis(
+            "mixed",
+            (0.58 + min(0.24, mixed_text * 0.08) if mixed_text or mixed_visual else 0.3)
+            + (0.04 if mixed_file else 0),
+            (["transcript:mixed_format_terms"] if mixed_text else [])
+            + (["filename:weak_mixed_format_hint"] if mixed_file else [])
+            + (["visual:mixed_format_label"] if mixed_visual else []),
+        )
+    elif scene_driven_text or scene_driven_file or scene_driven_visual:
+        filename_signal_used = bool(scene_driven_file)
+        format_axis = _axis(
+            "scene_driven",
+            (0.58 + min(0.24, scene_driven_text * 0.08) if scene_driven_text or scene_driven_visual else 0.3)
+            + (0.04 if scene_driven_file else 0),
+            (["transcript:scene_driven_terms"] if scene_driven_text else [])
+            + (["filename:weak_scene_driven_hint"] if scene_driven_file else [])
+            + (["visual:scene_driven_label"] if scene_driven_visual else []),
+        )
     elif speaker_count >= 2:
         format_axis = _axis("dialogue", 0.82, ["transcript:multiple_speakers"])
     elif speaker_count == 1 and text.strip():
@@ -695,10 +730,11 @@ def _detect_profile_axes(
         "interview": _DIALOGUE_TERMS,
         "motivational": _MOTIVATIONAL_TERMS,
         "explanatory": _EDUCATIONAL_TERMS,
-        "demonstration": ("покажу", "смотрите", "делаем", "нажмите", "demo", "demonstrat", "step by step"),
+        "commentary": ("обзор", "реакц", "комментар", "review", "reaction", "commentary"),
+        "demonstration": ("покажу", "смотрите", "делаем", "нажмите", "рецепт", "тренировк", "demo", "demonstrat", "tutorial", "workout", "step by step"),
         "news_analysis": ("новост", "сегодня", "событи", "аналитик", "news", "breaking", "report"),
-        "narrative": ("однажды", "история", "случилось", "сначала", "потом", "story", "once", "then"),
-        "entertainment": ("смешн", "шут", "прикол", "развлеч", "funny", "joke", "entertain"),
+        "narrative": ("однажды", "история", "случилось", "сначала", "потом", "влог", "путешеств", "story", "once", "then", "vlog", "travel"),
+        "entertainment": ("смешн", "шут", "прикол", "развлеч", "фильм", "сериал", "funny", "joke", "entertain", "movie", "series"),
     }
     editorial_scores = {name: _keyword_score(lowered, terms) for name, terms in editorial_terms.items()}
     if speaker_count >= 2:
@@ -723,10 +759,10 @@ def _detect_profile_axes(
         "business": ("бизнес", "компан", "продаж", "клиент", "market", "business", "startup"),
         "finance": ("деньг", "инвест", "кредит", "банк", "акци", "finance", "invest", "stock"),
         "food": ("еда", "рецепт", "готов", "кухн", "блюд", "food", "recipe", "cook"),
-        "health": ("здоров", "врач", "лечен", "трениров", "health", "doctor", "fitness"),
+        "health": ("здоров", "врач", "лечен", "трениров", "спорт", "фитнес", "health", "doctor", "fitness", "sport", "workout"),
         "news": ("новост", "репортаж", "событи", "news", "breaking"),
-        "lifestyle": ("влог", "путешеств", "дом", "семь", "vlog", "travel", "lifestyle"),
-        "entertainment": ("фильм", "сериал", "музык", "шоу", "movie", "series", "music", "show"),
+        "lifestyle": ("влог", "путешеств", "туризм", "дом", "семь", "vlog", "travel", "trip", "journey", "lifestyle"),
+        "entertainment": ("фильм", "сериал", "музык", "шоу", "реакц", "movie", "series", "music", "show", "reaction"),
     }
     domain_scores = {name: _keyword_score(lowered, terms) for name, terms in domain_terms.items()}
     filename_domain_scores = {name: _keyword_score(filename_lower, terms) for name, terms in domain_terms.items()}

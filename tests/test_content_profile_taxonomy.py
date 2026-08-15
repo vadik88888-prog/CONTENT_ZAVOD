@@ -9,12 +9,15 @@ import pytest
 from app.config import AppConfig
 from app.content_profile_taxonomy import (
     AUTO_PROFILE_INPUT,
+    CONTENT_PROFILE_PRESETS,
     CONTENT_PROFILE_SCHEMA_VERSION,
     LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS,
     PROFILE_AXIS_ORDER,
     PROFILE_TAXONOMY,
     SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS,
     UNKNOWN_PROFILE_ID,
+    content_profile_preset_ids,
+    content_profile_preset_mapping,
     order_profile_ids,
     profile_input_ids,
     profile_value_ids,
@@ -76,6 +79,38 @@ def test_auto_is_input_only_and_unknown_is_not_user_overridable() -> None:
     )
 
 
+EXPECTED_CONTENT_PRESET_MAPPINGS = {
+    "podcast": {"format": "dialogue", "editorial_mode": "commentary", "domain": "general", "traits": ["speech_led", "multi_speaker", "low_pacing"]},
+    "interview": {"format": "dialogue", "editorial_mode": "interview", "domain": "general", "traits": ["speech_led", "multi_speaker", "question_answer"]},
+    "talking_head_expert": {"format": "talking_head", "editorial_mode": "explanatory", "domain": "education", "traits": ["speech_led", "single_speaker", "dense_information"]},
+    "gameplay": {"format": "gameplay", "editorial_mode": "commentary", "domain": "gaming", "traits": ["visual_led", "high_pacing", "scene_driven"]},
+    "stream": {"format": "mixed", "editorial_mode": "commentary", "domain": "entertainment", "traits": ["speech_led", "visual_led", "high_pacing"]},
+    "vlog_lifestyle": {"format": "scene_driven", "editorial_mode": "narrative", "domain": "lifestyle", "traits": ["visual_led", "scene_driven"]},
+    "food": {"format": "scene_driven", "editorial_mode": "demonstration", "domain": "food", "traits": ["visual_led", "scene_driven", "instructional"]},
+    "travel": {"format": "scene_driven", "editorial_mode": "narrative", "domain": "lifestyle", "traits": ["visual_led", "scene_driven"]},
+    "tutorial_education": {"format": "screen_demo", "editorial_mode": "demonstration", "domain": "education", "traits": ["speech_led", "visual_led", "dense_information", "screen_content", "instructional"]},
+    "review": {"format": "mixed", "editorial_mode": "commentary", "domain": "general", "traits": ["speech_led", "visual_led", "dense_information"]},
+    "reaction": {"format": "mixed", "editorial_mode": "commentary", "domain": "entertainment", "traits": ["speech_led", "visual_led", "high_emotion"]},
+    "story_entertainment": {"format": "scene_driven", "editorial_mode": "narrative", "domain": "entertainment", "traits": ["visual_led", "high_emotion", "scene_driven"]},
+    "movie_series": {"format": "scene_driven", "editorial_mode": "entertainment", "domain": "entertainment", "traits": ["visual_led", "scene_driven"]},
+    "sports_fitness": {"format": "scene_driven", "editorial_mode": "demonstration", "domain": "health", "traits": ["visual_led", "high_pacing", "scene_driven", "instructional"]},
+    "news_commentary": {"format": "talking_head", "editorial_mode": "news_analysis", "domain": "news", "traits": ["speech_led", "single_speaker", "dense_information"]},
+}
+
+
+def test_all_15_user_facing_presets_have_stable_valid_deterministic_mappings() -> None:
+    assert content_profile_preset_ids(include_auto=True) == (AUTO_PROFILE_INPUT, *EXPECTED_CONTENT_PRESET_MAPPINGS)
+    assert tuple(CONTENT_PROFILE_PRESETS) == tuple(EXPECTED_CONTENT_PRESET_MAPPINGS)
+    assert len({preset.label for preset in CONTENT_PROFILE_PRESETS.values()}) == 15
+
+    for preset_id, expected in EXPECTED_CONTENT_PRESET_MAPPINGS.items():
+        assert content_profile_preset_mapping(preset_id) == expected
+        assert expected["format"] in profile_value_ids("format")
+        assert expected["editorial_mode"] in profile_value_ids("editorial_mode")
+        assert expected["domain"] in profile_value_ids("domain")
+        assert all(trait in profile_value_ids("traits") for trait in expected["traits"])
+
+
 def test_schema_config_product_and_profile_validation_cannot_drift_from_registry() -> None:
     assert PROFILE_FORMATS == frozenset(profile_value_ids("format"))
     assert PROFILE_EDITORIAL_MODES == frozenset(profile_value_ids("editorial_mode"))
@@ -124,17 +159,6 @@ def test_profile_consumers_do_not_redeclare_axis_order_or_auto_sentinel() -> Non
 
     assert repeated_axis_orders == []
 
-    screen_path = repository_root / "app" / "gui" / "screens" / "project_screen.py"
-    screen_tree = ast.parse(screen_path.read_text(encoding="utf-8"))
-    trait_fallbacks = [
-        node for node in ast.walk(screen_tree)
-        if isinstance(node, ast.IfExp) and "profile_traits_override" in ast.unparse(node.test)
-    ]
-    assert len(trait_fallbacks) == 1
-    assert isinstance(trait_fallbacks[0].orelse, ast.Name)
-    assert trait_fallbacks[0].orelse.id == "AUTO_PROFILE_INPUT"
-
-
 def test_config_preserves_5a1_to_5a2_schema_compatibility() -> None:
     current = AppConfig()
     assert current.content_understanding.profile_schema_version == CONTENT_PROFILE_SCHEMA_VERSION
@@ -155,7 +179,7 @@ def test_real_qt_profile_controls_follow_registry_order() -> None:
     from PySide6.QtCore import QCoreApplication
     from PySide6.QtWidgets import QApplication, QComboBox
 
-    from app.gui.screens.project_screen import _populate_profile_override
+    from app.gui.screens.project_screen import _populate_content_profile_preset, _populate_profile_override
 
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
@@ -172,6 +196,13 @@ def test_real_qt_profile_controls_follow_registry_order() -> None:
             controls.append(combo)
             assert combo.isVisible()
             assert tuple(combo.itemData(index) for index in range(combo.count())) == profile_input_ids(axis_id)
+        preset_combo = QComboBox()
+        _populate_content_profile_preset(preset_combo)
+        preset_combo.show()
+        app.processEvents()
+        controls.append(preset_combo)
+        assert preset_combo.isVisible()
+        assert tuple(preset_combo.itemData(index) for index in range(preset_combo.count())) == content_profile_preset_ids(include_auto=True)
     finally:
         for combo in controls:
             combo.close()

@@ -51,6 +51,7 @@ class ProjectOptions:
     preset_selection_mode: str = "auto"
     audio_mode: str = "original"
     editorial_intent: str = ""
+    content_profile_preset: str = AUTO_PROFILE_INPUT
     profile_format_override: str = AUTO_PROFILE_INPUT
     profile_editorial_mode_override: str = AUTO_PROFILE_INPUT
     profile_domain_override: str = AUTO_PROFILE_INPUT
@@ -82,6 +83,7 @@ class ProjectOptions:
             preset_selection_mode=self.preset_selection_mode,
             audio_mode=self.audio_mode,
             editorial_intent=self.editorial_intent,
+            content_profile_preset=self.content_profile_preset,
             profile_format_override=self.profile_format_override,
             profile_editorial_mode_override=self.profile_editorial_mode_override,
             profile_domain_override=self.profile_domain_override,
@@ -257,7 +259,7 @@ class DesktopProject:
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
             "subtitles_enabled", "subtitle_style", "preset_selection_mode", "audio_mode", "composition_strategy",
-            "editorial_intent", "profile_format_override", "profile_editorial_mode_override",
+            "editorial_intent", "content_profile_preset", "profile_format_override", "profile_editorial_mode_override",
             "profile_domain_override", "profile_traits_override",
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
         }

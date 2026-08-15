@@ -19,6 +19,7 @@ from app.analysis_artifact import candidate_is_draftable
 from app.clip_results import ClipResult, unique_primary_results
 from app.content_profile_taxonomy import (
     AUTO_PROFILE_INPUT,
+    CONTENT_PROFILE_PRESETS,
     ProfileAxisId,
     user_overridable_values,
 )
@@ -55,6 +56,14 @@ def _populate_profile_override(combo: QComboBox, axis_id: ProfileAxisId) -> None
     combo.addItem("Авто", AUTO_PROFILE_INPUT)
     for value in user_overridable_values(axis_id):
         combo.addItem(value.label, value.id)
+
+
+def _populate_content_profile_preset(combo: QComboBox) -> None:
+    """Populate the single user-facing category shortcut in contract order."""
+
+    combo.addItem("Авто", AUTO_PROFILE_INPUT)
+    for preset in CONTENT_PROFILE_PRESETS.values():
+        combo.addItem(preset.label, preset.id)
 
 
 class _ElidedLabel(QLabel):
@@ -428,37 +437,15 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(deep_analysis=str(self.deep_analysis.currentData()))
         )
         settings.addWidget(self.deep_analysis)
-        settings.addWidget(QLabel("Профиль источника: формат"))
-        self.profile_format_override = QComboBox()
-        _populate_profile_override(self.profile_format_override, "format")
-        self.profile_format_override.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(profile_format_override=str(self.profile_format_override.currentData()))
-        )
-        settings.addWidget(self.profile_format_override)
-        settings.addWidget(QLabel("Редакционный режим источника"))
-        self.profile_editorial_mode_override = QComboBox()
-        _populate_profile_override(self.profile_editorial_mode_override, "editorial_mode")
-        self.profile_editorial_mode_override.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(profile_editorial_mode_override=str(self.profile_editorial_mode_override.currentData()))
-        )
-        settings.addWidget(self.profile_editorial_mode_override)
-        settings.addWidget(QLabel("Тематика источника"))
-        self.profile_domain_override = QComboBox()
-        _populate_profile_override(self.profile_domain_override, "domain")
-        self.profile_domain_override.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(profile_domain_override=str(self.profile_domain_override.currentData()))
-        )
-        settings.addWidget(self.profile_domain_override)
-        settings.addWidget(QLabel("Главный признак источника"))
-        self.profile_trait_override = QComboBox()
-        _populate_profile_override(self.profile_trait_override, "traits")
-        self.profile_trait_override.currentIndexChanged.connect(
+        settings.addWidget(QLabel("Категория контента"))
+        self.content_profile_preset = QComboBox()
+        _populate_content_profile_preset(self.content_profile_preset)
+        self.content_profile_preset.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(
-                profile_traits_override=[] if self.profile_trait_override.currentData() == AUTO_PROFILE_INPUT
-                else [str(self.profile_trait_override.currentData())]
+                content_profile_preset=str(self.content_profile_preset.currentData())
             )
         )
-        settings.addWidget(self.profile_trait_override)
+        settings.addWidget(self.content_profile_preset)
         settings.addWidget(QLabel("Площадка"))
         self.platform = QComboBox()
         self.platform.addItem("TikTok", "tiktok")
@@ -1318,15 +1305,7 @@ class ProjectScreen(QWidget):
         self.setup_editorial_intent.blockSignals(True)
         self.setup_editorial_intent.setText(project.settings.editorial_intent)
         self.setup_editorial_intent.blockSignals(False)
-        self._set_combo_data(self.profile_format_override, project.settings.profile_format_override)
-        self._set_combo_data(self.profile_editorial_mode_override, project.settings.profile_editorial_mode_override)
-        self._set_combo_data(self.profile_domain_override, project.settings.profile_domain_override)
-        self._set_combo_data(
-            self.profile_trait_override,
-            project.settings.profile_traits_override[0]
-            if project.settings.profile_traits_override
-            else AUTO_PROFILE_INPUT,
-        )
+        self._set_combo_data(self.content_profile_preset, project.settings.content_profile_preset)
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
         self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
         self.same_source_broll.blockSignals(True)
@@ -3255,8 +3234,7 @@ class ProjectScreen(QWidget):
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.composition_strategy, self.same_source_broll,
             self.subtitles, self.subtitle_style, self.cache,
-            self.setup_editorial_intent, self.profile_format_override, self.profile_editorial_mode_override,
-            self.profile_domain_override, self.profile_trait_override,
+            self.setup_editorial_intent, self.content_profile_preset,
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
         ):
             widget.setDisabled(active)

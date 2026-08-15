@@ -205,7 +205,7 @@ class ContentUnderstandingConfig:
     """Versioned semantic-analysis settings, isolated from render-only options."""
 
     enabled: bool = True
-    strategy_version: str = "5A.3"
+    strategy_version: str = "5A.4"
     profile_schema_version: str = CONTENT_PROFILE_SCHEMA_VERSION
     editorial_intent: str = ""
     manual_override: dict[str, Any] = field(default_factory=dict)
@@ -252,7 +252,7 @@ class ContentUnderstandingConfig:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ClipEngineError(f"{name} не должен быть пустым.")
-        if self.strategy_version not in {"5A.1", "5A.2", "5A.3"}:
+        if self.strategy_version not in {"5A.1", "5A.2", "5A.3", "5A.4"}:
             raise ClipEngineError("content_understanding.strategy_version не поддерживается.")
         if self.profile_schema_version not in SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS:
             raise ClipEngineError("content_understanding.profile_schema_version не поддерживается.")

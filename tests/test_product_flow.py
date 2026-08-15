@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.analysis_artifact import AnalysisArtifact
 from app.config import load_config
+from app.content_profile_taxonomy import content_profile_preset_mapping
 from app.gui.models import DesktopSettings, RunKind, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -69,6 +70,44 @@ def test_editorial_intent_and_profile_override_resolve_into_existing_pipeline_co
         "traits": ["visual_led", "high_pacing"],
     }
     config.validate()
+
+
+def test_manual_content_preset_beats_auto_detection_and_legacy_axis_overrides() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(
+            content_profile_preset="food",
+            profile_format_override="gameplay",
+            profile_editorial_mode_override="commentary",
+            profile_domain_override="gaming",
+            profile_traits_override=("high_pacing",),
+            subtitle_preset="minimal",
+            preset_selection_mode="explicit",
+        ),
+        _metadata(
+            effective_profile={
+                "format": "talking_head", "editorial_mode": "news_analysis",
+                "domain": "news", "traits": ["speech_led"],
+            },
+        ),
+    )
+
+    assert resolved.content_profile_preset == "food"
+    assert resolved.manual_profile_override == content_profile_preset_mapping("food")
+    assert resolved.recommended_subtitle_preset == "dynamic"
+    assert resolved.subtitle_preset == "minimal"
+    assert resolved.preset_provenance == "explicit_selection"
+
+
+def test_auto_content_preset_preserves_existing_detection_and_legacy_override_behavior() -> None:
+    detected = resolve_processing_intent(ProcessingIntent(), _metadata())
+    legacy_override = resolve_processing_intent(
+        ProcessingIntent(content_profile_preset="auto", profile_domain_override="technology"),
+        _metadata(),
+    )
+
+    assert detected.content_profile_preset == "auto"
+    assert detected.manual_profile_override == {}
+    assert legacy_override.manual_profile_override == {"domain": "technology"}
 
 
 def test_deep_analysis_auto_is_conservative_and_manual_choice_wins() -> None:
@@ -374,7 +413,7 @@ def test_setup_changes_explain_when_analysis_is_reused_or_needed_again(tmp_path:
         runs=RunHistoryStore(projects), pipeline=PipelineFacade(root), system=SystemService(root),
     )
 
-    services.update_project_options(project, processing_mode="maximum")
+    services.update_project_options(project, content_profile_preset="interview")
     assert project.setup_state.needs_new_analysis is True
     assert "новый анализ" in project.setup_state.change_summary
 

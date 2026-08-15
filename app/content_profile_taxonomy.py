@@ -41,6 +41,26 @@ class ProfileTaxonomyAxis:
     multiple: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ContentProfilePreset:
+    """Stable user-facing shortcut over the canonical profile axes."""
+
+    id: str
+    label: str
+    format: str
+    editorial_mode: str
+    domain: str
+    traits: tuple[str, ...]
+
+    def profile(self) -> dict[str, str | list[str]]:
+        return {
+            "format": self.format,
+            "editorial_mode": self.editorial_mode,
+            "domain": self.domain,
+            "traits": list(order_profile_ids("traits", list(self.traits))),
+        }
+
+
 def _value(value_id: str, label: str, *, user_overridable: bool = True) -> ProfileTaxonomyValue:
     return ProfileTaxonomyValue(value_id, label, user_overridable)
 
@@ -113,6 +133,90 @@ PROFILE_TAXONOMY = MappingProxyType({
         multiple=True,
     ),
 })
+
+
+CONTENT_PROFILE_PRESETS = MappingProxyType({
+    item.id: item for item in (
+        ContentProfilePreset(
+            "podcast", "Подкаст", "dialogue", "commentary", "general",
+            ("speech_led", "multi_speaker", "low_pacing"),
+        ),
+        ContentProfilePreset(
+            "interview", "Интервью", "dialogue", "interview", "general",
+            ("speech_led", "multi_speaker", "question_answer"),
+        ),
+        ContentProfilePreset(
+            "talking_head_expert", "Эксперт в кадре", "talking_head", "explanatory", "education",
+            ("speech_led", "single_speaker", "dense_information"),
+        ),
+        ContentProfilePreset(
+            "gameplay", "Геймплей", "gameplay", "commentary", "gaming",
+            ("visual_led", "scene_driven", "high_pacing"),
+        ),
+        ContentProfilePreset(
+            "stream", "Стрим", "mixed", "commentary", "entertainment",
+            ("speech_led", "visual_led", "high_pacing"),
+        ),
+        ContentProfilePreset(
+            "vlog_lifestyle", "Влог / лайфстайл", "scene_driven", "narrative", "lifestyle",
+            ("visual_led", "scene_driven"),
+        ),
+        ContentProfilePreset(
+            "food", "Еда", "scene_driven", "demonstration", "food",
+            ("visual_led", "scene_driven", "instructional"),
+        ),
+        ContentProfilePreset(
+            "travel", "Путешествия", "scene_driven", "narrative", "lifestyle",
+            ("visual_led", "scene_driven"),
+        ),
+        ContentProfilePreset(
+            "tutorial_education", "Обучение / туториал", "screen_demo", "demonstration", "education",
+            ("speech_led", "visual_led", "dense_information", "screen_content", "instructional"),
+        ),
+        ContentProfilePreset(
+            "review", "Обзор", "mixed", "commentary", "general",
+            ("speech_led", "visual_led", "dense_information"),
+        ),
+        ContentProfilePreset(
+            "reaction", "Реакция", "mixed", "commentary", "entertainment",
+            ("speech_led", "visual_led", "high_emotion"),
+        ),
+        ContentProfilePreset(
+            "story_entertainment", "История / развлечение", "scene_driven", "narrative", "entertainment",
+            ("visual_led", "scene_driven", "high_emotion"),
+        ),
+        ContentProfilePreset(
+            "movie_series", "Фильм / сериал", "scene_driven", "entertainment", "entertainment",
+            ("visual_led", "scene_driven"),
+        ),
+        ContentProfilePreset(
+            "sports_fitness", "Спорт / фитнес", "scene_driven", "demonstration", "health",
+            ("visual_led", "scene_driven", "high_pacing", "instructional"),
+        ),
+        ContentProfilePreset(
+            "news_commentary", "Новости / комментарии", "talking_head", "news_analysis", "news",
+            ("speech_led", "single_speaker", "dense_information"),
+        ),
+    )
+})
+
+
+def content_profile_preset_ids(*, include_auto: bool = False) -> tuple[str, ...]:
+    preset_ids = tuple(CONTENT_PROFILE_PRESETS)
+    return (AUTO_PROFILE_INPUT, *preset_ids) if include_auto else preset_ids
+
+
+def content_profile_preset(preset_id: str) -> ContentProfilePreset:
+    try:
+        return CONTENT_PROFILE_PRESETS[preset_id]
+    except KeyError as error:
+        raise ValueError(f"Unsupported content profile preset: {preset_id!r}") from error
+
+
+def content_profile_preset_mapping(preset_id: str) -> dict[str, str | list[str]]:
+    """Return a fresh deterministic override payload for a manual preset."""
+
+    return content_profile_preset(preset_id).profile()
 
 
 def taxonomy_axis(axis_id: ProfileAxisId) -> ProfileTaxonomyAxis:

@@ -1,0 +1,162 @@
+{
+  "schema_version": "source-content-profile-v2-presets-real-window.1",
+  "captured_at": "2026-08-15T09:35:08.240114+00:00",
+  "os": "Windows-10-10.0.26200-SP0",
+  "qt_platform": "windows",
+  "screen": {
+    "name": "\\\\.\\DISPLAY1",
+    "available_geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 1536,
+      "height": 816
+    },
+    "device_pixel_ratio": 1.25
+  },
+  "window": {
+    "class": "ProjectScreen",
+    "title": "Content Factory — Source Content Profile v2 QA",
+    "native_window_id": 10356732,
+    "width": 1400,
+    "height": 736
+  },
+  "sample_selection": "sports_fitness",
+  "persisted_value": "sports_fitness",
+  "content_profile_preset_control": {
+    "visible": true,
+    "fully_inside_scroll_viewport": true,
+    "enabled": true,
+    "geometry": {
+      "x": 19,
+      "y": 194,
+      "width": 1316,
+      "height": 36
+    },
+    "items": [
+      {
+        "label": "Авто",
+        "value": "auto"
+      },
+      {
+        "label": "Подкаст",
+        "value": "podcast"
+      },
+      {
+        "label": "Интервью",
+        "value": "interview"
+      },
+      {
+        "label": "Эксперт в кадре",
+        "value": "talking_head_expert"
+      },
+      {
+        "label": "Геймплей",
+        "value": "gameplay"
+      },
+      {
+        "label": "Стрим",
+        "value": "stream"
+      },
+      {
+        "label": "Влог / лайфстайл",
+        "value": "vlog_lifestyle"
+      },
+      {
+        "label": "Еда",
+        "value": "food"
+      },
+      {
+        "label": "Путешествия",
+        "value": "travel"
+      },
+      {
+        "label": "Обучение / туториал",
+        "value": "tutorial_education"
+      },
+      {
+        "label": "Обзор",
+        "value": "review"
+      },
+      {
+        "label": "Реакция",
+        "value": "reaction"
+      },
+      {
+        "label": "История / развлечение",
+        "value": "story_entertainment"
+      },
+      {
+        "label": "Фильм / сериал",
+        "value": "movie_series"
+      },
+      {
+        "label": "Спорт / фитнес",
+        "value": "sports_fitness"
+      },
+      {
+        "label": "Новости / комментарии",
+        "value": "news_commentary"
+      }
+    ],
+    "expected_values": [
+      "auto",
+      "podcast",
+      "interview",
+      "talking_head_expert",
+      "gameplay",
+      "stream",
+      "vlog_lifestyle",
+      "food",
+      "travel",
+      "tutorial_education",
+      "review",
+      "reaction",
+      "story_entertainment",
+      "movie_series",
+      "sports_fitness",
+      "news_commentary"
+    ],
+    "expected_labels": [
+      "Авто",
+      "Подкаст",
+      "Интервью",
+      "Эксперт в кадре",
+      "Геймплей",
+      "Стрим",
+      "Влог / лайфстайл",
+      "Еда",
+      "Путешествия",
+      "Обучение / туториал",
+      "Обзор",
+      "Реакция",
+      "История / развлечение",
+      "Фильм / сериал",
+      "Спорт / фитнес",
+      "Новости / комментарии"
+    ],
+    "values_match_contract": true,
+    "labels_match_contract": true,
+    "current_value": "sports_fitness",
+    "current_label": "Спорт / фитнес"
+  },
+  "checks": {
+    "qt_windows_platform": true,
+    "native_window_created": true,
+    "project_screen_visible": true,
+    "settings_panel_visible": true,
+    "control_visible": true,
+    "control_inside_scroll_viewport": true,
+    "control_enabled": true,
+    "values_match_contract": true,
+    "labels_match_contract": true,
+    "auto_plus_15_choices": true,
+    "interactive_selection_persisted": true
+  },
+  "result": "PASS",
+  "screenshot": {
+    "path": "project-screen-profile-controls.png",
+    "sha256": "d1f0996dd6ff695c6b790bacd5dd52d7d02e764e8a0d0ec751580e4e9160d4bf",
+    "width": 1750,
+    "height": 920
+  }
+}

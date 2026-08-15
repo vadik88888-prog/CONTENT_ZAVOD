@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.config import AppConfig
+from app.content_profile_taxonomy import content_profile_preset_ids, content_profile_preset_mapping
 from app.content_understanding import (
     VIDEO_CONTENT_PROFILE_SCHEMA_VERSION,
     VideoContentProfile,
@@ -92,6 +93,28 @@ def test_unknown_profile_uses_safe_fallback_and_filename_is_only_weak_signal() -
     assert filename_only["effective_profile"]["resolution"]["format"] == "safe_fallback"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("Это влог про путешествие: сначала мы приехали, потом пошли в горы.", ("scene_driven", "narrative", "lifestyle")),
+        ("Покажу фитнес-тренировку workout шаг за шагом.", ("scene_driven", "demonstration", "health")),
+        ("Это обзор и product review: комментирую плюсы и минусы.", ("mixed", "commentary", "general")),
+    ),
+)
+def test_auto_profile_aliases_use_only_existing_transcript_evidence(
+    text: str, expected: tuple[str, str, str],
+) -> None:
+    data = _profile(text)
+
+    assert (
+        data["detected_profile"]["format"]["value"],
+        data["detected_profile"]["editorial_mode"]["value"],
+        data["detected_profile"]["domain"]["value"],
+    ) == expected
+    for axis in ("format", "editorial_mode", "domain"):
+        assert all(not item.startswith("filename:") for item in data["detected_profile"][axis]["evidence"])
+
+
 def test_profile_v2_auto_detection_keeps_detected_and_effective_axes() -> None:
     data = _profile(
         "В этой катке PUBG разберём матч и покажем решающий момент gameplay.",
@@ -130,6 +153,26 @@ def test_manual_override_changes_effective_profile_without_replacing_detection()
     assert data["manual_override"]["provenance"] == "user"
     assert data["manual_override"]["revision_id"]
     assert data["detected_content_type"] == "interview"
+
+
+@pytest.mark.parametrize("preset_id", content_profile_preset_ids())
+def test_each_manual_content_preset_creates_effective_profile_and_preserves_detection(preset_id: str) -> None:
+    text = "Объясняю принцип на примере, потому что важно понять вывод."
+    detected = _profile(text)["detected_profile"]
+    expected = content_profile_preset_mapping(preset_id)
+    config = AppConfig()
+    config.content_understanding.manual_override = expected
+
+    data = _profile(text, config=config)
+
+    assert data["detected_profile"] == detected
+    assert {axis: data["effective_profile"][axis] for axis in ("format", "editorial_mode", "domain", "traits")} == expected
+    assert data["effective_profile"]["resolution"] == {
+        "format": "manual_override",
+        "editorial_mode": "manual_override",
+        "domain": "manual_override",
+        "traits": "manual_override",
+    }
 
 
 def test_profile_reads_current_audio_and_visual_evidence_contracts() -> None:

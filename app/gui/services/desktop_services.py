@@ -216,6 +216,7 @@ class DesktopServices:
         # changing it must never re-run Brain/Vision.
         analysis_options = {
             "processing_mode", "deep_analysis", "editorial_intent",
+            "content_profile_preset",
             "profile_format_override", "profile_editorial_mode_override",
             "profile_domain_override", "profile_traits_override",
         }
@@ -505,6 +506,7 @@ class DesktopServices:
                     "preset_selection_mode": project.settings.preset_selection_mode,
                     "audio_mode": project.settings.audio_mode,
                     "editorial_intent": project.settings.editorial_intent,
+                    "content_profile_preset": project.settings.content_profile_preset,
                     "profile_format_override": project.settings.profile_format_override,
                     "profile_editorial_mode_override": project.settings.profile_editorial_mode_override,
                     "profile_domain_override": project.settings.profile_domain_override,

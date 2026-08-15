@@ -12,11 +12,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QWidget
 
 from app.content_profile_taxonomy import (
-    AUTO_PROFILE_INPUT,
-    PROFILE_AXIS_ORDER,
-    ProfileAxisId,
-    profile_input_ids,
-    user_overridable_values,
+    CONTENT_PROFILE_PRESETS,
+    content_profile_preset_ids,
 )
 from app.gui.models import DesktopSettings
 from app.gui.screens.project_screen import ProjectScreen
@@ -31,17 +28,11 @@ from app.gui.viewmodels import ProjectViewModel
 from app.utils import utc_now
 
 
-SAMPLE_SELECTIONS = {
-    "format": "gameplay",
-    "editorial_mode": "commentary",
-    "domain": "gaming",
-    "traits": "visual_led",
-}
+SAMPLE_SELECTION = "sports_fitness"
 
 
 def _control_snapshot(
     combo: QComboBox,
-    axis_id: ProfileAxisId,
     *,
     viewport: QWidget,
 ) -> dict[str, object]:
@@ -51,9 +42,9 @@ def _control_snapshot(
     ]
     expected_labels = [
         "Авто",
-        *(item.label for item in user_overridable_values(axis_id)),
+        *(preset.label for preset in CONTENT_PROFILE_PRESETS.values()),
     ]
-    expected_values = list(profile_input_ids(axis_id))
+    expected_values = list(content_profile_preset_ids(include_auto=True))
     actual_labels = [str(item["label"]) for item in items]
     actual_values = [str(item["value"]) for item in items]
     viewport_position = combo.mapTo(viewport, QPoint(0, 0))
@@ -131,57 +122,31 @@ def run(output_directory: Path) -> None:
         QTest.qWait(250)
         app.processEvents()
 
-        controls = {
-            "format": screen.profile_format_override,
-            "editorial_mode": screen.profile_editorial_mode_override,
-            "domain": screen.profile_domain_override,
-            "traits": screen.profile_trait_override,
-        }
-        for axis_id in PROFILE_AXIS_ORDER:
-            combo = controls[axis_id]
-            expected_index = combo.findData(SAMPLE_SELECTIONS[axis_id])
-            if expected_index < 0:
-                raise AssertionError(f"Missing {axis_id} selection {SAMPLE_SELECTIONS[axis_id]!r}.")
-            combo.setCurrentIndex(expected_index)
-            app.processEvents()
+        combo = screen.content_profile_preset
+        expected_index = combo.findData(SAMPLE_SELECTION)
+        if expected_index < 0:
+            raise AssertionError(f"Missing content preset selection {SAMPLE_SELECTION!r}.")
+        combo.setCurrentIndex(expected_index)
+        app.processEvents()
 
-        screen.content_scroll.ensureWidgetVisible(screen.profile_trait_override, 24, 24)
+        screen.content_scroll.ensureWidgetVisible(combo, 24, 24)
         QTest.qWait(500)
         app.processEvents()
         persisted = projects.load(project.project_id)
-        persisted_values = {
-            "format": persisted.settings.profile_format_override,
-            "editorial_mode": persisted.settings.profile_editorial_mode_override,
-            "domain": persisted.settings.profile_domain_override,
-            "traits": persisted.settings.profile_traits_override[0]
-            if persisted.settings.profile_traits_override
-            else AUTO_PROFILE_INPUT,
-        }
-        control_evidence = {
-            axis_id: _control_snapshot(
-                controls[axis_id],
-                axis_id,
-                viewport=screen.content_scroll.viewport(),
-            )
-            for axis_id in PROFILE_AXIS_ORDER
-        }
+        persisted_value = persisted.settings.content_profile_preset
+        control_evidence = _control_snapshot(combo, viewport=screen.content_scroll.viewport())
         checks = {
             "qt_windows_platform": app.platformName().casefold() == "windows",
             "native_window_created": int(screen.winId()) > 0,
             "project_screen_visible": screen.isVisible(),
             "settings_panel_visible": screen.settings_panel.isVisible(),
-            "all_controls_visible": all(bool(item["visible"]) for item in control_evidence.values()),
-            "all_controls_inside_scroll_viewport": all(
-                bool(item["fully_inside_scroll_viewport"]) for item in control_evidence.values()
-            ),
-            "all_controls_enabled": all(bool(item["enabled"]) for item in control_evidence.values()),
-            "all_values_match_contract": all(
-                bool(item["values_match_contract"]) for item in control_evidence.values()
-            ),
-            "all_labels_match_contract": all(
-                bool(item["labels_match_contract"]) for item in control_evidence.values()
-            ),
-            "interactive_selection_persisted": persisted_values == SAMPLE_SELECTIONS,
+            "control_visible": bool(control_evidence["visible"]),
+            "control_inside_scroll_viewport": bool(control_evidence["fully_inside_scroll_viewport"]),
+            "control_enabled": bool(control_evidence["enabled"]),
+            "values_match_contract": bool(control_evidence["values_match_contract"]),
+            "labels_match_contract": bool(control_evidence["labels_match_contract"]),
+            "auto_plus_15_choices": len(control_evidence["items"]) == 16,
+            "interactive_selection_persisted": persisted_value == SAMPLE_SELECTION,
         }
         if not all(checks.values()):
             raise AssertionError(
@@ -193,7 +158,7 @@ def run(output_directory: Path) -> None:
             raise RuntimeError("Could not capture the real ProjectScreen window.")
         screenshot_sha256 = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
         evidence = {
-            "schema_version": "source-content-profile-v2-task1-real-window.1",
+            "schema_version": "source-content-profile-v2-presets-real-window.1",
             "captured_at": utc_now(),
             "os": platform.platform(),
             "qt_platform": app.platformName(),
@@ -214,9 +179,9 @@ def run(output_directory: Path) -> None:
                 "width": screen.width(),
                 "height": screen.height(),
             },
-            "sample_selections": SAMPLE_SELECTIONS,
-            "persisted_values": persisted_values,
-            "controls": control_evidence,
+            "sample_selection": SAMPLE_SELECTION,
+            "persisted_value": persisted_value,
+            "content_profile_preset_control": control_evidence,
             "checks": checks,
             "result": "PASS",
             "screenshot": {
