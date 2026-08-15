@@ -152,6 +152,13 @@ QPushButton#nav {
 }
 QPushButton#nav:hover { background: @ELEVATED@; color: @PRIMARY_TEXT@; }
 QPushButton#nav:checked { color: @PRIMARY_TEXT@; background: @ACCENT@; border-color: @PRIMARY@; }
+QPushButton#navNewProject {
+  color: @PRIMARY@;
+  background: @MAIN@;
+  border: 1px solid @PRIMARY@;
+  font-weight: 700;
+}
+QPushButton#navNewProject:hover { color: @PRIMARY_TEXT@; background: @ACCENT@; }
 
 QLineEdit,
 QComboBox,

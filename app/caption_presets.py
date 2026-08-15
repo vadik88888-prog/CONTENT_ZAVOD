@@ -9,6 +9,7 @@ from typing import Literal
 CAPTION_PRESET_REGISTRY_VERSION = "production.captions.2"
 CAPTION_PRESET_VERSION = "2.0.0"
 CAPTION_CALIBRATED_PRESET_VERSION = "2.1.0"
+CAPTION_PRESET_OVERRIDE_PREFIX = "caption-preset:"
 
 CaptionPresetId = Literal[
     "clean_white",
@@ -209,6 +210,12 @@ _DEFAULT_BY_STYLE: dict[CaptionStyleFamily, CaptionPresetId] = {
     "minimal": "minimal_light",
     "editorial": "editorial_narrow",
 }
+_DEFAULT_BY_LEGACY_STYLE: dict[str, CaptionPresetId] = {
+    "clean": "clean_white",
+    "dynamic": "accent_yellow",
+    "documentary": "editorial_narrow",
+    "minimal": "minimal_light",
+}
 
 
 def caption_preset_definition(
@@ -223,9 +230,43 @@ def default_caption_preset_for_style(style_family: CaptionStyleFamily) -> Captio
     return caption_preset_definition(_DEFAULT_BY_STYLE[style_family])
 
 
+def default_caption_preset_id_for_legacy_style(style_id: object) -> CaptionPresetId:
+    """Map the four established creative families to their historic captions."""
+
+    return _DEFAULT_BY_LEGACY_STYLE.get(str(style_id), "editorial_narrow")
+
+
 def caption_preset_from_token_id(token_id: str) -> CaptionPresetDefinition | None:
     return _TOKEN_INDEX.get(token_id)
 
 
 def caption_preset_from_policy_id(policy_id: str) -> CaptionPresetDefinition | None:
     return CAPTION_PRESET_DEFINITIONS.get(policy_id)  # type: ignore[arg-type]
+
+
+def caption_preset_override_id(user_override_ids: tuple[str, ...]) -> CaptionPresetId | None:
+    """Resolve the existing CreativePolicy override slot to a production preset.
+
+    Creative style families continue to own composition and motion policy.  A
+    caption choice is deliberately carried by ``user_override_ids`` so it can
+    vary independently without changing the established CreativePolicy schema
+    or pretending that seven caption treatments are seven editing families.
+    """
+
+    marker = next((
+        value.removeprefix(CAPTION_PRESET_OVERRIDE_PREFIX)
+        for value in reversed(user_override_ids)
+        if value.startswith(CAPTION_PRESET_OVERRIDE_PREFIX)
+    ), None)
+    return marker if marker in CAPTION_PRESET_DEFINITIONS else None  # type: ignore[return-value]
+
+
+def with_caption_preset_override(
+    user_override_ids: tuple[str, ...], preset_id: CaptionPresetId,
+) -> tuple[str, ...]:
+    """Replace only the caption override while preserving unrelated choices."""
+
+    return (
+        *(value for value in user_override_ids if not value.startswith(CAPTION_PRESET_OVERRIDE_PREFIX)),
+        f"{CAPTION_PRESET_OVERRIDE_PREFIX}{preset_id}",
+    )

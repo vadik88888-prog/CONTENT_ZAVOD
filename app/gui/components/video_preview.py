@@ -305,6 +305,32 @@ class VideoPreview(QFrame):
 
         return self._presentation
 
+    def suspend(self) -> None:
+        """Release hidden native media work until an exact binding is shown.
+
+        Windows keeps ``QVideoWidget`` as a native surface.  Leaving a source
+        attached while its Results workspace is hidden can keep decoding and
+        can paint stale native frames over another route during window grabs.
+        The durable candidate/result id remains owned by ProjectScreen; the
+        next ``show_*`` call restores that exact path rather than guessing.
+        """
+
+        if (
+            self._path is None
+            and self._proxy_process.state() == QProcess.ProcessState.NotRunning
+            and self._poster_process.state() == QProcess.ProcessState.NotRunning
+        ):
+            return
+        self._selection_token += 1
+        self._cancel_proxy()
+        self._cancel_poster()
+        self._active_proxy = None
+        self._active_poster = None
+        self._clear_media()
+        self._source_path = None
+        self._source_range_seconds = None
+        self._active_candidate_title = None
+
     def set_vertical_frame_size(self, width: int, height: int) -> None:
         """Set a compact 9:16 stage without changing the media contract."""
 

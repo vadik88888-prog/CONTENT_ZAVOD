@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from app.content_profile_taxonomy import AUTO_PROFILE_INPUT
+from app.caption_presets import (
+    CAPTION_PRESET_DEFINITIONS,
+    default_caption_preset_id_for_legacy_style,
+)
 from app.product_flow import ProcessingIntent
 from app.source_models import SourceSpec
 from app.utils import utc_now
@@ -47,8 +51,13 @@ class ProjectOptions:
     platform: str = "universal"
     clip_count: str = "3"
     subtitles_enabled: bool = True
+    # ``subtitle_style`` is the established four-family creative style input.
+    # Keep its persisted name for compatibility and store the independently
+    # selectable production caption treatment beside it.
     subtitle_style: str = "documentary"
+    caption_preset_id: str = "editorial_narrow"
     preset_selection_mode: str = "auto"
+    reduced_motion: bool = False
     audio_mode: str = "original"
     editorial_intent: str = ""
     content_profile_preset: str = AUTO_PROFILE_INPUT
@@ -68,8 +77,11 @@ class ProjectOptions:
             raise ValueError("Unsupported encoder.")
         if self.composition_strategy not in {"safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop"}:
             raise ValueError("Unsupported composition strategy.")
+        if self.caption_preset_id not in CAPTION_PRESET_DEFINITIONS:
+            raise ValueError("Unsupported production caption preset.")
         if not all(isinstance(item, bool) for item in (
-            self.subtitles_enabled, self.same_source_broll_allowed, self.use_cache, self.recompute_all,
+            self.subtitles_enabled, self.reduced_motion,
+            self.same_source_broll_allowed, self.use_cache, self.recompute_all,
         )):
             raise ValueError("Project options must contain booleans.")
 
@@ -80,7 +92,9 @@ class ProjectOptions:
             platform=self.platform,
             clip_count=str(self.clip_count),
             subtitle_preset=self.subtitle_style,
+            caption_preset_id=self.caption_preset_id,
             preset_selection_mode=self.preset_selection_mode,
+            reduced_motion=self.reduced_motion,
             audio_mode=self.audio_mode,
             editorial_intent=self.editorial_intent,
             content_profile_preset=self.content_profile_preset,
@@ -176,6 +190,9 @@ class DesktopProject:
     review_selected_candidate_ids: list[str] = field(default_factory=list)
     selected_candidate_ids: list[str] = field(default_factory=list)
     candidate_boundary_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Candidate-owned visual choices.  Values are inputs to the existing
+    # draft-only pipeline and never replace Analysis/ProductionPlan identity.
+    candidate_creative_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Selection is part of the review workspace rather than a widget-local
     # detail.  Persist it so a reopened project restores the same preview.
     active_preview_candidate_id: str | None = None
@@ -235,6 +252,30 @@ class DesktopProject:
                 raise ValueError("Candidate boundary override has no valid range.") from error
             if end <= start:
                 raise ValueError("Candidate boundary override is reversed.")
+        for candidate_id, override in self.candidate_creative_overrides.items():
+            if not candidate_id or not isinstance(override, dict):
+                raise ValueError("Candidate creative override is invalid.")
+            unknown = set(override) - {
+                "creative_style", "caption_preset_id", "composition_strategy",
+                "same_source_broll_allowed", "reduced_motion",
+            }
+            if unknown:
+                raise ValueError("Candidate creative override contains unsupported values.")
+            if "creative_style" in override and override["creative_style"] not in {
+                "minimal", "documentary", "dynamic", "clean",
+            }:
+                raise ValueError("Candidate creative style is unsupported.")
+            if "caption_preset_id" in override and override["caption_preset_id"] not in CAPTION_PRESET_DEFINITIONS:
+                raise ValueError("Candidate caption preset is unsupported.")
+            if "composition_strategy" in override and override["composition_strategy"] not in {
+                "safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
+            }:
+                raise ValueError("Candidate composition strategy is unsupported.")
+            if any(
+                name in override and not isinstance(override[name], bool)
+                for name in ("same_source_broll_allowed", "reduced_motion")
+            ):
+                raise ValueError("Candidate toggle override must be boolean.")
 
     @property
     def source(self) -> Path:
@@ -259,11 +300,16 @@ class DesktopProject:
         supported_settings = {
             "processing_mode", "deep_analysis", "platform", "clip_count",
             "subtitles_enabled", "subtitle_style", "preset_selection_mode", "audio_mode", "composition_strategy",
+            "caption_preset_id", "reduced_motion",
             "editorial_intent", "content_profile_preset", "profile_format_override", "profile_editorial_mode_override",
             "profile_domain_override", "profile_traits_override",
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
+        if "caption_preset_id" not in settings:
+            migrated_settings["caption_preset_id"] = default_caption_preset_id_for_legacy_style(
+                settings.get("subtitle_style", "documentary")
+            )
         if "preset_selection_mode" not in settings:
             # Before this contract every persisted subtitle style was the
             # effective pinned value. Never reinterpret it as automatic.
@@ -348,6 +394,11 @@ class DesktopProject:
             selected_candidate_ids=selected_candidate_ids,
             candidate_boundary_overrides={
                 str(key): dict(item) for key, item in dict(value.get("candidate_boundary_overrides") or {}).items()
+                if isinstance(item, dict)
+            },
+            candidate_creative_overrides={
+                str(key): dict(item)
+                for key, item in dict(value.get("candidate_creative_overrides") or {}).items()
                 if isinstance(item, dict)
             },
             last_final_result_id=(

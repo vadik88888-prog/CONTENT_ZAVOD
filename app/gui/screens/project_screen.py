@@ -11,11 +11,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.analysis_artifact import candidate_is_draftable
+from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.clip_results import ClipResult, unique_primary_results
 from app.content_profile_taxonomy import (
     AUTO_PROFILE_INPUT,
@@ -24,6 +25,7 @@ from app.content_profile_taxonomy import (
     user_overridable_values,
 )
 from app.editorial_profile_policy import evaluate_editorial_candidate
+from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
@@ -65,6 +67,30 @@ def _populate_content_profile_preset(combo: QComboBox) -> None:
     combo.addItem("Авто", AUTO_PROFILE_INPUT)
     for preset in CONTENT_PROFILE_PRESETS.values():
         combo.addItem(preset.label, preset.id)
+
+
+_CREATIVE_STYLE_CHOICES = (
+    ("Clean", "clean"),
+    ("Dynamic", "dynamic"),
+    ("Educational", "documentary"),
+    ("Minimal Premium", "minimal"),
+)
+
+
+def _populate_creative_styles(combo: QComboBox) -> None:
+    for label, value in _CREATIVE_STYLE_CHOICES:
+        combo.addItem(label, value)
+
+
+def _populate_caption_presets(combo: QComboBox) -> None:
+    for preset in CAPTION_PRESET_DEFINITIONS.values():
+        font = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
+        combo.addItem(preset.label, preset.preset_id)
+        combo.setItemData(
+            combo.count() - 1,
+            f"{preset.label} · встроенный шрифт {font.family} ({font.file_name})",
+            Qt.ItemDataRole.ToolTipRole,
+        )
 
 
 class _ElidedLabel(QLabel):
@@ -129,8 +155,9 @@ class ProjectScreen(QWidget):
         self._pending_runs: list[ProjectRun] | None = None
         self._persisted_refresh_pending = False
         self._processing_structure_key: tuple[object, ...] | None = None
-        self._analysis_cache_key: tuple[Path, int, int] | None = None
+        self._analysis_cache_key: tuple[object, ...] | None = None
         self._analysis_cache: dict[str, Any] = {}
+        self._analysis_reference_stats: tuple[tuple[object, ...], ...] = ()
         self._analysis_load_error: str | None = None
         self._active_candidate_id: str | None = None
         # The player is shared by Moments and Drafts.  Keep its review binding
@@ -141,6 +168,7 @@ class ProjectScreen(QWidget):
         self._active_candidate_range: tuple[str, float, float] | None = None
         self._active_preview_kind = "source"
         self._persisting_active_preview = False
+        self._persisting_review_selection = False
         self._all_candidates_by_id: dict[str, dict] = {}
         self._draftable_candidates_by_id: dict[str, dict] = {}
         self._review_candidates_by_id: dict[str, dict] = {}
@@ -236,6 +264,7 @@ class ProjectScreen(QWidget):
         self._body_layout = body
         self.content_scroll = QScrollArea()
         self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.content_host = QWidget()
         left = QVBoxLayout(self.content_host)
         left.setContentsMargins(0, 0, 0, 0)
@@ -260,7 +289,8 @@ class ProjectScreen(QWidget):
         self.setup_source.setObjectName("muted")
         make_label_shrinkable(self.setup_source)
         setup_layout.addWidget(self.setup_source)
-        setup_layout.addWidget(QLabel("Что искать?"))
+
+        setup_layout.addWidget(QLabel("Что искать? (необязательно)"))
         self.setup_editorial_intent = QLineEdit()
         self.setup_editorial_intent.setMaxLength(500)
         self.setup_editorial_intent.setPlaceholderText("Например: практические советы, ошибки и сильные выводы")
@@ -271,7 +301,69 @@ class ProjectScreen(QWidget):
             lambda: self.viewmodel.save_options(editorial_intent=self.setup_editorial_intent.text().strip())
         )
         setup_layout.addWidget(self.setup_editorial_intent)
-        setup_layout.addWidget(QLabel("Как искать моменты"))
+
+        setup_choices = QWidget()
+        setup_choices.setObjectName("setupChoices")
+        setup_choices_layout = QGridLayout(setup_choices)
+        setup_choices_layout.setContentsMargins(0, 4, 0, 0)
+        setup_choices_layout.setHorizontalSpacing(12)
+        setup_choices_layout.setVerticalSpacing(7)
+
+        setup_choices_layout.addWidget(QLabel("Тип контента"), 0, 0)
+        self.setup_content_profile = QComboBox()
+        _populate_content_profile_preset(self.setup_content_profile)
+        self.setup_content_profile.setToolTip(
+            "Авто или одна из 15 существующих категорий. Выбор влияет на рекомендации, а не скрывает нормальные моменты."
+        )
+        self.setup_content_profile.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option(
+                "content_profile_preset", str(self.setup_content_profile.currentData())
+            )
+        )
+        setup_choices_layout.addWidget(self.setup_content_profile, 1, 0)
+
+        setup_choices_layout.addWidget(QLabel("Стиль оформления"), 0, 1)
+        self.setup_creative_style = QComboBox()
+        _populate_creative_styles(self.setup_creative_style)
+        self.setup_creative_style.currentIndexChanged.connect(
+            lambda _index: self.viewmodel.save_options(
+                subtitle_style=str(self.setup_creative_style.currentData()),
+                preset_selection_mode="explicit",
+            )
+        )
+        setup_choices_layout.addWidget(self.setup_creative_style, 1, 1)
+
+        setup_choices_layout.addWidget(QLabel("Стиль субтитров"), 2, 0)
+        self.setup_caption_preset = QComboBox()
+        _populate_caption_presets(self.setup_caption_preset)
+        self.setup_caption_preset.setToolTip(
+            "Семь production presets используют точные встроенные шрифты и одну identity в Preview и Final."
+        )
+        self.setup_caption_preset.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option(
+                "caption_preset_id", str(self.setup_caption_preset.currentData())
+            )
+        )
+        setup_choices_layout.addWidget(self.setup_caption_preset, 3, 0)
+
+        setup_choices_layout.addWidget(QLabel("Количество роликов"), 2, 1)
+        self.setup_clip_count = QComboBox()
+        for label, value in (("Авто", "auto"), ("1 ролик", "1"), ("3 ролика", "3"), ("5 роликов", "5")):
+            self.setup_clip_count.addItem(label, value)
+        self.setup_clip_count.setToolTip(
+            "Это начальная рекомендация. После анализа можно выбрать любое число доступных моментов."
+        )
+        self.setup_clip_count.currentIndexChanged.connect(
+            lambda _index: self._save_setup_option("clip_count", str(self.setup_clip_count.currentData()))
+        )
+        setup_choices_layout.addWidget(self.setup_clip_count, 3, 1)
+        setup_choices_layout.setColumnStretch(0, 1)
+        setup_choices_layout.setColumnStretch(1, 1)
+        setup_layout.addWidget(setup_choices)
+
+        # These compatibility controls retain their public attributes for
+        # persisted tests.  Their visible owners live in the collapsed
+        # Advanced panel below.
         self.setup_processing_mode = QComboBox()
         self.setup_processing_mode.addItem("Быстрее — для разговорных видео", "fast")
         self.setup_processing_mode.addItem("Сбалансировано", "standard")
@@ -279,12 +371,9 @@ class ProjectScreen(QWidget):
         self.setup_processing_mode.currentIndexChanged.connect(
             lambda _index: self._save_setup_option("processing_mode", str(self.setup_processing_mode.currentData()))
         )
-        setup_layout.addWidget(self.setup_processing_mode)
         self.setup_mode_help = QLabel()
         self.setup_mode_help.setObjectName("muted")
         make_label_shrinkable(self.setup_mode_help)
-        setup_layout.addWidget(self.setup_mode_help)
-        setup_layout.addWidget(QLabel("Учитывать события в кадре"))
         self.setup_deep_analysis = QComboBox()
         self.setup_deep_analysis.addItem("Авто — выбрать по содержанию", "auto")
         self.setup_deep_analysis.addItem("Включить", "on")
@@ -292,12 +381,9 @@ class ProjectScreen(QWidget):
         self.setup_deep_analysis.currentIndexChanged.connect(
             lambda _index: self._save_setup_option("deep_analysis", str(self.setup_deep_analysis.currentData()))
         )
-        setup_layout.addWidget(self.setup_deep_analysis)
         self.setup_deep_help = QLabel()
         self.setup_deep_help.setObjectName("muted")
         make_label_shrinkable(self.setup_deep_help)
-        setup_layout.addWidget(self.setup_deep_help)
-        setup_layout.addWidget(QLabel("Где будет показываться ролик"))
         self.setup_platform = QComboBox()
         self.setup_platform.addItem("TikTok", "tiktok")
         self.setup_platform.addItem("Instagram Reels", "reels")
@@ -306,19 +392,9 @@ class ProjectScreen(QWidget):
         self.setup_platform.currentIndexChanged.connect(
             lambda _index: self._save_setup_option("platform", str(self.setup_platform.currentData()))
         )
-        setup_layout.addWidget(self.setup_platform)
         self.setup_platform_help = QLabel("Размер и поля ролика будут подготовлены для выбранного места.")
         self.setup_platform_help.setObjectName("muted")
         make_label_shrinkable(self.setup_platform_help)
-        setup_layout.addWidget(self.setup_platform_help)
-        setup_layout.addWidget(QLabel("Сколько черновиков подготовить"))
-        self.setup_clip_count = QComboBox()
-        for label, value in (("Авто", "auto"), ("1 лучший", "1"), ("3 лучших", "3"), ("5 лучших", "5")):
-            self.setup_clip_count.addItem(label, value)
-        self.setup_clip_count.currentIndexChanged.connect(
-            lambda _index: self._save_setup_option("clip_count", str(self.setup_clip_count.currentData()))
-        )
-        setup_layout.addWidget(self.setup_clip_count)
         self.setup_count_help = QLabel("Количество можно изменить позже — анализ не будет запущен повторно из-за выбора списка.")
         self.setup_count_help.setObjectName("muted")
         make_label_shrinkable(self.setup_count_help)
@@ -391,6 +467,7 @@ class ProjectScreen(QWidget):
         self.final_results = FinalResultsWorkspace()
         self.final_results.output_selected.connect(self._final_output_selected)
         self.final_results.create_more_requested.connect(self._create_more_outputs)
+        self.final_results.drafts_requested.connect(self._back_to_drafts)
         self.final_results.rerender_requested.connect(self._rerender_final_output)
         self.final_results.projects_requested.connect(self.back_requested)
         left.addWidget(self.final_results)
@@ -419,7 +496,7 @@ class ProjectScreen(QWidget):
         panel.setMaximumWidth(300)
         settings = QVBoxLayout(panel)
         settings.setContentsMargins(18, 18, 18, 18)
-        heading = QLabel("Как подготовить ролики")
+        heading = QLabel("Дополнительные настройки")
         heading.setStyleSheet("font-size: 17px; font-weight: 600;")
         settings.addWidget(heading)
         settings.addWidget(QLabel("Режим обработки"))
@@ -440,15 +517,7 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(deep_analysis=str(self.deep_analysis.currentData()))
         )
         settings.addWidget(self.deep_analysis)
-        settings.addWidget(QLabel("Категория контента"))
-        self.content_profile_preset = QComboBox()
-        _populate_content_profile_preset(self.content_profile_preset)
-        self.content_profile_preset.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(
-                content_profile_preset=str(self.content_profile_preset.currentData())
-            )
-        )
-        settings.addWidget(self.content_profile_preset)
+        self.content_profile_preset = self.setup_content_profile
         settings.addWidget(QLabel("Площадка"))
         self.platform = QComboBox()
         self.platform.addItem("TikTok", "tiktok")
@@ -459,15 +528,7 @@ class ProjectScreen(QWidget):
             lambda _index: self.viewmodel.save_options(platform=str(self.platform.currentData()))
         )
         settings.addWidget(self.platform)
-        settings.addWidget(QLabel("Количество роликов"))
-        self.clip_count = QComboBox()
-        for label, value in (("Авто", "auto"), ("1 ролик", "1"), ("3 ролика", "3"), ("5 роликов", "5")):
-            self.clip_count.addItem(label, value)
-        self.clip_count.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(clip_count=str(self.clip_count.currentData()))
-        )
-        settings.addWidget(self.clip_count)
-        settings.addWidget(QLabel("Аудио"))
+        self.clip_count = self.setup_clip_count
         self.audio_mode = QComboBox()
         self.audio_mode.addItem("Исходная речь", "original")
         self.audio_mode.addItem("Исходная речь, улучшить звук", "original_enhanced")
@@ -475,7 +536,6 @@ class ProjectScreen(QWidget):
         self.audio_mode.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(audio_mode=str(self.audio_mode.currentData()))
         )
-        settings.addWidget(self.audio_mode)
         settings.addWidget(QLabel("Композиция кадра"))
         self.composition_strategy = QComboBox()
         self.composition_strategy.addItem("Авто: сохранить важное", "safe_auto")
@@ -500,23 +560,19 @@ class ProjectScreen(QWidget):
         self.subtitles = QCheckBox("Показывать субтитры")
         self.subtitles.toggled.connect(lambda value: self.viewmodel.save_options(subtitles_enabled=value))
         settings.addWidget(self.subtitles)
-        settings.addWidget(QLabel("Стиль субтитров"))
-        self.subtitle_style = QComboBox()
-        self.subtitle_style.addItem("Документальный", "documentary")
-        self.subtitle_style.addItem("Чистый", "clean")
-        self.subtitle_style.addItem("Минималистичный", "minimal")
-        self.subtitle_style.addItem("Динамичный", "dynamic")
-        self.subtitle_style.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(
-                subtitle_style=str(self.subtitle_style.currentData()),
-                preset_selection_mode="explicit",
-            )
+        self.reduced_motion = QCheckBox("Уменьшить движение текста и акцентов")
+        self.reduced_motion.setToolTip(
+            "Использует безопасные static/fade варианты текущего production caption preset."
         )
-        settings.addWidget(self.subtitle_style)
+        self.reduced_motion.toggled.connect(
+            lambda value: self.viewmodel.save_options(reduced_motion=value)
+        )
+        settings.addWidget(self.reduced_motion)
+        self.subtitle_style = self.setup_creative_style
+        self.caption_preset = self.setup_caption_preset
         self.cache = QCheckBox(self._CACHE_TEXT)
         self.cache.setToolTip(self._CACHE_TEXT)
         self.cache.toggled.connect(lambda value: self.viewmodel.save_options(use_cache=value))
-        settings.addWidget(self.cache)
         settings.addStretch()
         self.run_button = QPushButton("Начать поиск моментов")
         self.run_button.setObjectName("primary")
@@ -696,7 +752,7 @@ class ProjectScreen(QWidget):
             1,
             self.width() - root_margins.left() - root_margins.right(),
         )
-        for bar in (self.setup_action_bar, self.review_action_bar):
+        for bar in (self.setup_action_bar, self.review_action_bar, self.final_results.action_bar):
             bar.setMinimumHeight(0)
             bar_layout = bar.layout()
             if bar_layout is None or bar.isHidden():
@@ -729,26 +785,24 @@ class ProjectScreen(QWidget):
         QTimer.singleShot(0, self._refresh_drafts_workspace_geometry)
 
     def _refresh_drafts_workspace_geometry(self) -> None:
-        """Give Drafts one scroll owner and preserve natural content.
+        """Give stacked review workspaces one scroll owner and preserve content.
 
         The review body's 2:3:2 stretch factors can give the list and inspector
         tiny nested viewports and make a fixed phone preview taller than its
-        panel.  In Drafts only, the actual list and inspector widgets therefore
-        live directly in their panels; the existing outer project scroll
-        exposes the resulting natural page at every width.  Moments keeps its
-        independent catalogue/inspector scrollers.
+        panel.  Drafts always use the existing outer project scroll.  Moments
+        keep independent catalogue/inspector panes in the wide three-column
+        workspace, but switch to that same single owner when the panels stack.
         """
 
         self._drafts_geometry_refresh_pending = False
         if not hasattr(self, "review_workspace"):
             return
 
-        is_drafts = bool(
-            self.project is not None
-            and self._derive_flow_step(self.project) == "drafts"
-        )
+        flow_step = self._derive_flow_step(self.project) if self.project is not None else ""
+        is_drafts = flow_step == "drafts"
+        is_stacked_moments = flow_step == "candidates" and bool(self._compact_stage_layout)
         preview_height = self._draft_preview_natural_height()
-        single_scroll = is_drafts
+        single_scroll = is_drafts or is_stacked_moments
         mode_changed = single_scroll != self._drafts_single_scroll_layout
         self._set_drafts_single_scroll_layout(single_scroll)
         previous_panel_constraints = tuple(
@@ -861,6 +915,15 @@ class ProjectScreen(QWidget):
                 scroll.hide()
                 content.setParent(panel)
                 panel_layout.addWidget(content)
+                # Once the inner viewport no longer owns width negotiation,
+                # ignore its historic wide-column size hint.  Wrapped labels
+                # and button rails then recompute height-for-width against the
+                # stacked panel instead of widening the outer workspace.
+                content.setMinimumWidth(0)
+                content.setSizePolicy(
+                    QSizePolicy.Policy.Ignored,
+                    QSizePolicy.Policy.Preferred,
+                )
                 content.show()
                 panel.setSizePolicy(
                     QSizePolicy.Policy.Expanding,
@@ -871,6 +934,10 @@ class ProjectScreen(QWidget):
                     panel_layout.removeWidget(content)
                     content.setParent(None)
                     scroll.setWidget(content)
+                content.setSizePolicy(
+                    QSizePolicy.Policy.Ignored,
+                    QSizePolicy.Policy.Preferred,
+                )
                 scroll.setVerticalScrollBarPolicy(
                     Qt.ScrollBarPolicy.ScrollBarAsNeeded
                 )
@@ -1046,16 +1113,19 @@ class ProjectScreen(QWidget):
         self.processing_stage_labels: dict[str, QLabel] = {}
         for stage, label in (
             ("prepare", "Подготавливаем видео"),
-            ("transcribe", "Разбираем речь и структуру"),
-            ("analyze", "Ищем сильные моменты"),
-            ("render", "Собираем ролики"),
+            ("transcribe", "Понимаем речь и структуру"),
+            ("understand", "Учитываем содержание и события"),
+            ("candidates", "Находим и оцениваем моменты"),
+            ("save", "Сохраняем результаты"),
         ):
             row = QLabel(f"○  {label}")
             row.setObjectName("processingStage")
             row.setProperty("stageState", "pending")
             stages_layout.addWidget(row)
             self.processing_stage_labels[stage] = row
-        self._processing_stage_rows: tuple[str, ...] = ("prepare", "transcribe", "analyze", "render")
+        self._processing_stage_rows: tuple[str, ...] = (
+            "prepare", "transcribe", "understand", "candidates", "save",
+        )
         processing_main_layout.addWidget(self.processing_stages)
         self.processing_actions = QFrame()
         self.processing_actions.setObjectName("secondaryActionBar")
@@ -1195,6 +1265,7 @@ class ProjectScreen(QWidget):
         self.stage_actions.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setup_action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.review_action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.final_results.action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         actions_layout = QVBoxLayout(self.stage_actions)
         actions_layout.setContentsMargins(0, 10, 0, 0)
         actions_layout.setSpacing(0)
@@ -1202,8 +1273,10 @@ class ProjectScreen(QWidget):
         # button is duplicated and therefore no second primary CTA appears.
         actions_layout.addWidget(self.setup_action_bar)
         actions_layout.addWidget(self.review_action_bar)
+        actions_layout.addWidget(self.final_results.action_bar)
         self.setup_action_bar.hide()
         self.review_action_bar.hide()
+        self.final_results.action_bar.hide()
         self.stage_actions.hide()
         root.addWidget(self.stage_actions)
 
@@ -1211,6 +1284,13 @@ class ProjectScreen(QWidget):
         # Explicit navigation back to a project starts from its reconciled
         # persisted state; the temporary "create more" route is session-only.
         self._results_subflow_override = None
+        # A deliberate project-open transaction verifies Analysis once.  Card
+        # batches and selection-only refreshes reuse the verified projection
+        # until the persisted artifact identity or file stat changes.
+        self._analysis_cache_key = None
+        self._analysis_cache = {}
+        self._analysis_reference_stats = ()
+        self._analysis_load_error = None
         self.viewmodel.open(project)
         # Navigation is a user-visible state transition and remains
         # synchronous.  The two persisted signals emitted by ``open`` are
@@ -1221,6 +1301,10 @@ class ProjectScreen(QWidget):
     def _queue_project_changed(self, project: DesktopProject) -> None:
         if self._persisting_active_preview and self.project and self.project.project_id == project.project_id:
             self.project = project
+            return
+        if self._persisting_review_selection and self.project and self.project.project_id == project.project_id:
+            self.project = project
+            self._refresh_moment_selection_ui()
             return
         self._pending_project = project
         self._queue_persisted_refresh()
@@ -1280,7 +1364,12 @@ class ProjectScreen(QWidget):
         )
         self.status.setText(presentation.status_label)
         self.run_button.setText("Начать поиск моментов")
-        if project.source_spec.is_ready and (is_new_project or self.preview.active_media_path is None):
+        preview_step = self._derive_flow_step(project)
+        if (
+            project.source_spec.is_ready
+            and preview_step in {"candidates", "drafts"}
+            and (is_new_project or self.preview.active_media_path is None)
+        ):
             self.preview.show_source(
                 str(project.source),
                 source_codec=str(project.source_metadata.get("video_codec") or ""),
@@ -1316,6 +1405,10 @@ class ProjectScreen(QWidget):
         self.same_source_broll.blockSignals(False)
         self.subtitles.blockSignals(True); self.subtitles.setChecked(project.settings.subtitles_enabled); self.subtitles.blockSignals(False)
         self._set_combo_data(self.subtitle_style, project.settings.subtitle_style)
+        self._set_combo_data(self.caption_preset, project.settings.caption_preset_id)
+        self.reduced_motion.blockSignals(True)
+        self.reduced_motion.setChecked(project.settings.reduced_motion)
+        self.reduced_motion.blockSignals(False)
         self.cache.blockSignals(True); self.cache.setChecked(project.settings.use_cache); self.cache.blockSignals(False)
         self._update_download_card(project)
         self._update_setup_card(project)
@@ -1325,6 +1418,12 @@ class ProjectScreen(QWidget):
         self._update_next_step(project)
         self._reconcile_active_candidate_preview(project, previous_step=previous_step)
         self._apply_flow_visibility(project, presentation=presentation)
+        if previous_step != self._flow_step:
+            # Each route is a screen, not a continuation of the previous
+            # page's scroll position.  Reset after Qt has shown the newly
+            # selected workspace so its reference composition starts at the
+            # global stepper while sticky actions remain reachable below.
+            QTimer.singleShot(0, lambda: self.content_scroll.verticalScrollBar().setValue(0))
 
     def _set_advanced_visible(self, visible: bool) -> None:
         if self._flow_step != "settings":
@@ -1402,8 +1501,16 @@ class ProjectScreen(QWidget):
             "universal": "Вертикальный 9:16",
         }.get(project.settings.platform, "Вертикальный 9:16")
         count = self._selection_limit(project)
+        profile_index = self.setup_content_profile.findData(project.settings.content_profile_preset)
+        profile_label = self.setup_content_profile.itemText(profile_index) if profile_index >= 0 else "Авто"
+        style_label = dict((value, label) for label, value in _CREATIVE_STYLE_CHOICES).get(
+            project.settings.subtitle_style, "Educational",
+        )
+        caption = CAPTION_PRESET_DEFINITIONS.get(project.settings.caption_preset_id)
         set_responsive_text(
             self.setup_summary_text,
+            f"Тип контента: {profile_label}\nСтиль оформления: {style_label}\n"
+            f"Субтитры: {caption.label if caption else 'Editorial'}\n"
             f"Режим: {mode}\nЧто анализируем: {scope}\nФормат: {platform}\n"
             f"Рекомендуемых черновиков: {count}\n"
             f"Дополнительные кадры: {'разрешены' if project.settings.same_source_broll_allowed else 'не использовать'}"
@@ -1475,8 +1582,8 @@ class ProjectScreen(QWidget):
         *,
         presentation: ProjectPresentation | None = None,
     ) -> str:
-        if self._results_subflow_override == "candidates" and project.analysis_artifact_path:
-            return "candidates"
+        if self._results_subflow_override in {"candidates", "drafts"} and project.analysis_artifact_path:
+            return self._results_subflow_override
         if presentation is None:
             presentation = self.viewmodel.services.presentation(
                 project,
@@ -1566,6 +1673,10 @@ class ProjectScreen(QWidget):
         self.preview.setVisible(show_review and project.source_spec.is_ready)
         self.candidate_detail.setVisible(show_review)
         self.final_results.setVisible(show_final)
+        if not show_review:
+            self.preview.suspend()
+        if not show_final:
+            self.final_results.preview.suspend()
         self.progress.setVisible(show_processing)
         self.next_step.setVisible(False)
         self.metadata.setVisible(False)
@@ -1576,7 +1687,8 @@ class ProjectScreen(QWidget):
         self.secondary_details.setVisible(False)
         self.setup_action_bar.setVisible(show_setup and not self.setup_start_button.isHidden())
         self.review_action_bar.setVisible(show_review)
-        self.stage_actions.setVisible(show_setup or show_review)
+        self.final_results.action_bar.setVisible(show_final)
+        self.stage_actions.setVisible(show_setup or show_review or show_final)
         self.results_subflow.setText({
             "candidates": "Найденные моменты",
             "drafts": "Черновики",
@@ -1622,23 +1734,28 @@ class ProjectScreen(QWidget):
             "standard": "Подходящий вариант по умолчанию: хороший баланс времени и качества.",
             "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени.",
         }[project.settings.processing_mode])
-        try:
-            resolved, estimate = self.viewmodel.setup_preflight()
-            deep_state = "будет использован" if resolved.deep_analysis.resolved else "не потребуется"
-            set_responsive_text(
-                self.setup_deep_help,
-                f"{resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.",
-            )
-            set_responsive_text(
-                self.setup_platform_help,
-                f"{resolved.platform.label}: ролик будет вертикальным, до {int(resolved.platform.maximum_duration_seconds)} секунд, "
-                "с субтитрами и полями для интерфейса."
-            )
-            set_responsive_text(self.setup_estimate, self._setup_estimate_text(estimate))
-        except Exception:
+        if project.analysis_artifact_path:
             saved = project.setup_state.last_estimate
-            set_responsive_text(self.setup_deep_help, "Рекомендация появится после проверки настроек.")
+            set_responsive_text(self.setup_deep_help, "Используется сохранённый проверенный анализ.")
             set_responsive_text(self.setup_estimate, self._saved_estimate_text(saved))
+        else:
+            try:
+                resolved, estimate = self.viewmodel.setup_preflight()
+                deep_state = "будет использован" if resolved.deep_analysis.resolved else "не потребуется"
+                set_responsive_text(
+                    self.setup_deep_help,
+                    f"{resolved.deep_analysis.reason} Дополнительный разбор {deep_state}.",
+                )
+                set_responsive_text(
+                    self.setup_platform_help,
+                    f"{resolved.platform.label}: ролик будет вертикальным, до {int(resolved.platform.maximum_duration_seconds)} секунд, "
+                    "с субтитрами и полями для интерфейса."
+                )
+                set_responsive_text(self.setup_estimate, self._setup_estimate_text(estimate))
+            except Exception:
+                saved = project.setup_state.last_estimate
+                set_responsive_text(self.setup_deep_help, "Рекомендация появится после проверки настроек.")
+                set_responsive_text(self.setup_estimate, self._saved_estimate_text(saved))
         set_responsive_text(
             self.setup_change,
             project.setup_state.change_summary or "Настройки сохраняются в этом проекте."
@@ -1695,6 +1812,16 @@ class ProjectScreen(QWidget):
         try:
             resolved = Path(project.analysis_artifact_path).resolve()
             stat = resolved.stat()
+            key = (
+                resolved, stat.st_size, stat.st_mtime_ns,
+                project.analysis_id, project.analysis_fingerprint,
+            )
+            if (
+                key == self._analysis_cache_key
+                and ProjectScreen._analysis_reference_stat_signature(self._analysis_cache)
+                == getattr(self, "_analysis_reference_stats", ())
+            ):
+                return self._analysis_cache
             artifact = self.viewmodel.services.pipeline.load_verified_analysis(project, required=True)
         except (OSError, ValueError) as error:
             self._analysis_load_error = str(error)
@@ -1703,12 +1830,31 @@ class ProjectScreen(QWidget):
             return {}
         assert artifact is not None
         self._analysis_load_error = None
-        key = (resolved, stat.st_size, stat.st_mtime_ns)
-        if key == self._analysis_cache_key:
-            return self._analysis_cache
         self._analysis_cache_key = key
         self._analysis_cache = artifact.to_dict()
+        self._analysis_reference_stats = ProjectScreen._analysis_reference_stat_signature(
+            self._analysis_cache
+        )
         return self._analysis_cache
+
+    @staticmethod
+    def _analysis_reference_stat_signature(
+        analysis: dict[str, Any],
+    ) -> tuple[tuple[object, ...], ...]:
+        """Cheaply detect reference changes between full integrity checks."""
+
+        references = analysis.get("references") if isinstance(analysis, dict) else None
+        if not isinstance(references, dict):
+            return ()
+        signature: list[tuple[object, ...]] = []
+        for name, raw_path in sorted(references.items()):
+            try:
+                path = Path(str(raw_path)).resolve()
+                stat = path.stat()
+                signature.append((str(name), path, stat.st_size, stat.st_mtime_ns))
+            except (OSError, ValueError):
+                signature.append((str(name), str(raw_path), "missing"))
+        return tuple(signature)
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
@@ -1863,7 +2009,7 @@ class ProjectScreen(QWidget):
             set_responsive_text(
                 self.review_metrics_text,
                 f"Найдено {len(all_candidates)} · RECOMMENDED {recommended_count} · "
-                f"AVAILABLE {available_count} · недоступны {unavailable_count}"
+                f"AVAILABLE {available_count} · BLOCKED {unavailable_count}"
             )
         if workflow_step == "candidates":
             # Moment selection belongs to the source-moment phase.  Drafts
@@ -2494,6 +2640,14 @@ class ProjectScreen(QWidget):
         self._update_candidate_review(self.project)
         self._apply_flow_visibility(self.project)
 
+    def _back_to_drafts(self) -> None:
+        if not self.project or not self.project.candidate_draft_artifacts:
+            return
+        self._results_subflow_override = "drafts"
+        self._update_candidate_review(self.project)
+        self._reconcile_active_candidate_preview(self.project, previous_step="finished")
+        self._apply_flow_visibility(self.project)
+
     def _rerender_final_output(self, run_id: str) -> None:
         """Re-export from the exact completed run without asking for analysis."""
 
@@ -2591,7 +2745,7 @@ class ProjectScreen(QWidget):
             selected.remove(candidate_id)
         else:
             selected.append(candidate_id)
-        self.viewmodel.set_review_selection(selected)
+        self._set_review_selection_without_rebuild(selected)
 
     def _set_draft_approval(self, candidate_id: str, approved: bool) -> None:
         self.viewmodel.set_draft_approval(candidate_id, approved)
@@ -2619,23 +2773,82 @@ class ProjectScreen(QWidget):
     def _select_recommended(self) -> None:
         if not self.project:
             return
-        self.viewmodel.set_review_selection(self._recommended_candidate_ids())
+        self._set_review_selection_without_rebuild(self._recommended_candidate_ids())
 
     def _select_all_candidates(self) -> None:
         if self.project:
-            self.viewmodel.set_review_selection(list(self._draftable_candidates_by_id))
+            self._set_review_selection_without_rebuild(list(self._draftable_candidates_by_id))
 
     def _view_all_candidates(self) -> None:
         if not self.project:
             return
         self._candidate_filter = "all"
-        self._candidate_visible_limit = max(12, len(self._review_candidates_by_id))
+        # Initial paint stays bounded.  This explicit user action may reveal
+        # the complete catalogue, but it still reuses the verified Analysis
+        # projection and asynchronous thumbnail loader.
+        self._candidate_visible_limit = max(12, len(self._all_candidates_by_id))
         self._update_candidate_review(self.project)
         self.content_scroll.ensureWidgetVisible(self.candidate_review, 0, 16)
         self.candidate_review.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _clear_review_selection(self) -> None:
-        self.viewmodel.set_review_selection([])
+        self._set_review_selection_without_rebuild([])
+
+    def _set_review_selection_without_rebuild(self, candidate_ids: list[str]) -> None:
+        if not self.project:
+            return
+        self._persisting_review_selection = True
+        try:
+            self.viewmodel.set_review_selection(candidate_ids)
+        finally:
+            self._persisting_review_selection = False
+
+    def _refresh_moment_selection_ui(self) -> None:
+        """Update checkbox/CTA state without rebuilding the candidate cards."""
+
+        if not self.project:
+            return
+        if self._candidate_filter == "unselected":
+            self._update_candidate_review(self.project)
+            return
+        selected = set(self.project.review_selected_candidate_ids)
+        for candidate_id, button in self._candidate_selection_buttons.items():
+            button.setText(
+                "Убрать из черновиков" if candidate_id in selected else "Добавить к черновикам"
+            )
+        recommended_count = sum(
+            bool(item.get("recommended", item.get("selected_by_recommendation")))
+            for item in self._draftable_candidates_by_id.values()
+        )
+        available_count = sum(
+            item.get("surfacing_state") == "AVAILABLE"
+            for item in self._draftable_candidates_by_id.values()
+        )
+        set_responsive_text(
+            self.review_metrics_text,
+            f"Найдено {len(self._all_candidates_by_id)} · выбрано {len(selected)} · "
+            f"RECOMMENDED {recommended_count} · AVAILABLE {available_count} · "
+            f"BLOCKED {len(self._all_candidates_by_id) - len(self._draftable_candidates_by_id)}",
+        )
+        draftable_ids = [
+            candidate_id for candidate_id in self.project.review_selected_candidate_ids
+            if candidate_id in self._draftable_candidates_by_id
+            and self._candidate_needs_draft(self.project, candidate_id)
+        ]
+        ready_count = sum(
+            state in {"draft_ready", "selected"}
+            for state in self.project.candidate_states.values()
+        )
+        rendered_count = sum(
+            state == "rendered" for state in self.project.candidate_states.values()
+        )
+        processing_count = sum(
+            state in {"draft_planning", "production_rendering"}
+            for state in self.project.candidate_states.values()
+        )
+        self._configure_workflow_action(
+            self.project, draftable_ids, ready_count, rendered_count, processing_count,
+        )
 
     def _change_candidate_filter(self, value: str) -> None:
         self._candidate_filter = value
@@ -2902,6 +3115,8 @@ class ProjectScreen(QWidget):
         if not candidate_draftable:
             self._refresh_candidate_detail_geometry()
             return
+        if self._derive_flow_step(self.project) == "drafts" and candidate_id:
+            self._append_draft_inspector(candidate_id, start, end)
         controls = QWidget()
         controls.setObjectName("candidateBoundaryControls")
         grid = QGridLayout(controls)
@@ -2954,7 +3169,115 @@ class ProjectScreen(QWidget):
 
     def _adjust_candidate_boundary(self, candidate_id: str, boundary: str, delta_seconds: float) -> None:
         if candidate_id:
-            self.viewmodel.adjust_candidate_boundary(candidate_id, boundary, delta_seconds)
+            if self.project and self._derive_flow_step(self.project) == "drafts":
+                self.viewmodel.revise_draft_boundary(candidate_id, boundary, delta_seconds)
+            else:
+                self.viewmodel.adjust_candidate_boundary(candidate_id, boundary, delta_seconds)
+
+    def _append_draft_inspector(self, candidate_id: str, start: float, end: float) -> None:
+        """Show compact per-draft values backed by candidate-owned overrides."""
+
+        if not self.project:
+            return
+        override = self.project.candidate_creative_overrides.get(candidate_id, {})
+        style_id = str(override.get("creative_style", self.project.settings.subtitle_style))
+        caption_id = str(override.get("caption_preset_id", self.project.settings.caption_preset_id))
+        crop_id = str(override.get("composition_strategy", self.project.settings.composition_strategy))
+        broll = bool(override.get(
+            "same_source_broll_allowed", self.project.settings.same_source_broll_allowed,
+        ))
+        style_labels = {value: label for label, value in _CREATIVE_STYLE_CHOICES}
+        crop_labels = {
+            "safe_auto": "Авто — сохранить важное",
+            "center_crop": "По центру",
+            "fit_blur_background": "С размытым фоном",
+            "fit_solid_background": "С однотонным фоном",
+            "top_crop": "Верхняя часть кадра",
+        }
+        caption = CAPTION_PRESET_DEFINITIONS.get(caption_id)
+        panel = QFrame()
+        panel.setObjectName("draftInspector")
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(0, 8, 0, 4)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(7)
+        rows = (
+            ("Стиль оформления", style_labels.get(style_id, style_id), "creative_style"),
+            ("Субтитры", caption.label if caption else caption_id, "caption_preset_id"),
+            ("Кадрирование", crop_labels.get(crop_id, crop_id), "composition_strategy"),
+            ("Дополнительные кадры", "Включены" if broll else "Выключены", "same_source_broll_allowed"),
+        )
+        for row, (label, value, option) in enumerate(rows):
+            name = QLabel(label)
+            name.setObjectName("muted")
+            current = QLabel(value)
+            make_label_shrinkable(current)
+            change = QPushButton("Изменить")
+            change.setObjectName("secondaryAction")
+            change.setToolTip(
+                "Обновит только этот Creative Preview из сохранённого анализа; остальные черновики не изменятся."
+            )
+            change.clicked.connect(
+                lambda _checked=False, cid=candidate_id, key=option: self._edit_draft_option(cid, key)
+            )
+            grid.addWidget(name, row, 0)
+            grid.addWidget(current, row, 1)
+            grid.addWidget(change, row, 2)
+        fragment_row = len(rows)
+        grid.addWidget(QLabel("Фрагмент"), fragment_row, 0)
+        grid.addWidget(QLabel(f"{format_seconds(start)}–{format_seconds(end)}"), fragment_row, 1, 1, 2)
+        quality = "Готов" if candidate_id in self._draft_preview_paths else "Ожидает предпросмотр"
+        grid.addWidget(QLabel("Качество"), fragment_row + 1, 0)
+        quality_value = QLabel(quality)
+        quality_value.setObjectName("finalReady" if candidate_id in self._draft_preview_paths else "warning")
+        grid.addWidget(quality_value, fragment_row + 1, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        self.candidate_detail.layout().addWidget(panel)
+
+    def _edit_draft_option(self, candidate_id: str, option: str) -> None:
+        if not self.project or self.viewmodel.active:
+            return
+        override = self.project.candidate_creative_overrides.get(candidate_id, {})
+        choices: list[tuple[str, object]]
+        title: str
+        if option == "creative_style":
+            title = "Стиль оформления"
+            choices = [(label, value) for label, value in _CREATIVE_STYLE_CHOICES]
+            current = override.get(option, self.project.settings.subtitle_style)
+        elif option == "caption_preset_id":
+            title = "Стиль субтитров"
+            choices = [(item.label, item.preset_id) for item in CAPTION_PRESET_DEFINITIONS.values()]
+            current = override.get(option, self.project.settings.caption_preset_id)
+        elif option == "composition_strategy":
+            title = "Кадрирование"
+            choices = [
+                ("Авто — сохранить важное", "safe_auto"),
+                ("По центру", "center_crop"),
+                ("С размытым фоном", "fit_blur_background"),
+                ("С однотонным фоном", "fit_solid_background"),
+                ("Верхняя часть кадра", "top_crop"),
+            ]
+            current = override.get(option, self.project.settings.composition_strategy)
+        elif option == "same_source_broll_allowed":
+            title = "Дополнительные кадры из этого видео"
+            choices = [("Не использовать", False), ("Использовать", True)]
+            current = override.get(option, self.project.settings.same_source_broll_allowed)
+        else:
+            return
+        labels = [label for label, _value in choices]
+        current_index = next(
+            (index for index, (_label, value) in enumerate(choices) if value == current), 0,
+        )
+        selected, accepted = QInputDialog.getItem(
+            self, title, "Выберите значение для этого черновика:",
+            labels, current_index, False,
+        )
+        if not accepted:
+            return
+        value = next(value for label, value in choices if label == selected)
+        if value == current:
+            return
+        self.viewmodel.revise_draft(candidate_id, **{option: value})
 
     def _refresh_active_candidate_detail(self, project: DesktopProject) -> None:
         self._reconcile_active_candidate_preview(project, previous_step=self._flow_step)
@@ -3512,15 +3835,17 @@ class ProjectScreen(QWidget):
             )
         return (
             ("prepare", "Подготавливаем видео"),
-            ("transcribe", "Разбираем речь и структуру"),
-            ("analyze", "Ищем сильные моменты"),
+            ("transcribe", "Понимаем речь и структуру"),
+            ("understand", "Учитываем содержание и события"),
+            ("candidates", "Находим и оцениваем моменты"),
+            ("save", "Сохраняем результаты"),
         )
 
     @staticmethod
     def _processing_stage_target(raw: str, run_kind: str, row_count: int) -> int:
         if row_count <= 1:
             return 0
-        if any(token in raw for token in ("verify", "valid", "finaliz", "manifest")):
+        if any(token in raw for token in ("verify", "valid", "finaliz", "manifest", "save", "report")):
             return row_count - 1
         if run_kind == "draft":
             return 1 if any(token in raw for token in ("draft", "script", "subtitle", "compose", "render")) else 0
@@ -3528,7 +3853,9 @@ class ProjectScreen(QWidget):
             return 1 if any(token in raw for token in ("render", "production", "export", "encode", "subtitle", "compose")) else 0
         if any(token in raw for token in ("transcrib", "speech", "audio")):
             return min(1, row_count - 1)
-        if any(token in raw for token in ("analy", "candidate", "intelligence", "select")):
+        if any(token in raw for token in ("candidate", "ranking", "select", "shortlist", "scoring")):
+            return min(3, row_count - 1)
+        if any(token in raw for token in ("analy", "intelligence", "vision", "scene", "content", "semantic")):
             return min(2, row_count - 1)
         if any(token in raw for token in ("render", "production", "export", "subtitle", "compose")):
             return row_count - 1
@@ -3612,6 +3939,12 @@ class ProjectScreen(QWidget):
             layout.addWidget(label)
 
     def _update_estimate(self, project: DesktopProject) -> None:
+        if project.analysis_artifact_path:
+            self._replace_card_text(
+                self.estimate,
+                [self._saved_estimate_text(project.setup_state.last_estimate)],
+            )
+            return
         try:
             estimate = self.viewmodel.services.processing_estimate(project)
             minutes = (

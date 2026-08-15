@@ -1,0 +1,21 @@
+{
+  "transaction": "project-open / UI-refresh -> Moments initial projection",
+  "dataset_candidates": 37,
+  "before": {
+    "verified_analysis_loads": 5,
+    "elapsed_seconds": 2.1803,
+    "initial_cards": 1,
+    "behavior": "verification occurred before cache lookup in repeated setup/review consumers"
+  },
+  "after": {
+    "verified_analysis_loads": 1,
+    "elapsed_seconds": 0.0357,
+    "initial_cards": 12,
+    "behavior": "one verified load seeds a signature-keyed projection; additional cards reuse it in batches of 12"
+  },
+  "integrity": {
+    "weakened": false,
+    "mutation_detection": "artifact/reference stat signatures invalidate the transaction projection",
+    "analysis_identity_reused": true
+  }
+}

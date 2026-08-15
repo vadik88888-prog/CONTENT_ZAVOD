@@ -63,6 +63,7 @@ class FinalResultsWorkspace(QWidget):
 
     output_selected = Signal(str)
     create_more_requested = Signal()
+    drafts_requested = Signal()
     projects_requested = Signal()
     rerender_requested = Signal(str)
 
@@ -180,7 +181,7 @@ class FinalResultsWorkspace(QWidget):
         self.create_more_button.setObjectName("secondaryAction")
         self.create_more_button.setToolTip("Вернуться к моментам и выбрать другие ролики без повторного анализа.")
         self.create_more_button.clicked.connect(self.create_more_requested)
-        self._list_layout.addWidget(self.create_more_button)
+        self.create_more_button.hide()
 
         self.preview = VideoPreview()
         self.preview.set_vertical_frame_size(247, 440)
@@ -257,7 +258,7 @@ class FinalResultsWorkspace(QWidget):
         self.open_video_button = QPushButton("▷  Открыть видео")
         # Opening the selected, metadata-bound output is the focused final
         # action.  Folder navigation and returning to projects stay quiet.
-        self.open_video_button.setObjectName("primary")
+        self.open_video_button.setObjectName("secondaryAction")
         self.open_video_button.clicked.connect(self._open_active_video)
         self.show_folder_button = QPushButton("▢  Показать в папке")
         self.show_folder_button.clicked.connect(self._show_active_folder)
@@ -277,18 +278,40 @@ class FinalResultsWorkspace(QWidget):
         self._bottom_layout.setContentsMargins(12, 10, 12, 10)
         self.project_folder_button = QPushButton("▢  Открыть папку проекта")
         self.project_folder_button.clicked.connect(self._open_project_folder)
+        self.drafts_button = QPushButton("←  Назад к черновикам")
+        self.drafts_button.setObjectName("secondaryAction")
+        self.drafts_button.clicked.connect(self.drafts_requested)
+        self.create_more_primary_button = QPushButton("Создать ещё ролики  →")
+        self.create_more_primary_button.setObjectName("primary")
+        self.create_more_primary_button.clicked.connect(self.create_more_requested)
         self.projects_button = QPushButton("К проектам")
         self.projects_button.setObjectName("secondaryAction")
         self.projects_button.clicked.connect(self.projects_requested)
+        self._bottom_layout.addWidget(self.drafts_button)
         self._bottom_layout.addStretch()
-        self._bottom_layout.addWidget(self.project_folder_button)
-        self._bottom_layout.addWidget(self.projects_button)
+        self._bottom_layout.addWidget(self.create_more_primary_button)
+        # The selected-output inspector already owns "Показать в папке".
+        # Keep these compatibility actions callable but avoid duplicating them
+        # in the reference bottom bar or forcing a desktop minimum width.
+        self.project_folder_button.hide()
+        self.projects_button.hide()
         self._root_layout.addWidget(self._bottom)
         self._apply_responsive_layout(force=True)
 
     @property
     def active_output_id(self) -> str | None:
         return self._active_id
+
+    @property
+    def action_bar(self) -> QFrame:
+        """Expose the one action bar so a host can keep it sticky.
+
+        The standalone workspace owns the bar by default.  ProjectScreen
+        moves this same widget into its shared sticky-action slot; no button
+        or signal path is duplicated.
+        """
+
+        return self._bottom
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -335,7 +358,9 @@ class FinalResultsWorkspace(QWidget):
         # tunes density; a wide-but-short window can use columns and let the
         # surrounding project viewport provide vertical scrolling.
         body_mode = "stacked" if width < 760 else "two_row" if width < 1260 else "columns"
-        bottom_actions_stacked = width < 620
+        # Stack early enough that the three reference actions never establish
+        # an oversized minimum width before the host receives its final size.
+        bottom_actions_stacked = width < 720
         if (
             not force
             and profile == self._responsive_profile

@@ -24,6 +24,7 @@ from app.creative_contracts import (
     canonical_hash,
 )
 from app.creative_policy import CREATIVE_POLICY_VERSION, creative_preset_definition
+from app.caption_presets import caption_preset_definition, with_caption_preset_override
 from app.production_models import ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 from app.utils import read_json, stable_file_hash, utc_now, write_json
@@ -462,9 +463,20 @@ def creative_policy_for_config(
 ) -> CreativePolicy:
     parent_mode = parent_selection_mode
     requested_mode = config.product_flow.preset_selection_mode
+    caption = caption_preset_definition(
+        config.product_flow.caption_preset_id  # type: ignore[arg-type]
+    )
+    desired_overrides = with_caption_preset_override(
+        parent.user_override_ids,
+        config.product_flow.caption_preset_id,  # type: ignore[arg-type]
+    )
     if parent_mode == requested_mode and (
         requested_mode == "auto"
         or config.product_flow.subtitle_preset == parent.preset_id
+    ) and (
+        desired_overrides == parent.user_override_ids
+        and parent.reduced_motion == config.product_flow.reduced_motion
+        and parent.source_broll_enabled == config.production_render.same_source_broll_allowed
     ):
         # An approved policy is pinned. Automatic recommendations and later
         # policy-table changes may affect new drafts, never a rerender of this
@@ -478,11 +490,17 @@ def creative_policy_for_config(
         "preset_id": config.product_flow.subtitle_preset,
         "preset_version": config.product_flow.preset_version,
         "platform": config.product_flow.platform,
-        "caption_style_family": family_policy.caption_style_family,
-        "caption_density": family_policy.caption_density,
+        "caption_style_family": caption.style_family,
+        "caption_density": {
+            "minimal": "low", "clean": "balanced",
+            "editorial": "balanced", "emphasis": "high",
+        }[caption.style_family],
         "intensity": family_policy.intensity_ceiling,
-        # Rights and evidence do not become stronger during a style revision.
-        "source_broll_enabled": parent.source_broll_enabled,
+        "reduced_motion": config.product_flow.reduced_motion,
+        # The desktop value is an explicit, same-source-only permission.  It
+        # defaults off and can be enabled independently for one draft.
+        "source_broll_enabled": config.production_render.same_source_broll_allowed,
+        "user_override_ids": desired_overrides,
     })
 
 
@@ -512,6 +530,7 @@ def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> Creativ
                     "creative_policy:",
                     "preset_selection:", "preset_provenance:",
                     "preset_effective:", "preset_recommendation:",
+                    "caption_preset:",
                 ))
             ),
             f"creative_policy:{CREATIVE_POLICY_VERSION}",
@@ -519,6 +538,7 @@ def revise_creative_intent(parent: CreativeIntent, config: AppConfig) -> Creativ
             f"preset_provenance:{config.product_flow.preset_provenance}",
             f"preset_effective:{policy.preset_id}",
             f"preset_recommendation:{config.product_flow.recommended_subtitle_preset}",
+            f"caption_preset:{config.product_flow.caption_preset_id}",
             f"style_revision:{revision}",
         ),
     })

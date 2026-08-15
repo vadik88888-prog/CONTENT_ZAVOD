@@ -1,0 +1,201 @@
+{
+  "label": "dpi125",
+  "qt_scale_factor": "1.0",
+  "stages": {
+    "source": {
+      "primary_cta": [
+        "Выбрать видео"
+      ],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\source-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    },
+    "settings": {
+      "primary_cta": [
+        "Начать поиск моментов"
+      ],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 304
+        }
+      ],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\settings-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    },
+    "processing": {
+      "primary_cta": [],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 404
+        }
+      ],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\processing-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    },
+    "moments": {
+      "primary_cta": [
+        "Создать 3 рекомендованных"
+      ],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 2711
+        }
+      ],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\moments-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    },
+    "drafts": {
+      "primary_cta": [
+        "Создать готовые ролики (3)"
+      ],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 1758
+        }
+      ],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\drafts-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    },
+    "final": {
+      "primary_cta": [
+        "Создать ещё ролики  →"
+      ],
+      "horizontal_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        }
+      ],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 568
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 188
+        }
+      ],
+      "window_logical_size": [
+        1536,
+        760
+      ],
+      "device_pixel_ratio": 1.25,
+      "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\final-dpi125.png",
+      "screenshot_pixels": [
+        1920,
+        950
+      ]
+    }
+  },
+  "lineage": {
+    "project_id": "aa71f33b6e564c09a1edaf3f63312e03",
+    "analysis": {
+      "analysis_id": "analysis-33eaad7854b66ecb",
+      "analysis_fingerprint": "33eaad7854b66ecb7117233ffa696e28e12059374342d665ff82d36813382b68",
+      "artifact_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\f2b38815fa994292b52a613bb538fcf8\\analysis.json"
+    },
+    "draft": {
+      "draft_id": "draft-ab56c7d7b9a44b90",
+      "candidate_id": "candidate-chapter-008-story-004",
+      "artifact_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\45588decab3f4d8fabe1b198ec7fa233\\draft.json",
+      "artifact_sha256": "5f4b4db1cdfd1f7707da189bb794ed4980c5134a9e16dbf67f69286f2791e359",
+      "creative_preview_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\45588decab3f4d8fabe1b198ec7fa233\\candidates\\candidate-chapter-008-story-004\\creative-preview\\creative-preview.mp4",
+      "creative_preview_sha256": "3fe2f7b808e8379ac357731ac5e26729be0fdbdf0ca6d2e14262c2ff04a13e87"
+    },
+    "final": {
+      "clip_result_id": "candidate-chapter-008-story-004:production-candidate-chapter-008-story-004-4dbf28b7b6ab",
+      "candidate_id": "candidate-chapter-008-story-004",
+      "run_id": "cb2d97288bae45afb8de0127569a6458",
+      "output_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\cb2d97288bae45afb8de0127569a6458\\results\\final-short-03.mp4",
+      "output_sha256": "cfa34715bcc118850da7fff77c90ac41085c871785f6e215298fcda700a6a0b0"
+    }
+  },
+  "all_six_stages": true
+}

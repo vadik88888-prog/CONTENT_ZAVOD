@@ -223,7 +223,8 @@ class DesktopServices:
         needs_analysis = has_analysis and bool(analysis_options.intersection(changed))
         preview_options = {
             "platform", "subtitles_enabled", "subtitle_style", "preset_selection_mode",
-            "composition_strategy", "same_source_broll_allowed", "encoder",
+            "caption_preset_id", "reduced_motion", "composition_strategy",
+            "same_source_broll_allowed", "encoder",
         }
         stale_preview_ids = [
             candidate_id
@@ -464,6 +465,12 @@ class DesktopServices:
     def refresh_setup_estimate(self, project: DesktopProject) -> DesktopProject:
         """Refresh the durable preflight when a project is opened again."""
 
+        if project.analysis_artifact_path:
+            # Opening Results is a read transaction over the persisted,
+            # verified Analysis projection.  Its pre-analysis estimate is
+            # already durable and must not trigger a second verification
+            # before ProjectScreen opens Moments.
+            return project
         previous = dict(project.setup_state.last_estimate)
         previous_at = project.setup_state.estimated_at
         self._refresh_setup_state(project)
@@ -503,7 +510,9 @@ class DesktopServices:
                     "clip_count": project.settings.clip_count,
                     "subtitles_enabled": project.settings.subtitles_enabled,
                     "subtitle_style": project.settings.subtitle_style,
+                    "caption_preset_id": project.settings.caption_preset_id,
                     "preset_selection_mode": project.settings.preset_selection_mode,
+                    "reduced_motion": project.settings.reduced_motion,
                     "audio_mode": project.settings.audio_mode,
                     "editorial_intent": project.settings.editorial_intent,
                     "content_profile_preset": project.settings.content_profile_preset,
@@ -803,6 +812,60 @@ class DesktopServices:
         self.projects.save(project)
         return project, validation
 
+    def update_candidate_creative_override(
+        self, project: DesktopProject, candidate_id: str, **values: object,
+    ) -> DesktopProject:
+        """Persist one draft's visual choices and invalidate only that draft.
+
+        The previous immutable DraftArtifact remains referenced and playable
+        until the candidate-only draft run publishes a validated replacement.
+        Analysis identity and sibling lifecycle state are never changed here.
+        """
+
+        if candidate_id not in project.candidate_states:
+            raise InputValidationError("Момент не найден в этом проекте.")
+        allowed = {
+            "creative_style", "caption_preset_id", "composition_strategy",
+            "same_source_broll_allowed", "reduced_motion",
+        }
+        if not values or set(values) - allowed:
+            raise InputValidationError("Такую настройку черновика изменить нельзя.")
+        override = dict(project.candidate_creative_overrides.get(candidate_id) or {})
+        defaults = {
+            "creative_style": project.settings.subtitle_style,
+            "caption_preset_id": project.settings.caption_preset_id,
+            "composition_strategy": project.settings.composition_strategy,
+            "same_source_broll_allowed": project.settings.same_source_broll_allowed,
+            "reduced_motion": project.settings.reduced_motion,
+        }
+        for name, value in values.items():
+            if value == defaults[name]:
+                override.pop(name, None)
+            else:
+                override[name] = value
+        if override:
+            project.candidate_creative_overrides[candidate_id] = override
+        else:
+            project.candidate_creative_overrides.pop(candidate_id, None)
+        project.validate()
+        self._set_candidate_lifecycle(
+            project, candidate_id, draft="pending", approval="pending", export="pending",
+        )
+        project.selected_candidate_ids = [
+            value for value in project.selected_candidate_ids if value != candidate_id
+        ]
+        project.candidate_errors.pop(candidate_id, None)
+        project.status = ProjectStatus.REVIEWING_CANDIDATES
+        project.setup_state.change_summary = (
+            "Настройка сохранена только для выбранного черновика. Анализ и остальные черновики не изменены."
+        )
+        project.setup_state.needs_new_analysis = False
+        project.setup_state.reused_stages = [
+            "сохранённый анализ", "Brain/Vision evidence", "остальные черновики",
+        ]
+        self.projects.save(project)
+        return project
+
     def prepare_selected_render(
         self, project: DesktopProject, candidate_ids: list[str] | None = None,
     ) -> tuple[ProjectRun, PreparedPipelineRun]:
@@ -889,7 +952,9 @@ class DesktopServices:
             raise InputValidationError("Для изменения аудиорежима запустите полное создание ролика.")
         current = {
             "subtitle_style": project.settings.subtitle_style,
+            "caption_preset_id": project.settings.caption_preset_id,
             "preset_selection_mode": project.settings.preset_selection_mode,
+            "reduced_motion": project.settings.reduced_motion,
             "subtitles_enabled": project.settings.subtitles_enabled,
             "platform": project.settings.platform,
             "audio_mode": project.settings.audio_mode,

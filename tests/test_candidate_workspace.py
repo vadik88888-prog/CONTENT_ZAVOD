@@ -1210,7 +1210,13 @@ def test_candidate_detail_releases_narrow_height_after_width_grows(
         screen.show()
         app.processEvents()
         screen._show_candidate_detail(candidate, 1.0, 18.0)
-        assert screen.review_inspector_scroll.takeWidget() is detail
+        if screen.review_inspector_scroll.widget() is detail:
+            assert screen.review_inspector_scroll.takeWidget() is detail
+        else:
+            # Compact Moments deliberately bypass the inner viewport and use
+            # ProjectScreen's outer scroll owner.
+            assert detail.parent() is screen.review_inspector_panel
+            screen._review_inspector_panel_layout.removeWidget(detail)
         detail.setParent(None)
         detail.resize(520, 3000)
         detail.show()
@@ -1909,28 +1915,35 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
             actions_origin = screen.stage_actions.mapTo(screen, QPoint(0, 0))
             assert scroll_origin.y() + screen.content_scroll.height() <= actions_origin.y()
 
-        # The bypass is Drafts-local. Returning to Moments must put both
-        # widgets back under their original independent scroll areas and
-        # release every Drafts-only panel minimum.
+        # Stacked Moments use the same single outer owner, so switching from
+        # Drafts at this compact width must not reintroduce nested scrolling.
         assert screen.project is not None
         screen._results_subflow_override = "candidates"
         screen._project_changed(screen.project)
         for _ in range(8):
             app.processEvents()
         assert screen._flow_step == "candidates"
+        assert screen._drafts_single_scroll_layout is True
+        assert screen.review_list_scroll.isHidden()
+        assert screen.review_inspector_scroll.isHidden()
+        assert screen.review_list_scroll.verticalScrollBar().maximum() == 0
+        assert screen.review_inspector_scroll.verticalScrollBar().maximum() == 0
+
+        # The approved wide reference is still a bounded three-column
+        # workspace.  At that breakpoint the catalogue and inspector regain
+        # their independent pane scrollers.
+        window.resize(1920, 1080)
+        for _ in range(8):
+            app.processEvents()
+        assert screen._compact_stage_layout is False
         assert screen._drafts_single_scroll_layout is False
         assert screen.review_list_scroll.widget() is screen.candidate_review
         assert screen.review_inspector_scroll.widget() is screen.candidate_detail
         assert not screen.review_list_scroll.isHidden()
         assert not screen.review_inspector_scroll.isHidden()
-        assert screen.review_list_scroll.verticalScrollBar().maximum() > 0
-        assert screen.review_inspector_scroll.verticalScrollBar().maximum() > 0
         assert screen.review_list_panel.minimumHeight() == 0
         assert screen.review_preview_panel.minimumHeight() == 0
         assert screen.review_inspector_panel.minimumHeight() == 0
-        assert screen.review_list_panel.maximumHeight() == 16_777_215
-        assert screen.review_preview_panel.maximumHeight() == 16_777_215
-        assert screen.review_inspector_panel.maximumHeight() == 16_777_215
     finally:
         window.close()
         window.deleteLater()

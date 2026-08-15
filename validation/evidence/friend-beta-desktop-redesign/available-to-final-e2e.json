@@ -1,0 +1,66 @@
+{
+  "scenario": "AVAILABLE moment -> DraftArtifact -> real production Final",
+  "project_id": "aa71f33b6e564c09a1edaf3f63312e03",
+  "candidate": {
+    "candidate_id": "candidate-chapter-009-story-001",
+    "recommended": false,
+    "recommendation_status": "not_recommended",
+    "eligible": true,
+    "source_start_seconds": 521.04,
+    "source_end_seconds": 542.17
+  },
+  "analysis": {
+    "analysis_id": "analysis-33eaad7854b66ecb",
+    "analysis_fingerprint": "33eaad7854b66ecb7117233ffa696e28e12059374342d665ff82d36813382b68",
+    "artifact_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\f2b38815fa994292b52a613bb538fcf8\\analysis.json",
+    "artifact_sha256_at_draft": "86b7ffe75d32eb5dd85e0dac834a862a0f82cdf5e562c4998f22afea810e1117",
+    "identity_reused_by_draft_and_final": true,
+    "analysis_or_vision_stages_in_draft_run": [],
+    "analysis_or_vision_stages_in_final_run": []
+  },
+  "per_draft_override": {
+    "creative_style": "dynamic",
+    "caption_preset_token": "caption-preset:word_pop:2.1.0",
+    "composition_layout": "fit_background",
+    "same_source_broll_allowed": false,
+    "same_source_broll_segments": 0,
+    "reduced_motion": false
+  },
+  "draft": {
+    "run_id": "e4386f6f297040298144b69220233b28",
+    "status": "draft_ready",
+    "elapsed_seconds": 8.368,
+    "draft_id": "draft-ffdb85dbf7e1b077",
+    "production_plan_id": "production-candidate-chapter-009-story-001-a4ed336634c0",
+    "artifact_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\e4386f6f297040298144b69220233b28\\draft.json",
+    "artifact_sha256": "28d2999fc3ef7dfa2cb2b29d6fe3974c2b90f95e27a6c51a3d517f5ed72279b9",
+    "creative_preview_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\e4386f6f297040298144b69220233b28\\creative-preview\\creative-preview.mp4",
+    "creative_preview_sha256": "d5ffc10301b53eaaaf32729b5f0902364d83d18b4ddedf846e2a0dc059fc5ec0",
+    "preview_kind": "creative",
+    "compiled_plan_hash": "937b8f87f1a304ea0c3d5b47b4f79248024fd45fa81f2ed5225c8a098683ce23",
+    "parity_signature": "91decd9f26476bde4c768a4ad6ef7c34019346ab0e2f6306dd0005b832757055"
+  },
+  "final": {
+    "run_id": "881b54b7db2c4cb598ffaaf6a5d1f7e3",
+    "status": "completed",
+    "terminal_status": "completed",
+    "quality_status": "PASS_WITH_WARNINGS",
+    "elapsed_seconds": 53.285,
+    "manifest_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\881b54b7db2c4cb598ffaaf6a5d1f7e3\\manifest.json",
+    "clip_result_id": "candidate-chapter-009-story-001:production-candidate-chapter-009-story-001-a4ed336634c0",
+    "artifact_id": "artifact-dc21010d5a9f80509ec1ceb8",
+    "artifact_checksum": "28c48f298b37aeeb73bd9807b5505b82f400dbd9b6923242217d448a527555f0",
+    "candidate_id": "candidate-chapter-009-story-001",
+    "production_plan_id": "production-candidate-chapter-009-story-001-a4ed336634c0",
+    "output_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\881b54b7db2c4cb598ffaaf6a5d1f7e3\\results\\final-short-01.mp4",
+    "output_sha256": "28c48f298b37aeeb73bd9807b5505b82f400dbd9b6923242217d448a527555f0",
+    "bytes": 10828011
+  },
+  "integration_regression": {
+    "pre_fix_run_id": "85916d969b6b47739997a80a0bdfbef2",
+    "pre_fix_error": "production_render: PRESET_CONSTRAINT_VIOLATION: ProductionPlan render handoff rejected: {\"actual\": \"dynamic\", \"expected\": \"documentary\", \"field\": \"preset_id\", \"plan_id\": \"production-candidate-chapter-009-story-001-a4ed336634c0\"}",
+    "fix": "selected-render resolves the same candidate-scoped settings overlay used by draft",
+    "post_fix_run_id": "881b54b7db2c4cb598ffaaf6a5d1f7e3"
+  },
+  "execution_note": "Draft used existing local deterministic transformation (--mock-ai --no-ai-transformation); Final used the real existing selected-render production path. Neither run invoked Brain/Vision."
+}

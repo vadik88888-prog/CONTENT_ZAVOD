@@ -22,6 +22,7 @@ from app.caption_presets import (
     caption_preset_definition,
     caption_preset_from_token_id,
     caption_preset_from_policy_id,
+    caption_preset_override_id,
     default_caption_preset_for_style,
 )
 from app.config import ProductionRenderConfig
@@ -790,6 +791,9 @@ def materialize_caption_font_directory(
 
 
 def _caption_preset(intent: CreativeIntent) -> CaptionPresetDefinition:
+    override_id = caption_preset_override_id(intent.policy.user_override_ids)
+    if override_id is not None:
+        return caption_preset_definition(override_id)
     direct = caption_preset_from_policy_id(intent.policy.preset_id)
     if direct is not None and direct.style_family == intent.policy.caption_style_family:
         return direct

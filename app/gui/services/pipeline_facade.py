@@ -253,7 +253,8 @@ class PipelineFacade:
         if not candidate_ids:
             raise InputValidationError("Выберите хотя бы один кандидат для чернового просмотра.")
         self.load_verified_analysis(project, required=True)
-        source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
+        effective_project = self._project_with_candidate_options(project, candidate_ids)
+        source_path, config, resolved, config_path = self._prepare_mode_paths(effective_project, run, settings)
         arguments = [
             "draft", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),
@@ -271,9 +272,37 @@ class PipelineFacade:
         return self._prepared_mode(
             arguments, source_path, config_path, run.run_id, project.project_id,
             {"mode": "draft", "analysis_id": project.analysis_id, "candidate_count": str(len(candidate_ids)),
-             "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
+             "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform,
+             "candidate_override": str(bool(
+                 len(candidate_ids) == 1 and project.candidate_creative_overrides.get(candidate_ids[0])
+             )).lower()},
             source_duration_seconds=_source_duration_seconds(project),
         )
+
+    @staticmethod
+    def _project_with_candidate_options(
+        project: DesktopProject, candidate_ids: list[str],
+    ) -> DesktopProject:
+        """Overlay one candidate's visual choices for its draft/final run."""
+
+        if len(candidate_ids) != 1:
+            return project
+        override = project.candidate_creative_overrides.get(candidate_ids[0])
+        if not isinstance(override, dict) or not override:
+            return project
+        values: dict[str, object] = {}
+        if "creative_style" in override:
+            values["subtitle_style"] = override["creative_style"]
+            values["preset_selection_mode"] = "explicit"
+        for name in (
+            "caption_preset_id", "composition_strategy",
+            "same_source_broll_allowed", "reduced_motion",
+        ):
+            if name in override:
+                values[name] = override[name]
+        effective_settings = replace(project.settings, **values)
+        effective_settings.validate()
+        return replace(project, settings=effective_settings)
 
     def prepare_selected_render(
         self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, candidate_ids: list[str],
@@ -285,7 +314,12 @@ class PipelineFacade:
         if not candidate_ids:
             raise InputValidationError("Выберите черновики, из которых нужно создать готовые ролики.")
         self.load_verified_analysis(project, required=True)
-        source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
+        # The immutable DraftArtifact owns the candidate's creative plan.  Use
+        # the same candidate-scoped options that created it when establishing
+        # the renderer's defensive preset constraints; otherwise a valid
+        # per-Draft style override is rejected against the project default.
+        effective_project = self._project_with_candidate_options(project, candidate_ids)
+        source_path, config, resolved, config_path = self._prepare_mode_paths(effective_project, run, settings)
         draft_path = self._compose_approved_draft(project, candidate_ids, config_path.parent)
         arguments = [
             "render", "--input", str(source_path), "--config", str(config_path),

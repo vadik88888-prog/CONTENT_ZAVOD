@@ -813,7 +813,10 @@ class ProductFlowConfig:
     configured_subtitle_preset: str = "documentary"
     subtitle_preset: str = "documentary"
     recommended_subtitle_preset: str = "documentary"
+    caption_preset_id: str = "editorial_narrow"
+    caption_preset_version: str = "2.1.0"
     preset_selection_mode: str = "auto"
+    reduced_motion: bool = False
     preset_provenance: str = "content_recommendation"
     audio_mode: str = "original"
     preset_version: str = "1.0.0"
@@ -840,8 +843,15 @@ class ProductFlowConfig:
             raise ClipEngineError("product_flow.configured_subtitle_preset must be a supported style.")
         if self.recommended_subtitle_preset not in {"minimal", "documentary", "dynamic", "clean"}:
             raise ClipEngineError("product_flow.recommended_subtitle_preset must be a supported style.")
+        from app.caption_presets import CAPTION_PRESET_DEFINITIONS, CAPTION_PRESET_VERSIONS
+        if self.caption_preset_id not in CAPTION_PRESET_DEFINITIONS:
+            raise ClipEngineError("product_flow.caption_preset_id is unsupported.")
+        if (self.caption_preset_id, self.caption_preset_version) not in CAPTION_PRESET_VERSIONS:
+            raise ClipEngineError("product_flow.caption_preset_version is unsupported.")
         if self.preset_selection_mode not in {"auto", "explicit"}:
             raise ClipEngineError("product_flow.preset_selection_mode must be auto or explicit.")
+        if not isinstance(self.reduced_motion, bool):
+            raise ClipEngineError("product_flow.reduced_motion must be boolean.")
         if self.preset_provenance not in {"content_recommendation", "explicit_selection", "legacy_pinned"}:
             raise ClipEngineError("product_flow.preset_provenance is unsupported.")
         if not isinstance(self.preset_version, str) or not self.preset_version.strip():
@@ -994,6 +1004,26 @@ def load_config(path: Path | None = None) -> AppConfig:
                     "preset_provenance": "legacy_pinned",
                     "configured_subtitle_preset": nested_values.get("subtitle_preset", "documentary"),
                     "recommended_subtitle_preset": nested_values.get("subtitle_preset", "documentary"),
+                }
+            if name == "product_flow" and (
+                "caption_preset_id" not in nested_values
+                or "caption_preset_version" not in nested_values
+            ):
+                from app.caption_presets import (
+                    CURRENT_CAPTION_PRESET_VERSIONS,
+                    default_caption_preset_id_for_legacy_style,
+                )
+
+                caption_id = str(
+                    nested_values.get("caption_preset_id")
+                    or default_caption_preset_id_for_legacy_style(
+                        nested_values.get("subtitle_preset", "documentary")
+                    )
+                )
+                nested_values = {
+                    **nested_values,
+                    "caption_preset_id": caption_id,
+                    "caption_preset_version": CURRENT_CAPTION_PRESET_VERSIONS.get(caption_id, ""),
                 }
             values[name] = config_type(**nested_values)
     config = AppConfig(**values)

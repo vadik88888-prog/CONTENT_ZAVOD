@@ -21,6 +21,11 @@ from app.content_profile_taxonomy import (
     profile_input_ids,
     user_override_ids,
 )
+from app.caption_presets import (
+    CAPTION_PRESET_DEFINITIONS,
+    CURRENT_CAPTION_PRESET_VERSIONS,
+    default_caption_preset_id_for_legacy_style,
+)
 from app.creative_policy import (
     PresetFamily,
     creative_preset_definition,
@@ -81,7 +86,9 @@ class ProcessingIntent:
     platform: str = "universal"
     clip_count: str = "3"
     subtitle_preset: str = "documentary"
+    caption_preset_id: str = "editorial_narrow"
     preset_selection_mode: str = "auto"
+    reduced_motion: bool = False
     audio_mode: str = "original"
     editorial_intent: str = ""
     content_profile_preset: str = AUTO_PROFILE_INPUT
@@ -101,8 +108,12 @@ class ProcessingIntent:
             raise ValueError("Unsupported clip count.")
         if self.subtitle_preset not in SUBTITLE_PRESETS:
             raise ValueError("Unsupported subtitle preset.")
+        if self.caption_preset_id not in CAPTION_PRESET_DEFINITIONS:
+            raise ValueError("Unsupported production caption preset.")
         if self.preset_selection_mode not in PRESET_SELECTION_MODES:
             raise ValueError("Unsupported preset selection mode.")
+        if not isinstance(self.reduced_motion, bool):
+            raise ValueError("Reduced motion must be a boolean.")
         if self.audio_mode not in AUDIO_MODES:
             raise ValueError("Unsupported audio mode.")
         if not isinstance(self.editorial_intent, str) or len(self.editorial_intent.strip()) > 500:
@@ -130,7 +141,9 @@ class ProcessingIntent:
             "platform": self.platform,
             "clip_count": str(self.clip_count),
             "subtitle_preset": self.subtitle_preset,
+            "caption_preset_id": self.caption_preset_id,
             "preset_selection_mode": self.preset_selection_mode,
+            "reduced_motion": self.reduced_motion,
             "audio_mode": self.audio_mode,
             "editorial_intent": self.editorial_intent.strip(),
             "content_profile_preset": self.content_profile_preset,
@@ -142,15 +155,23 @@ class ProcessingIntent:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ProcessingIntent":
+        legacy_style = str(value.get("subtitle_preset", "documentary"))
         intent = cls(
             processing_mode=str(value.get("processing_mode", "standard")),
             deep_analysis=str(value.get("deep_analysis", "auto")),
             platform=str(value.get("platform", "universal")),
             clip_count=str(value.get("clip_count", "3")),
-            subtitle_preset=str(value.get("subtitle_preset", "documentary")),
+            subtitle_preset=legacy_style,
+            caption_preset_id=str(
+                value.get(
+                    "caption_preset_id",
+                    default_caption_preset_id_for_legacy_style(legacy_style),
+                )
+            ),
             # Payloads without provenance predate automatic selection. Their
             # stored preset is user-owned/pinned and must remain effective.
             preset_selection_mode=str(value.get("preset_selection_mode", "explicit")),
+            reduced_motion=bool(value.get("reduced_motion", False)),
             audio_mode=str(value.get("audio_mode", "original")),
             editorial_intent=str(value.get("editorial_intent", "")),
             content_profile_preset=str(value.get("content_profile_preset", AUTO_PROFILE_INPUT)),
@@ -192,7 +213,10 @@ class ResolvedProcessingConfig:
     configured_subtitle_preset: str
     subtitle_preset: str
     recommended_subtitle_preset: str
+    caption_preset_id: str
+    caption_preset_version: str
     preset_selection_mode: str
+    reduced_motion: bool
     preset_provenance: str
     preset_version: str
     audio_mode: str
@@ -218,7 +242,10 @@ class ResolvedProcessingConfig:
             "subtitle_preset": self.subtitle_preset,
             "effective_subtitle_preset": self.subtitle_preset,
             "recommended_subtitle_preset": self.recommended_subtitle_preset,
+            "caption_preset_id": self.caption_preset_id,
+            "caption_preset_version": self.caption_preset_version,
             "preset_selection_mode": self.preset_selection_mode,
+            "reduced_motion": self.reduced_motion,
             "preset_provenance": self.preset_provenance,
             "preset_version": self.preset_version,
             "audio_mode": self.audio_mode,
@@ -389,7 +416,10 @@ def resolve_processing_intent(intent: ProcessingIntent, source_metadata: dict[st
         configured_subtitle_preset=intent.subtitle_preset,
         subtitle_preset=effective_preset,
         recommended_subtitle_preset=recommended_preset,
+        caption_preset_id=intent.caption_preset_id,
+        caption_preset_version=CURRENT_CAPTION_PRESET_VERSIONS[intent.caption_preset_id],
         preset_selection_mode=intent.preset_selection_mode,
+        reduced_motion=intent.reduced_motion,
         preset_provenance=(
             "explicit_selection"
             if intent.preset_selection_mode == "explicit"
@@ -573,7 +603,10 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     flow.configured_subtitle_preset = resolved.configured_subtitle_preset
     flow.subtitle_preset = resolved.subtitle_preset
     flow.recommended_subtitle_preset = resolved.recommended_subtitle_preset
+    flow.caption_preset_id = resolved.caption_preset_id
+    flow.caption_preset_version = resolved.caption_preset_version
     flow.preset_selection_mode = resolved.preset_selection_mode
+    flow.reduced_motion = resolved.reduced_motion
     flow.preset_provenance = resolved.preset_provenance
     flow.audio_mode = resolved.audio_mode
     flow.preset_version = resolved.preset_version

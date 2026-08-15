@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Literal, Sequence
 
 from app.caption_planning import build_caption_plan
+from app.caption_presets import caption_preset_definition, with_caption_preset_override
 from app.composition_planning import TargetObservation, build_composition_plan
 from app.config import AppConfig
 from app.creative_contracts import (
@@ -78,11 +79,21 @@ def default_native_creative_intent(
         preset_id=envelope.preset.preset_id,
         preset_version=envelope.preset.preset_version,
         platform=envelope.preset.platform,
-        caption_style_family=family_policy.caption_style_family,
-        caption_density=family_policy.caption_density,
+        caption_style_family=caption_preset_definition(
+            config.product_flow.caption_preset_id  # type: ignore[arg-type]
+        ).style_family,
+        caption_density={
+            "minimal": "low", "clean": "balanced",
+            "editorial": "balanced", "emphasis": "high",
+        }[caption_preset_definition(
+            config.product_flow.caption_preset_id  # type: ignore[arg-type]
+        ).style_family],
         intensity=family_policy.intensity_ceiling,
-        reduced_motion=False,
-        source_broll_enabled=family_policy.source_extra_shots_default,
+        reduced_motion=config.product_flow.reduced_motion,
+        source_broll_enabled=config.production_render.same_source_broll_allowed,
+        user_override_ids=with_caption_preset_override(
+            (), config.product_flow.caption_preset_id,  # type: ignore[arg-type]
+        ),
     )
     identity = {
         "production_plan": plan.reference().model_dump(mode="json"),
@@ -95,6 +106,8 @@ def default_native_creative_intent(
             "configured": config.product_flow.configured_subtitle_preset,
             "recommended": config.product_flow.recommended_subtitle_preset,
             "effective": config.product_flow.subtitle_preset,
+            "caption_preset": config.product_flow.caption_preset_id,
+            "reduced_motion": config.product_flow.reduced_motion,
         },
         "version": NATIVE_CREATIVE_EXECUTION_VERSION,
     }
@@ -115,6 +128,7 @@ def default_native_creative_intent(
             f"preset_provenance:{config.product_flow.preset_provenance}",
             f"preset_effective:{config.product_flow.subtitle_preset}",
             f"preset_recommendation:{config.product_flow.recommended_subtitle_preset}",
+            f"caption_preset:{config.product_flow.caption_preset_id}",
         ),
     )
 

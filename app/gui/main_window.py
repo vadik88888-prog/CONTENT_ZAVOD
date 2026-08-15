@@ -77,7 +77,7 @@ class MainWindow(QMainWindow):
         nav.addSpacing(18)
 
         self.new_button = self._nav_button("＋  Новый проект")
-        self.new_button.setObjectName("primary")
+        self.new_button.setObjectName("navNewProject")
         self.new_button.setMinimumHeight(38)
         self.projects_button = self._nav_button("▢  Проекты")
         self.settings_button = self._nav_button("⚙  Настройки")

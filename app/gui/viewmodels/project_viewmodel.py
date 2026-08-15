@@ -232,6 +232,38 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def revise_draft(self, candidate_id: str, **values: object) -> None:
+        """Update and rebuild one creative preview from persisted Analysis."""
+
+        if not self.project or not self._can_start_heavy_job():
+            return
+        try:
+            self.project = self.services.update_candidate_creative_override(
+                self.project, candidate_id, **values,
+            )
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return
+        self.build_drafts([candidate_id])
+
+    def revise_draft_boundary(
+        self, candidate_id: str, boundary: str, delta_seconds: float,
+    ) -> None:
+        """Revalidate one boundary and rebuild only its dependent preview."""
+
+        if not self.project or not self._can_start_heavy_job():
+            return
+        try:
+            self.project, _validation = self.services.adjust_candidate_boundary(
+                self.project, candidate_id, boundary, delta_seconds,
+            )
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return
+        self.build_drafts([candidate_id])
+
     def select_final_output(self, result_id: str) -> None:
         """Persist the exact canonical result currently open in the viewer."""
 
