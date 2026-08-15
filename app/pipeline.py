@@ -42,6 +42,7 @@ from app.content_understanding import (
     validate_video_content_profile,
 )
 from app.candidate_quality import EligibilityDecision, resolve_eligibility_decision
+from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
     run_content_transformation,
@@ -538,15 +539,19 @@ class Pipeline:
                 "profile_schema_version": self.config.content_understanding.profile_schema_version,
                 "enabled": self.config.content_understanding.enabled,
                 "manual_override": self.config.content_understanding.manual_override,
+                "content_profile_preset": self.config.product_flow.content_profile_preset,
                 "profile_detection_min_confidence": self.config.content_understanding.profile_detection_min_confidence,
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
                 work_directory / "video_content_profile.json",
-                build_video_content_profile(
-                    source_data, metadata, transcript, transcript_features, audio_features, scenes,
-                    visual_analysis, self.config,
-                ),
+                {
+                    **build_video_content_profile(
+                        source_data, metadata, transcript, transcript_features, audio_features, scenes,
+                        visual_analysis, self.config,
+                    ),
+                    "content_profile_preset": self.config.product_flow.content_profile_preset,
+                },
             ),
             cache_tracker=source_cache,
             validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
@@ -814,7 +819,9 @@ class Pipeline:
             )
             ranked_data = virality_ranking
         scored = [scored_from_dict(item) for item in ranked_data.get("candidates", [])]
-        self._prepare_recommendation_candidates(scored, visual_analysis)
+        self._prepare_recommendation_candidates(
+            scored, visual_analysis, content_profile=content_profile, source=source_data,
+        )
         production_feasibility = self._cached(
             tracker,
             "production_feasibility",
@@ -1328,7 +1335,10 @@ class Pipeline:
             snapshot_directory, snapshot_objects, producer,
         )
         candidate_data_path = Path(references["candidate_data"])
-        review_candidates = [candidate_review_payload(record, selected_ids) for record in scored_records]
+        review_candidates = [
+            candidate_review_payload(record, selected_ids, content_profile, source_data)
+            for record in scored_records
+        ]
         artifact = new_analysis_artifact(
             analysis_id=analysis_id,
             project_id=self.project_id,
@@ -1359,6 +1369,7 @@ class Pipeline:
                 "detected_profile": content_profile.get("detected_profile"),
                 "effective_profile": content_profile.get("effective_profile"),
                 "manual_override": content_profile.get("manual_override"),
+                "content_profile_preset": content_profile.get("content_profile_preset", "auto"),
             },
             duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
             analysis_run_id=self.run_id,
@@ -1532,7 +1543,7 @@ class Pipeline:
             selected, metadata, transcript_features, scenes, tracker,
         )
         selected, preflight_failures = self._preflight_selected_candidates(
-            selected, visual_analysis, tracker,
+            selected, visual_analysis, tracker, content_profile=content_profile, source=source_data,
         )
         candidate_failures = {**boundary_failures, **preflight_failures}
         self._write_draft_progress(
@@ -1618,6 +1629,9 @@ class Pipeline:
         selected: list[Any],
         visual_analysis: dict[str, Any],
         tracker: StageTracker,
+        *,
+        content_profile: dict[str, Any],
+        source: dict[str, Any],
     ) -> tuple[list[Any], dict[str, str]]:
         """Recheck production eligibility and BoundaryDecision before transform."""
 
@@ -1642,8 +1656,16 @@ class Pipeline:
                 cached_eligibility=dict(scored.virality.get("eligibility") or {}),
             )
             candidate.eligibility_decision = decision
-            if not decision.eligible:
-                codes = ",".join(item.value for item in decision.reason_codes) or "UNKNOWN"
+            editorial = evaluate_editorial_candidate(
+                candidate,
+                content_profile,
+                score=float(scored.score),
+                production_feasibility=dict(scored.selection_diagnostics.get("production_feasibility") or {}),
+                source=source,
+            )
+            candidate.editorial_decision = editorial
+            if not editorial.selectable:
+                codes = ",".join(editorial.hard_blockers) or "UNKNOWN"
                 message = f"CANDIDATE_NOT_PRODUCTION_ELIGIBLE: {codes}."
                 failures[candidate.id] = message
                 tracker.finish(stage_name, "failed", message)
@@ -1804,6 +1826,7 @@ class Pipeline:
                 "source_start_seconds": selected_ranges[candidate_id][0],
                 "source_end_seconds": selected_ranges[candidate_id][1],
                 "eligibility_decision": selected_by_id[candidate_id].candidate.eligibility_decision.to_dict(),
+                "editorial_decision": selected_by_id[candidate_id].candidate.editorial_decision.to_dict(),
                 "output_file": None,
                 "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
@@ -2045,6 +2068,8 @@ class Pipeline:
                 "requested_index": index,
                 "source_start_seconds": float(item.candidate.start),
                 "source_end_seconds": float(item.candidate.end),
+                "eligibility_decision": item.candidate.eligibility_decision.to_dict(),
+                "editorial_decision": item.candidate.editorial_decision.to_dict(),
                 "output_file": None,
             }
             for index, item in enumerate(selected, start=1)
@@ -2558,6 +2583,9 @@ class Pipeline:
         self,
         scored: list,
         visual_analysis: dict[str, Any],
+        *,
+        content_profile: dict[str, Any],
+        source: dict[str, Any],
     ) -> None:
         """Refresh deterministic gates after loading old ranking caches."""
 
@@ -2573,6 +2601,12 @@ class Pipeline:
                 cached_eligibility=dict(item.virality.get("eligibility") or {}),
             )
             ensure_candidate_boundary_decision(candidate)
+            candidate.editorial_decision = evaluate_editorial_candidate(
+                candidate,
+                content_profile,
+                score=float(item.score),
+                source=source,
+            )
 
     def _production_feasibility(
         self,
@@ -2634,6 +2668,7 @@ class Pipeline:
                 self.config,
                 content_map,
                 production_feasibility=production_feasibility,
+                content_profile=None,
             )
         else:
             selected = select_clips(

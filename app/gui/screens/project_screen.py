@@ -23,6 +23,7 @@ from app.content_profile_taxonomy import (
     ProfileAxisId,
     user_overridable_values,
 )
+from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
@@ -1739,13 +1740,35 @@ class ProjectScreen(QWidget):
         self._candidate_cards = {}
         analysis = self._analysis_artifact(project)
         raw_candidates = analysis.get("candidates", []) if isinstance(analysis, dict) else []
-        all_candidates = [
-            dict(item) for item in raw_candidates
-            if isinstance(item, dict) and item.get("candidate_id")
-        ]
-        # Phase 6 owns eligibility. Moments keeps both projections and only
-        # reads the persisted decision; it never re-runs or reconstructs
-        # Brain/Vision evidence.
+        profile = analysis.get("content_profile", {}) if isinstance(analysis, dict) else {}
+        source = analysis.get("source", {}) if isinstance(analysis, dict) else {}
+        all_candidates = []
+        for raw in raw_candidates:
+            if not isinstance(raw, dict) or not raw.get("candidate_id"):
+                continue
+            item = dict(raw)
+            decision = evaluate_editorial_candidate(
+                item,
+                profile if isinstance(profile, dict) else {},
+                score=float(item.get("score") or 0),
+                confidence=float(item.get("confidence") or 0),
+                recommended=bool(
+                    item.get("selected_by_recommendation", item.get("recommended", False))
+                ),
+                production_feasibility=(
+                    item.get("production_feasibility")
+                    if isinstance(item.get("production_feasibility"), dict) else None
+                ),
+                source=source if isinstance(source, dict) else {},
+            )
+            item["editorial_decision"] = decision.to_dict()
+            item["surfacing_state"] = decision.surfacing_state.value
+            item["selectable"] = decision.selectable
+            item["recommended"] = decision.surfacing_state.value == "RECOMMENDED"
+            item["recommendation_status"] = decision.surfacing_state.value.lower()
+            all_candidates.append(item)
+        # Moments interprets persisted evidence through deterministic policy;
+        # it never re-runs or reconstructs Brain/Vision evidence.
         draftable_candidates = [item for item in all_candidates if candidate_is_draftable(item)]
         self._all_candidates_by_id = {
             str(item["candidate_id"]): item for item in all_candidates
@@ -1823,6 +1846,11 @@ class ProjectScreen(QWidget):
             bool(item.get("recommended", item.get("selected_by_recommendation")))
             for item in draftable_candidates
         )
+        available_count = sum(
+            item.get("surfacing_state") == "AVAILABLE" and candidate_is_draftable(item)
+            for item in all_candidates
+        )
+        unavailable_count = len(all_candidates) - len(draftable_candidates)
         rendered_count = sum(state == "rendered" for state in project.candidate_states.values())
         ready_count = sum(state in {"draft_ready", "selected"} for state in project.candidate_states.values())
         processing_count = sum(state in {"draft_planning", "production_rendering"} for state in project.candidate_states.values())
@@ -1834,7 +1862,8 @@ class ProjectScreen(QWidget):
         else:
             set_responsive_text(
                 self.review_metrics_text,
-                f"Найдено {len(candidates)} · рекомендуем {recommended_count}"
+                f"Найдено {len(all_candidates)} · RECOMMENDED {recommended_count} · "
+                f"AVAILABLE {available_count} · недоступны {unavailable_count}"
             )
         if workflow_step == "candidates":
             # Moment selection belongs to the source-moment phase.  Drafts
@@ -1853,7 +1882,8 @@ class ProjectScreen(QWidget):
             toolbar_layout.setDirection(QBoxLayout.Direction.TopToBottom)
             toolbar_layout.setContentsMargins(0, 0, 0, 0)
             summary = QLabel(
-                f"Найдено {len(candidates)} · рекомендуем {recommended_count} · "
+                f"Найдено {len(all_candidates)} · RECOMMENDED {recommended_count} · "
+                f"AVAILABLE {available_count} · недоступны {unavailable_count} · "
                 f"выбрано {selected_moment_count}"
             )
             summary.setWordWrap(True)
@@ -2008,8 +2038,8 @@ class ProjectScreen(QWidget):
             title.setObjectName("candidateTitle")
             title.setStyleSheet("font-weight: 600;")
             information.addWidget(title)
-            recommended = " · рекомендуем" if item.get("recommended", item.get("selected_by_recommendation")) else ""
-            details = QLabel(f"{start}–{end} · {potential} · уверенность {confidence * 100:.0f}%{recommended}")
+            editorial_state = str(item.get("surfacing_state") or "AVAILABLE")
+            details = QLabel(f"{start}–{end} · {editorial_state} · {potential} · уверенность {confidence * 100:.0f}%")
             details.setObjectName("muted")
             make_label_shrinkable(details)
             information.addWidget(details)
@@ -2623,7 +2653,7 @@ class ProjectScreen(QWidget):
         if self.project:
             self._update_candidate_review(self.project)
 
-    def _filtered_candidates(self, candidates: list[object], project: DesktopProject) -> list[dict]:
+    def _filtered_candidates(self, candidates: list[dict[str, Any]], project: DesktopProject) -> list[dict]:
         values = [dict(item) for item in candidates if isinstance(item, dict) and item.get("candidate_id")]
         if self._candidate_filter == "recommended":
             values = [item for item in values if item.get("recommended", item.get("selected_by_recommendation"))]
@@ -2649,9 +2679,9 @@ class ProjectScreen(QWidget):
 
     @staticmethod
     def _candidate_block_reason(candidate: dict) -> str:
-        """Translate the first persisted eligibility reason into concise UI copy."""
+        """Translate the first structural/technical policy blocker into concise UI copy."""
 
-        decision = candidate.get("eligibility_decision")
+        decision = candidate.get("editorial_decision")
         if not isinstance(decision, dict):
             return "Для этого момента нет актуальной проверки качества."
         labels = {
@@ -2675,8 +2705,11 @@ class ProjectScreen(QWidget):
             "VISUAL_EVIDENCE_UNAVAILABLE": "Недостаточно визуальных данных для проверки.",
             "DURATION_OUT_OF_RANGE": "Длительность фрагмента вне допустимого диапазона.",
             "LEGACY_UNASSESSED": "Для этого момента нет актуальной проверки качества.",
+            "EDITORIAL_EVIDENCE_UNASSESSED": "Для этого момента нет актуальной проверки качества.",
+            "INVALID_SOURCE_MAPPING": "Не удалось подтвердить диапазон исходного видео.",
+            "PRODUCTION_FEASIBILITY_BLOCKED": "Из этого фрагмента нельзя безопасно создать черновик.",
         }
-        reason_codes = decision.get("reason_codes")
+        reason_codes = decision.get("hard_blockers")
         if isinstance(reason_codes, list):
             for raw_code in reason_codes:
                 label = labels.get(str(raw_code))

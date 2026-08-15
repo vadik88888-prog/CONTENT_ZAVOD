@@ -4,7 +4,12 @@ from pathlib import Path
 
 from app.config import AppConfig
 from app.analysis_artifact import candidate_is_draftable
-from app.candidate_quality import CANDIDATE_QUALITY_SCHEMA_VERSION, EligibilityDecision, EligibilityState
+from app.candidate_quality import (
+    CANDIDATE_QUALITY_SCHEMA_VERSION,
+    EligibilityDecision,
+    EligibilityReasonCode,
+    EligibilityState,
+)
 from app.content_understanding import (
     GlobalContentMap,
     build_global_content_map,
@@ -175,6 +180,9 @@ def test_similarity_matrix_excludes_ineligible_candidates() -> None:
     ineligible = scored[1]
     assert ineligible.candidate.eligibility_decision is not None
     ineligible.candidate.eligibility_decision.eligible = False
+    ineligible.candidate.eligibility_decision.reason_codes = [
+        EligibilityReasonCode.SOURCE_INTERVAL_INVALID
+    ]
 
     _selected, coverage = select_with_coverage(scored, config, content_map)
 
@@ -185,7 +193,7 @@ def test_similarity_matrix_excludes_ineligible_candidates() -> None:
         for item in decision["similarities"]
     )
     exclusion = next(item for item in decision["exclusions"] if item["candidate_id"] == ineligible.candidate.id)
-    assert exclusion["reason_code"] == "ELIGIBILITY_NOT_PASSED"
+    assert exclusion["reason_code"] == "EDITORIAL_INTEGRITY_NOT_PASSED"
 
 
 def test_final_selection_artifact_persists_versioned_diversity_decision(tmp_path: Path) -> None:

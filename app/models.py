@@ -9,6 +9,7 @@ from app.candidate_quality import (
     legacy_eligibility_decision,
     legacy_score_v2,
 )
+from app.editorial_profile_policy import CandidateEditorialDecision
 
 
 @dataclass(slots=True)
@@ -65,6 +66,7 @@ class Candidate:
     vision_pass2_evidence: dict[str, Any] = field(default_factory=dict)
     composition_intent: dict[str, Any] = field(default_factory=dict)
     eligibility_decision: EligibilityDecision | None = None
+    editorial_decision: CandidateEditorialDecision | None = None
     candidate_score_v2: CandidateScoreV2 | None = None
     incremental_coverage_score: float = 0.0
 
@@ -102,6 +104,7 @@ class Candidate:
             # Old candidate JSON has no V2 decision. Serialize that distinction
             # explicitly so it cannot masquerade as a V2 pass on a later read.
             "eligibility_decision": (self.eligibility_decision or legacy_eligibility_decision()).to_dict(),
+            "editorial_decision": self.editorial_decision.to_dict() if self.editorial_decision else None,
             "candidate_score_v2": (self.candidate_score_v2 or legacy_score_v2()).to_dict(),
             "incremental_coverage_score": round(self.incremental_coverage_score, 3),
         }
@@ -184,6 +187,11 @@ def candidate_from_dict(data: dict[str, Any]) -> Candidate:
             if isinstance(data.get("eligibility_decision"), dict)
             and str(data["eligibility_decision"].get("state") or "") != "legacy_unassessed"
             else legacy_eligibility_decision()
+        ),
+        editorial_decision=(
+            CandidateEditorialDecision.from_dict(data["editorial_decision"])
+            if isinstance(data.get("editorial_decision"), dict)
+            else None
         ),
         candidate_score_v2=(
             CandidateScoreV2.from_dict(data["candidate_score_v2"])

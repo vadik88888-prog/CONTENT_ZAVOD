@@ -212,7 +212,7 @@ def test_structured_profile_changes_only_downstream_rank_for_eligible_candidate(
     assert motivational["virality"]["ranking_sort_score"] != educational["virality"]["ranking_sort_score"]
 
 
-def test_phase6_eligibility_reject_never_receives_profile_weighting() -> None:
+def test_phase6_editorial_reject_without_hard_evidence_receives_profile_weighting() -> None:
     candidate, story, transcript, audio, _profile, _retention, _publishability, _eligibility = _diagnostics([
         "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",
     ])
@@ -237,10 +237,11 @@ def test_phase6_eligibility_reject_never_receives_profile_weighting() -> None:
     motivational = rank({"format": "talking_head", "editorial_mode": "motivational", "domain": "general"})
     educational = rank({"format": "screen_demo", "editorial_mode": "explanatory", "domain": "education"})
 
-    assert motivational["virality"]["profile_weighting_applied"] is False
-    assert educational["virality"]["profile_weighting_applied"] is False
+    assert motivational["virality"]["profile_weighting_applied"] is True
+    assert educational["virality"]["profile_weighting_applied"] is True
     assert motivational["virality"]["profile_weighting_gates"]["phase6_eligibility_passed"] is False
-    assert motivational["virality"]["ranking_sort_score"] == educational["virality"]["ranking_sort_score"]
+    assert motivational["virality"]["profile_weighting_gates"]["editorial_selectable"] is True
+    assert motivational["virality"]["ranking_sort_score"] != educational["virality"]["ranking_sort_score"]
 
 
 def test_guaranteed_blocked_feasibility_never_receives_profile_weighting() -> None:

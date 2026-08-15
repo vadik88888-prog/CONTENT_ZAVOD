@@ -434,6 +434,22 @@ def _collect_artifact_identity(
 
 
 def _collect_eligibility(finding: Any, candidate: dict[str, Any]) -> None:
+    editorial = candidate.get("editorial_decision") if isinstance(candidate, dict) else None
+    if isinstance(editorial, dict):
+        hard_blockers = [str(item) for item in editorial.get("hard_blockers", []) if str(item)]
+        if editorial.get("selectable") is True and not hard_blockers:
+            return
+        code = hard_blockers[0] if hard_blockers else "EDITORIAL_POLICY_BLOCKED"
+        finding(
+            code,
+            "blocker",
+            {"editorial_decision": editorial},
+            measured_value=hard_blockers,
+            threshold="profile-aware editorial selectable=true",
+            producer="editorial_profile_policy",
+            message="Candidate has an evidence-backed structural or technical blocker.",
+        )
+        return
     decision = candidate.get("eligibility_decision") if isinstance(candidate, dict) else None
     if not isinstance(decision, dict) or decision.get("state") == "legacy_unassessed":
         virality = candidate.get("virality") if isinstance(candidate, dict) else None
@@ -1206,7 +1222,12 @@ def _check_catalog(
         "caption_quality_report" if native_captions else "subtitle_quality_decision"
     )
     sources = [
-        ("ELIGIBILITY", "eligibility", candidate.get("eligibility_decision"), "eligible=true"),
+        (
+            "ELIGIBILITY",
+            "editorial_profile_policy" if candidate.get("editorial_decision") else "eligibility",
+            candidate.get("editorial_decision") or candidate.get("eligibility_decision"),
+            "profile-aware editorial selectable=true",
+        ),
         ("DIVERSITY", "diversity", diversity_decision, "candidate selected by versioned diversity decision"),
         ("BOUNDARIES", "boundary_decision", plan.get("boundary_decision"), "safe complete boundary"),
         (

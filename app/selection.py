@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.config import AppConfig
 from app.diversity import interval_metrics, is_temporal_duplicate, transcript_similarity
 from app.models import ScoredCandidate
+from app.editorial_profile_policy import editorial_decision_from_candidate, evaluate_editorial_candidate
 from app.production_feasibility import production_feasibility_index
 
 
@@ -11,7 +12,7 @@ TRANSCRIPT_DUPLICATE_THRESHOLD = 0.90
 
 def select_clips(
     scored: list[ScoredCandidate], config: AppConfig, content_map: dict | None = None,
-    production_feasibility: dict | None = None,
+    production_feasibility: dict | None = None, content_profile: dict | None = None,
 ) -> list[ScoredCandidate]:
     """Select the strongest candidates while preserving source-content diversity."""
 
@@ -20,6 +21,7 @@ def select_clips(
 
         selected, _coverage = select_with_coverage(
             scored, config, content_map, production_feasibility=production_feasibility,
+            content_profile=content_profile,
         )
         return selected
 
@@ -39,15 +41,34 @@ def select_clips(
             item.selection_reason = str(boundary.get("fallback_reason") or "Semantic boundary не прошла no-cut-off validation.")
             item.selection_diagnostics = {"decision": "rejected_boundary", "boundary": boundary}
             continue
-        decision = item.candidate.eligibility_decision
-        if decision is None or not decision.explicitly_eligible:
+        decision = (
+            evaluate_editorial_candidate(
+                item.candidate,
+                content_profile,
+                score=float(item.score),
+                production_feasibility=feasibility_by_id.get(item.candidate.id),
+            )
+            if content_profile is not None
+            else editorial_decision_from_candidate(item.candidate)
+            or evaluate_editorial_candidate(
+                item.candidate,
+                None,
+                score=float(item.score),
+                production_feasibility=feasibility_by_id.get(item.candidate.id),
+            )
+        )
+        item.candidate.editorial_decision = decision
+        if not decision.selectable:
             item.selected = False
-            state = decision.state.value if decision is not None else "legacy_unassessed"
-            item.selection_reason = "Candidate не имеет явного eligibility PASS."
+            item.selection_reason = "Candidate не прошёл structural/technical policy check."
             item.selection_diagnostics = {
-                "decision": "rejected_eligibility",
-                "eligibility_state": state,
-                "reason_codes": [code.value for code in decision.reason_codes] if decision else ["LEGACY_UNASSESSED"],
+                "decision": "rejected_editorial_integrity",
+                "surfacing_state": decision.surfacing_state.value,
+                "reason_codes": list(decision.hard_blockers),
+                "eligibility_state": (
+                    item.candidate.eligibility_decision.state.value
+                    if item.candidate.eligibility_decision is not None else "legacy_unassessed"
+                ),
             }
             continue
         feasibility = feasibility_by_id.get(item.candidate.id)

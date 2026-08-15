@@ -577,6 +577,7 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     flow.preset_provenance = resolved.preset_provenance
     flow.audio_mode = resolved.audio_mode
     flow.preset_version = resolved.preset_version
+    flow.content_profile_preset = resolved.content_profile_preset
 
 def _number(value: Any) -> float | None:
     if isinstance(value, bool):

@@ -2137,6 +2137,7 @@ def editorial_intent_affinity(candidate: Candidate, story: StoryUnit | None, int
 def select_with_coverage(
     scored: list[ScoredCandidate], config: Any, content_map_data: dict[str, Any],
     *, production_feasibility: dict[str, Any] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> tuple[list[ScoredCandidate], dict[str, Any]]:
     """Select strong StoryUnits with existing coverage plus deterministic MMR diversity."""
 
@@ -2150,16 +2151,36 @@ def select_with_coverage(
     requested = min(config.max_clips, config.ai_reranking.final_clip_count)
     diversity_lambda = float(settings.diversity_lambda)
     from app.production_feasibility import production_feasibility_index
+    from app.editorial_profile_policy import editorial_decision_from_candidate, evaluate_editorial_candidate
 
     feasibility_by_id = production_feasibility_index(production_feasibility)
     allow_ranked_replacements = bool(
         isinstance(production_feasibility, dict)
         and production_feasibility.get("allow_ranked_replacements")
     )
+    editorial_by_id = {}
+    for item in scored:
+        decision = (
+            evaluate_editorial_candidate(
+                item.candidate,
+                content_profile,
+                score=float(item.score),
+                production_feasibility=feasibility_by_id.get(item.candidate.id),
+            )
+            if content_profile is not None
+            else editorial_decision_from_candidate(item.candidate)
+            or evaluate_editorial_candidate(
+                item.candidate,
+                None,
+                score=float(item.score),
+                production_feasibility=feasibility_by_id.get(item.candidate.id),
+            )
+        )
+        item.candidate.editorial_decision = decision
+        editorial_by_id[item.candidate.id] = decision
     eligible_for_similarity = [
         item for item in scored
-        if item.candidate.eligibility_decision is not None
-        and item.candidate.eligibility_decision.explicitly_eligible
+        if editorial_by_id[item.candidate.id].selectable
         and feasibility_by_id.get(item.candidate.id, {}).get("status") != "GUARANTEED_BLOCKED"
     ]
     similarities, similarity_index = _eligible_diversity_similarities(eligible_for_similarity, stories)
@@ -2177,7 +2198,7 @@ def select_with_coverage(
 
     for item in scored:
         boundary = item.candidate.boundary_diagnostics
-        decision = item.candidate.eligibility_decision
+        decision = editorial_by_id[item.candidate.id]
         story = stories.get(str(item.candidate.story_unit_id or ""))
         strong_story = bool(
             story
@@ -2189,13 +2210,12 @@ def select_with_coverage(
             and item.virality.get("selection_eligible", False)
             and item.score >= float(getattr(config.virality, "minimum_quality_score", 0.52)) * 100
         )
-        if decision is None or not decision.explicitly_eligible:
-            state = decision.state.value if decision is not None else "legacy_unassessed"
-            codes = [code.value for code in decision.reason_codes] if decision is not None else ["LEGACY_UNASSESSED"]
+        if not decision.selectable:
+            codes = list(decision.hard_blockers)
             reject(
                 item,
-                "ELIGIBILITY_NOT_PASSED",
-                f"Eligibility gate rejected candidate: state={state}; codes={','.join(codes)}.",
+                "EDITORIAL_INTEGRITY_NOT_PASSED",
+                f"Structural/technical policy rejected candidate: codes={','.join(codes)}.",
             )
         elif feasibility_by_id.get(item.candidate.id, {}).get("status") == "GUARANTEED_BLOCKED":
             feasibility = feasibility_by_id[item.candidate.id]

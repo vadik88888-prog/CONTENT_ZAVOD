@@ -127,7 +127,7 @@ def test_complete_legacy_boundary_evidence_is_promoted_to_typed_decision() -> No
     assert candidate.boundary_diagnostics["boundary_decision_migration"].startswith("legacy_5A")
 
 
-def test_high_score_explicitly_ineligible_candidate_cannot_enter_coverage_selection() -> None:
+def test_high_score_editorial_weakness_can_enter_coverage_selection() -> None:
     candidate = _score(_candidate("candidate-ineligible", "It fixes the issue. The result is reliable progress."))
     assert candidate.eligibility_decision is not None and candidate.eligibility_decision.eligible is False
     scored = ScoredCandidate(candidate, "title", "hook", "summary", 100, 100, 100, 100, 100, 0, None, True)
@@ -139,10 +139,11 @@ def test_high_score_explicitly_ineligible_candidate_cannot_enter_coverage_select
 
     selected, _coverage = select_with_coverage([scored], config, content_map)
 
-    assert selected == []
-    assert scored.selected is False
-    assert scored.selection_diagnostics["decision"] == "rejected_coverage"
-    assert "CONTEXT_DEBT_CRITICAL" in (scored.selection_reason or "")
+    assert selected == [scored]
+    assert scored.selected is True
+    assert scored.candidate.editorial_decision is not None
+    assert scored.candidate.editorial_decision.selectable is True
+    assert "CONTEXT_DEBT_CRITICAL" in scored.candidate.editorial_decision.soft_issues
 
 
 def test_legacy_candidate_is_explicitly_unassessed_and_is_not_a_v2_pass() -> None:

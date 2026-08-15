@@ -257,7 +257,9 @@ def test_moments_show_ineligible_read_only_while_bulk_actions_keep_only_eligible
         {
             "candidate_id": ineligible_id, "title": "Ineligible", "start_seconds": 20.0,
             "end_seconds": 30.0, "potential": "high", "confidence": 0.99,
-            "recommended": True, "eligibility_decision": _eligibility(False),
+            "recommended": True, "eligibility_decision": {
+                **_eligibility(False), "reason_codes": ["SOURCE_INTERVAL_INVALID"],
+            },
         },
         {
             "candidate_id": legacy_id, "title": "Legacy unassessed", "start_seconds": 31.0,
@@ -299,7 +301,7 @@ def test_moments_show_ineligible_read_only_while_bulk_actions_keep_only_eligible
             label.text() for label in screen.findChildren(QLabel)
             if label.objectName() == "candidateBlockedReason"
         }
-        assert "Почему нельзя создать черновик: Мысль во фрагменте не завершена." in blocked_reasons
+        assert "Почему нельзя создать черновик: Некорректный диапазон исходного видео." in blocked_reasons
         assert "Почему нельзя создать черновик: Для этого момента нет актуальной проверки качества." in blocked_reasons
         recommended_ids = screen._recommended_candidate_ids()
         assert recommended_ids == candidate_ids[:3]
@@ -1525,7 +1527,7 @@ def test_review_action_bar_releases_medium_width_minimum_during_resize_history(
         app.processEvents()
 
 
-def test_moments_show_95_ineligible_candidates_with_quality_message_and_no_draft_actions(
+def test_moments_keep_editorial_weakness_selectable_and_block_only_technical_integrity(
     tmp_path: Path, monkeypatch,
 ) -> None:
     existing = QCoreApplication.instance()
@@ -1536,8 +1538,12 @@ def test_moments_show_95_ineligible_candidates_with_quality_message_and_no_draft
     analysis_path = Path(project.analysis_artifact_path or "")
     analysis = read_json(analysis_path, {})
     blocked_ids = [f"blocked-{index:03d}" for index in range(95)]
-    analysis["candidates"] = [
-        {
+    analysis["candidates"] = []
+    for index, candidate_id in enumerate(blocked_ids):
+        eligibility = _eligibility(False)
+        if index >= 89:
+            eligibility = {**eligibility, "reason_codes": ["SOURCE_INTERVAL_INVALID"]}
+        analysis["candidates"].append({
             "candidate_id": candidate_id,
             "title": f"Момент {index + 1}",
             "start_seconds": float(index),
@@ -1545,10 +1551,8 @@ def test_moments_show_95_ineligible_candidates_with_quality_message_and_no_draft
             "potential": "high",
             "confidence": 0.9,
             "recommended": True,
-            "eligibility_decision": _eligibility(False),
-        }
-        for index, candidate_id in enumerate(blocked_ids)
-    ]
+            "eligibility_decision": eligibility,
+        })
     _rewrite_analysis(analysis_path, analysis)
     project.candidate_states = {candidate_id: "analyzed" for candidate_id in blocked_ids}
     services.projects.save(project)
@@ -1556,37 +1560,34 @@ def test_moments_show_95_ineligible_candidates_with_quality_message_and_no_draft
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
-    monkeypatch.setattr(viewmodel, "build_drafts", lambda *_args: pytest.fail("blocked candidates must not start Draft"))
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda *_args: None)
 
     try:
         screen.open(project)
         app.processEvents()
 
         assert len(screen._all_candidates_by_id) == 95
-        assert screen._draftable_candidates_by_id == {}
+        assert len(screen._draftable_candidates_by_id) == 89
         assert len(screen._review_candidates_by_id) == 95
         quality_notice = screen.findChild(QLabel, "candidateQualityNotice")
-        assert quality_notice is not None
-        assert quality_notice.text() == "Найдено 95 моментов, но ни один пока не прошёл проверку качества"
-        assert screen.workflow_hint.text() == quality_notice.text()
-        assert screen.findChild(QPushButton, "selectRecommendedCandidates").isEnabled() is False
-        assert screen.findChild(QPushButton, "selectAllCandidates").isEnabled() is False
-        assert screen.draft_button.isHidden()
+        assert quality_notice is None
+        assert screen.findChild(QPushButton, "selectRecommendedCandidates").isEnabled() is True
+        assert screen.findChild(QPushButton, "selectAllCandidates").isEnabled() is True
+        assert not screen.draft_button.isHidden()
 
         screen._toggle_candidate_selection(blocked_ids[0])
-        screen._draft_action()
         assert viewmodel.project is not None
-        assert viewmodel.project.review_selected_candidate_ids == []
+        assert viewmodel.project.review_selected_candidate_ids == [blocked_ids[0]]
 
         screen._view_all_candidates()
         app.processEvents()
         assert set(screen._candidate_cards) == set(blocked_ids)
-        assert screen._candidate_selection_buttons == {}
+        assert len(screen._candidate_selection_buttons) == 89
         assert all(
             screen.findChild(QPushButton, f"blocked-candidate-{candidate_id}").isEnabled() is False
-            for candidate_id in blocked_ids
+            for candidate_id in blocked_ids[89:]
         )
-        screen._preview_candidate(screen._all_candidates_by_id[blocked_ids[0]])
+        screen._preview_candidate(screen._all_candidates_by_id[blocked_ids[89]])
         app.processEvents()
         assert screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls") is None
     finally:

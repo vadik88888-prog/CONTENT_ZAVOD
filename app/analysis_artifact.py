@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from app.candidate_quality import EligibilityDecision, legacy_eligibility_decision
+from app.editorial_profile_policy import (
+    CandidateEditorialDecision,
+    evaluate_editorial_candidate,
+)
 from app.utils import read_json, stable_file_hash, utc_now, write_json
 
 
@@ -289,7 +293,12 @@ class AnalysisArtifact:
         return value
 
 
-def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) -> dict[str, Any]:
+def candidate_review_payload(
+    candidate: dict[str, Any],
+    selected_ids: set[str],
+    content_profile: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Expose only review-relevant fields; full evidence remains in cache."""
 
     candidate_id = str(candidate.get("id") or "")
@@ -320,7 +329,16 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
     selection_diagnostics = _dict_value(candidate.get("selection_diagnostics"))
     production_feasibility = _dict_value(selection_diagnostics.get("production_feasibility"))
     eligibility_decision = _eligibility_decision(candidate.get("eligibility_decision"))
-    selected = candidate_id in selected_ids and eligibility_decision.explicitly_eligible
+    editorial_decision = evaluate_editorial_candidate(
+        candidate,
+        content_profile,
+        score=_optional_float(candidate.get("score")),
+        confidence=confidence,
+        recommended=candidate_id in selected_ids,
+        production_feasibility=production_feasibility,
+        source=source,
+    )
+    selected = candidate_id in selected_ids and editorial_decision.selectable
     start = _optional_float(candidate.get("start"))
     end = _optional_float(candidate.get("end"))
     duration = _optional_float(candidate.get("duration"))
@@ -361,9 +379,12 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
             "weakest_factors": list(viral.get("weakest_factors") or []),
             "features": compact_features,
         },
-        # Moments consumes the Phase 6 decision as a persisted boundary.  Keep
-        # legacy/unassessed explicit so an old record cannot become a V2 pass.
+        # Preserve the legacy Phase 6 evidence for diagnostics. Editorial
+        # surfacing below owns recommendation/selectability.
         "eligibility_decision": eligibility_decision.to_dict(),
+        "editorial_decision": editorial_decision.to_dict(),
+        "surfacing_state": editorial_decision.surfacing_state.value,
+        "selectable": editorial_decision.selectable,
         "boundary_evidence": {
             "overall_boundary_score": boundary.get("overall_boundary_score"),
             "semantic_completion": boundary.get("semantic_completion"),
@@ -386,9 +407,9 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
             },
         },
         "state": "analyzed",
-        "recommended": selected,
+        "recommended": editorial_decision.surfacing_state.value == "RECOMMENDED",
         "selected_by_recommendation": selected,
-        "recommendation_status": "recommended" if selected else "not_recommended",
+        "recommendation_status": editorial_decision.surfacing_state.value.lower(),
         "production_feasibility": production_feasibility,
         "virality_level": potential.get("level") or potential_level,
         "publishability_status": eligibility.get("status"),
@@ -404,15 +425,22 @@ def candidate_review_payload(candidate: dict[str, Any], selected_ids: set[str]) 
 
 
 def candidate_is_draftable(candidate: object) -> bool:
-    """Return only an explicit Phase 6 eligibility pass.
-
-    Missing, malformed and legacy decisions intentionally retain the existing
-    conservative compatibility state: they are unassessed, not eligible.
-    """
+    """Return the persisted profile-aware selectability decision."""
 
     if not isinstance(candidate, dict):
         return False
-    return _eligibility_decision(candidate.get("eligibility_decision")).explicitly_eligible
+    decision = candidate.get("editorial_decision")
+    if not isinstance(decision, dict):
+        return False
+    try:
+        editorial_selectable = CandidateEditorialDecision.from_dict(decision).selectable
+    except (TypeError, ValueError):
+        return False
+    feasibility = candidate.get("production_feasibility")
+    production_selectable = not (
+        isinstance(feasibility, dict) and feasibility.get("status") == "GUARANTEED_BLOCKED"
+    )
+    return editorial_selectable and production_selectable
 
 
 def _eligibility_decision(value: object) -> EligibilityDecision:

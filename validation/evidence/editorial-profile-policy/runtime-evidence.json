@@ -1,0 +1,79 @@
+{
+  "schema_version": "editorial-profile-policy-real-window.1",
+  "captured_at": "2026-08-15T11:20:47.570848+00:00",
+  "policy_version": "editorial-profile-policy.1",
+  "os": "Windows-10-10.0.26200-SP0",
+  "qt_platform": "windows",
+  "source_project": {
+    "project_id": "3c21b1579922410b9b2f33080356f34f",
+    "analysis_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Сериал_Холод_1_серия_2026_Wink_I_Любовь_Аксёнова-0QWbay4LlUU-3b9aac2f10b4\\runs\\62b19eaea3004d4e80016463044f18f0\\analysis.json",
+    "analysis_sha256": "a52f197df4d945c62669b6e5a541b44259ba479dad216cac4f2542897f1be5c4",
+    "source_path": "C:\\Users\\Вадим\\AppData\\Local\\ContentFactoryData\\projects\\3c21b1579922410b9b2f33080356f34f\\sources\\Сериал Холод ｜ 1 серия (2026) Wink I Любовь Аксёнова-0QWbay4LlUU.webm",
+    "source_probe": {
+      "duration": 2819.581,
+      "width": 1920,
+      "height": 1080,
+      "fps": 25.0,
+      "video_codec": "av1",
+      "audio_streams": 1,
+      "audio_codecs": [
+        "opus"
+      ],
+      "format": "matroska,webm",
+      "source_path": "C:\\Users\\Вадим\\AppData\\Local\\ContentFactoryData\\projects\\3c21b1579922410b9b2f33080356f34f\\sources\\Сериал Холод ｜ 1 серия (2026) Wink I Любовь Аксёнова-0QWbay4LlUU.webm"
+    }
+  },
+  "regression": {
+    "candidate_count": 95,
+    "surfacing_counts": {
+      "RECOMMENDED": 6,
+      "AVAILABLE": 83,
+      "BLOCKED": 6
+    },
+    "selectable_count": 89,
+    "technical_integrity_failure_count": 6,
+    "profile_counts": {
+      "movie_series": 95
+    },
+    "selected_editorial_weakness_candidate_id": "candidate-chapter-001-story-002",
+    "summary_text": "Найдено 95 · RECOMMENDED 6 · AVAILABLE 83 · недоступны 6"
+  },
+  "checks": {
+    "qt_windows_platform": true,
+    "native_window_created": true,
+    "real_source_probe_valid": true,
+    "candidate_count_95": true,
+    "recommended_present": true,
+    "available_present": true,
+    "technical_integrity_failures_6": true,
+    "selectable_89": true,
+    "blocked_buttons_6": true,
+    "auto_resolved_movie_series": true,
+    "editorial_weakness_selected": true,
+    "analysis_checksum_unchanged": true,
+    "analysis_snapshot_still_verified": true,
+    "boundary_decisions_unchanged": true,
+    "original_project_unchanged": true
+  },
+  "result": "PASS",
+  "screenshot": {
+    "path": "moments-profile-aware-95.png",
+    "sha256": "9ec84e459ab3a9a10ff7835181ed65727f9f1a5ea08041fbfc3f76bd0560ef28",
+    "width": 1820,
+    "height": 920
+  },
+  "candidate_cards": {
+    "available": {
+      "path": "available-editorial-weakness-card.png",
+      "sha256": "8a8cc7158db1214ba8220666cd9b3ed88ede4ff7d7effb0bd638d74682e4f0c0",
+      "width": 1710,
+      "height": 173
+    },
+    "blocked": {
+      "path": "blocked-integrity-card.png",
+      "sha256": "07c1d913017428ba98d503610026f0be30919bed32a14a14a142693c2148ff35",
+      "width": 1710,
+      "height": 193
+    }
+  }
+}

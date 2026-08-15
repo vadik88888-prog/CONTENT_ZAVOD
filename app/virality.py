@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 
 from app.audio_features import window_audio_features
 from app.content_understanding import StoryUnit
+from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.models import Candidate
 
 
@@ -1991,13 +1992,20 @@ def _apply_virality_ranking(
         phase6_eligibility_passed = bool(
             phase6_decision is not None and phase6_decision.explicitly_eligible
         )
+        editorial_decision = evaluate_editorial_candidate(
+            item.candidate,
+            content_profile,
+            score=float(item.score),
+            production_feasibility=feasibility_by_id.get(item.candidate.id),
+        )
+        item.candidate.editorial_decision = editorial_decision
+        editorial_selectable = bool(editorial_decision is not None and editorial_decision.selectable)
         feasibility_status = str(
             feasibility_by_id.get(item.candidate.id, {}).get("status") or "UNASSESSED"
         )
         feasibility_viable = feasibility_status == "VIABLE"
         profile_weighting_applied = bool(
-            eligibility_passed
-            and phase6_eligibility_passed
+            editorial_selectable
             and boundary_passed
             and feasibility_viable
         )
@@ -2015,7 +2023,7 @@ def _apply_virality_ranking(
         # reject can never be numerically rescued by its source profile.
         passes_floor = base_potential.viral_potential_score >= float(getattr(settings, "minimum_quality_score", 0.52))
         publishable = publishability.publishability_score.score >= float(getattr(settings, "minimum_publishability_score", 0.55))
-        allowed = eligibility_passed and boundary_passed and passes_floor and publishable
+        allowed = editorial_selectable and boundary_passed and passes_floor and publishable
         item.score = int(round(base_potential.viral_potential_score * 100))
         item.hook_score = int(round(feature.hook_assessment.hook_strength.score * 100))
         item.completeness_score = int(round(publishability.story_completeness.score * 100))
@@ -2040,6 +2048,7 @@ def _apply_virality_ranking(
             "profile_weighting_gates": {
                 "virality_eligibility_passed": eligibility_passed,
                 "phase6_eligibility_passed": phase6_eligibility_passed,
+                "editorial_selectable": editorial_selectable,
                 "boundary_passed": boundary_passed,
                 "feasibility_status": feasibility_status,
                 "feasibility_viable": feasibility_viable,
@@ -2057,6 +2066,7 @@ def _apply_virality_ranking(
             "passes_quality_floor": passes_floor, "passes_publishability_floor": publishable,
             "profile_weighting_applied": profile_weighting_applied,
             "phase6_eligibility_passed": phase6_eligibility_passed,
+            "editorial_selectable": editorial_selectable,
             "boundary_passed": boundary_passed,
             "feasibility_status": feasibility_status,
         })

@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from app.content_profile_taxonomy import (
+    AUTO_PROFILE_INPUT,
     CONTENT_PROFILE_SCHEMA_VERSION,
     PROFILE_AXIS_ORDER,
     SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS,
+    content_profile_preset_ids,
     user_override_ids,
 )
 from app.errors import ClipEngineError
@@ -815,6 +817,7 @@ class ProductFlowConfig:
     preset_provenance: str = "content_recommendation"
     audio_mode: str = "original"
     preset_version: str = "1.0.0"
+    content_profile_preset: str = AUTO_PROFILE_INPUT
 
     def validate(self) -> None:
         if self.audio_mode not in {"original", "original_enhanced", "voiceover", "replace_voice", "mixed"}:
@@ -843,6 +846,8 @@ class ProductFlowConfig:
             raise ClipEngineError("product_flow.preset_provenance is unsupported.")
         if not isinstance(self.preset_version, str) or not self.preset_version.strip():
             raise ClipEngineError("product_flow.preset_version не должен быть пустым.")
+        if self.content_profile_preset not in content_profile_preset_ids(include_auto=True):
+            raise ClipEngineError("product_flow.content_profile_preset is unsupported.")
 
 
 @dataclass(slots=True)
