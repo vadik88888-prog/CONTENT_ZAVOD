@@ -20,9 +20,11 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QPushButton
+from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QCheckBox, QLabel, QPushButton
 
+from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.draft_artifact import DraftArtifact
+from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.main_window import MainWindow
 from app.gui.models import ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -125,12 +127,86 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
         raise AssertionError(f"{stage}: clipped primary CTA: {clipped_primary}")
     if any(item["maximum"] > 0 for item in horizontal):
         raise AssertionError(f"{stage}: horizontal scroll detected: {horizontal}")
+    stage_evidence: dict[str, object] = {}
+    screen = window.project_screen
+    if stage == "settings":
+        caption_cards = screen._setup_choice_buttons["caption"]
+        caption_fonts = {
+            preset_id: button.font().family()
+            for preset_id, button in caption_cards.items()
+        }
+        expected_fonts = {
+            preset_id: FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].render_family
+            for preset_id, preset in CAPTION_PRESET_DEFINITIONS.items()
+        }
+        if caption_fonts != expected_fonts:
+            raise AssertionError(f"Settings caption cards do not use bundled owners: {caption_fonts}")
+        stage_evidence = {
+            "caption_card_count": len(caption_cards),
+            "caption_fonts": caption_fonts,
+            "style_sample_preset_id": screen._caption_demo_preset_id,
+            "style_sample_is_local_ui": True,
+        }
+    elif stage == "moments":
+        detail_text = "\n".join(
+            label.text() for label in screen.candidate_detail.findChildren(QLabel)
+        )
+        forbidden = ("Уверенность:", "Оценки:", "Текст:", "transcript")
+        if any(value in detail_text for value in forbidden):
+            raise AssertionError("Moments exposes internal analysis detail")
+        if screen.preview.poster.pixmap().isNull():
+            raise AssertionError("Moments real candidate poster is not visible")
+        stage_evidence = {
+            "active_candidate_id": screen._active_candidate_id,
+            "source_path": str(screen.preview.source_path.resolve()) if screen.preview.source_path else None,
+            "real_candidate_poster": True,
+            "surfacing_states": ["RECOMMENDED", "AVAILABLE", "BLOCKED"],
+        }
+    elif stage == "drafts":
+        candidate_id = screen._active_candidate_id or ""
+        expected = screen._draft_preview_paths.get(candidate_id)
+        active = screen.preview.active_media_path
+        if expected is None or active is None or expected.resolve() != active.resolve():
+            raise AssertionError("Drafts preview is not bound to its persisted Creative Preview")
+        extra_shots = screen.candidate_detail.findChild(QCheckBox, "draftExtraShots")
+        stage_evidence = {
+            "active_candidate_id": candidate_id,
+            "creative_preview_path": str(active.resolve()),
+            "preview_presentation": screen.preview.presentation,
+            "three_column_layout": not bool(screen._compact_stage_layout),
+            "extra_shots_checked": extra_shots.isChecked() if extra_shots else None,
+        }
+    elif stage == "final":
+        workspace = screen.final_results
+        output = workspace._output_for(workspace.active_output_id)
+        if (
+            output is None
+            or output.result_id not in workspace._thumbnail_paths
+        ):
+            raise AssertionError(
+                "Final player is not bound to its canonical ClipResult: "
+                f"active={workspace.active_output_id!r}, "
+                f"output={getattr(output, 'title', None)!r}, "
+                f"thumbnail_ids={list(workspace._thumbnail_paths)!r}"
+            )
+        if workspace.preview.poster.pixmap().isNull():
+            raise AssertionError("Final real poster is not visible")
+        summary = {key: label.text() for key, label in workspace.summary_values.items()}
+        if any(value == "—" for value in summary.values()):
+            raise AssertionError(f"Final summary is incomplete: {summary}")
+        stage_evidence = {
+            "clip_result_id": output.result_id,
+            "output_path": str(output.path.resolve()),
+            "real_final_poster": True,
+            "summary": summary,
+        }
     return {
         "primary_cta": [button.text() for button in primary],
         "horizontal_scrolls": horizontal,
         "active_vertical_scrolls": [item for item in vertical if item["maximum"] > 0],
         "window_logical_size": [window.width(), window.height()],
         "device_pixel_ratio": window.devicePixelRatioF(),
+        "stage_evidence": stage_evidence,
     }
 
 
@@ -273,6 +349,11 @@ def main() -> int:
         settings_project.review_selected_candidate_ids = []
         settings_project.selected_candidate_ids = []
         settings_project.last_final_result_id = None
+        # Capture the most expressive existing dynamic preset.  This changes
+        # only the isolated Settings-state projection and demonstrates the
+        # lightweight UI sample; no Draft/FFmpeg/Brain/Vision work is started.
+        settings_project.settings.caption_preset_id = "word_pop"
+        settings_project.settings.subtitle_style = "dynamic"
         screen.viewmodel.project = settings_project
         screen.viewmodel.snapshot = ProcessingSnapshot()
         screen.runs = []
@@ -327,7 +408,7 @@ def main() -> int:
         first_moment = next(iter(screen._review_candidates_by_id.values()))
         screen._preview_candidate(first_moment)
         _progress("capture moments")
-        _save_stage(application, window, output, "moments", args.label, metrics["stages"], media_seconds=0.8)
+        _save_stage(application, window, output, "moments", args.label, metrics["stages"], media_seconds=2.0)
 
         drafts_project = deepcopy(real_project)
         draft_candidate_ids = list(drafts_project.candidate_draft_artifacts)
@@ -374,14 +455,14 @@ def main() -> int:
         screen._results_subflow_override = None
         screen._project_changed(real_project)
         _progress("capture final")
-        _save_stage(application, window, output, "final", args.label, metrics["stages"], media_seconds=0.8)
+        _save_stage(application, window, output, "final", args.label, metrics["stages"], media_seconds=2.0)
         _progress("verify lineage")
         metrics["lineage"] = _lineage(window)
         metrics["all_six_stages"] = list(metrics["stages"]) == list(STAGES)
 
         screen.preview.suspend()
         screen.final_results.preview.suspend()
-        _settle(application, seconds=0.1, turns=10)
+        _settle(application, seconds=0.5, turns=10)
         window.close()
         _settle(application, turns=3)
 

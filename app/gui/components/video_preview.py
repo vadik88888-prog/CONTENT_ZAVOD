@@ -41,6 +41,7 @@ class _PosterRequest:
     token: int
     source_path: Path
     destination: Path
+    timestamp_seconds: float = 0.05
 
 
 class _BoundedVideoWidget(QVideoWidget):
@@ -89,15 +90,19 @@ def preview_proxy_temporary_path(destination: Path) -> Path:
     return destination.with_name(f"{destination.stem}.part{destination.suffix}")
 
 
-def preview_poster_path(cache_directory: Path, source_path: Path) -> Path:
-    """Return a source-revision-bound first-frame image path."""
+def preview_poster_path(
+    cache_directory: Path, source_path: Path, timestamp_seconds: float = 0.05,
+) -> Path:
+    """Return a source-revision-and-time-bound poster image path."""
 
     try:
         stat = source_path.stat()
         revision = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     except OSError:
         revision = str(source_path)
-    digest = stable_text_hash(f"first-frame-v1:{revision}")[:20]
+    digest = stable_text_hash(
+        f"preview-poster-v2:{revision}:{max(0.0, timestamp_seconds):.3f}"
+    )[:20]
     return cache_directory / f"{safe_name(source_path.stem, 'video')}-{digest}.jpg"
 
 
@@ -404,6 +409,27 @@ class VideoPreview(QFrame):
             self.geometry_requirement_changed.emit()
         self.updateGeometry()
 
+    def show_bound_poster(self, path: str | Path) -> bool:
+        """Show a real identity-bound thumbnail while media becomes ready.
+
+        The caller owns the candidate/result binding.  This method only
+        paints the supplied image and never discovers media by name or index.
+        """
+
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return False
+        self.poster.setText("")
+        self.poster.setPixmap(pixmap.scaled(
+            self.poster.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        self.placeholder.hide()
+        self._sync_stage_overlays()
+        self.poster.show()
+        self.poster.raise_()
+        return True
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt API name
         if self._presentation == "vertical":
             width, height = self._vertical_frame_size
@@ -556,6 +582,10 @@ class VideoPreview(QFrame):
                 self._proxy_cache_directory,
                 "Для этого исходника сразу готовим совместимый preview.",
             )
+            # The exact candidate frame is useful immediately while the
+            # short playable proxy is encoded in the background.  It is a
+            # real source frame, never a placeholder or guessed file.
+            self._request_poster(self._source_path, timestamp_seconds=start)
             return
         self._activate_direct_source()
 
@@ -752,11 +782,16 @@ class VideoPreview(QFrame):
             logger.warning("media video output was detached; restoring persistent QVideoWidget")
             self.player.setVideoOutput(self.video)
 
-    def _request_poster(self, source_path: Path) -> None:
+    def _request_poster(
+        self, source_path: Path, *, timestamp_seconds: float = 0.05,
+    ) -> None:
         request = _PosterRequest(
             token=self._selection_token,
             source_path=source_path,
-            destination=preview_poster_path(self._poster_cache_directory, source_path),
+            destination=preview_poster_path(
+                self._poster_cache_directory, source_path, timestamp_seconds,
+            ),
+            timestamp_seconds=max(0.0, timestamp_seconds),
         )
         if self.usable_media_path(request.destination):
             self._show_poster(request)
@@ -777,7 +812,8 @@ class VideoPreview(QFrame):
         self._active_poster = request
         self._poster_process.setProgram(executable)
         self._poster_process.setArguments([
-            "-y", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", "0.05",
+            "-y", "-hide_banner", "-loglevel", "error", "-threads", "1",
+            "-ss", f"{request.timestamp_seconds:.3f}",
             "-i", str(request.source_path), "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "3",
             str(request.destination),
         ])

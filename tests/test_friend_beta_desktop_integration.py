@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,10 +10,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from app.analysis_artifact import new_analysis_artifact
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
+from app.clip_results import ClipResult
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
 from app.gui.components import VideoPreview
@@ -116,6 +118,93 @@ def test_friend_beta_uses_all_canonical_profiles_and_bundled_caption_fonts() -> 
         if preset.semantic_font_asset_id:
             semantic = FONT_ASSET_DEFINITIONS[preset.semantic_font_asset_id]
             assert bundled_font_asset_path(semantic).is_file()
+
+
+def test_settings_exposes_seven_real_font_style_samples_and_local_dynamic_demo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _services(tmp_path)
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(ProjectViewModel(services))
+    try:
+        screen.open(project)
+        cards = screen._setup_choice_buttons["caption"]
+        assert set(cards) == set(CAPTION_PRESET_DEFINITIONS)
+        assert screen.setup_caption_preset.isHidden()
+        for preset_id, preset in CAPTION_PRESET_DEFINITIONS.items():
+            card = cards[preset_id]
+            asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
+            assert card.font().family() == asset.render_family
+            assert asset.file_name in card.toolTip()
+            assert preset.label in card.text()
+
+        screen._choose_setup_value(screen.setup_caption_preset, "word_pop")
+        app.processEvents()
+        assert screen._caption_demo_preset_id == "word_pop"
+        first = screen.setup_example_line.text()
+        screen._advance_caption_demo()
+        assert screen.setup_example_line.text() != first
+        assert any(
+            "без обработки видео" in label.text()
+            for label in screen.setup_summary.findChildren(QLabel)
+        )
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_final_metadata_and_warnings_use_the_exact_bound_quality_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _services(tmp_path)
+    output = tmp_path / "final.mp4"
+    output.write_bytes(b"final")
+    report_path = tmp_path / "quality.json"
+    report = {
+        "artifact_id": "artifact-exact",
+        "artifact_path": str(output.resolve()),
+        "project_id": project.project_id,
+        "candidate_id": "candidate-exact",
+        "status": "PASS_WITH_WARNINGS",
+        "metrics": {"technical": {"duration": 28.3, "resolution": "1080x1920"}},
+        "findings": [{
+            "code": "CAPTION_READABILITY_FALLBACK",
+            "severity": "warning",
+            "user_message": "Raw internal English must not reach Final.",
+        }],
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    result = ClipResult(
+        candidate_id="candidate-exact",
+        output_file=str(output),
+        artifact_id="artifact-exact",
+        quality_report_path=str(report_path),
+        quality_status="PASS_WITH_WARNINGS",
+    )
+    screen = ProjectScreen(ProjectViewModel(services))
+    try:
+        assert screen._quality_media_for_result(project, result) == {
+            "duration": 28.3, "width": 1080, "height": 1920,
+        }
+        assert "Субтитры упрощены" in screen._quality_finding_message(report["findings"][0])
+        assert "Raw internal" not in screen._quality_finding_message(report["findings"][0])
+
+        report["candidate_id"] = "candidate-other"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        assert screen._quality_media_for_result(project, result) == {}
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
 
 
 def test_legacy_project_caption_migration_follows_existing_creative_family(

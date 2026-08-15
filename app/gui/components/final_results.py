@@ -78,6 +78,7 @@ class FinalResultsWorkspace(QWidget):
         self._cards: dict[str, _FinalOutputCard] = {}
         self._thumbnail_labels: dict[str, QLabel] = {}
         self._thumbnail_pixmaps: dict[str, QPixmap] = {}
+        self._thumbnail_paths: dict[str, Path] = {}
         self._thumbnail_size = (72, 128)
         self._responsive_profile: str | None = None
         self._body_layout_mode: str | None = None
@@ -351,13 +352,13 @@ class FinalResultsWorkspace(QWidget):
 
         window_height = self.window().height() if self.window() else 0
         width = self.width()
-        dense = width < 920 or (0 < window_height <= 760)
-        compact = dense or width < 1260 or (0 < window_height <= 860)
+        dense = width < 1020 or (0 < window_height <= 720)
+        compact = dense or width < 1320 or (0 < window_height <= 840)
         profile = "dense" if dense else "compact" if compact else "standard"
         # Panel composition follows the actual workspace width.  Height only
         # tunes density; a wide-but-short window can use columns and let the
         # surrounding project viewport provide vertical scrolling.
-        body_mode = "stacked" if width < 760 else "two_row" if width < 1260 else "columns"
+        body_mode = "stacked" if width < 700 else "two_row" if width < 900 else "columns"
         # Stack early enough that the three reference actions never establish
         # an oversized minimum width before the host receives its final size.
         bottom_actions_stacked = width < 720
@@ -373,10 +374,10 @@ class FinalResultsWorkspace(QWidget):
         self._bottom_actions_stacked = bottom_actions_stacked
 
         if profile == "dense":
-            list_width = (344, 362)
-            info_width = (200, 250)
-            frame_size = (172, 306)
-            body_height = 920 if body_mode == "stacked" else 690
+            list_width = (260, 300)
+            info_width = (250, 285)
+            frame_size = (204, 363)
+            body_height = 900 if body_mode == "stacked" else 465
             thumbnail_size = (52, 92)
             spacing = 8
             panel_margins = 9
@@ -385,10 +386,10 @@ class FinalResultsWorkspace(QWidget):
             self.heading.setStyleSheet("font-size: 22px; font-weight: 700;")
             summary_value_style = "font-size: 17px; font-weight: 700;"
         elif profile == "compact":
-            list_width = (344, 362)
-            info_width = (220, 285)
-            frame_size = (196, 348)
-            body_height = 720
+            list_width = (280, 320)
+            info_width = (270, 320)
+            frame_size = (220, 391)
+            body_height = 492
             thumbnail_size = (60, 106)
             spacing = 10
             panel_margins = 11
@@ -399,13 +400,13 @@ class FinalResultsWorkspace(QWidget):
         else:
             # 356 leaves the full-width “Create more” CTA at least its themed
             # 320px minimum after the panel's 16px side margins and frame.
-            list_width = (356, 380)
+            list_width = (300, 350)
             # Keep the metadata grid's two readable columns inside its own
             # viewport.  The old 420 px cap left a five-pixel hidden range at
             # full-HD once the scroll frame and its vertical bar were present.
-            info_width = (425, 440)
-            frame_size = (220, 392)
-            body_height = 492
+            info_width = (300, 350)
+            frame_size = (236, 420)
+            body_height = 520
             thumbnail_size = (72, 128)
             spacing = 14
             panel_margins = 16
@@ -588,6 +589,7 @@ class FinalResultsWorkspace(QWidget):
         self._cards = {}
         self._thumbnail_labels = {}
         self._thumbnail_pixmaps = {}
+        self._thumbnail_paths = {}
         for number, output in enumerate(self._outputs, start=1):
             card = _FinalOutputCard(output.result_id)
             card.activated.connect(lambda result_id: self._activate(result_id, emit=True, warnings=self._warnings))
@@ -624,13 +626,14 @@ class FinalResultsWorkspace(QWidget):
             self.list_items.insertWidget(self.list_items.count() - 1, card)
             self._cards[output.result_id] = card
             if self._project_directory and output.path.is_file():
-                self._thumbnail_loader.request(
+                thumbnail_path = self._thumbnail_loader.request(
                     cache_directory=self._project_directory / "final-thumbnails",
                     analysis_id="final-results",
                     candidate_id=output.result_id,
                     source_path=output.path,
                     timestamp_seconds=0.05,
                 )
+                self._thumbnail_paths[output.result_id] = thumbnail_path
 
     def _activate(self, result_id: str, *, emit: bool, warnings: list[str]) -> None:
         output = self._output_for(result_id)
@@ -643,6 +646,9 @@ class FinalResultsWorkspace(QWidget):
         # backend source handoff.  A slow multimedia backend must never delay
         # the visible selection change.
         self.preview.show_final(output.path, output.title)
+        poster_path = self._thumbnail_paths.get(output.result_id)
+        if poster_path is not None and poster_path.is_file():
+            self.preview.show_bound_poster(poster_path)
         if emit:
             self.output_selected.emit(output.result_id)
 
@@ -699,6 +705,8 @@ class FinalResultsWorkspace(QWidget):
             return
         self._thumbnail_pixmaps[result_id] = pixmap
         self._set_thumbnail_pixmap(label, pixmap)
+        if result_id == self._active_id:
+            self.preview.show_bound_poster(path)
 
     def _thumbnail_unavailable(self, result_id: str) -> None:
         label = self._thumbnail_labels.get(result_id)

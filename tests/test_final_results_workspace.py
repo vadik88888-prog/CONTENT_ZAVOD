@@ -81,8 +81,8 @@ def test_final_results_workspace_switches_only_between_bound_outputs(tmp_path: P
     ("width", "height", "profile", "body_mode", "bottom_stacked"),
     (
         (542, 480, "dense", "stacked", True),
-        (1026, 720, "compact", "two_row", False),
-        (1186, 900, "compact", "two_row", False),
+        (1026, 720, "compact", "columns", False),
+        (1186, 900, "compact", "columns", False),
         (1338, 900, "standard", "columns", False),
         (1660, 1080, "standard", "columns", False),
     ),

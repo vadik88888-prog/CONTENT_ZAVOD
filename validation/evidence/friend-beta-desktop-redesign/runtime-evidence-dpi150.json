@@ -23,6 +23,7 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {},
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\source-dpi150.png",
       "screenshot_pixels": [
         1920,
@@ -42,7 +43,7 @@
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 412
+          "maximum": 263
         }
       ],
       "window_logical_size": [
@@ -50,6 +51,20 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {
+        "caption_card_count": 7,
+        "caption_fonts": {
+          "clean_white": "Manrope",
+          "minimal_light": "Commissioner Light",
+          "accent_yellow": "Oswald",
+          "editorial_narrow": "PT Sans Narrow",
+          "karaoke_yellow": "Golos Text",
+          "contrast_box": "Rubik SemiBold",
+          "word_pop": "Unbounded"
+        },
+        "style_sample_preset_id": "word_pop",
+        "style_sample_is_local_ui": true
+      },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\settings-dpi150.png",
       "screenshot_pixels": [
         1920,
@@ -67,7 +82,7 @@
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 534
+          "maximum": 426
         }
       ],
       "window_logical_size": [
@@ -75,6 +90,7 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {},
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\processing-dpi150.png",
       "screenshot_pixels": [
         1920,
@@ -89,12 +105,24 @@
         {
           "name": "QScrollArea",
           "maximum": 0
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 0
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 0
         }
       ],
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 3616
+          "maximum": 351
+        },
+        {
+          "name": "QScrollArea",
+          "maximum": 2062
         }
       ],
       "window_logical_size": [
@@ -102,6 +130,16 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {
+        "active_candidate_id": "candidate-chapter-009-story-002",
+        "source_path": "C:\\Users\\Вадим\\AppData\\Local\\ContentFactoryData\\projects\\aa71f33b6e564c09a1edaf3f63312e03\\sources\\Абсолютно всё о печати денег-ezPXmzaaMH0.webm",
+        "real_candidate_poster": true,
+        "surfacing_states": [
+          "RECOMMENDED",
+          "AVAILABLE",
+          "BLOCKED"
+        ]
+      },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\moments-dpi150.png",
       "screenshot_pixels": [
         1920,
@@ -121,7 +159,7 @@
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 2117
+          "maximum": 700
         }
       ],
       "window_logical_size": [
@@ -129,6 +167,13 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {
+        "active_candidate_id": "candidate-chapter-009-story-002",
+        "creative_preview_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\45588decab3f4d8fabe1b198ec7fa233\\creative-preview\\creative-preview.mp4",
+        "preview_presentation": "vertical",
+        "three_column_layout": true,
+        "extra_shots_checked": false
+      },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\drafts-dpi150.png",
       "screenshot_pixels": [
         1920,
@@ -160,15 +205,11 @@
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 698
+          "maximum": 658
         },
         {
           "name": "QScrollArea",
-          "maximum": 116
-        },
-        {
-          "name": "QScrollArea",
-          "maximum": 28
+          "maximum": 236
         }
       ],
       "window_logical_size": [
@@ -176,6 +217,17 @@
         630
       ],
       "device_pixel_ratio": 1.5,
+      "stage_evidence": {
+        "clip_result_id": "candidate-chapter-008-story-004:production-candidate-chapter-008-story-004-4dbf28b7b6ab",
+        "output_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\Абсолютно_всё_о_печати_денег-ezPXmzaaMH0-4dd75eec773e\\runs\\cb2d97288bae45afb8de0127569a6458\\results\\final-short-03.mp4",
+        "real_final_poster": true,
+        "summary": {
+          "count": "3",
+          "duration": "02:10",
+          "format": "1080×1920",
+          "size": "72.1 МБ"
+        }
+      },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\final-dpi150.png",
       "screenshot_pixels": [
         1920,

@@ -206,6 +206,39 @@ QFrame#recommendationBanner {
   border-radius: 10px;
 }
 QLabel#recommendationIcon { color: @PRIMARY@; font-size: 23px; }
+QFrame#setupChoiceSection {
+  background: @MAIN@;
+  border: 1px solid @BORDER@;
+  border-radius: 10px;
+}
+QLabel#setupSectionTitle,
+QLabel#inspectorSectionTitle { color: @PRIMARY_TEXT@; font-size: 15px; font-weight: 700; }
+QPushButton#setupChoice {
+  min-height: 26px;
+  background: @SIDEBAR@;
+  border: 1px solid @BORDER@;
+  text-align: left;
+  padding: 7px 9px;
+}
+QPushButton#setupChoice:hover { border-color: @PRIMARY@; background: @ACCENT@; }
+QPushButton#setupChoice:checked,
+QPushButton#setupChoice[selected="true"] {
+  background: @ACCENT@;
+  border: 2px solid @PRIMARY@;
+  color: @PRIMARY_TEXT@;
+}
+QPushButton#choiceMore {
+  color: @SECONDARY@;
+  background: transparent;
+  border: 0;
+  padding: 4px 0;
+}
+QFrame#setupExample {
+  background: #111317;
+  border: 1px solid @BORDER@;
+  border-radius: 18px;
+}
+QLabel#setupExampleCaption { padding: 8px; }
 QFrame#stickyActionBar, QFrame#secondaryActionBar {
   background: @SIDEBAR@;
   border: 1px solid @BORDER@;
@@ -221,10 +254,30 @@ QFrame#reviewListPanel,
 QFrame#reviewPreviewPanel,
 QFrame#reviewInspectorPanel { background: @SIDEBAR@; }
 QFrame#resultsMetrics { background: @MAIN@; }
-QFrame#reviewFilters { background: transparent; border: 0; }
+QFrame#reviewFilters,
+QFrame#momentSelectionToolbar { background: transparent; border: 0; }
 QFrame#card[activeCandidate="true"] {
   background: @ACCENT@;
   border: 1px solid @PRIMARY@;
+}
+QFrame#card[candidateBlocked="true"] { background: @MAIN@; }
+QLabel#momentState {
+  color: @SECONDARY@;
+  background: @MAIN@;
+  border: 1px solid @BORDER@;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+QLabel#momentState[surfacingState="RECOMMENDED"] { color: @PRIMARY@; border-color: @PRIMARY@; }
+QLabel#momentState[surfacingState="AVAILABLE"] { color: @SUCCESS@; border-color: @SUCCESS@; }
+QLabel#momentState[surfacingState="BLOCKED"] { color: @MUTED@; }
+QLabel#candidateBlockedReason { color: @MUTED@; font-size: 12px; }
+QFrame#draftInspector {
+  background: @MAIN@;
+  border: 1px solid @BORDER@;
+  border-radius: 10px;
 }
 
 QWidget#phoneStage { background: @APP_BG@; border: 1px solid @BORDER@; border-radius: 16px; }

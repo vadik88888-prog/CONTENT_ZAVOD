@@ -8,6 +8,8 @@ The proven Moments delay came from `ProjectScreen._analysis_artifact()` verifyin
 
 The AVAILABLE end-to-end run found one further integration defect: Draft correctly applied a candidate `dynamic` override, while selected-render established its defensive constraint from the project default `documentary`. The renderer rejected the valid immutable plan with `PRESET_CONSTRAINT_VIOLATION`. Selected-render now resolves the same candidate-scoped option overlay as Draft. The pre-fix and post-fix run identities are retained in `available-to-final-e2e.json`.
 
+This UI-only follow-up starts from commit `608c0a38` and keeps that integration intact. Settings now projects the existing profile/style/caption owners as visual choices instead of a dropdown form. Its seven caption cards use the exact bundled production font families and typography; the selected preset is demonstrated in a local 9:16 widget, with UI-only motion for Active/Karaoke and Word Pop. That sample does not open media or invoke FFmpeg, Brain, Vision, Draft, or render. Moments no longer exposes transcript/scoring dumps. Drafts keeps the exact persisted Creative Preview in a compact list + 9:16 preview + candidate-scoped inspector. Final binds the exact persisted `ClipResult` and `QualityReport` to a real player and human-readable summary.
+
 | Capability | Existing owner reused by the desktop flow |
 |---|---|
 | Auto + 15 content profiles | `app/content_profile_taxonomy.py`, `app/product_flow.py` |
@@ -25,32 +27,18 @@ The AVAILABLE end-to-end run found one further integration defect: Draft correct
 
 ## Changed target files
 
-Product/config and creative adapters:
-
-- `app/caption_planning.py`
-- `app/caption_presets.py`
-- `app/config.py`
-- `app/creative_execution.py`
-- `app/creative_lifecycle.py`
-- `app/product_flow.py`
-
-Desktop projection and UI:
+UI-only delta from `608c0a38`:
 
 - `app/gui/components/final_results.py`
 - `app/gui/components/video_preview.py`
-- `app/gui/main_window.py`
-- `app/gui/models/desktop_project.py`
 - `app/gui/screens/project_screen.py`
-- `app/gui/services/desktop_services.py`
-- `app/gui/services/pipeline_facade.py`
 - `app/gui/styles/theme.qss`
-- `app/gui/styles/tokens.py`
-- `app/gui/viewmodels/project_viewmodel.py`
 
 Verification:
 
 - `tests/test_friend_beta_desktop_integration.py`
 - `tests/test_candidate_workspace.py`
+- `tests/test_final_results_workspace.py`
 - `validation/friend_beta_desktop_real_window_qa.py`
 - this evidence directory
 
@@ -67,7 +55,7 @@ Every screenshot is a native shown Windows `MainWindow`, captured through its re
 | Drafts | [PNG](drafts-dpi100.png) | [PNG](drafts-dpi125.png) | [PNG](drafts-dpi150.png) |
 | Final | [PNG](final-dpi100.png) | [PNG](final-dpi125.png) | [PNG](final-dpi150.png) |
 
-Machine-readable metrics: [100%](runtime-evidence-dpi100.json), [125%](runtime-evidence-dpi125.json), [150%](runtime-evidence-dpi150.json). All 18 states have zero horizontal scroll, no clipped primary CTA, and one primary CTA per route (Processing intentionally exposes only Stop). At 125/150%, stacked Moments and Drafts use the outer workspace as their one vertical owner; wide/dense Final retains bounded result and inspector panes.
+Machine-readable metrics: [100%](runtime-evidence-dpi100.json), [125%](runtime-evidence-dpi125.json), [150%](runtime-evidence-dpi150.json). All 18 states have zero horizontal scroll and no clipped primary CTA. Source, Settings, Moments, Drafts, and Final expose exactly one primary CTA; Processing intentionally exposes none while work is running. Drafts preserves the normal three-column composition at all three desktop profiles and uses the outer workspace as its sole vertical scroll owner. Moments and Final retain bounded list/inspector panes rather than becoming a giant vertical stack.
 
 ## Persisted artifact lineage
 
@@ -98,13 +86,11 @@ See [performance-before-after.json](performance-before-after.json).
 
 ## Tests
 
-- Friend Beta/UI/identity/recovery/caption/creative target regression: 214 passed.
+- UI/candidate/identity/recovery/caption/quality focused regression: 111 passed.
 - Real-window QA: 3 DPI processes passed; 18 screenshots and three runtime evidence files produced.
-- AVAILABLE → Draft → Final: passed through the existing CLI draft and selected-render owners.
+- AVAILABLE → Draft → Final: persisted proof revalidated against its exact existing artifacts; the UI-only delta does not touch its owners.
 - `compileall`: passed.
 - `git diff --check`: passed (Git reports only the repository's existing LF→CRLF checkout warnings).
-
-The repository-wide pytest command did not terminate within 15 minutes in this Windows environment. Independently, `tests/test_creative_lifecycle.py` has two pre-existing failures in its helper fixture: `ProductionPlan.model_validate` rejects missing `DIALOGUE_EVIDENCE_MAPPING` before reaching the changed lifecycle code. `app/production_models.py`, A-2 owners, and those test fixtures are unchanged because the requested scope explicitly forbids changing BoundaryDecision/A-2 semantics.
 
 ## Reference control with no existing owner
 
