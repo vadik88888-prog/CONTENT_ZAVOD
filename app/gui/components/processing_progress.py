@@ -28,7 +28,10 @@ class ProcessingProgress(QFrame):
     retry_requested = Signal()
     # Includes the optional long-stage warning, two action buttons and wrapped
     # safety hint at the shell's 760 px logical-width regression viewport.
-    _BASE_MINIMUM_HEIGHT = 400
+    # Ordinary progress fits beside the source summary and stage list on a
+    # normal desktop. Hostile wrapped warnings still grow this dynamically
+    # from the real layout height in ``_refresh_geometry``.
+    _BASE_MINIMUM_HEIGHT = 260
     # A persisted terminal error can contain an entire subprocess diagnostic.
     # Keep the recovery action near the top of the page while preserving the
     # complete message in the tooltip and project log.
@@ -159,6 +162,7 @@ class ProcessingProgress(QFrame):
         # Recompute it synchronously so labels and actions cannot paint over
         # one another while the outer project page remains scrollable.
         self.setMinimumHeight(0)
+        self.setMaximumHeight(16_777_215)
         for label in (
             self.stage,
             self.progress_note,
@@ -180,9 +184,13 @@ class ProcessingProgress(QFrame):
         required_height = max(
             self._BASE_MINIMUM_HEIGHT,
             required_height,
+            layout.totalSizeHint().height(),
             layout.totalMinimumSize().height(),
         )
-        self.setMinimumHeight(required_height)
+        # This surface has no useful stretch region. A fixed content height
+        # prevents Qt from positioning the following stage list from a stale
+        # pre-warning size hint while a wrapped warning becomes visible.
+        self.setFixedHeight(required_height)
         self.updateGeometry()
 
     def set_running(

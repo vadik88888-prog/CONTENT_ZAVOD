@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from app.ai import MockProvider, OpenAIProvider
-from app.config import AppConfig
+from app.ai import MockProvider, OpenAIProvider, TRANSFORMATION_REQUEST_TIMEOUT_SECONDS
+from app.config import AIConfig, AppConfig
 from app.cli import _apply_transformation_arguments, build_parser
 from app.content_transformation import run_content_transformation
 from app.errors import NarrativePlanningError, SemanticExtractionError, TransformationProviderError
@@ -524,6 +525,35 @@ def test_openai_transformer_uses_responses_strict_schema() -> None:
     assert responses.calls[0]["text"] == {
         "format": {"type": "json_schema", "name": "grounded_content_transformation", "strict": True, "schema": OPENAI_TRANSFORMATION_RESPONSE_SCHEMA}
     }
+
+
+def test_openai_transformation_connection_wait_is_bounded_without_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor_options: list[dict[str, object]] = []
+
+    class FailingResponses:
+        @staticmethod
+        def create(**_kwargs: object) -> object:
+            raise ConnectionError("offline")
+
+    def client(**options: object) -> object:
+        constructor_options.append(options)
+        return SimpleNamespace(responses=FailingResponses())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=client))
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=0)), "sk-test-secret",
+    )
+
+    with pytest.raises(TransformationProviderError):
+        provider.transform_compact(_context())
+
+    assert constructor_options == [{
+        "api_key": "sk-test-secret",
+        "timeout": TRANSFORMATION_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": 0,
+    }]
 
 
 def test_openai_repair_uses_bounded_strict_script_schema() -> None:

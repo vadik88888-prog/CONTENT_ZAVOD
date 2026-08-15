@@ -35,6 +35,7 @@ from app.gui.services.settings_store import SettingsStore, default_data_director
 from app.gui.services.system_service import SystemService
 from app.gui.styles import load_theme
 from app.gui.models import DesktopSettings
+from app.settings_preview_assets import settings_preview_manifest, settings_preview_path
 from app.utils import stable_file_hash
 
 
@@ -141,11 +142,53 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
         }
         if caption_fonts != expected_fonts:
             raise AssertionError(f"Settings caption cards do not use bundled owners: {caption_fonts}")
+        identity = screen._settings_demo_identity
+        if identity is None:
+            raise AssertionError("Settings production preview has no selected identity")
+        style_id, caption_id = identity
+        expected_preview = settings_preview_path(style_id, caption_id).resolve()
+        active_preview = screen.setup_demo_preview.active_media_path
+        if active_preview is None or active_preview.resolve() != expected_preview:
+            raise AssertionError(
+                "Settings sample is not bound to the canonical production preview: "
+                f"active={active_preview!s}; expected={expected_preview!s}"
+            )
+        manifest = settings_preview_manifest()
+        asset = next(
+            item for item in manifest["items"]
+            if item["creative_style_id"] == style_id
+            and item["caption_preset_id"] == caption_id
+        )
         stage_evidence = {
             "caption_card_count": len(caption_cards),
             "caption_fonts": caption_fonts,
-            "style_sample_preset_id": screen._caption_demo_preset_id,
-            "style_sample_is_local_ui": True,
+            "style_sample_style_id": style_id,
+            "style_sample_preset_id": caption_id,
+            "style_sample_is_production_mp4": True,
+            "style_sample_path": str(expected_preview),
+            "compiled_plan_hash": asset["compiled_plan_hash"],
+            "caption_preset_version": asset["caption_preset_version"],
+            "creative_style_version": asset["creative_style_version"],
+            "font_asset_ids": asset["font_asset_ids"],
+        }
+    elif stage == "source":
+        cards = window.projects_screen._thumbnail_labels
+        visible = [
+            label for labels in cards.values() for label in labels
+            if label.isVisibleTo(window)
+        ]
+        if not visible or any(label.pixmap().isNull() for label in visible):
+            raise AssertionError("Projects source cards do not show real persisted posters")
+        persisted = window.projects_screen.viewmodel.services.projects.load(
+            next(iter(cards))
+        )
+        poster = Path(str(persisted.thumbnail_path or ""))
+        if not poster.is_file():
+            raise AssertionError("Projects poster identity was not persisted for restart")
+        stage_evidence = {
+            "real_project_posters": len(visible),
+            "persisted_poster_path": str(poster.resolve()),
+            "restart_reload_identity": persisted.thumbnail_path == str(poster.resolve()),
         }
     elif stage == "moments":
         detail_text = "\n".join(
@@ -324,7 +367,10 @@ def main() -> int:
 
         window.show_projects()
         _progress("capture source")
-        _save_stage(application, window, output, "source", args.label, metrics["stages"])
+        _save_stage(
+            application, window, output, "source", args.label, metrics["stages"],
+            media_seconds=3.0,
+        )
 
         real_project = services.projects.load(args.project_id)
         screen = window.project_screen
@@ -350,8 +396,8 @@ def main() -> int:
         settings_project.selected_candidate_ids = []
         settings_project.last_final_result_id = None
         # Capture the most expressive existing dynamic preset.  This changes
-        # only the isolated Settings-state projection and demonstrates the
-        # lightweight UI sample; no Draft/FFmpeg/Brain/Vision work is started.
+        # only the isolated Settings-state projection and plays the canonical
+        # packaging-time production MP4; no Draft/Brain/Vision work is started.
         settings_project.settings.caption_preset_id = "word_pop"
         settings_project.settings.subtitle_style = "dynamic"
         screen.viewmodel.project = settings_project
@@ -359,7 +405,10 @@ def main() -> int:
         screen.runs = []
         screen._project_changed(settings_project)
         _progress("capture settings")
-        _save_stage(application, window, output, "settings", args.label, metrics["stages"])
+        _save_stage(
+            application, window, output, "settings", args.label, metrics["stages"],
+            media_seconds=1.4,
+        )
 
         processing_project = deepcopy(settings_project)
         processing_project.status = ProjectStatus.ANALYZING

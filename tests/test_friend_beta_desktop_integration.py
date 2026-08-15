@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from app.analysis_artifact import new_analysis_artifact
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.clip_results import ClipResult
+from app.config import load_config
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
 from app.gui.components import VideoPreview
@@ -27,6 +28,8 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.gui.viewmodels import ProjectViewModel
+from app.settings_preview_assets import settings_preview_manifest, settings_preview_path
+from app.utils import stable_file_hash
 
 
 def _eligibility() -> dict[str, object]:
@@ -120,7 +123,46 @@ def test_friend_beta_uses_all_canonical_profiles_and_bundled_caption_fonts() -> 
             assert bundled_font_asset_path(semantic).is_file()
 
 
-def test_settings_exposes_seven_real_font_style_samples_and_local_dynamic_demo(
+def test_settings_manifest_covers_every_current_style_caption_identity() -> None:
+    manifest = settings_preview_manifest()
+    expected = {
+        (style_id, preset_id)
+        for style_id in ("minimal", "documentary", "dynamic", "clean")
+        for preset_id in CAPTION_PRESET_DEFINITIONS
+    }
+    records = {
+        (item["creative_style_id"], item["caption_preset_id"]): item
+        for item in manifest["items"]
+    }
+
+    assert set(records) == expected
+    assert manifest["provider_calls"] == 0
+    assert manifest["brain_rerun"] is False
+    assert manifest["vision_rerun"] is False
+    for identity, item in records.items():
+        path = settings_preview_path(*identity)
+        assert path is not None and path.is_file()
+        assert stable_file_hash(path) == item["sha256"]
+        preset = CAPTION_PRESET_DEFINITIONS[identity[1]]
+        assert item["caption_preset_version"] == preset.preset_version
+        assert preset.preferred_font_asset_id in item["font_asset_ids"]
+
+
+def test_project_thumbnail_identity_persists_across_store_restart(tmp_path: Path) -> None:
+    services, project = _services(tmp_path)
+    poster = project.directory / "thumbnails" / "source-revision.jpg"
+    poster.parent.mkdir(parents=True)
+    poster.write_bytes(b"exact persisted source frame")
+
+    services.update_project_thumbnail(project, poster)
+    reopened_store = DesktopProjectStore(Path(services.settings.data_directory))
+    reopened = reopened_store.load(project.project_id)
+
+    assert reopened.thumbnail_path == str(poster.resolve())
+    assert Path(reopened.thumbnail_path).read_bytes() == b"exact persisted source frame"
+
+
+def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     existing = QCoreApplication.instance()
@@ -129,9 +171,16 @@ def test_settings_exposes_seven_real_font_style_samples_and_local_dynamic_demo(
     app = QApplication.instance() or QApplication([])
     services, project = _services(tmp_path)
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    media_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        VideoPreview, "set_file",
+        lambda _self, path, **_kwargs: media_calls.append(Path(path) if path else None),
+    )
     screen = ProjectScreen(ProjectViewModel(services))
     try:
         screen.open(project)
+        screen.show()
+        app.processEvents()
         cards = screen._setup_choice_buttons["caption"]
         assert set(cards) == set(CAPTION_PRESET_DEFINITIONS)
         assert screen.setup_caption_preset.isHidden()
@@ -144,12 +193,18 @@ def test_settings_exposes_seven_real_font_style_samples_and_local_dynamic_demo(
 
         screen._choose_setup_value(screen.setup_caption_preset, "word_pop")
         app.processEvents()
-        assert screen._caption_demo_preset_id == "word_pop"
-        first = screen.setup_example_line.text()
-        screen._advance_caption_demo()
-        assert screen.setup_example_line.text() != first
+        expected = settings_preview_path(project.settings.subtitle_style, "word_pop")
+        assert expected is not None and expected.is_file()
+        assert media_calls[-1] == expected
+        record = next(
+            item for item in settings_preview_manifest()["items"]
+            if item["creative_style_id"] == project.settings.subtitle_style
+            and item["caption_preset_id"] == "word_pop"
+        )
+        assert record["caption_token_id"] == "caption-preset:word_pop:2.1.0"
+        assert "font.unbounded.bold" in record["font_asset_ids"]
         assert any(
-            "без обработки видео" in label.text()
+            "без обработки вашего видео" in label.text()
             for label in screen.setup_summary.findChildren(QLabel)
         )
     finally:
@@ -272,6 +327,35 @@ def test_candidate_override_invalidates_only_its_draft_and_preserves_analysis(
     assert project.setup_state.needs_new_analysis is False
 
 
+def test_draft_override_is_transactional_until_explicit_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services, project = _services(tmp_path)
+    _attach_analysis(tmp_path, project, count=1)
+    previous = tmp_path / "previous-draft.json"
+    previous.write_text("{}", encoding="utf-8")
+    project.candidate_draft_artifacts = {"candidate-000": str(previous)}
+    project.candidate_draft_statuses = {"candidate-000": "ready"}
+    project.candidate_approval_states = {"candidate-000": "pending"}
+    project.candidate_export_statuses = {"candidate-000": "pending"}
+    project.candidate_states = {"candidate-000": "draft_ready"}
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    launches: list[list[str]] = []
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda ids: launches.append(list(ids)))
+
+    viewmodel.revise_draft("candidate-000", caption_preset_id="word_pop")
+
+    assert launches == []
+    assert project.candidate_creative_overrides["candidate-000"] == {
+        "caption_preset_id": "word_pop",
+    }
+    assert project.candidate_draft_statuses["candidate-000"] == "pending"
+    assert project.candidate_draft_artifacts["candidate-000"] == str(previous)
+    assert previous.is_file()
+
+
 def test_candidate_override_is_an_isolated_draft_config_overlay(tmp_path: Path) -> None:
     _services_value, project = _services(tmp_path)
     project.candidate_states = {"candidate-a": "draft_ready", "candidate-b": "draft_ready"}
@@ -296,6 +380,52 @@ def test_candidate_override_is_an_isolated_draft_config_overlay(tmp_path: Path) 
     assert project.settings.subtitle_style == "documentary"
     assert project.settings.same_source_broll_allowed is False
     assert PipelineFacade._project_with_candidate_options(project, ["candidate-a", "candidate-b"]) is project
+
+
+def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: Path) -> None:
+    services, project = _services(tmp_path)
+
+    services.update_project_options(
+        project,
+        processing_mode="maximum",
+        deep_analysis="on",
+        platform="reels",
+        clip_count="5",
+        audio_mode="original_enhanced",
+        composition_strategy="fit_blur_background",
+        same_source_broll_allowed=True,
+        subtitles_enabled=False,
+        reduced_motion=True,
+        use_cache=False,
+    )
+
+    persisted = services.projects.load(project.project_id)
+    _intent, resolved, _estimate = services.pipeline.plan_processing(persisted, services.settings)
+    config = load_config(services.pipeline._base_config(services.settings))
+    services.pipeline._apply_project_options(config, persisted, services.settings, resolved)
+
+    assert persisted.settings.processing_mode == "maximum"
+    assert persisted.settings.deep_analysis == "on"
+    assert persisted.settings.platform == "reels"
+    assert persisted.settings.clip_count == "5"
+    assert persisted.settings.audio_mode == "original_enhanced"
+    assert persisted.settings.composition_strategy == "fit_blur_background"
+    assert persisted.settings.same_source_broll_allowed is True
+    assert persisted.settings.subtitles_enabled is False
+    assert persisted.settings.reduced_motion is True
+    assert persisted.settings.use_cache is False
+    assert config.product_flow.processing_mode == "maximum"
+    assert config.product_flow.deep_analysis_requested == "on"
+    assert config.product_flow.deep_analysis_resolved is True
+    assert config.product_flow.platform == "reels"
+    assert config.product_flow.clip_count == 5
+    assert config.product_flow.audio_mode == "original_enhanced"
+    assert config.product_flow.reduced_motion is True
+    assert config.production.audio_mode == "original_enhanced"
+    assert config.production_render.crop_strategy == "fit_blur_background"
+    assert config.production_render.same_source_broll_allowed is True
+    assert config.production_render.subtitles_enabled is False
+    assert config.production_render.cache_enabled is False
 
 
 def test_single_candidate_final_reuses_the_draft_override_constraints(

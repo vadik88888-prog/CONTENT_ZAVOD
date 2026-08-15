@@ -88,6 +88,15 @@ class OnboardingDialog(QDialog):
             if self.width() < 620
             else QBoxLayout.Direction.LeftToRight
         )
+        # At 100/125/150% Windows scaling a short setup window can have only
+        # 360 logical pixels. Keep diagnostics as the flexible scroll owner so
+        # the two action buttons remain inside the real client rectangle.
+        short = self.height() <= 380
+        stacked = self.width() < 620
+        self.checks.setMinimumHeight(36 if short and stacked else (56 if short else 80))
+        root = self.layout()
+        if root is not None:
+            root.setSpacing(3 if short else 6)
 
     def _finish(self) -> None:
         if self._readiness in {None, DoctorReadiness.SETUP_REQUIRED}:

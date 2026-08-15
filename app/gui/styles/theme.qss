@@ -48,6 +48,7 @@ QLabel#eyebrow { color: @PRIMARY@; font-size: 11px; font-weight: 700; letter-spa
 QFrame#card,
 QFrame#dropZone,
 QFrame#preview,
+QFrame#settingsProductionPreview,
 QFrame#setup-card,
 QFrame#setupSummary,
 QFrame#processingSummary,
@@ -234,7 +235,7 @@ QPushButton#choiceMore {
   padding: 4px 0;
 }
 QFrame#setupExample {
-  background: #111317;
+  background: @SIDEBAR@;
   border: 1px solid @BORDER@;
   border-radius: 18px;
 }
@@ -284,12 +285,14 @@ QWidget#phoneStage { background: @APP_BG@; border: 1px solid @BORDER@; border-ra
 QLabel#active-candidate { color: @PRIMARY_TEXT@; }
 QLabel#candidateThumbnail,
 QLabel#finalThumbnail,
+QLabel#projectPoster,
 QLabel#videoPoster {
   background: @APP_BG@;
   border: 1px solid @BORDER@;
   border-radius: 6px;
   color: @SECONDARY@;
 }
+QLabel#projectPoster { border-radius: 9px; }
 
 QFrame#finalOutputCard { background: @MAIN@; border: 1px solid @BORDER@; border-radius: 10px; }
 QFrame#finalOutputCard:hover { background: @ELEVATED@; border-color: @SECONDARY@; }

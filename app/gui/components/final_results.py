@@ -373,6 +373,18 @@ class FinalResultsWorkspace(QWidget):
         self._body_layout_mode = body_mode
         self._bottom_actions_stacked = bottom_actions_stacked
 
+        # The inspector is intentionally narrow beside the 9:16 player.
+        # Keep actions readable without allowing their full desktop copy to
+        # establish a hidden horizontal minimum at laptop widths.
+        if compact:
+            self.open_video_button.setText("▶  Открыть")
+            self.show_folder_button.setText("▢  Папка")
+            self.rerender_button.setText("↻  Пересоздать")
+        else:
+            self.open_video_button.setText("▶  Открыть видео")
+            self.show_folder_button.setText("▢  Показать в папке")
+            self.rerender_button.setText("↻  Собрать заново")
+
         if profile == "dense":
             list_width = (260, 300)
             info_width = (250, 285)
@@ -645,7 +657,13 @@ class FinalResultsWorkspace(QWidget):
         # Update card/details synchronously, then let VideoPreview queue the
         # backend source handoff.  A slow multimedia backend must never delay
         # the visible selection change.
-        self.preview.show_final(output.path, output.title)
+        self.preview.show_final(
+            output.path, output.title,
+            poster_cache_directory=(
+                self._project_directory / "preview-posters"
+                if self._project_directory else None
+            ),
+        )
         poster_path = self._thumbnail_paths.get(output.result_id)
         if poster_path is not None and poster_path.is_file():
             self.preview.show_bound_poster(poster_path)

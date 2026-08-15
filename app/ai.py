@@ -17,6 +17,12 @@ if TYPE_CHECKING:
     from app.transformation_models import SourceContext
 
 
+# The SDK otherwise performs its own long connection retries inside each of
+# the application's bounded attempts.  Manual QA measured 551.62 seconds for
+# a failed compact transformation before the deterministic fallback ran.
+TRANSFORMATION_REQUEST_TIMEOUT_SECONDS = 45.0
+
+
 class ClipScorer(Protocol):
     name: str
 
@@ -431,7 +437,11 @@ class OpenAIProvider:
         if client is None:
             from openai import OpenAI
 
-            client = OpenAI(api_key=self.api_key)
+            client = OpenAI(
+                api_key=self.api_key,
+                timeout=TRANSFORMATION_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         errors: list[str] = []
         started = time.perf_counter()
         payload = compact_payload(context, asdict(self.config.transformation))
@@ -479,7 +489,11 @@ class OpenAIProvider:
         if client is None:
             from openai import OpenAI
 
-            client = OpenAI(api_key=self.api_key)
+            client = OpenAI(
+                api_key=self.api_key,
+                timeout=TRANSFORMATION_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         errors: list[str] = []
         started = time.perf_counter()
         payload = repair_payload(context, semantic, plan, draft, validation_errors, asdict(self.config.transformation))

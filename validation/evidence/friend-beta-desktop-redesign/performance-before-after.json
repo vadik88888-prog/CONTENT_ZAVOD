@@ -1,21 +1,52 @@
 {
-  "transaction": "project-open / UI-refresh -> Moments initial projection",
-  "dataset_candidates": 37,
-  "before": {
-    "verified_analysis_loads": 5,
-    "elapsed_seconds": 2.1803,
-    "initial_cards": 1,
-    "behavior": "verification occurred before cache lookup in repeated setup/review consumers"
+  "moments_initial_projection": {
+    "transaction": "project-open / UI-refresh",
+    "dataset_candidates": 37,
+    "before": {
+      "verified_analysis_loads": 5,
+      "elapsed_seconds": 2.1803,
+      "initial_cards": 1,
+      "behavior": "verification occurred before cache lookup in repeated setup/review consumers"
+    },
+    "after": {
+      "verified_analysis_loads": 1,
+      "elapsed_seconds": 0.0357,
+      "initial_cards": 12,
+      "behavior": "one verified load seeds a signature-keyed projection; additional cards reuse it in batches of 12"
+    },
+    "integrity": {
+      "weakened": false,
+      "mutation_detection": "artifact/reference stat signatures invalidate the transaction projection",
+      "analysis_identity_reused": true
+    }
   },
-  "after": {
-    "verified_analysis_loads": 1,
-    "elapsed_seconds": 0.0357,
-    "initial_cards": 12,
-    "behavior": "one verified load seeds a signature-keyed projection; additional cards reuse it in batches of 12"
-  },
-  "integrity": {
-    "weakened": false,
-    "mutation_detection": "artifact/reference stat signatures invalidate the transaction projection",
-    "analysis_identity_reused": true
+  "gameplay_draft_timing": {
+    "project_id": "de57e7edcd884509868610aee84827c5",
+    "run_id": "1be9b53e72014ada8edc0d31fdd19675",
+    "creative_preview_duration_seconds": 51.633,
+    "measured_before_seconds": {
+      "total": 631.6,
+      "transformation_result": 551.62,
+      "audio_composition": 10.653,
+      "creative_preview": 69.175,
+      "other": 0.152
+    },
+    "root_cause": "OpenAI SDK connection retries were nested inside the application's three bounded transformation attempts, delaying the existing deterministic local fallback.",
+    "fix": {
+      "scope": "content-transformation provider construction only",
+      "request_timeout_seconds": 45.0,
+      "sdk_max_retries": 0,
+      "application_attempts_preserved": 3,
+      "brain_vision_scoring_providers_changed": false,
+      "renderer_changed": false
+    },
+    "after": {
+      "kind": "regression-enforced conservative upper bound; not a fresh production measurement",
+      "provider_wait_upper_bound_seconds": 135.0,
+      "non_provider_measured_seconds": 79.98,
+      "total_conservative_upper_bound_seconds": 214.98,
+      "minimum_reduction_vs_measured_before_percent": 65.96
+    },
+    "verification": "The regression asserts timeout=45 and max_retries=0 on the SDK client while preserving application fallback attempts. A fresh provider-backed timing run remains required for a measured after value."
   }
 }

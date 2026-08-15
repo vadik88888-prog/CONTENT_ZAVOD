@@ -58,6 +58,23 @@ class CandidateThumbnailLoader(QObject):
         self._process.finished.connect(self._finished)
         self._process.errorOccurred.connect(self._process_error)
 
+    def replace_pending(self) -> None:
+        """Drop work owned by a stale screen projection.
+
+        Candidate cards are rebuilt when persisted state changes.  Keeping the
+        old serial FFmpeg queue meant a newly visible project could wait behind
+        dozens of frames for widgets that no longer existed.  Cached files are
+        immutable, so cancelling only in-flight/queued extraction is safe.
+        """
+
+        self._queue.clear()
+        if self._active is None:
+            self._requested.clear()
+            return
+        self._requested = {self._request_key(self._active.destination)}
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+
     def request(
         self, *, cache_directory: Path, analysis_id: str, candidate_id: str,
         source_path: Path, timestamp_seconds: float,
@@ -104,7 +121,7 @@ class CandidateThumbnailLoader(QObject):
         request.destination.parent.mkdir(parents=True, exist_ok=True)
         self._process.setProgram(executable)
         self._process.setArguments([
-            "-y", "-hide_banner", "-loglevel", "error",
+            "-y", "-hide_banner", "-loglevel", "error", "-threads", "1",
             "-ss", f"{request.timestamp_seconds:.3f}", "-i", str(request.source_path),
             "-frames:v", "1", "-vf", "scale=240:-2", "-q:v", "5", str(request.destination),
         ])

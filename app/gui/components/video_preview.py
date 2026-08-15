@@ -8,7 +8,7 @@ import tempfile
 
 from PySide6.QtCore import QEvent, QProcess, QSignalBlocker, QSize, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLayout, QLabel, QPushButton, QSlider,
@@ -173,6 +173,9 @@ class VideoPreview(QFrame):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
+        self._frame_sink_output = False
+        self._frame_sink = QVideoSink(self)
+        self._frame_sink.videoFrameChanged.connect(self._software_video_frame_changed)
         # QVideoWidget changes its native size hint after a stream is loaded.
         # Without a bound, a 1080/1440p source can make the whole review page
         # several screens wide even though the visible player is small.
@@ -345,6 +348,39 @@ class VideoPreview(QFrame):
         if self._presentation == "vertical":
             self._set_presentation("vertical")
 
+    def set_frame_sink_output(self, enabled: bool) -> None:
+        """Present decoded frames in the QWidget tree instead of a native surface.
+
+        Windows native video surfaces are intentionally used for full source,
+        Draft and Final playback.  A compact Settings sample also needs to be
+        capturable by real-window QA, so it consumes the *same decoded MP4*
+        through QVideoSink and paints those frames in the existing poster
+        layer.  This is media playback, not a synthetic Qt animation.
+        """
+
+        self._frame_sink_output = bool(enabled)
+        self.player.setVideoOutput(self._frame_sink if enabled else self.video)
+        if not enabled:
+            self.poster.hide()
+
+    def _software_video_frame_changed(self, frame: QVideoFrame) -> None:
+        if not self._frame_sink_output or not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image).scaled(
+            self.poster.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.poster.setText("")
+        self.poster.setPixmap(pixmap)
+        self.placeholder.hide()
+        self._sync_stage_overlays()
+        self.poster.show()
+        self.poster.raise_()
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._apply_controls_layout()
@@ -441,24 +477,40 @@ class VideoPreview(QFrame):
         # outer player must still be allowed to fit a normal desktop window.
         return QSize(0, self.minimumHeight())
 
-    def show_source(self, path: str | Path | None, *, source_codec: str | None = None) -> None:
+    def show_source(
+        self, path: str | Path | None, *, source_codec: str | None = None,
+        poster_cache_directory: Path | None = None,
+    ) -> None:
         """Show the original landscape source in a normal wide player."""
 
         self.set_file(
             path, presentation="source", title="Исходное видео", source_codec=source_codec,
+            poster_cache_directory=poster_cache_directory,
         )
 
-    def show_draft(self, path: str | Path | None, candidate_title: str | None = None) -> None:
+    def show_draft(
+        self, path: str | Path | None, candidate_title: str | None = None, *,
+        poster_cache_directory: Path | None = None,
+    ) -> None:
         """Show a draft in a phone-sized 9:16 player."""
 
         suffix = f" · {candidate_title}" if candidate_title else ""
-        self.set_file(path, presentation="vertical", title=f"Черновик{suffix}")
+        self.set_file(
+            path, presentation="vertical", title=f"Черновик{suffix}",
+            poster_cache_directory=poster_cache_directory,
+        )
 
-    def show_final(self, path: str | Path | None, candidate_title: str | None = None) -> None:
+    def show_final(
+        self, path: str | Path | None, candidate_title: str | None = None, *,
+        poster_cache_directory: Path | None = None,
+    ) -> None:
         """Show a completed short in a phone-sized 9:16 player."""
 
         suffix = f" · {candidate_title}" if candidate_title else ""
-        self.set_file(path, presentation="vertical", title=f"Готовый ролик{suffix}")
+        self.set_file(
+            path, presentation="vertical", title=f"Готовый ролик{suffix}",
+            poster_cache_directory=poster_cache_directory,
+        )
 
     def set_file(
         self,
@@ -467,6 +519,7 @@ class VideoPreview(QFrame):
         presentation: str = "auto",
         title: str | None = None,
         source_codec: str | None = None,
+        poster_cache_directory: Path | None = None,
     ) -> None:
         self._selection_token += 1
         self._cancel_proxy()
@@ -474,6 +527,8 @@ class VideoPreview(QFrame):
         self._stop_media_load_watchdog()
         self._source_range_seconds = None
         self._source_codec = self._normalise_source_codec(source_codec)
+        if poster_cache_directory is not None:
+            self._poster_cache_directory = poster_cache_directory
         self._force_compatible_proxy = None
         self._active_candidate_title = title
         self._range_start_ms = None
@@ -573,6 +628,9 @@ class VideoPreview(QFrame):
             return
         cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
         self._proxy_cache_directory = cache
+        # Posters share the same source-revision identity as proxies, but are
+        # durable project artifacts rather than temporary OS-cache entries.
+        self._poster_cache_directory = cache.parent / "preview-posters"
         # Codec metadata was obtained once while the project source was
         # registered.  Do not run ffprobe from this click path.  In
         # particular, AV1 must bypass QMediaPlayer entirely on a host that
@@ -778,9 +836,10 @@ class VideoPreview(QFrame):
 
         output_getter = getattr(self.player, "videoOutput", None)
         output = output_getter() if callable(output_getter) else self.video
-        if output is not self.video:
-            logger.warning("media video output was detached; restoring persistent QVideoWidget")
-            self.player.setVideoOutput(self.video)
+        expected_output = self._frame_sink if self._frame_sink_output else self.video
+        if output is not expected_output:
+            logger.warning("media video output was detached; restoring persistent output")
+            self.player.setVideoOutput(expected_output)
 
     def _request_poster(
         self, source_path: Path, *, timestamp_seconds: float = 0.05,
@@ -873,7 +932,8 @@ class VideoPreview(QFrame):
         self.placeholder.raise_()
 
     def _show_video(self) -> None:
-        self.poster.hide()
+        if not self._frame_sink_output:
+            self.poster.hide()
         self.placeholder.hide()
         self.video.show()
 

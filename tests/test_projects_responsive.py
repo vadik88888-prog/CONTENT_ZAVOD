@@ -44,7 +44,7 @@ def test_desktop_theme_resolves_only_the_approved_creator_tech_tokens() -> None:
         "BORDER": "#2A303D",
         "PRIMARY": "#FF6A00",
         "PRIMARY_HOVER": "#FF7F33",
-        "ACCENT": "#252A4A",
+        "ACCENT": "#2B211A",
         "SUCCESS": "#56D6A0",
         "WARNING": "#D7A95B",
         "ERROR": "#E46B78",

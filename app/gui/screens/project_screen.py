@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QPixmap
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
@@ -30,6 +31,7 @@ from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResul
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
 from app.gui.viewmodels import ProjectViewModel
+from app.settings_preview_assets import settings_preview_path
 from app.utils import format_seconds, read_json
 
 
@@ -176,6 +178,9 @@ class ProjectScreen(QWidget):
         self._candidate_thumbnail_labels: dict[str, list[QLabel]] = {}
         self._candidate_thumbnail_paths: dict[str, Path] = {}
         self._candidate_cards: dict[str, QFrame] = {}
+        self._project_thumbnail_labels: list[QLabel] = []
+        self._project_thumbnail_path: Path | None = None
+        self._settings_demo_identity: tuple[str, str] | None = None
         # Drafts owns one vertical scroll surface at every size.  The two
         # inner scroll areas remain available to Moments, but are bypassed in
         # Drafts so wheel/trackpad input always has one unambiguous owner.
@@ -190,6 +195,11 @@ class ProjectScreen(QWidget):
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.thumbnail_unavailable_with_path.connect(self._thumbnail_unavailable)
+        self._project_thumbnail_loader = CandidateThumbnailLoader(self)
+        self._project_thumbnail_loader.thumbnail_ready.connect(self._project_thumbnail_ready)
+        self._project_thumbnail_loader.thumbnail_unavailable_with_path.connect(
+            self._project_thumbnail_unavailable
+        )
         root = QVBoxLayout(self)
         self._root_layout = root
         root.setContentsMargins(34, 26, 34, 30)
@@ -1120,8 +1130,16 @@ class ProjectScreen(QWidget):
         self.setup_source_summary_text = QLabel()
         self.setup_source_summary_text.setObjectName("muted")
         make_label_shrinkable(self.setup_source_summary_text)
+        self.setup_source_poster = QLabel("Готовим кадр…")
+        self.setup_source_poster.setObjectName("projectPoster")
+        self.setup_source_poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setup_source_poster.setFixedHeight(92)
+        self.setup_source_poster.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed,
+        )
+        self._project_thumbnail_labels.append(self.setup_source_poster)
+        self.setup_source_summary.layout().addWidget(self.setup_source_poster)
         self.setup_source_summary.layout().addWidget(self.setup_source_summary_text)
-        self.setup_source_summary.hide()
         self.recommendation_banner = QFrame()
         self.recommendation_banner.setObjectName("recommendationBanner")
         recommendation_layout = QHBoxLayout(self.recommendation_banner)
@@ -1132,7 +1150,8 @@ class ProjectScreen(QWidget):
         make_label_shrinkable(self.recommendation_text)
         recommendation_layout.addWidget(recommendation_icon)
         recommendation_layout.addWidget(self.recommendation_text, 1)
-        self.recommendation_banner.hide()
+        setup_main_layout.addWidget(self.setup_source_summary)
+        setup_main_layout.addWidget(self.recommendation_banner)
 
         # The CTA belongs to one persistent action bar rather than to the
         # middle of an option card; this preserves the one-primary-action rule.
@@ -1159,35 +1178,24 @@ class ProjectScreen(QWidget):
         self.setup_summary_text = QLabel()
         self.setup_summary_text.setObjectName("muted")
         make_label_shrinkable(self.setup_summary_text)
-        self.setup_example = QFrame()
-        self.setup_example.setObjectName("setupExample")
-        self.setup_example.setMinimumSize(220, 391)
-        self.setup_example.setFixedHeight(391)
-        example_layout = QVBoxLayout(self.setup_example)
-        example_layout.setContentsMargins(14, 18, 14, 18)
-        self.setup_example_badge = QLabel("ПРИМЕР 9:16")
-        self.setup_example_badge.setObjectName("eyebrow")
-        self.setup_example_line = QLabel("Сильная мысль\nвыглядит так")
-        self.setup_example_line.setObjectName("setupExampleCaption")
-        self.setup_example_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setup_example_line.setWordWrap(True)
-        self.setup_example_line.setTextFormat(Qt.TextFormat.RichText)
-        example_layout.addWidget(self.setup_example_badge, 0, Qt.AlignmentFlag.AlignHCenter)
-        example_layout.addStretch()
-        example_layout.addWidget(self.setup_example_line)
-        example_layout.addStretch()
-        self.setup_summary.layout().addWidget(self.setup_example)
-        example_note = QLabel("Демонстрация стиля · без обработки видео")
+        self.setup_demo_preview = VideoPreview()
+        self.setup_demo_preview.setObjectName("settingsProductionPreview")
+        self.setup_demo_preview.set_vertical_frame_size(180, 320)
+        self.setup_demo_preview.set_frame_sink_output(True)
+        self.setup_demo_preview.controls_host.hide()
+        self.setup_demo_preview.player.setLoops(QMediaPlayer.Loops.Infinite)
+        self.setup_demo_preview.player.mediaStatusChanged.connect(
+            self._settings_demo_media_status_changed
+        )
+        self.setup_summary.layout().addWidget(
+            self.setup_demo_preview, 0, Qt.AlignmentFlag.AlignHCenter,
+        )
+        example_note = QLabel("Канонический production sample · без обработки вашего видео")
         example_note.setObjectName("muted")
         example_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         example_note.setWordWrap(True)
         self.setup_summary.layout().addWidget(example_note)
         self.setup_summary.layout().addWidget(self.setup_summary_text)
-        self._caption_demo_preset_id = ""
-        self._caption_demo_frame = 0
-        self._caption_demo_timer = QTimer(self)
-        self._caption_demo_timer.setInterval(560)
-        self._caption_demo_timer.timeout.connect(self._advance_caption_demo)
         setup_workspace_layout.addWidget(self.setup_summary, 1)
         self._stage_widgets["settings"] = self.setup_workspace
 
@@ -1201,7 +1209,9 @@ class ProjectScreen(QWidget):
         processing_layout.setContentsMargins(0, 0, 0, 0)
         processing_layout.setSpacing(18)
         processing_main = QWidget()
+        self._processing_main = processing_main
         processing_main_layout = QVBoxLayout(processing_main)
+        self._processing_main_layout = processing_main_layout
         processing_main_layout.setContentsMargins(0, 0, 0, 0)
         processing_main_layout.setSpacing(14)
         processing_heading = QLabel("Обработка видео")
@@ -1215,9 +1225,18 @@ class ProjectScreen(QWidget):
         self.processing_source_text = QLabel()
         self.processing_source_text.setObjectName("muted")
         make_label_shrinkable(self.processing_source_text)
+        self.processing_source_poster = QLabel("Готовим кадр…")
+        self.processing_source_poster.setObjectName("projectPoster")
+        self.processing_source_poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.processing_source_poster.setFixedHeight(112)
+        self.processing_source_poster.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed,
+        )
+        self._project_thumbnail_labels.append(self.processing_source_poster)
+        self.processing_source_summary.layout().addWidget(self.processing_source_poster)
         self.processing_source_summary.layout().addWidget(self.processing_source_text)
-        processing_main_layout.addWidget(self.processing_source_summary)
         processing_main_layout.addWidget(self.progress)
+        self._processing_progress_layout_height = self.progress.minimumHeight()
         self.processing_stages = QFrame()
         self.processing_stages.setObjectName("processingStages")
         stages_layout = QVBoxLayout(self.processing_stages)
@@ -1260,6 +1279,8 @@ class ProjectScreen(QWidget):
         processing_layout.addWidget(processing_main, 3)
         self.processing_summary = self._card("Текущий запуск")
         self.processing_summary.setObjectName("processingSummary")
+        self.processing_summary.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.processing_summary.layout().addWidget(self.processing_source_summary)
         self.processing_summary_text = QLabel()
         self.processing_summary_text.setObjectName("muted")
         make_label_shrinkable(self.processing_summary_text)
@@ -1489,6 +1510,7 @@ class ProjectScreen(QWidget):
             self.preview.show_source(
                 str(project.source),
                 source_codec=str(project.source_metadata.get("video_codec") or ""),
+                poster_cache_directory=project.directory / "preview-posters",
             )
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source else "н/д"
@@ -1530,6 +1552,7 @@ class ProjectScreen(QWidget):
         self._update_download_card(project)
         self._update_setup_card(project)
         self._update_stage_context(project)
+        self._ensure_project_thumbnail(project)
         self._update_candidate_review(project)
         self._update_final_results(project)
         self._update_next_step(project)
@@ -1697,65 +1720,43 @@ class ProjectScreen(QWidget):
         if project.settings.content_profile_preset in hidden_profiles:
             self.setup_profile_more_toggle.setChecked(True)
 
-    def _update_caption_style_demo(self, preset_id: str, style_label: str) -> None:
+    def _update_caption_style_demo(self, preset_id: str, style_id: str) -> None:
         preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, preset_id))
         if preset is None:
             return
-        font_asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
-        preview_font = QFont(font_asset.render_family)
-        preview_font.setPointSize(max(12, round(preset.font_size_ratio * 390)))
-        preview_font.setWeight(
-            QFont.Weight.Bold if font_asset.weight == "bold" else QFont.Weight.Light
-        )
-        self.setup_example_line.setFont(preview_font)
-        self.setup_example_badge.setText(f"{style_label.upper()} · {preset.label.upper()}")
-        self._caption_demo_preset_id = preset.preset_id
-        self._caption_demo_frame = 0
-        dynamic = preset.motion_profile_id in {"semantic_karaoke", "spoken_word_pop"}
-        if dynamic and self.setup_workspace.isVisible():
-            self._caption_demo_timer.start()
-        else:
-            self._caption_demo_timer.stop()
-        self._advance_caption_demo()
-
-    def _advance_caption_demo(self) -> None:
-        preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, self._caption_demo_preset_id))
-        if preset is None:
+        identity = (style_id, preset.preset_id)
+        self._settings_demo_identity = identity
+        if not self.setup_workspace.isVisible():
             return
-        font_asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
-        words = ("ЭТО", "СИЛЬНАЯ", "МЫСЛЬ")
-        frame = self._caption_demo_frame % len(words)
-        self._caption_demo_frame += 1
-        if preset.motion_profile_id == "spoken_word_pop":
-            text = words[frame]
-            size = 118 if frame == 1 else 100
-            html = (
-                f"<div style='color:{preset.highlight_color}; font-size:{size}%;'>"
-                f"{text}</div>"
-            )
-        elif preset.motion_profile_id == "semantic_karaoke":
-            parts = [
-                f"<span style='color:{preset.highlight_color};'>{word}</span>"
-                if index == frame else f"<span style='color:{preset.text_color};'>{word}</span>"
-                for index, word in enumerate(words)
-            ]
-            html = " ".join(parts)
-        else:
-            accent = preset.highlight_color
-            html = (
-                f"<span style='color:{preset.text_color};'>СИЛЬНАЯ</span><br>"
-                f"<span style='color:{accent};'>МЫСЛЬ</span>"
-            )
-        background = (
-            f"background: {preset.background_color}; padding: 8px; border-radius: 5px;"
-            if preset.background_mode == "opaque_box" else "background: transparent;"
+        path = settings_preview_path(style_id, preset.preset_id)
+        if self.setup_demo_preview.active_media_path == path:
+            # The source can finish loading while Settings is hidden during
+            # route projection. Start that exact media when Settings becomes
+            # visible; Qt will not emit a second LoadedMedia notification.
+            self.setup_demo_preview._play()
+            return
+        style_label = dict((value, label) for label, value in _CREATIVE_STYLE_CHOICES).get(
+            style_id, style_id,
         )
-        self.setup_example_line.setStyleSheet(
-            f"color: {preset.text_color}; {background} "
-            f"font-family: '{font_asset.render_family}'; "
-            f"font-weight: {'700' if preset.font_weight == 'bold' else '300'};"
+        if path is None:
+            self.setup_demo_preview.set_file(
+                None, presentation="vertical",
+                title=f"{style_label} · {preset.label}: sample недоступен",
+            )
+            return
+        self.setup_demo_preview.set_file(
+            path,
+            presentation="vertical",
+            title=f"{style_label} · {preset.label}",
         )
-        self.setup_example_line.setText(html)
+
+    def _settings_demo_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if (
+            status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}
+            and self.setup_workspace.isVisible()
+            and self._settings_demo_identity is not None
+        ):
+            self.setup_demo_preview._play()
 
     def _save_setup_option(self, name: str, value: str) -> None:
         self.viewmodel.save_options(**{name: value})
@@ -1826,12 +1827,13 @@ class ProjectScreen(QWidget):
         count = self._selection_limit(project)
         profile_index = self.setup_content_profile.findData(project.settings.content_profile_preset)
         profile_label = self.setup_content_profile.itemText(profile_index) if profile_index >= 0 else "Авто"
+        style_id = project.settings.subtitle_style
         style_label = dict((value, label) for label, value in _CREATIVE_STYLE_CHOICES).get(
-            project.settings.subtitle_style, "Educational",
+            style_id, "Educational",
         )
         caption = CAPTION_PRESET_DEFINITIONS.get(project.settings.caption_preset_id)
         if caption is not None:
-            self._update_caption_style_demo(caption.preset_id, style_label)
+            self._update_caption_style_demo(caption.preset_id, style_id)
         set_responsive_text(
             self.setup_summary_text,
             f"Тип контента: {profile_label}\nСтиль оформления: {style_label}\n"
@@ -2026,10 +2028,11 @@ class ProjectScreen(QWidget):
         self.autosave.setVisible(
             step == "settings" and not active and not bool(self._compact_action_layout)
         )
-        if show_setup and self._caption_demo_preset_id in {"karaoke_yellow", "word_pop"}:
-            self._caption_demo_timer.start()
-        else:
-            self._caption_demo_timer.stop()
+        if show_setup and self._settings_demo_identity is not None:
+            style_id, preset_id = self._settings_demo_identity
+            self._update_caption_style_demo(preset_id, style_id)
+        elif not show_setup:
+            self.setup_demo_preview.suspend()
         if step != "settings" or active:
             self._set_advanced_visible(False)
         self._apply_compact_chrome(global_step)
@@ -2188,6 +2191,7 @@ class ProjectScreen(QWidget):
 
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
+        self._thumbnail_loader.replace_pending()
         workflow_step = self._derive_flow_step(project)
         self._all_candidates_by_id = {}
         self._draftable_candidates_by_id = {}
@@ -2238,10 +2242,21 @@ class ProjectScreen(QWidget):
                 source=source if isinstance(source, dict) else {},
             )
             item["editorial_decision"] = decision.to_dict()
-            item["surfacing_state"] = decision.surfacing_state.value
-            item["selectable"] = decision.selectable
-            item["recommended"] = decision.surfacing_state.value == "RECOMMENDED"
-            item["recommendation_status"] = decision.surfacing_state.value.lower()
+            feasibility = item.get("production_feasibility")
+            production_blocked = (
+                isinstance(feasibility, dict)
+                and feasibility.get("status") == "GUARANTEED_BLOCKED"
+            )
+            # The final visible state combines editorial surfacing with the
+            # already-persisted production gate.  A candidate must never wear
+            # a RECOMMENDED badge while its action is correctly disabled.
+            visible_state = (
+                "BLOCKED" if production_blocked else decision.surfacing_state.value
+            )
+            item["surfacing_state"] = visible_state
+            item["selectable"] = decision.selectable and not production_blocked
+            item["recommended"] = visible_state == "RECOMMENDED"
+            item["recommendation_status"] = visible_state.lower()
             all_candidates.append(item)
         # Moments interprets persisted evidence through deterministic policy;
         # it never re-runs or reconstructs Brain/Vision evidence.
@@ -2702,6 +2717,25 @@ class ProjectScreen(QWidget):
                 return
         if draftable_ids:
             count = len(draftable_ids)
+            is_drafts = self._derive_flow_step(project) == "drafts"
+            changed_count = sum(
+                candidate_id in project.candidate_draft_artifacts
+                for candidate_id in draftable_ids
+            )
+            if is_drafts and changed_count:
+                self._set_workflow_hint(
+                    "Изменения сохранены как ожидающие. Предыдущие Preview остаются доступны, "
+                    "пока новые версии не будут готовы."
+                )
+                full = (
+                    "Пересоздать черновик" if changed_count == 1
+                    else f"Пересоздать изменённые ({changed_count})"
+                )
+                compact = "Пересоздать" if changed_count == 1 else f"Пересоздать ({changed_count})"
+                self._set_review_action_text(self.draft_button, full, compact)
+                self.draft_button.setEnabled(True)
+                self.draft_button.show()
+                return
             selected_count = sum(
                 candidate_id in self._review_candidates_by_id
                 for candidate_id in project.review_selected_candidate_ids
@@ -3009,6 +3043,7 @@ class ProjectScreen(QWidget):
         self.preview.show_source(
             self.project.source,
             source_codec=str(self.project.source_metadata.get("video_codec") or ""),
+            poster_cache_directory=self.project.directory / "preview-posters",
         )
         self._update_candidate_review(self.project)
         self._apply_flow_visibility(self.project)
@@ -3324,7 +3359,12 @@ class ProjectScreen(QWidget):
             self._bind_draft_candidate(candidate, path, start, end, title=title, force=True)
         else:
             self._active_preview_kind = "draft"
-            self.preview.show_draft(str(path), title)
+            self.preview.show_draft(
+                str(path), title,
+                poster_cache_directory=(
+                    self.project.directory / "preview-posters" if self.project else None
+                ),
+            )
         self._focus_preview_player()
 
     def _show_final_preview(self, path: Path, title: str | None = None, candidate_id: str | None = None) -> None:
@@ -3339,7 +3379,12 @@ class ProjectScreen(QWidget):
             else:
                 self._active_candidate_id = candidate_id
                 self._active_preview_kind = "final"
-        self.preview.show_final(str(path), title)
+        self.preview.show_final(
+            str(path), title,
+            poster_cache_directory=(
+                self.project.directory / "preview-posters" if self.project else None
+            ),
+        )
         if candidate_id:
             self._persist_active_preview_candidate(candidate_id)
         self._focus_preview_player()
@@ -3415,7 +3460,13 @@ class ProjectScreen(QWidget):
         )
         self._set_active_candidate_binding(candidate_id, start, end, kind="draft")
         if reload_needed:
-            self.preview.show_draft(str(path), title or str(candidate.get("title") or candidate.get("core_idea") or "момент"))
+            self.preview.show_draft(
+                str(path),
+                title or str(candidate.get("title") or candidate.get("core_idea") or "момент"),
+                poster_cache_directory=(
+                    self.project.directory / "preview-posters" if self.project else None
+                ),
+            )
         self._persist_active_preview_candidate(candidate_id)
 
     def _mark_active_candidate(self) -> None:
@@ -3579,7 +3630,9 @@ class ProjectScreen(QWidget):
         panel_heading = QLabel("Вид этого черновика")
         panel_heading.setObjectName("inspectorSectionTitle")
         grid.addWidget(panel_heading, 0, 0, 1, 3)
-        candidate_note = QLabel("Изменения применяются только к выбранному черновику.")
+        candidate_note = QLabel(
+            "Изменения сохраняются для этого черновика. Создание начнётся только по кнопке внизу."
+        )
         candidate_note.setObjectName("muted")
         candidate_note.setWordWrap(True)
         grid.addWidget(candidate_note, 1, 0, 1, 3)
@@ -3596,7 +3649,7 @@ class ProjectScreen(QWidget):
             change = QPushButton("Изменить")
             change.setObjectName("secondaryAction")
             change.setToolTip(
-                "Обновит только этот Creative Preview из сохранённого анализа; остальные черновики не изменятся."
+                "Сохранит pending-изменение только для этого черновика; render не начнётся автоматически."
             )
             change.clicked.connect(
                 lambda _checked=False, cid=candidate_id, key=option: self._edit_draft_option(cid, key)
@@ -3619,7 +3672,13 @@ class ProjectScreen(QWidget):
         grid.addWidget(QLabel("Фрагмент"), fragment_row, 0)
         grid.addWidget(QLabel(f"{format_seconds(start)}–{format_seconds(end)}"), fragment_row, 1, 1, 2)
         state = self.project.candidate_states.get(candidate_id, "")
-        if state == "draft_failed":
+        pending_revision = (
+            self.project.candidate_draft_statuses.get(candidate_id) == "pending"
+            and candidate_id in self.project.candidate_draft_artifacts
+        )
+        if pending_revision:
+            quality = "Изменения ожидают · показана предыдущая версия"
+        elif state == "draft_failed":
             quality = "Нужен повтор черновика"
         elif candidate_id in self._draft_preview_paths:
             quality = "Creative Preview готов"
@@ -3629,7 +3688,10 @@ class ProjectScreen(QWidget):
             quality = "Ожидает Creative Preview"
         grid.addWidget(QLabel("Качество"), fragment_row + 1, 0)
         quality_value = QLabel(quality)
-        quality_value.setObjectName("finalReady" if candidate_id in self._draft_preview_paths else "warning")
+        quality_value.setObjectName(
+            "warning" if pending_revision else
+            "finalReady" if candidate_id in self._draft_preview_paths else "warning"
+        )
         grid.addWidget(quality_value, fragment_row + 1, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         self.candidate_detail.layout().addWidget(panel)
@@ -3698,10 +3760,9 @@ class ProjectScreen(QWidget):
         """Keep the visible player bound to a current, durable candidate.
 
         Project changes happen for selection, approval and run-state updates.
-        They must not restart an unchanged source interval.  Conversely, an
-        edited boundary makes an existing draft preview stale, so the player
-        deliberately returns to that exact source range until a new draft is
-        rendered.
+        They must not restart an unchanged source interval. Pending overrides
+        keep the previous immutable Preview visible until a replacement has
+        been fully rendered and atomically published.
         """
 
         workflow_step = self._derive_flow_step(project)
@@ -3734,6 +3795,7 @@ class ProjectScreen(QWidget):
                 self.preview.show_source(
                     project.source,
                     source_codec=str(project.source_metadata.get("video_codec") or ""),
+                    poster_cache_directory=project.directory / "preview-posters",
                 )
             return
         try:
@@ -3746,13 +3808,8 @@ class ProjectScreen(QWidget):
         binding = (candidate_id, start, end)
         draft_path = self._draft_preview_paths.get(candidate_id)
         previous_binding = self._active_candidate_range
-        boundary_changed = (
-            previous_binding is not None
-            and previous_binding[0] == candidate_id
-            and previous_binding != binding
-        )
         if previous_binding != binding:
-            if workflow_step == "drafts" and draft_path and not boundary_changed:
+            if workflow_step == "drafts" and draft_path:
                 self._bind_draft_candidate(candidate, draft_path, start, end)
             else:
                 self._bind_source_candidate(candidate, start, end, autoplay=False)
@@ -3788,6 +3845,66 @@ class ProjectScreen(QWidget):
             and self._active_preview_kind == "source-range"
         ):
             self.preview.show_bound_poster(path)
+
+    def _ensure_project_thumbnail(self, project: DesktopProject) -> None:
+        """Bind Source/Processing to one durable source-revision poster."""
+
+        persisted = Path(project.thumbnail_path) if project.thumbnail_path else None
+        if persisted is not None and persisted.is_file():
+            self._project_thumbnail_path = persisted.resolve(strict=False)
+            self._paint_project_thumbnail(self._project_thumbnail_path)
+            return
+        if not project.source_spec.is_ready or not project.source.is_file():
+            self._project_thumbnail_path = None
+            for label in self._project_thumbnail_labels:
+                label.setText("Кадр появится после загрузки")
+                label.setPixmap(QPixmap())
+            return
+        destination = self._project_thumbnail_loader.request(
+            cache_directory=project.directory / "thumbnails",
+            analysis_id="source-poster-v1",
+            candidate_id=project.project_id,
+            source_path=project.source,
+            timestamp_seconds=1.0,
+        )
+        self._project_thumbnail_path = destination.resolve(strict=False)
+
+    def _project_thumbnail_ready(self, project_id: str, path: str) -> None:
+        if not self.project or self.project.project_id != project_id:
+            return
+        actual = Path(path).resolve(strict=False)
+        if self._project_thumbnail_path != actual:
+            return
+        self._paint_project_thumbnail(actual)
+        if self.project.thumbnail_path != str(actual):
+            try:
+                self.project = self.viewmodel.services.update_project_thumbnail(
+                    self.project, actual,
+                )
+            except Exception:
+                pass
+
+    def _project_thumbnail_unavailable(self, project_id: str, path: str) -> None:
+        if (
+            not self.project or self.project.project_id != project_id
+            or self._project_thumbnail_path != Path(path).resolve(strict=False)
+        ):
+            return
+        for label in self._project_thumbnail_labels:
+            label.setPixmap(QPixmap())
+            label.setText("Кадр недоступен · видео можно открыть")
+
+    def _paint_project_thumbnail(self, path: Path) -> None:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return
+        for label in self._project_thumbnail_labels:
+            label.setText("")
+            label.setPixmap(pixmap.scaled(
+                max(1, label.width()), max(1, label.height()),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
 
     def _thumbnail_unavailable(self, candidate_id: str, path: str) -> None:
         expected = self._candidate_thumbnail_paths.get(candidate_id)
@@ -4098,12 +4215,16 @@ class ProjectScreen(QWidget):
             blocked,
             self.project.project_id if self.project else None,
         )
+        # Telemetry can reveal a wrapped long-stage warning without changing
+        # the structural stage key. Publish that height before an early return.
+        self._refresh_processing_geometry()
         if structure_key == self._processing_structure_key:
             # Elapsed/activity/progress telemetry owns only the progress
             # surface.  Persisted project/run projection is unchanged.
             return
         self._processing_structure_key = structure_key
         self._update_processing_stages(snapshot)
+        self._refresh_processing_geometry()
         self.run_button.setDisabled(active or blocked)
         self.setup_start_button.setDisabled(active or blocked)
         has_draft_choice = bool(
@@ -4216,6 +4337,37 @@ class ProjectScreen(QWidget):
             widget.setProperty("stageState", state)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def _refresh_processing_geometry(self) -> None:
+        """Publish dynamic progress height before placing the stage rows."""
+
+        progress_height = self.progress.minimumHeight()
+        if progress_height != self._processing_progress_layout_height:
+            # Recreate only the affected QLayoutItem. On Windows/Qt a hidden
+            # page can otherwise retain the height cached before an optional
+            # warning row appeared, letting the stage list paint underneath.
+            self._processing_main_layout.removeWidget(self.progress)
+            self._processing_main_layout.insertWidget(2, self.progress)
+            self._processing_progress_layout_height = progress_height
+        self._processing_main.setMinimumHeight(0)
+        self._processing_main_layout.invalidate()
+        self._processing_main_layout.activate()
+        required = self._processing_main_layout.totalHeightForWidth(
+            max(1, self._processing_main.width())
+        )
+        if required < 0:
+            required = self._processing_main_layout.totalMinimumSize().height()
+        self._processing_main.setMinimumHeight(max(
+            required,
+            self._processing_main_layout.totalMinimumSize().height(),
+        ))
+        self.processing_workspace.updateGeometry()
+        QTimer.singleShot(0, self._activate_processing_layout)
+
+    def _activate_processing_layout(self) -> None:
+        self._processing_main_layout.invalidate()
+        self._processing_main_layout.setGeometry(self._processing_main.rect())
+        self._processing_main_layout.activate()
 
     def _processing_run_kind(self) -> str:
         run = self.viewmodel.run

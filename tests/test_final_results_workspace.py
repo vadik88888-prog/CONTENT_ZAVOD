@@ -104,7 +104,9 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
     output = tmp_path / "result.mp4"
     output.write_bytes(b"result")
 
-    def show_final_with_hostile_copy(preview: VideoPreview, _path: Path, title: str) -> None:
+    def show_final_with_hostile_copy(
+        preview: VideoPreview, _path: Path, title: str, **_kwargs: object,
+    ) -> None:
         preview._set_presentation("vertical")
         preview.active_candidate.setText(f"Готовый ролик · {title}")
         preview.active_candidate.show()

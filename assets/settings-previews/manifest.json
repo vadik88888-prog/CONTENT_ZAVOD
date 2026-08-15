@@ -1,0 +1,1039 @@
+{
+  "schema_version": "friend-beta.settings-preview.1",
+  "created_at": "2026-08-15T16:35:26.683105+00:00",
+  "generator": "packaging/generate_settings_previews.py",
+  "provider_calls": 0,
+  "brain_rerun": false,
+  "vision_rerun": false,
+  "render_owner": "compile_native_creative_plan + write_caption_plan_ass + bundled fonts + libass",
+  "items": [
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "clean_white",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "font_asset_ids": [
+        "font.manrope.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.manrope.bold",
+        "requested_family": "Manrope",
+        "resolved_family": "Manrope",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Manrope-Bold.ttf",
+        "file_sha256": "4aed5d180a4f41ed21f07e678486f889bb40eb0ddf5f473769b6302f507d1e36",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "0d89cd3e992d2f6584a0679f73d3f815e779af646e3f159c4e17f86c6b93721c",
+      "parity_signature": "e5ad0a9cd4a0a47707c7651c43bf3b53d78978cd7fdd898d43c6afca1825ca9d",
+      "path": "minimal/clean_white.mp4",
+      "sha256": "880f677f29b5441f93bec9c25e74dd0d542979adb20ed0121a0e437232cf6bbd",
+      "size_bytes": 19458
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "minimal_light",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "font_asset_ids": [
+        "font.commissioner.light"
+      ],
+      "font_manifest": {
+        "font_id": "font.commissioner.light",
+        "requested_family": "Commissioner",
+        "resolved_family": "Commissioner Light",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 300,
+        "file_name": "Commissioner-Light.ttf",
+        "file_sha256": "fadc0f71d5e6a89af6200d5ff46b81d5b5c7bf6663da3031093d4a19e50124ee",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "f384cca71003a605098646b582b28db1c457ff92cb53fe9ed41d4cd84e1eab72",
+      "parity_signature": "2f39444a4c88722b6e2cac22bde7ab19e58e18dd2782aee2f2da5236364e2e36",
+      "path": "minimal/minimal_light.mp4",
+      "sha256": "ed0a61cf6f7129843bc7fa3919c3a4466a48db38e0debbed25f939e8e05fd224",
+      "size_bytes": 18228
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "accent_yellow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "font_asset_ids": [
+        "font.oswald.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.oswald.bold",
+        "requested_family": "Oswald",
+        "resolved_family": "Oswald",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Oswald-Bold.ttf",
+        "file_sha256": "21843a0ccca2e97030da1330961646510ed6e9b8bb39620974c1195b9803034a",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "21b7cda5d292ca4c25620d11b000e70a52804119bed7c9c7d13c4f90343c75f4",
+      "parity_signature": "957a7b117cbd9eb810ff2b7036e43871733d8b806212a45ca95f9c739057dafd",
+      "path": "minimal/accent_yellow.mp4",
+      "sha256": "1e8d389521535de2433f9aea933cc0b70788b17ef9a5dd2a242d62e48607d2e9",
+      "size_bytes": 21377
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "editorial_narrow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "font_asset_ids": [
+        "font.pt-sans-narrow.regular",
+        "font.pt-sans-narrow.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.pt-sans-narrow.regular",
+        "requested_family": "PT Sans Narrow",
+        "resolved_family": "PT Sans Narrow",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 400,
+        "file_name": "PTSansNarrow-Regular.ttf",
+        "file_sha256": "d4882d4b26690f2951c476fd2b3bb4abfb20f3763a2cc4de04f30466e923baeb",
+        "companion_faces": [
+          {
+            "font_id": "font.pt-sans-narrow.bold",
+            "family": "PT Sans Narrow",
+            "subfamily": "Bold",
+            "postscript_name": "PTSans-NarrowBold",
+            "style": "normal",
+            "weight_class": 700,
+            "file_name": "PTSansNarrow-Bold.ttf",
+            "file_sha256": "d94bed3e84c75c97c0d477840896f7bf63c3b341540228be98edd1a6e98a6a0e"
+          }
+        ],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "1914e90347f07a9c158df23160f5f8d67bd4efc72a3560e21d661d7a80cc96dc",
+      "parity_signature": "38d9bcbe870e29fe51f22b6d93390b95c332eeecb68e299802d7c6cb75daa188",
+      "path": "minimal/editorial_narrow.mp4",
+      "sha256": "4b720f65f463bf646100b2a37c36d95d67a19ae7393716cbfb75dbc55fca422d",
+      "size_bytes": 22289
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "karaoke_yellow",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "font_asset_ids": [
+        "font.golos-text.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.golos-text.bold",
+        "requested_family": "Golos Text",
+        "resolved_family": "Golos Text",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "GolosText-Bold.ttf",
+        "file_sha256": "cac7fc9fd8c577f0f2ed0119e01a4c1169c3142158b8bfb0b6ecf6cc6eb97cad",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "b1d828eb31fd71a684534ca03ff844f4525926c08ca601b97d7e382b8457ffb3",
+      "parity_signature": "8538e2d4cfa6d8c9d2dee5b7e04a70abe7f14d308009b1f6e25e3ef5880947fe",
+      "path": "minimal/karaoke_yellow.mp4",
+      "sha256": "0540fbb4dd97d9f3fb060e7efd863c5bd5448e94cfe903e21fabb848e68be818",
+      "size_bytes": 30887
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "contrast_box",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "font_asset_ids": [
+        "font.rubik.semibold"
+      ],
+      "font_manifest": {
+        "font_id": "font.rubik.semibold",
+        "requested_family": "Rubik",
+        "resolved_family": "Rubik SemiBold",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 600,
+        "file_name": "Rubik-SemiBold.ttf",
+        "file_sha256": "3645e8b65efcdd3bccde6afeb1e482fbdc34c1a810ee2f19fb9e6e8837744938",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "cb5ebd8eaf72a396daa454dae999079e9bdf8e72c3db39f47f875033fa69fc66",
+      "parity_signature": "70e991eb31dfa0f8378067a71513e04d39271b8d08cbc1c9bc8fa42fbdcde648",
+      "path": "minimal/contrast_box.mp4",
+      "sha256": "739ed17f26c5dcf2dc06435c0a2d0b048b29a0ae285a0ccce21bdb89da0e1666",
+      "size_bytes": 19718
+    },
+    {
+      "creative_style_id": "minimal",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "word_pop",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:word_pop:2.1.0",
+      "font_asset_ids": [
+        "font.unbounded.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.unbounded.bold",
+        "requested_family": "Unbounded",
+        "resolved_family": "Unbounded",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Unbounded-Bold.ttf",
+        "file_sha256": "a9f663beb8f7e99e94e61a775c742486a09f53fe7f90e1af7997ee317b199f66",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "27889d42ff54f69b848db508b9b0c775c7a18d700402333580bd2f6333e35c62",
+      "parity_signature": "290df1f8155292b6a93f08298413d9878814f7e463dfd8cc859c0452ee49d2f9",
+      "path": "minimal/word_pop.mp4",
+      "sha256": "a98ffded01b823832d8af107c6cd3b4d0061d2740e958dcd27b550767ab97e9b",
+      "size_bytes": 67775
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "clean_white",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "font_asset_ids": [
+        "font.manrope.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.manrope.bold",
+        "requested_family": "Manrope",
+        "resolved_family": "Manrope",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Manrope-Bold.ttf",
+        "file_sha256": "4aed5d180a4f41ed21f07e678486f889bb40eb0ddf5f473769b6302f507d1e36",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "24744dc7d438c74ddc0a0082e0c18bb12f4f422d6853cc0f75c0c457fa0b2a0b",
+      "parity_signature": "cd159c59da091f530b86f9b01b8e5f1ed248f0396e243641febbe71fd4452777",
+      "path": "documentary/clean_white.mp4",
+      "sha256": "db629b5ee0dbe148177ec688eff12e029f38e26c4a975a15e3b39af279d2139b",
+      "size_bytes": 19397
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "minimal_light",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "font_asset_ids": [
+        "font.commissioner.light"
+      ],
+      "font_manifest": {
+        "font_id": "font.commissioner.light",
+        "requested_family": "Commissioner",
+        "resolved_family": "Commissioner Light",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 300,
+        "file_name": "Commissioner-Light.ttf",
+        "file_sha256": "fadc0f71d5e6a89af6200d5ff46b81d5b5c7bf6663da3031093d4a19e50124ee",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "94720c6ab9854aea5756effadb9caabc8ba8d48f6ac1b6170a9eac39d576563f",
+      "parity_signature": "f40804a6a2bebf456071beb505f53e6efa89f7cb9fc7c7b9e23b422695f14aa1",
+      "path": "documentary/minimal_light.mp4",
+      "sha256": "ed0a61cf6f7129843bc7fa3919c3a4466a48db38e0debbed25f939e8e05fd224",
+      "size_bytes": 18228
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "accent_yellow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "font_asset_ids": [
+        "font.oswald.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.oswald.bold",
+        "requested_family": "Oswald",
+        "resolved_family": "Oswald",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Oswald-Bold.ttf",
+        "file_sha256": "21843a0ccca2e97030da1330961646510ed6e9b8bb39620974c1195b9803034a",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "8310e6bced43a04e55aa788d2c4bc3708e40a0834c4d44ba884e0c2c24fcc7aa",
+      "parity_signature": "8e9eadbdd1ba060d6a1e9b7df5f40e380ea9575533668f3a4dfe625f436da066",
+      "path": "documentary/accent_yellow.mp4",
+      "sha256": "848f711bc7639238ff2b1c1c413be5361c6a4af888e584551ab1cf3ae2ae5583",
+      "size_bytes": 28952
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "editorial_narrow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "font_asset_ids": [
+        "font.pt-sans-narrow.regular",
+        "font.pt-sans-narrow.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.pt-sans-narrow.regular",
+        "requested_family": "PT Sans Narrow",
+        "resolved_family": "PT Sans Narrow",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 400,
+        "file_name": "PTSansNarrow-Regular.ttf",
+        "file_sha256": "d4882d4b26690f2951c476fd2b3bb4abfb20f3763a2cc4de04f30466e923baeb",
+        "companion_faces": [
+          {
+            "font_id": "font.pt-sans-narrow.bold",
+            "family": "PT Sans Narrow",
+            "subfamily": "Bold",
+            "postscript_name": "PTSans-NarrowBold",
+            "style": "normal",
+            "weight_class": 700,
+            "file_name": "PTSansNarrow-Bold.ttf",
+            "file_sha256": "d94bed3e84c75c97c0d477840896f7bf63c3b341540228be98edd1a6e98a6a0e"
+          }
+        ],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "8467c73c7ac336ce3b056fd8fd645b51c6a81da83730d6d5ec056d9f043ec216",
+      "parity_signature": "639941cad32e931b629ea2ecd446999ae3ef8c77d4a79f4508139a1355b67dee",
+      "path": "documentary/editorial_narrow.mp4",
+      "sha256": "799ec432f06af10d69f78478fcc75846b746c02bb1680129b8b1dd84fd3d8fb4",
+      "size_bytes": 22328
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "karaoke_yellow",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "font_asset_ids": [
+        "font.golos-text.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.golos-text.bold",
+        "requested_family": "Golos Text",
+        "resolved_family": "Golos Text",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "GolosText-Bold.ttf",
+        "file_sha256": "cac7fc9fd8c577f0f2ed0119e01a4c1169c3142158b8bfb0b6ecf6cc6eb97cad",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "5eb4062864e3a8436e0ba70e21a036b57ea127c7e3984390de89c1ca45f00668",
+      "parity_signature": "b02a43213be6ace3c44ffe14e4b2241d883c3ee021a30c8d1af3cd3948927643",
+      "path": "documentary/karaoke_yellow.mp4",
+      "sha256": "0540fbb4dd97d9f3fb060e7efd863c5bd5448e94cfe903e21fabb848e68be818",
+      "size_bytes": 30887
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "contrast_box",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "font_asset_ids": [
+        "font.rubik.semibold"
+      ],
+      "font_manifest": {
+        "font_id": "font.rubik.semibold",
+        "requested_family": "Rubik",
+        "resolved_family": "Rubik SemiBold",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 600,
+        "file_name": "Rubik-SemiBold.ttf",
+        "file_sha256": "3645e8b65efcdd3bccde6afeb1e482fbdc34c1a810ee2f19fb9e6e8837744938",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "11768bb21e9423512bfa4e296cd062de551c3a7847738cbc43c23beab4f90d24",
+      "parity_signature": "0323f7edfd179bb55749ac0f2bf7a06093427cc7c26650bac16c71902b32d3ac",
+      "path": "documentary/contrast_box.mp4",
+      "sha256": "92a35cf1559f7ce78477bd95cde87639e56b330229d92029fb1c962c1ee5042e",
+      "size_bytes": 19767
+    },
+    {
+      "creative_style_id": "documentary",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "word_pop",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:word_pop:2.1.0",
+      "font_asset_ids": [
+        "font.unbounded.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.unbounded.bold",
+        "requested_family": "Unbounded",
+        "resolved_family": "Unbounded",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Unbounded-Bold.ttf",
+        "file_sha256": "a9f663beb8f7e99e94e61a775c742486a09f53fe7f90e1af7997ee317b199f66",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "dfa8cd912fa899f14b07ea469cd726805d5e608be8b2cb68a459e6159a9ae61b",
+      "parity_signature": "708e4688440a61d38e6f6e21e8a4cc09c16cf1aa140af0d23f458c4aa252e2b8",
+      "path": "documentary/word_pop.mp4",
+      "sha256": "f25ae53e731fc64cc563bf8e24f9a439f4c28aa63f381c8b9ec46e344a539103",
+      "size_bytes": 67761
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "clean_white",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "font_asset_ids": [
+        "font.manrope.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.manrope.bold",
+        "requested_family": "Manrope",
+        "resolved_family": "Manrope",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Manrope-Bold.ttf",
+        "file_sha256": "4aed5d180a4f41ed21f07e678486f889bb40eb0ddf5f473769b6302f507d1e36",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "30a9e35e1e5d8f9cadf284f9224959e5a7de0f1d0615fa20cb41c115a1cc6d46",
+      "parity_signature": "71fff0b1170c6d23f38a5b7700e68075c169ab7e9330e849144a2351df0d32e3",
+      "path": "dynamic/clean_white.mp4",
+      "sha256": "07349247f914494328d0003f8d951175cb3f99852183e81517fb1502d261fe36",
+      "size_bytes": 19635
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "minimal_light",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "font_asset_ids": [
+        "font.commissioner.light"
+      ],
+      "font_manifest": {
+        "font_id": "font.commissioner.light",
+        "requested_family": "Commissioner",
+        "resolved_family": "Commissioner Light",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 300,
+        "file_name": "Commissioner-Light.ttf",
+        "file_sha256": "fadc0f71d5e6a89af6200d5ff46b81d5b5c7bf6663da3031093d4a19e50124ee",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "0cde0ef14928b305c9c15da2324f9e6dd4e66e00fad8eb03c3a3e854174bf05d",
+      "parity_signature": "1a230a0872494ceabbdc3685e475ef9c27e67953f6a40e327ad4d3c4a80ebe49",
+      "path": "dynamic/minimal_light.mp4",
+      "sha256": "1761fa66ed1af8a91c1b7ef34da8596f1182aec1f907fc21ef198d1b072e4576",
+      "size_bytes": 18367
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "accent_yellow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "font_asset_ids": [
+        "font.oswald.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.oswald.bold",
+        "requested_family": "Oswald",
+        "resolved_family": "Oswald",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Oswald-Bold.ttf",
+        "file_sha256": "21843a0ccca2e97030da1330961646510ed6e9b8bb39620974c1195b9803034a",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "1c1228d499f8793de25931207ffcb13a7b669f23db00867f92d8034d556272cf",
+      "parity_signature": "14d334687a9c7d418ece5626e2579bccccf277bee234b5c96e4177f5c3a9177a",
+      "path": "dynamic/accent_yellow.mp4",
+      "sha256": "e6404bc83c609600dcda8a876ba3014d4a6a9ee7380adc538e7a9b5f4695eea6",
+      "size_bytes": 28770
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "editorial_narrow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "font_asset_ids": [
+        "font.pt-sans-narrow.regular",
+        "font.pt-sans-narrow.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.pt-sans-narrow.regular",
+        "requested_family": "PT Sans Narrow",
+        "resolved_family": "PT Sans Narrow",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 400,
+        "file_name": "PTSansNarrow-Regular.ttf",
+        "file_sha256": "d4882d4b26690f2951c476fd2b3bb4abfb20f3763a2cc4de04f30466e923baeb",
+        "companion_faces": [
+          {
+            "font_id": "font.pt-sans-narrow.bold",
+            "family": "PT Sans Narrow",
+            "subfamily": "Bold",
+            "postscript_name": "PTSans-NarrowBold",
+            "style": "normal",
+            "weight_class": 700,
+            "file_name": "PTSansNarrow-Bold.ttf",
+            "file_sha256": "d94bed3e84c75c97c0d477840896f7bf63c3b341540228be98edd1a6e98a6a0e"
+          }
+        ],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "774b832b38ebc8e2c0b06457df96e5bd371bdd881af52cf53bb4fa1a9d14a834",
+      "parity_signature": "532baf7160eec845d0a5e4daf9d459605b62ece842625901062959d6609f5821",
+      "path": "dynamic/editorial_narrow.mp4",
+      "sha256": "bea7a8e134d153441aa79fdd95654db694185a182435d64bdcc9d97b636c3884",
+      "size_bytes": 22246
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "karaoke_yellow",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "font_asset_ids": [
+        "font.golos-text.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.golos-text.bold",
+        "requested_family": "Golos Text",
+        "resolved_family": "Golos Text",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "GolosText-Bold.ttf",
+        "file_sha256": "cac7fc9fd8c577f0f2ed0119e01a4c1169c3142158b8bfb0b6ecf6cc6eb97cad",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "73d38af6b6bd47e96ce0ca0ee0a29a3faec8a0acdb4081ffe3cfe38a9f730c13",
+      "parity_signature": "86056e87c6f4e790e89466ee19bdab87490005d71d7ae12b9adfa574902814c8",
+      "path": "dynamic/karaoke_yellow.mp4",
+      "sha256": "a2e13ef887e31dd733866da638e553738d20805d68afb6663a33199c4380c41d",
+      "size_bytes": 30824
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "contrast_box",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "font_asset_ids": [
+        "font.rubik.semibold"
+      ],
+      "font_manifest": {
+        "font_id": "font.rubik.semibold",
+        "requested_family": "Rubik",
+        "resolved_family": "Rubik SemiBold",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 600,
+        "file_name": "Rubik-SemiBold.ttf",
+        "file_sha256": "3645e8b65efcdd3bccde6afeb1e482fbdc34c1a810ee2f19fb9e6e8837744938",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "4ea0a1ef0353074cce2d6ab16da9ad6cbd820f95d14f8aa74137c697a7cc2170",
+      "parity_signature": "512b83a3a3bbe8c1cc003d85ada1fd1dba411aaefa8694e239066b02af237e7e",
+      "path": "dynamic/contrast_box.mp4",
+      "sha256": "4b2573425d90499556e92ad0492a5906bbc2118ab1fa554373fd407434bbe50f",
+      "size_bytes": 19705
+    },
+    {
+      "creative_style_id": "dynamic",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "word_pop",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:word_pop:2.1.0",
+      "font_asset_ids": [
+        "font.unbounded.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.unbounded.bold",
+        "requested_family": "Unbounded",
+        "resolved_family": "Unbounded",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Unbounded-Bold.ttf",
+        "file_sha256": "a9f663beb8f7e99e94e61a775c742486a09f53fe7f90e1af7997ee317b199f66",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "4a18c3b434e8e40bc4a23106ea9518f4b73532c50db285721b8c04c86e472b15",
+      "parity_signature": "26c1a5eb8c898b81aaa3e553bbbbc853d5bc537aeb7735507b94300ad1da705c",
+      "path": "dynamic/word_pop.mp4",
+      "sha256": "a98ffded01b823832d8af107c6cd3b4d0061d2740e958dcd27b550767ab97e9b",
+      "size_bytes": 67775
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "clean_white",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "font_asset_ids": [
+        "font.manrope.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.manrope.bold",
+        "requested_family": "Manrope",
+        "resolved_family": "Manrope",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Manrope-Bold.ttf",
+        "file_sha256": "4aed5d180a4f41ed21f07e678486f889bb40eb0ddf5f473769b6302f507d1e36",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "80592506c8f1ac2a64bc8caa3fe24ff4784cdeb86485c5bfe9f7734845530c99",
+      "parity_signature": "efafc593b0d17a08b128dfc2063939f5cecb70aa97c5aaf0d17a131cfac1307e",
+      "path": "clean/clean_white.mp4",
+      "sha256": "07349247f914494328d0003f8d951175cb3f99852183e81517fb1502d261fe36",
+      "size_bytes": 19635
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "minimal_light",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "font_asset_ids": [
+        "font.commissioner.light"
+      ],
+      "font_manifest": {
+        "font_id": "font.commissioner.light",
+        "requested_family": "Commissioner",
+        "resolved_family": "Commissioner Light",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 300,
+        "file_name": "Commissioner-Light.ttf",
+        "file_sha256": "fadc0f71d5e6a89af6200d5ff46b81d5b5c7bf6663da3031093d4a19e50124ee",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "27656afde775012c5598be5011ed4b135bc5789ca5a8b74fc4bdef7534e9e59c",
+      "parity_signature": "90c55dae31f879c342198454d2f1dd3d61546005637d7486215e8f95a0b4e965",
+      "path": "clean/minimal_light.mp4",
+      "sha256": "5848f6803c63c734ecb3b019cb2dc331634ddd2cf15538eb278f6231beb5c9bb",
+      "size_bytes": 18327
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "accent_yellow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "font_asset_ids": [
+        "font.oswald.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.oswald.bold",
+        "requested_family": "Oswald",
+        "resolved_family": "Oswald",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Oswald-Bold.ttf",
+        "file_sha256": "21843a0ccca2e97030da1330961646510ed6e9b8bb39620974c1195b9803034a",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "2cdc7812df0915b74c2b5f7804ec972d0e65ccd06c682a3628b8714a58776c00",
+      "parity_signature": "b91913176cad2f32ae60667a06e1003f51526eecc5dd5c8da71048c0124fd25d",
+      "path": "clean/accent_yellow.mp4",
+      "sha256": "1e8d389521535de2433f9aea933cc0b70788b17ef9a5dd2a242d62e48607d2e9",
+      "size_bytes": 21377
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "editorial_narrow",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "font_asset_ids": [
+        "font.pt-sans-narrow.regular",
+        "font.pt-sans-narrow.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.pt-sans-narrow.regular",
+        "requested_family": "PT Sans Narrow",
+        "resolved_family": "PT Sans Narrow",
+        "style": "normal",
+        "weight": "normal",
+        "weight_class": 400,
+        "file_name": "PTSansNarrow-Regular.ttf",
+        "file_sha256": "d4882d4b26690f2951c476fd2b3bb4abfb20f3763a2cc4de04f30466e923baeb",
+        "companion_faces": [
+          {
+            "font_id": "font.pt-sans-narrow.bold",
+            "family": "PT Sans Narrow",
+            "subfamily": "Bold",
+            "postscript_name": "PTSans-NarrowBold",
+            "style": "normal",
+            "weight_class": 700,
+            "file_name": "PTSansNarrow-Bold.ttf",
+            "file_sha256": "d94bed3e84c75c97c0d477840896f7bf63c3b341540228be98edd1a6e98a6a0e"
+          }
+        ],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "2bd3e256301c49b2f78612ab7a991912b541666f962702ae4e084f2b3fadbe84",
+      "parity_signature": "19bd753a091b589b575ea81c86ff8c49e19f8e2790606a2c7ed26130fc298dba",
+      "path": "clean/editorial_narrow.mp4",
+      "sha256": "b12c24debd2583cb7879e53db32e03ae49e9d388115b65d7f39750f228186f1f",
+      "size_bytes": 22400
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "karaoke_yellow",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "font_asset_ids": [
+        "font.golos-text.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.golos-text.bold",
+        "requested_family": "Golos Text",
+        "resolved_family": "Golos Text",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "GolosText-Bold.ttf",
+        "file_sha256": "cac7fc9fd8c577f0f2ed0119e01a4c1169c3142158b8bfb0b6ecf6cc6eb97cad",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "200e4c0c6cfb7a9d4f1e36bfc2f4096f4c9b4506dfe2d643cd6e5ffe34aa3fe5",
+      "parity_signature": "fda11c423ab104a72cd54d3b43ec488142a30d089ed4be61f6e7803245139469",
+      "path": "clean/karaoke_yellow.mp4",
+      "sha256": "5d894f8c9d685165330735829b359cdb90b3038daeb5905c33a33ef23aeba327",
+      "size_bytes": 30880
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "contrast_box",
+      "caption_preset_version": "2.0.0",
+      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "font_asset_ids": [
+        "font.rubik.semibold"
+      ],
+      "font_manifest": {
+        "font_id": "font.rubik.semibold",
+        "requested_family": "Rubik",
+        "resolved_family": "Rubik SemiBold",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 600,
+        "file_name": "Rubik-SemiBold.ttf",
+        "file_sha256": "3645e8b65efcdd3bccde6afeb1e482fbdc34c1a810ee2f19fb9e6e8837744938",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "99bae83606b6f0d75610c1c627173f78ebfa1291a561fe114d0bd7e747cd1c8f",
+      "parity_signature": "b64610244f19e4c56e06237394f332db261f22cad4eb972664c9600ec5018924",
+      "path": "clean/contrast_box.mp4",
+      "sha256": "13315b0249366d92981af1f334d23d1e74a76d43158b4fa4eec175a04b1bddc7",
+      "size_bytes": 19778
+    },
+    {
+      "creative_style_id": "clean",
+      "creative_style_version": "1.0.0",
+      "caption_preset_id": "word_pop",
+      "caption_preset_version": "2.1.0",
+      "caption_token_id": "caption-preset:word_pop:2.1.0",
+      "font_asset_ids": [
+        "font.unbounded.bold"
+      ],
+      "font_manifest": {
+        "font_id": "font.unbounded.bold",
+        "requested_family": "Unbounded",
+        "resolved_family": "Unbounded",
+        "style": "normal",
+        "weight": "bold",
+        "weight_class": 700,
+        "file_name": "Unbounded-Bold.ttf",
+        "file_sha256": "a9f663beb8f7e99e94e61a775c742486a09f53fe7f90e1af7997ee317b199f66",
+        "companion_faces": [],
+        "supported_scripts": [
+          "latin",
+          "cyrillic"
+        ],
+        "metrics_backend": "gdi_file_metrics",
+        "shaping_backend": "libass-harfbuzz",
+        "fallback_chain": [],
+        "deployment_status": "bundled",
+        "fallback_used": false
+      },
+      "compiled_plan_hash": "5c96d75faf905621875e788d4034cf08b1b719f28c567fc0531bc426848ccbc5",
+      "parity_signature": "36f802b3525bacc492a74a821a8b4f696f9a6f2d04392c30d54b347fa7191bad",
+      "path": "clean/word_pop.mp4",
+      "sha256": "12e17484d699e1977dbb6b8619551cabe6f0248e8639a86a0c083589af0297a6",
+      "size_bytes": 67724
+    }
+  ]
+}

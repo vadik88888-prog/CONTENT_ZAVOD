@@ -1,0 +1,66 @@
+{
+  "audit_kind": "gameplay-selection-provider-validity",
+  "project_id": "de57e7edcd884509868610aee84827c5",
+  "run_id": "0ca1e9e45e924503885e46b1e5df9e02",
+  "analysis_id": "analysis-584469843333389b",
+  "selection_snapshot": {
+    "candidate_count": 14,
+    "available": 1,
+    "blocked": 13,
+    "reason_code_counts": {
+      "DURATION_OUT_OF_RANGE": 9,
+      "VISUAL_EVIDENCE_UNAVAILABLE": 14,
+      "SENTENCE_BOUNDARY_UNRECOVERABLE": 12,
+      "SEMANTIC_INCOMPLETE": 13,
+      "REFERENCES_EARLIER_CONTENT": 4,
+      "CONTEXT_DEBT_CRITICAL": 4,
+      "NO_PAYOFF": 10,
+      "FALSE_HOOK_RISK": 10
+    }
+  },
+  "provider_status_at_run": {
+    "credential_environment": {
+      "source": "pipeline.log:16",
+      "OPENAI_API_KEY": "absent",
+      "GEMINI_API_KEY": "absent"
+    },
+    "semantic_ai": {
+      "configured_mode": "auto",
+      "report_provider": "disabled",
+      "model": "None",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "api_errors": [],
+      "called": false
+    },
+    "vision": {
+      "configured_enabled": true,
+      "result_status": "skipped",
+      "provider": "not-called",
+      "model": "not-called",
+      "failure_reason": "vision_not_opted_in",
+      "external_vision_api_calls": 0,
+      "usage_calls": 0,
+      "frames_sent": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "called": false
+    },
+    "note": "The completed vision_pass1/vision_pass2 stage wrappers do not prove provider execution; persisted provider provenance and usage both record zero calls."
+  },
+  "benchmark_valid": false,
+  "benchmark_invalid_reason": "The run had neither semantic-AI calls nor Vision-provider calls, and both supported API credential variables were absent from the inherited process environment.",
+  "algorithm_changes_from_this_run": {
+    "boundary": false,
+    "editorial": false,
+    "selection_thresholds": false
+  },
+  "required_follow_up": [
+    "Provide working semantic AI and Vision credentials to the pipeline process.",
+    "Explicitly opt in to the existing Vision/deep-analysis path.",
+    "Create a fresh Analysis with a new analysis identity.",
+    "Verify non-disabled semantic provider provenance and non-zero semantic usage.",
+    "Verify Vision provider provenance, non-zero external call count, frames sent, and token usage.",
+    "Only then compare AVAILABLE/BLOCKED distribution and audit structural blockers without a global unblock."
+  ]
+}

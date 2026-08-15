@@ -1295,12 +1295,15 @@ class PipelineFacade:
         config.production_render.enabled = True
         config.production_render.subtitles_enabled = options.subtitles_enabled
         config.production_render.subtitle_style = options.subtitle_style
-        config.production_render.crop_strategy = options.composition_strategy
         config.production_render.same_source_broll_allowed = options.same_source_broll_allowed
         config.production_render.encoder = options.encoder
         config.production_render.cache_enabled = options.use_cache
         config.device = settings.device_preference
         apply_resolved_processing_config(config, resolved)
+        # The product preset establishes a safe baseline; a person's explicit
+        # Advanced composition choice is the established production-render
+        # override and must not be overwritten by that baseline.
+        config.production_render.crop_strategy = options.composition_strategy
         # A user can always choose not to reuse existing artifacts.  The product
         # preset controls normal cache policy; this explicit advanced switch wins.
         config.production_render.cache_enabled = options.use_cache and config.production_render.cache_enabled

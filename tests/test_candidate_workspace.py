@@ -884,7 +884,7 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
     viewmodel = ProjectViewModel(services)
     watched: list[tuple[Path, str]] = []
     monkeypatch.setattr(
-        VideoPreview, "show_draft", lambda _preview, path, title=None: watched.append((Path(path), str(title))),
+        VideoPreview, "show_draft", lambda _preview, path, title=None, **_kwargs: watched.append((Path(path), str(title))),
     )
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
@@ -2018,7 +2018,7 @@ def test_reopened_project_restores_the_persisted_candidate_preview(tmp_path: Pat
         app.processEvents()
 
 
-def test_boundary_change_replaces_a_stale_draft_preview_with_source_range(tmp_path: Path, monkeypatch) -> None:
+def test_boundary_change_keeps_the_previous_draft_preview_until_explicit_rebuild(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
@@ -2054,8 +2054,8 @@ def test_boundary_change_replaces_a_stale_draft_preview_with_source_range(tmp_pa
         assert ranges == []
         project.candidate_boundary_overrides[candidate_id] = {"start": 2.0, "end": 19.0}
         screen._project_changed(project)
-        assert ranges == [(2.0, 19.0, False)]
-        assert screen._active_preview_kind == "source-range"
+        assert ranges == []
+        assert screen._active_preview_kind == "draft"
     finally:
         screen.close()
         screen.deleteLater()

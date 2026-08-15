@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QBoxLayout,
     QFileDialog,
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.gui.components import VideoDropZone
+from app.gui.components import CandidateThumbnailLoader, VideoDropZone
 from app.gui.models import DesktopProject, ProjectPresentation
 from app.gui.responsive import set_responsive_text
 from app.gui.services.error_mapping import dialog_message, map_error
@@ -42,6 +44,13 @@ class ProjectsScreen(QWidget):
         self._refresh_pending = False
         self._dirty = True
         self._compact_source_layout: bool | None = None
+        self._thumbnail_labels: dict[str, list[QLabel]] = {}
+        self._thumbnail_paths: dict[str, Path] = {}
+        self._thumbnail_loader = CandidateThumbnailLoader(self)
+        self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
+        self._thumbnail_loader.thumbnail_unavailable_with_path.connect(
+            self._thumbnail_unavailable
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 22, 26, 22)
@@ -235,6 +244,7 @@ class ProjectsScreen(QWidget):
         self.file_button.setText("Проверяем видео…" if busy else "Выбрать видео")
 
     def _render(self, projects: list[DesktopProject]) -> None:
+        self._thumbnail_loader.replace_pending()
         self._projects = list(projects)
         self._presentations = {}
         for project in self._projects:
@@ -262,6 +272,8 @@ class ProjectsScreen(QWidget):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+        self._thumbnail_labels = {}
+        self._thumbnail_paths = {}
         columns = self._recent_columns()
         self._rendered_columns = columns
         for index, project in enumerate(self._projects):
@@ -314,6 +326,31 @@ class ProjectsScreen(QWidget):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 13, 14, 13)
         layout.setSpacing(7)
+
+        poster = QLabel("Готовим кадр…")
+        poster.setObjectName("projectPoster")
+        poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        poster.setMinimumHeight(112)
+        poster.setMaximumHeight(148)
+        # Ignore the pixmap's native size hint; card width owns the crop.
+        poster.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(poster)
+        self._thumbnail_labels.setdefault(project.project_id, []).append(poster)
+        persisted = Path(project.thumbnail_path) if project.thumbnail_path else None
+        if persisted is not None and persisted.is_file():
+            self._apply_thumbnail(project.project_id, persisted)
+            self._thumbnail_paths[project.project_id] = persisted.resolve(strict=False)
+        elif project.source_spec.is_ready and project.source.is_file():
+            destination = self._thumbnail_loader.request(
+                cache_directory=project.directory / "thumbnails",
+                analysis_id="source-poster-v1",
+                candidate_id=project.project_id,
+                source_path=project.source,
+                timestamp_seconds=1.0,
+            )
+            self._thumbnail_paths[project.project_id] = destination.resolve(strict=False)
+        else:
+            poster.setText("Видео будет доступно после загрузки")
         top = QHBoxLayout()
         name = QLabel()
         name.setStyleSheet("font-size: 15px; font-weight: 600;")
@@ -372,6 +409,46 @@ class ProjectsScreen(QWidget):
         actions.addWidget(delete_button)
         layout.addLayout(actions)
         return card
+
+    def _thumbnail_ready(self, project_id: str, path: str) -> None:
+        expected = self._thumbnail_paths.get(project_id)
+        actual = Path(path).resolve(strict=False)
+        if expected is None or expected != actual:
+            return
+        self._apply_thumbnail(project_id, actual)
+        project = next((item for item in self._projects if item.project_id == project_id), None)
+        if project is not None and project.thumbnail_path != str(actual):
+            try:
+                self.viewmodel.services.update_project_thumbnail(project, actual)
+            except Exception:
+                # The real cached frame is already visible. Persistence can be
+                # retried by the next normal project refresh.
+                pass
+
+    def _thumbnail_unavailable(self, project_id: str, path: str) -> None:
+        expected = self._thumbnail_paths.get(project_id)
+        if expected is None or expected != Path(path).resolve(strict=False):
+            return
+        for label in self._thumbnail_labels.get(project_id, []):
+            try:
+                label.setText("Кадр недоступен\nВидео можно открыть")
+            except RuntimeError:
+                continue
+
+    def _apply_thumbnail(self, project_id: str, path: Path) -> None:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return
+        for label in self._thumbnail_labels.get(project_id, []):
+            try:
+                label.setText("")
+                label.setPixmap(pixmap.scaled(
+                    max(1, label.width()), max(1, label.height()),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                ))
+            except RuntimeError:
+                continue
 
     def _delete(self, project: DesktopProject) -> None:
         answer = QMessageBox.question(

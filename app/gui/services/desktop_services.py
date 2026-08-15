@@ -866,6 +866,23 @@ class DesktopServices:
         self.projects.save(project)
         return project
 
+    def update_project_thumbnail(
+        self, project: DesktopProject, thumbnail_path: Path,
+    ) -> DesktopProject:
+        """Persist the exact source-revision poster used by Projects/Source."""
+
+        path = thumbnail_path.resolve()
+        project_root = project.directory.resolve()
+        try:
+            path.relative_to(project_root)
+        except ValueError as error:
+            raise InputValidationError("Кадр проекта должен храниться вместе с проектом.") from error
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise InputValidationError("Кадр проекта ещё не готов.")
+        project.thumbnail_path = str(path)
+        self.projects.save(project)
+        return project
+
     def prepare_selected_render(
         self, project: DesktopProject, candidate_ids: list[str] | None = None,
     ) -> tuple[ProjectRun, PreparedPipelineRun]:

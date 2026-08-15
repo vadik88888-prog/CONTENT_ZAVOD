@@ -18,7 +18,11 @@
         950
       ],
       "device_pixel_ratio": 1.0,
-      "stage_evidence": {},
+      "stage_evidence": {
+        "real_project_posters": 1,
+        "persisted_poster_path": "C:\\Users\\Вадим\\AppData\\Local\\Temp\\friend-beta-real-window-otumfhqj\\projects\\aa71f33b6e564c09a1edaf3f63312e03\\thumbnails\\source-poster-v1\\aa71f33b6e564c09a1edaf3f63312e03-7f264bb5ba670582.jpg",
+        "restart_reload_identity": true
+      },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\source-dpi100.png",
       "screenshot_pixels": [
         1920,
@@ -35,7 +39,12 @@
           "maximum": 0
         }
       ],
-      "active_vertical_scrolls": [],
+      "active_vertical_scrolls": [
+        {
+          "name": "QScrollArea",
+          "maximum": 225
+        }
+      ],
       "window_logical_size": [
         1920,
         950
@@ -52,8 +61,16 @@
           "contrast_box": "Rubik SemiBold",
           "word_pop": "Unbounded"
         },
+        "style_sample_style_id": "dynamic",
         "style_sample_preset_id": "word_pop",
-        "style_sample_is_local_ui": true
+        "style_sample_is_production_mp4": true,
+        "style_sample_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\assets\\settings-previews\\dynamic\\word_pop.mp4",
+        "compiled_plan_hash": "4a18c3b434e8e40bc4a23106ea9518f4b73532c50db285721b8c04c86e472b15",
+        "caption_preset_version": "2.1.0",
+        "creative_style_version": "1.0.0",
+        "font_asset_ids": [
+          "font.unbounded.bold"
+        ]
       },
       "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\friend-beta-desktop-redesign\\settings-dpi100.png",
       "screenshot_pixels": [
@@ -69,12 +86,7 @@
           "maximum": 0
         }
       ],
-      "active_vertical_scrolls": [
-        {
-          "name": "QScrollArea",
-          "maximum": 105
-        }
-      ],
+      "active_vertical_scrolls": [],
       "window_logical_size": [
         1920,
         950
@@ -191,7 +203,7 @@
       "active_vertical_scrolls": [
         {
           "name": "QScrollArea",
-          "maximum": 18
+          "maximum": 337
         },
         {
           "name": "QScrollArea",

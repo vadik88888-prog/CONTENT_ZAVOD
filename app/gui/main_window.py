@@ -244,8 +244,18 @@ class MainWindow(QMainWindow):
             DoctorReadiness.SETUP_REQUIRED: "■  ",
         }[summary.readiness]
         self.system_status_title.setText(prefix + summary.title)
-        self.system_status_title.setToolTip(summary.title)
-        self.system_status_detail.setText(summary.detail)
+        actionable = next((item for item in checks if item.blocking), None)
+        if actionable is None:
+            actionable = next((item for item in checks if item.warning), None)
+        if actionable is not None:
+            detail = f"{actionable.label}: {actionable.action}"
+            tooltip = f"{actionable.detail}\n{actionable.action}"
+        else:
+            detail = "Система готова к обработке видео"
+            tooltip = summary.detail
+        self.system_status_title.setToolTip(tooltip)
+        self.system_status_detail.setText(detail)
+        self.system_status_detail.setToolTip(tooltip)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
