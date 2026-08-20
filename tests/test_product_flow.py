@@ -177,8 +177,16 @@ def test_vision_auto_is_finalized_from_gameplay_profile_and_explicit_choices_win
     gameplay_profile = {
         "detected_content_type": "gameplay",
         "visual_density": 0.8,
-        "detected_profile": {"format": {"value": "gameplay"}},
-        "effective_profile": {"format": "gameplay", "traits": ["visual_led"]},
+        "detected_profile": {
+            "format": {
+                "value": "gameplay", "confidence": 0.84,
+                "evidence": ["transcript:gameplay", "scene_density:high"],
+            },
+        },
+        "effective_profile": {
+            "format": "gameplay", "traits": ["visual_led"],
+            "resolution": {"format": "detected", "traits": "detected"},
+        },
     }
 
     auto_config = load_config()
@@ -205,6 +213,35 @@ def test_vision_auto_is_finalized_from_gameplay_profile_and_explicit_choices_win
 
     assert on_decision.resolved is True
     assert on_config.optional_visual_features is True
+
+
+def test_vision_auto_rejects_low_confidence_filename_only_gameplay_profile(tmp_path: Path) -> None:
+    weak_profile = {
+        "detected_content_type": "unknown",
+        "visual_density": 0.0,
+        "detected_profile": {
+            "format": {
+                "value": "gameplay", "confidence": 0.34,
+                "evidence": ["filename:weak_gameplay_hint"],
+            },
+        },
+        "effective_profile": {
+            "format": "unknown", "traits": [],
+            "resolution": {"format": "safe_fallback", "traits": "detected"},
+        },
+    }
+    config = load_config()
+    config.product_flow.deep_analysis_requested = "auto"
+
+    decision = Pipeline(tmp_path, config)._finalize_deep_analysis(weak_profile)
+
+    assert decision.resolved is False
+    assert config.optional_visual_features is False
+    assert decision.evidence["detected_profile_format"] == "gameplay"
+    assert decision.evidence["detected_profile_format_confidence"] == 0.34
+    assert decision.evidence["effective_profile_format"] == "unknown"
+    assert decision.evidence["profile_format_resolution"] == "safe_fallback"
+    assert "profile_format" not in decision.evidence
 
 
 def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() -> None:

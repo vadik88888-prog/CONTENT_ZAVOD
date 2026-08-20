@@ -7,7 +7,7 @@ import pytest
 from app.cli import main
 from app.config import AppConfig
 from app.errors import ClipEngineError
-from app.pipeline import Pipeline, PipelineResult
+from app.pipeline import INTELLIGENCE_ENGINE_VERSION, Pipeline, PipelineResult, StageTracker, _hash
 from app.run_artifacts import run_metadata_path
 from app.utils import read_json, write_json
 
@@ -327,6 +327,50 @@ def test_repeated_analysis_reuses_source_intelligence_cache(tmp_path: Path, monk
     assert feasibility["provider_mode"] == "local_only"
     assert feasibility["provider_calls"] == {"brain": 0, "vision": 0, "transformation": 0}
     assert report["terminal"]["status"] == "analysis_ready"
+
+
+@pytest.mark.parametrize(
+    ("stage", "artifact_name"),
+    (("vision_pass1", "vision-observations.json"), ("vision_pass2", "shortlist.vision.json")),
+)
+def test_vision_admission_fingerprint_rejects_legacy_skipped_cache(
+    tmp_path: Path, stage: str, artifact_name: str,
+) -> None:
+    artifact = tmp_path / artifact_name
+    legacy_result = {"status": "skipped", "failure_reason": "vision_not_opted_in", "marker": "legacy"}
+    write_json(artifact, legacy_result)
+    legacy_fingerprint = {
+        "source": "source-1", "processing_mode": "standard",
+        "vision": {"enabled": True}, "provider": "mock", "model": "gpt-5-mini",
+    }
+    legacy_key = _hash({"engine_version": INTELLIGENCE_ENGINE_VERSION, "input": legacy_fingerprint})
+    source_cache = StageTracker(tmp_path / "source-cache.json")
+    source_cache.start(stage, legacy_key)
+    source_cache.finish(stage)
+    run_tracker = StageTracker(tmp_path / "run-state.json")
+    calls: list[str] = []
+
+    def recompute() -> dict:
+        calls.append(stage)
+        fresh = {"status": "completed", "marker": "fresh"}
+        write_json(artifact, fresh)
+        return fresh
+
+    current_fingerprint = {
+        **legacy_fingerprint,
+        "deep_analysis": {
+            "requested": "auto", "resolved": True, "reason": "accepted gameplay profile",
+            "evidence": {"profile_format": "gameplay", "profile_format_resolution": "detected"},
+            "estimated_benefit": "high",
+        },
+    }
+    result = Pipeline(tmp_path, AppConfig(), mock_ai=True)._cached(
+        run_tracker, stage, artifact, current_fingerprint, recompute, cache_tracker=source_cache,
+    )
+
+    assert calls == [stage]
+    assert result == {"status": "completed", "marker": "fresh"}
+    assert run_tracker.data["stages"][stage]["cache_hit"] is False
 
 
 def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_order(tmp_path: Path, monkeypatch) -> None:

@@ -340,22 +340,28 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     detected_format = detected_profile.get("format")
     if not isinstance(detected_format, dict):
         detected_format = {}
-    structured_detection = bool(detected_format.get("value"))
-    profile_format = str(
-        detected_format.get("value")
-        or effective_profile.get("format")
-        or ""
+    effective_resolution = effective_profile.get("resolution")
+    if not isinstance(effective_resolution, dict):
+        effective_resolution = {}
+    detected_format_value = str(detected_format.get("value") or "")
+    effective_format = str(effective_profile.get("format") or "")
+    format_resolution = str(effective_resolution.get("format") or "")
+    profile_format = ""
+    if (
+        format_resolution == "detected"
+        and effective_format
+        and effective_format == detected_format_value
+    ) or (format_resolution == "legacy_migration" and effective_format):
+        profile_format = effective_format
+    has_structured_profile = bool(detected_format_value or effective_format)
+    raw_profile_traits = effective_profile.get("traits")
+    traits_resolution = str(effective_resolution.get("traits") or "")
+    profile_traits = (
+        [str(item) for item in raw_profile_traits]
+        if isinstance(raw_profile_traits, list)
+        and traits_resolution in {"detected", "legacy_migration"}
+        else []
     )
-    detected_traits = detected_profile.get("traits")
-    profile_traits: list[str]
-    if structured_detection and isinstance(detected_traits, list):
-        profile_traits = [
-            str(item.get("value")) for item in detected_traits
-            if isinstance(item, dict) and item.get("value")
-        ]
-    else:
-        raw_profile_traits = effective_profile.get("traits")
-        profile_traits = [str(item) for item in raw_profile_traits] if isinstance(raw_profile_traits, list) else []
     evidence: dict[str, Any] = {}
     for key in (
         "duration", "width", "height", "fps", "visual_activity_score", "scene_density",
@@ -363,11 +369,21 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     ):
         if key in metadata:
             evidence[key] = metadata[key]
+    if detected_format_value:
+        evidence["detected_profile_format"] = detected_format_value
+    if detected_format.get("confidence") is not None:
+        evidence["detected_profile_format_confidence"] = detected_format["confidence"]
+    if isinstance(detected_format.get("evidence"), list):
+        evidence["detected_profile_format_evidence"] = [str(item) for item in detected_format["evidence"]]
+    if effective_format:
+        evidence["effective_profile_format"] = effective_format
+    if format_resolution:
+        evidence["profile_format_resolution"] = format_resolution
     if profile_format:
         evidence["profile_format"] = profile_format
     if profile_traits:
         evidence["profile_traits"] = [str(item) for item in profile_traits]
-    if not structured_detection and metadata.get("detected_content_type"):
+    if not has_structured_profile and metadata.get("detected_content_type"):
         evidence["detected_content_type"] = str(metadata["detected_content_type"])
     if "visual_density" in metadata:
         evidence["visual_density"] = metadata["visual_density"]
@@ -378,7 +394,7 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
 
     kind = " ".join((
         *(str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename")),
-        str(metadata.get("detected_content_type", "")) if not structured_detection else "",
+        str(metadata.get("detected_content_type", "")) if not has_structured_profile else "",
         profile_format,
         " ".join(str(item) for item in profile_traits),
     )).lower()
