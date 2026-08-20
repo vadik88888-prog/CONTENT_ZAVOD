@@ -43,6 +43,8 @@ from app.utils import stable_text_hash
 VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = CONTENT_PROFILE_SCHEMA_VERSION
 LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS[0]
 CONTENT_STRATEGY_VERSION = "5A.4"
+SEMANTIC_CANDIDATE_GENERATION_VERSION = "5A.candidate-generation.2"
+SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
@@ -77,6 +79,13 @@ _DIALOGUE_TERMS = ("вопрос", "ответ", "спросил", "интерв
 _TOPIC_MARKERS = ("теперь", "другая тема", "важно понять", "первое", "второе", "finally", "next")
 _PAYOFF_MARKERS = ("поэтому", "значит", "вывод", "итог", "вот почему", "therefore", "that is why", "the point")
 _SETUP_MARKERS = ("если", "когда", "проблем", "вопрос", "почему", "if ", "when ", "question", "problem")
+_ORDERED_SEMANTIC_BEAT_MARKERS = (
+    (1, re.compile(r"\b(?:во[\s-]*первых|first(?:ly)?)\b", re.IGNORECASE)),
+    (2, re.compile(r"\b(?:во[\s-]*вторых|second(?:ly)?)\b", re.IGNORECASE)),
+    (3, re.compile(r"\b(?:в[\s-]*третьих|third(?:ly)?)\b", re.IGNORECASE)),
+    (4, re.compile(r"\b(?:в[\s-]*четв[её]ртых|fourth(?:ly)?)\b", re.IGNORECASE)),
+    (5, re.compile(r"\b(?:в[\s-]*пятых|fifth(?:ly)?)\b", re.IGNORECASE)),
+)
 _STOP_WORDS = frozenset({
     "и", "а", "но", "что", "это", "как", "в", "на", "с", "по", "к", "за", "из", "у", "не", "мы", "вы",
     "the", "a", "an", "and", "or", "but", "to", "of", "in", "is", "it", "that", "this", "for", "with",
@@ -1747,17 +1756,200 @@ def generate_semantic_candidates(
     content_map_data: dict[str, Any], transcript: dict[str, Any], transcript_features: dict[str, Any],
     scenes: dict[str, Any], config: Any,
 ) -> tuple[list[Candidate], int]:
-    """Turn StoryUnits into traceable candidate ranges without duration truncation."""
+    """Turn StoryUnits and their explicit semantic beats into traceable candidates."""
 
     content_map = GlobalContentMap.from_dict(content_map_data, transcript)
     engine = SemanticBoundaryEngine(config.content_understanding)
+    chapters = {item.chapter_id: item for item in content_map.chapters}
     candidates: list[Candidate] = []
     for unit in content_map.story_units:
-        candidates.append(build_semantic_candidate(
+        parent = build_semantic_candidate(
             [unit], transcript, transcript_features, scenes, engine,
             candidate_id=f"candidate-{unit.story_unit_id}",
-        ))
+        )
+        candidates.append(parent)
+        chapter = chapters.get(unit.chapter_id)
+        if chapter is None:
+            continue
+        for beat_unit, beat_evidence in _semantic_beat_proposals(
+            unit, chapter, transcript, transcript_features, config,
+        ):
+            candidate = build_semantic_candidate(
+                [beat_unit], transcript, transcript_features, scenes, engine,
+                candidate_id=f"candidate-{beat_evidence['beat_id']}",
+            )
+            candidate.reason = "Semantic beat proposal grounded in an explicit ordered discourse cue."
+            candidate.explanations.append(
+                "Дополнительный candidate сохраняет самостоятельный semantic beat внутри исходной StoryUnit."
+            )
+            candidate.semantic_evidence = {
+                **candidate.semantic_evidence,
+                "parent_story_unit_id": unit.story_unit_id,
+                "parent_candidate_id": parent.id,
+                "semantic_beat": _semantic_beat_candidate_evidence(candidate, beat_evidence, config),
+            }
+            candidates.append(candidate)
     return candidates, len(candidates)
+
+
+def _semantic_beat_proposals(
+    parent: StoryUnit,
+    chapter: ContentChapter,
+    transcript: dict[str, Any],
+    transcript_features: dict[str, Any],
+    config: Any,
+) -> list[tuple[StoryUnit, dict[str, Any]]]:
+    """Create segment-grounded proposals from an explicit ordered list.
+
+    Transcript segments that contain the transition between two beats may be
+    shared by adjacent proposals.  That preserves the spoken completion around
+    the cue and is recorded as a risk signal; it is never used to suppress a
+    proposal or to replace the parent StoryUnit candidate.
+    """
+
+    parent_segment_ids = set(parent.transcript_segment_ids)
+    segments = [
+        item for index, raw in enumerate(transcript.get("segments", []))
+        if (item := _valid_segment(raw, index)) is not None
+        and int(item["id"]) in parent_segment_ids
+    ]
+    segments.sort(key=lambda item: (float(item["start"]), float(item["end"]), int(item["id"])))
+    cues = _ordered_semantic_beat_cues(segments)
+    if len(cues) < 2:
+        return []
+
+    feature_rows = [item for item in transcript_features.get("segments", []) if isinstance(item, dict)]
+    features = {
+        int(item.get("id", index)): item
+        for index, item in enumerate(feature_rows)
+    }
+    proposals: list[tuple[StoryUnit, dict[str, Any]]] = []
+    for index, cue in enumerate(cues):
+        start_position = 0 if index == 0 else _semantic_beat_start_position(cue, segments)
+        if index + 1 < len(cues):
+            next_cue = cues[index + 1]
+            end_position = int(next_cue["segment_position"])
+        else:
+            end_position = len(segments) - 1
+        if not (0 <= start_position <= end_position < len(segments)):
+            continue
+        group = segments[start_position:end_position + 1]
+        beat_id = f"{parent.story_unit_id}-beat-{int(cue['ordinal']):03d}"
+        beat = _make_story_unit(
+            f"story-beat-{int(cue['ordinal']):03d}", chapter, group, features,
+            config.content_understanding,
+        )
+        # Candidate lineage continues to point at the validated parent StoryUnit
+        # in GlobalContentMap.  The child proposal has its own candidate/beat id
+        # and a beat-specific content signature and evidence range.
+        beat.story_unit_id = parent.story_unit_id
+        beat.evidence = {
+            **beat.evidence,
+            "parent_story_unit_id": parent.story_unit_id,
+            "semantic_beat_id": beat_id,
+            "ordered_cue": {
+                "ordinal": int(cue["ordinal"]),
+                "marker": str(cue["marker"]),
+                "transcript_segment_id": int(cue["segment_id"]),
+                "character_offset": int(cue["character_offset"]),
+            },
+        }
+        beat.multimodal_evidence = {}
+        proposals.append((beat, {
+            "schema_version": SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION,
+            "beat_id": beat_id,
+            "parent_story_unit_id": parent.story_unit_id,
+            "parent_candidate_id": f"candidate-{parent.story_unit_id}",
+            "ordinal": int(cue["ordinal"]),
+            "cue": dict(beat.evidence["ordered_cue"]),
+            "source_range": {"start": beat.start, "end": beat.end},
+            "transcript_segment_ids": list(beat.transcript_segment_ids),
+            "shared_transition_segment_ids": _shared_transition_segment_ids(
+                start_position, end_position, index, cues, segments,
+            ),
+        }))
+    return proposals if len(proposals) >= 2 else []
+
+
+def _ordered_semantic_beat_cues(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for segment_position, segment in enumerate(segments):
+        text = str(segment["text"])
+        for ordinal, pattern in _ORDERED_SEMANTIC_BEAT_MARKERS:
+            match = pattern.search(text)
+            if match is not None:
+                matches.append({
+                    "ordinal": ordinal,
+                    "marker": match.group(0),
+                    "segment_position": segment_position,
+                    "segment_id": int(segment["id"]),
+                    "character_offset": match.start(),
+                    "character_end": match.end(),
+                })
+    matches.sort(key=lambda item: (
+        int(item["segment_position"]), int(item["character_offset"]), int(item["ordinal"]),
+    ))
+    sequence: list[dict[str, Any]] = []
+    expected = 1
+    for item in matches:
+        if int(item["ordinal"]) != expected:
+            continue
+        if sequence and int(item["segment_position"]) == int(sequence[-1]["segment_position"]):
+            # The existing boundary contract cannot establish distinct source
+            # ranges for multiple cues inside one transcript segment.
+            continue
+        sequence.append(item)
+        expected += 1
+    return sequence
+
+
+def _semantic_beat_start_position(cue: dict[str, Any], segments: list[dict[str, Any]]) -> int:
+    position = int(cue["segment_position"])
+    text = str(segments[position]["text"])
+    trailing_tokens = _tokens(text[int(cue["character_end"]):])
+    if not trailing_tokens and position + 1 < len(segments):
+        return position + 1
+    return position
+
+
+def _shared_transition_segment_ids(
+    start_position: int,
+    end_position: int,
+    proposal_index: int,
+    cues: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+) -> list[int]:
+    shared: list[int] = []
+    if proposal_index > 0 and start_position == int(cues[proposal_index]["segment_position"]):
+        shared.append(int(segments[start_position]["id"]))
+    if proposal_index + 1 < len(cues) and end_position == int(cues[proposal_index + 1]["segment_position"]):
+        shared.append(int(segments[end_position]["id"]))
+    return list(dict.fromkeys(shared))
+
+
+def _semantic_beat_candidate_evidence(
+    candidate: Candidate, beat_evidence: dict[str, Any], config: Any,
+) -> dict[str, Any]:
+    risks: list[str] = []
+    if beat_evidence["shared_transition_segment_ids"]:
+        risks.append("SHARED_TRANSITION_SEGMENT")
+    if candidate.duration < float(config.candidate_generation.min_duration_seconds):
+        risks.append("BELOW_CONFIGURED_DURATION")
+    if candidate.duration > float(config.candidate_generation.max_duration_seconds):
+        risks.append("ABOVE_CONFIGURED_DURATION")
+    if candidate.boundary_diagnostics.get("eligible") is False:
+        risks.append("BOUNDARY_REFINEMENT_NEEDED")
+    return {
+        **beat_evidence,
+        "resolved_candidate_range": {"start": candidate.start, "end": candidate.end},
+        "ranking_signals": {
+            "explicit_ordered_structure": True,
+            "ordered_position": int(beat_evidence["ordinal"]),
+            "evidence_grounded": True,
+        },
+        "quality_risks": risks,
+        "permission_gate_applied": False,
+    }
 
 
 def build_semantic_candidate(

@@ -31,6 +31,7 @@ from app.creative_lifecycle import (
 )
 from app.content_understanding import (
     CONTENT_STRATEGY_VERSION,
+    SEMANTIC_CANDIDATE_GENERATION_VERSION,
     build_coverage_map,
     build_global_content_map,
     build_video_content_profile,
@@ -657,6 +658,7 @@ class Pipeline:
                 "multimodal_timeline": _hash(multimodal_timeline),
                 "vision_pass1": _hash(vision_analysis),
                 "candidate_generation": self.config.candidate_generation,
+                "semantic_candidate_generation_version": SEMANTIC_CANDIDATE_GENERATION_VERSION,
                 "multimodal_candidate_version": CANDIDATE_PROVENANCE_SCHEMA_VERSION,
                 "boundary_settings": {
                     "schema_version": self.config.content_understanding.boundary_schema_version,

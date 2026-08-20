@@ -11,13 +11,15 @@ from app.content_understanding import (
     VideoContentProfile,
     build_global_content_map,
     build_video_content_profile,
+    generate_semantic_candidates,
     story_units_artifact,
     validate_global_content_map,
     validate_video_content_profile,
 )
+from app.models import candidate_from_dict
 from app.pipeline import Pipeline, StageTracker
 from app.transcript_features import analyse_transcript
-from app.utils import write_json
+from app.utils import read_json, write_json
 
 
 def _profile(
@@ -318,6 +320,43 @@ def test_story_units_have_grounded_signatures_and_detect_repeated_ideas() -> Non
     artifact = story_units_artifact(content_map, transcript)
     assert artifact["schema_version"] == "5A.1"
     assert len(artifact["story_units"]) == 2
+
+
+def test_gameplay_multi_point_story_unit_adds_grounded_candidates_and_keeps_parent() -> None:
+    fixture = read_json(Path(__file__).parent / "fixtures" / "gameplay_multi_point_story_unit.json", {})
+    content_map, transcript = _content_map(fixture["segments"])
+    chapter = content_map["chapters"][0]
+    story = content_map["story_units"][0]
+    chapter["chapter_id"] = fixture["chapter_id"]
+    story["chapter_id"] = fixture["chapter_id"]
+    story["story_unit_id"] = fixture["story_unit_id"]
+    story["content_signature"]["chapter_id"] = fixture["chapter_id"]
+    config = AppConfig()
+    features = analyse_transcript(transcript, config.transcript_features)
+
+    candidates, count = generate_semantic_candidates(
+        content_map, transcript, features, {"boundaries": []}, config,
+    )
+
+    assert count == 4
+    assert [candidate.id for candidate in candidates] == fixture["expected_candidate_ids"]
+    for candidate, expected_range in zip(candidates, fixture["expected_resolved_ranges"]):
+        assert (candidate.start, candidate.end) == pytest.approx(tuple(expected_range), abs=0.001)
+    parent, *beats = candidates
+    assert parent.id == f"candidate-{fixture['story_unit_id']}"
+    assert "semantic_beat" not in parent.semantic_evidence
+    assert [candidate.transcript_segment_ids for candidate in beats] == fixture["expected_beat_segment_ids"]
+    assert all(candidate.story_unit_id == fixture["story_unit_id"] for candidate in beats)
+    assert all(candidate.story_unit_ids == [fixture["story_unit_id"]] for candidate in beats)
+    assert all(candidate.semantic_evidence["parent_candidate_id"] == parent.id for candidate in beats)
+    assert all(candidate.semantic_evidence["semantic_beat"]["permission_gate_applied"] is False for candidate in beats)
+    assert all(candidate.semantic_evidence["semantic_beat"]["ranking_signals"]["evidence_grounded"] is True for candidate in beats)
+    assert all(candidate.semantic_evidence["semantic_beat"]["quality_risks"] for candidate in beats)
+    assert any(candidate.boundary_diagnostics["eligible"] is False for candidate in beats)
+    assert all(candidate.boundary_diagnostics["boundary_decision"]["candidate_id"] == candidate.id for candidate in candidates)
+    restored = [candidate_from_dict(candidate.to_dict()) for candidate in beats]
+    assert [candidate.id for candidate in restored] == [candidate.id for candidate in beats]
+    assert [candidate.semantic_evidence for candidate in restored] == [candidate.semantic_evidence for candidate in beats]
 
 
 def test_content_map_rejects_ungrounded_or_out_of_chapter_story_unit() -> None:
