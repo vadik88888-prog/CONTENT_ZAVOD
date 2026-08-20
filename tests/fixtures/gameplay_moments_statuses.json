@@ -1,0 +1,79 @@
+{
+  "fixture_version": "moments-selectability.gameplay.1",
+  "evidence_source": "fresh AI+Vision gameplay run b5ec737ca0934a2da633482188adf8ef",
+  "before_moments_counts": {"RECOMMENDED": 0, "AVAILABLE": 1, "BLOCKED": 13},
+  "expected_moments_counts": {"RECOMMENDED": 1, "AVAILABLE": 13, "BLOCKED": 0},
+  "candidates": [
+    {
+      "candidate_id": "candidate-chapter-011-story-001", "start_seconds": 981.85, "end_seconds": 1072.31,
+      "score": 45, "confidence": 0.882, "recommended": true, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "VISUAL_EVIDENCE_UNAVAILABLE"]},
+      "production_feasibility": {"status": "GUARANTEED_BLOCKED", "reason_code": "CAPTION_CPS_INFEASIBLE", "reason": "Caption CPS exceeds the configured production limit.", "blockers": [{"gate": "A-3", "reason_code": "CAPTION_CPS_INFEASIBLE"}]}
+    },
+    {
+      "candidate_id": "candidate-chapter-003-story-001", "start_seconds": 178.95, "end_seconds": 290.27,
+      "score": 44, "confidence": 0.878, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-006-story-001", "start_seconds": 517.42, "end_seconds": 576.18,
+      "score": 44, "confidence": 0.868, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-007-story-001", "start_seconds": 632.44, "end_seconds": 743.76,
+      "score": 43, "confidence": 0.879, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "REFERENCES_EARLIER_CONTENT", "CONTEXT_DEBT_CRITICAL", "VISUAL_EVIDENCE_UNAVAILABLE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-002-story-001", "start_seconds": 62.17, "end_seconds": 179.17,
+      "score": 40, "confidence": 0.855, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-005-story-001", "start_seconds": 404.37, "end_seconds": 472.60,
+      "score": 39, "confidence": 0.879, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-001-story-001", "start_seconds": 2.27, "end_seconds": 53.89,
+      "score": 35, "confidence": 0.889, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["NO_PAYOFF", "FALSE_HOOK_RISK", "VISUAL_EVIDENCE_UNAVAILABLE", "SEMANTIC_INCOMPLETE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-005-story-002", "start_seconds": 472.38, "end_seconds": 518.82,
+      "score": 31, "confidence": 0.858, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "REFERENCES_EARLIER_CONTENT", "CONTEXT_DEBT_CRITICAL", "NO_PAYOFF", "FALSE_HOOK_RISK", "VISUAL_EVIDENCE_UNAVAILABLE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-004-story-001", "start_seconds": 289.69, "end_seconds": 405.05,
+      "score": 31, "confidence": 0.876, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-010-story-001", "start_seconds": 963.11, "end_seconds": 977.76,
+      "score": 29, "confidence": 0.873, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK", "VISUAL_EVIDENCE_UNAVAILABLE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-008-story-001", "start_seconds": 742.56, "end_seconds": 853.46,
+      "score": 26, "confidence": 0.883, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "REFERENCES_EARLIER_CONTENT", "CONTEXT_DEBT_CRITICAL", "NO_PAYOFF", "FALSE_HOOK_RISK"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-009-story-002", "start_seconds": 933.58, "end_seconds": 963.95,
+      "score": 25, "confidence": 0.886, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "REFERENCES_EARLIER_CONTENT", "CONTEXT_DEBT_CRITICAL", "NO_PAYOFF", "FALSE_HOOK_RISK", "VISUAL_EVIDENCE_UNAVAILABLE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-006-story-002", "start_seconds": 575.32, "end_seconds": 632.56,
+      "score": 19, "confidence": 0.869, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK", "VISUAL_EVIDENCE_UNAVAILABLE"]}
+    },
+    {
+      "candidate_id": "candidate-chapter-009-story-001", "start_seconds": 852.54, "end_seconds": 933.83,
+      "score": 18, "confidence": 0.875, "selected_by_recommendation": false,
+      "eligibility_decision": {"state": "assessed", "reason_codes": ["DURATION_OUT_OF_RANGE", "SENTENCE_BOUNDARY_UNRECOVERABLE", "SEMANTIC_INCOMPLETE", "NO_PAYOFF", "FALSE_HOOK_RISK"]}
+    }
+  ]
+}

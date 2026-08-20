@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
-from app.analysis_artifact import AnalysisArtifact
+from app.analysis_artifact import (
+    AnalysisArtifact,
+    _moments_review_candidate,
+    candidate_is_draftable,
+    candidate_review_payload,
+)
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.config import AppConfig
 from app.editorial_profile_policy import (
@@ -190,6 +197,102 @@ def test_real_95_analysis_is_immutable_and_has_only_evidence_backed_integrity_bl
     assert sum(decision.selectable for decision in decisions) == 89
     assert before == after
     assert all(decision.profile_id == "movie_series" for decision in decisions)
+
+
+def test_current_gameplay_moments_keeps_all_quality_and_feasibility_risks_selectable() -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/gameplay_moments_statuses.json").read_text(encoding="utf-8")
+    )
+    candidates = fixture["candidates"]
+    profile = _profile("gameplay")
+    canonical = [
+        evaluate_editorial_candidate(
+            candidate,
+            profile,
+            score=float(candidate["score"]),
+            confidence=float(candidate["confidence"]),
+        )
+        for candidate in candidates
+    ]
+    before_states = [
+        (
+            "BLOCKED"
+            if candidate.get("production_feasibility", {}).get("status")
+            == "GUARANTEED_BLOCKED"
+            else decision.surfacing_state.value
+        )
+        for candidate, decision in zip(candidates, canonical, strict=True)
+    ]
+
+    projected = []
+    for candidate, ranking_decision in zip(candidates, canonical, strict=True):
+        item = _moments_review_candidate(candidate)
+        brain_recommended = (
+            item.get("selected_by_recommendation") is True
+            or ranking_decision.surfacing_state is EditorialSurfacingState.RECOMMENDED
+        )
+        decision = evaluate_editorial_candidate(
+            item,
+            profile,
+            score=float(item["score"]),
+            confidence=float(item["confidence"]),
+            recommended=brain_recommended,
+            production_feasibility=item.get("production_feasibility"),
+        )
+        item.update(
+            editorial_decision=decision.to_dict(),
+            surfacing_state=decision.surfacing_state.value,
+            selectable=decision.selectable,
+        )
+        projected.append(item)
+
+    assert Counter(before_states) == Counter(fixture["before_moments_counts"])
+    assert Counter(item["surfacing_state"] for item in projected) == Counter(
+        fixture["expected_moments_counts"]
+    )
+    assert [
+        item["candidate_id"] for item in projected
+        if item["surfacing_state"] == "RECOMMENDED"
+    ] == ["candidate-chapter-011-story-001"]
+    assert all(candidate_is_draftable(item) for item in projected)
+
+    boundary_risk = projected[1]
+    assert "SENTENCE_BOUNDARY_UNRECOVERABLE" in boundary_risk["editorial_decision"]["soft_issues"]
+    assert boundary_risk["editorial_decision"]["profile_provenance"]["moments_projection"] == {
+        "policy_version": "moments-surfacing.1",
+        "permission_effect": "ranking_and_warning_only",
+        "risk_codes": ["SENTENCE_BOUNDARY_UNRECOVERABLE"],
+    }
+    assert canonical[1].surfacing_state is EditorialSurfacingState.BLOCKED
+    assert canonical[1].selectable is False
+
+    feasibility = projected[0]["production_feasibility"]
+    assert feasibility["status"] == "ADVISORY"
+    assert feasibility["diagnostic_status"] == "GUARANTEED_BLOCKED"
+    assert feasibility["reason_code"] == "CAPTION_CPS_INFEASIBLE"
+    assert feasibility["blockers"] == [
+        {"gate": "A-3", "reason_code": "CAPTION_CPS_INFEASIBLE"}
+    ]
+
+    source_candidate = {
+        "id": candidates[0]["candidate_id"],
+        "start": candidates[0]["start_seconds"],
+        "end": candidates[0]["end_seconds"],
+        "score": candidates[0]["score"],
+        "confidence": candidates[0]["confidence"],
+        "feature_vector": {"transcript_confidence": candidates[0]["confidence"]},
+        "eligibility_decision": candidates[0]["eligibility_decision"],
+        "selection_diagnostics": {
+            "production_feasibility": candidates[0]["production_feasibility"]
+        },
+    }
+    review_payload = candidate_review_payload(source_candidate, set(), profile)
+    assert review_payload["surfacing_state"] == "RECOMMENDED"
+    assert review_payload["selectable"] is True
+    assert review_payload["selected_by_recommendation"] is True
+    assert review_payload["production_feasibility"]["status"] == "ADVISORY"
+    assert review_payload["production_feasibility"]["diagnostic_status"] == "GUARANTEED_BLOCKED"
+    assert "Caption CPS exceeds the configured production limit." in review_payload["warnings"]
 
 
 def test_movie_editorial_weakness_passes_draft_preflight_without_brain_or_vision_rerun(

@@ -17,6 +17,7 @@ from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 
 
 EDITORIAL_PROFILE_POLICY_VERSION = "editorial-profile-policy.1"
+MOMENTS_SURFACING_POLICY_VERSION = "moments-surfacing.1"
 
 
 class EditorialSurfacingState(StrEnum):
@@ -333,10 +334,19 @@ def evaluate_editorial_candidate(
     *,
     score: float | None = None,
     confidence: float | None = None,
-    recommended: bool = False,
+    recommended: bool | None = None,
     production_feasibility: Mapping[str, Any] | None = None,
     source: Mapping[str, Any] | None = None,
 ) -> CandidateEditorialDecision:
+    """Evaluate ranking quality and, when requested, project it for Moments.
+
+    Omitting ``recommended`` keeps the canonical production-facing decision:
+    evidence-backed integrity failures remain blockers.  Moments always passes
+    an explicit Brain recommendation flag.  In that projection the same
+    findings remain ranked risk signals, while only an invalid identity/source
+    range can remove the generated candidate from user selection.
+    """
+
     resolved = resolve_editorial_profile(content_profile, source=source)
     policy = EDITORIAL_PROFILE_POLICIES[resolved.profile_id]
     eligibility = _eligibility_mapping(candidate)
@@ -361,6 +371,14 @@ def evaluate_editorial_candidate(
         hard_blockers.append("INVALID_SOURCE_MAPPING")
     hard_blockers = _unique(hard_blockers)
     soft_issues = _unique(code for code in soft_issues if code not in hard_blockers)
+    assessment_blockers = list(hard_blockers)
+    moments_projection = recommended is not None
+    if moments_projection:
+        hard_blockers = [code for code in hard_blockers if code == "INVALID_SOURCE_MAPPING"]
+        soft_issues = _unique([
+            *soft_issues,
+            *(code for code in assessment_blockers if code not in hard_blockers),
+        ])
     coherent = not _evidence_backed_truncation(candidate, eligibility)
     archetype = _candidate_archetype(candidate, policy)
     strengths = _candidate_strengths(candidate, policy, reason_codes, coherent)
@@ -373,9 +391,13 @@ def evaluate_editorial_candidate(
 
     if hard_blockers:
         surfacing = EditorialSurfacingState.BLOCKED
-    elif recommended or (
-        editorial_score >= policy.recommended_score_threshold
-        and candidate_confidence >= policy.recommended_confidence_floor
+    elif (
+        bool(recommended)
+        if moments_projection
+        else (
+            editorial_score >= policy.recommended_score_threshold
+            and candidate_confidence >= policy.recommended_confidence_floor
+        )
     ):
         surfacing = EditorialSurfacingState.RECOMMENDED
     else:
@@ -389,6 +411,13 @@ def evaluate_editorial_candidate(
         primary_reason = soft_issues[0]
     else:
         primary_reason = "LEGITIMATE_HUMAN_CHOICE"
+    profile_provenance = resolved.to_dict()
+    if moments_projection:
+        profile_provenance["moments_projection"] = {
+            "policy_version": MOMENTS_SURFACING_POLICY_VERSION,
+            "permission_effect": "ranking_and_warning_only",
+            "risk_codes": assessment_blockers,
+        }
     return CandidateEditorialDecision(
         profile_id=resolved.profile_id,
         archetype=archetype,
@@ -399,7 +428,7 @@ def evaluate_editorial_candidate(
         surfacing_state=surfacing,
         selectable=selectable,
         primary_reason=primary_reason,
-        profile_provenance=resolved.to_dict(),
+        profile_provenance=profile_provenance,
     )
 
 

@@ -9,13 +9,13 @@ references needed to load the full scored candidates again for rendering.
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from app.candidate_quality import EligibilityDecision, legacy_eligibility_decision
 from app.editorial_profile_policy import (
-    CandidateEditorialDecision,
     evaluate_editorial_candidate,
 )
 from app.utils import read_json, stable_file_hash, utc_now, write_json
@@ -177,7 +177,10 @@ class AnalysisArtifact:
             work_directory=str(raw.get("work_directory") or ""),
             candidate_data_ref=str(raw.get("candidate_data_ref") or ""),
             references={str(key): str(value) for key, value in dict(raw.get("references") or {}).items()},
-            candidates=[dict(item) for item in raw.get("candidates", []) if isinstance(item, dict)],
+            candidates=[
+                _moments_review_candidate(item)
+                for item in raw.get("candidates", []) if isinstance(item, dict)
+            ],
             recommendation=dict(raw.get("recommendation") or {}),
             summary=dict(raw.get("summary") or {}),
             content_profile=dict(raw.get("content_profile") or {}),
@@ -327,18 +330,34 @@ def candidate_review_payload(
     }
     boundary = _dict_value(candidate.get("boundary_diagnostics"))
     selection_diagnostics = _dict_value(candidate.get("selection_diagnostics"))
-    production_feasibility = _dict_value(selection_diagnostics.get("production_feasibility"))
+    assessed_production_feasibility = _dict_value(
+        selection_diagnostics.get("production_feasibility")
+    )
+    production_feasibility = _moments_production_feasibility(
+        assessed_production_feasibility
+    )
     eligibility_decision = _eligibility_decision(candidate.get("eligibility_decision"))
+    ranking_decision = evaluate_editorial_candidate(
+        candidate,
+        content_profile,
+        score=_optional_float(candidate.get("score")),
+        confidence=confidence,
+        production_feasibility=assessed_production_feasibility,
+        source=source,
+    )
+    brain_recommended = (
+        candidate_id in selected_ids
+        or ranking_decision.surfacing_state.value == "RECOMMENDED"
+    )
     editorial_decision = evaluate_editorial_candidate(
         candidate,
         content_profile,
         score=_optional_float(candidate.get("score")),
         confidence=confidence,
-        recommended=candidate_id in selected_ids,
+        recommended=brain_recommended,
         production_feasibility=production_feasibility,
         source=source,
     )
-    selected = candidate_id in selected_ids and editorial_decision.selectable
     start = _optional_float(candidate.get("start"))
     end = _optional_float(candidate.get("end"))
     duration = _optional_float(candidate.get("duration"))
@@ -408,7 +427,7 @@ def candidate_review_payload(
         },
         "state": "analyzed",
         "recommended": editorial_decision.surfacing_state.value == "RECOMMENDED",
-        "selected_by_recommendation": selected,
+        "selected_by_recommendation": brain_recommended,
         "recommendation_status": editorial_decision.surfacing_state.value.lower(),
         "production_feasibility": production_feasibility,
         "virality_level": potential.get("level") or potential_level,
@@ -418,29 +437,61 @@ def candidate_review_payload(
             *risks,
             *(
                 [str(production_feasibility.get("reason"))]
-                if production_feasibility.get("status") == "GUARANTEED_BLOCKED" else []
+                if assessed_production_feasibility.get("status") == "GUARANTEED_BLOCKED" else []
             ),
         ],
     }
 
 
 def candidate_is_draftable(candidate: object) -> bool:
-    """Return the persisted profile-aware selectability decision."""
+    """Return whether a generated review candidate has a usable source identity.
+
+    Moments quality and feasibility assessments are advisory.  Draft and Final
+    retain their independent integrity checks after the user's selection.
+    """
 
     if not isinstance(candidate, dict):
         return False
-    decision = candidate.get("editorial_decision")
-    if not isinstance(decision, dict):
+    candidate_id = str(candidate.get("candidate_id") or candidate.get("id") or "").strip()
+    if not candidate_id:
         return False
     try:
-        editorial_selectable = CandidateEditorialDecision.from_dict(decision).selectable
+        start = float(
+            candidate.get("start_seconds")
+            if candidate.get("start_seconds") is not None else candidate.get("start")
+        )
+        end = float(
+            candidate.get("end_seconds")
+            if candidate.get("end_seconds") is not None else candidate.get("end")
+        )
     except (TypeError, ValueError):
         return False
-    feasibility = candidate.get("production_feasibility")
-    production_selectable = not (
-        isinstance(feasibility, dict) and feasibility.get("status") == "GUARANTEED_BLOCKED"
-    )
-    return editorial_selectable and production_selectable
+    return math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start
+
+
+def _moments_review_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(candidate)
+    if (
+        projected.get("recommended") is True
+        or projected.get("surfacing_state") == "RECOMMENDED"
+    ):
+        projected["selected_by_recommendation"] = True
+    feasibility = projected.get("production_feasibility")
+    if isinstance(feasibility, dict):
+        projected["production_feasibility"] = _moments_production_feasibility(feasibility)
+    return projected
+
+
+def _moments_production_feasibility(value: object) -> dict[str, Any]:
+    """Keep feasibility evidence while removing its Moments permission effect."""
+
+    projected = _dict_value(value)
+    assessed_status = str(projected.get("diagnostic_status") or projected.get("status") or "")
+    if assessed_status == "GUARANTEED_BLOCKED":
+        projected["diagnostic_status"] = assessed_status
+        projected["status"] = "ADVISORY"
+        projected["selectability_effect"] = "ranking_and_warning_only"
+    return projected
 
 
 def _eligibility_decision(value: object) -> EligibilityDecision:
