@@ -19,10 +19,11 @@ from app.config import load_config
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
 from app.gui.components import VideoPreview
+from app.gui.components.project_poster import project_poster_path
 from app.gui.models import DesktopProject, DesktopSettings, ProjectStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
-from app.gui.services.desktop_services import DesktopServices
+from app.gui.services.desktop_services import DesktopServices, ValidatedSource
 from app.gui.services.pipeline_facade import PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
@@ -150,7 +151,10 @@ def test_settings_manifest_covers_every_current_style_caption_identity() -> None
 
 def test_project_thumbnail_identity_persists_across_store_restart(tmp_path: Path) -> None:
     services, project = _services(tmp_path)
-    poster = project.directory / "thumbnails" / "source-revision.jpg"
+    project.analysis_artifact_path = str(tmp_path / "analysis.json")
+    project.analysis_id = "analysis-kept"
+    project.analysis_fingerprint = "analysis-fingerprint-kept"
+    poster = project_poster_path(project)
     poster.parent.mkdir(parents=True)
     poster.write_bytes(b"exact persisted source frame")
 
@@ -160,6 +164,44 @@ def test_project_thumbnail_identity_persists_across_store_restart(tmp_path: Path
 
     assert reopened.thumbnail_path == str(poster.resolve())
     assert Path(reopened.thumbnail_path).read_bytes() == b"exact persisted source frame"
+    assert reopened.analysis_artifact_path == str(tmp_path / "analysis.json")
+    assert reopened.analysis_id == "analysis-kept"
+    assert reopened.analysis_fingerprint == "analysis-fingerprint-kept"
+
+
+def test_url_download_keeps_youtube_thumbnail_metadata_for_project_poster(tmp_path: Path) -> None:
+    services, _project = _services(tmp_path)
+    thumbnail_url = "https://i.ytimg.com/vi/example/maxresdefault.jpg"
+    project = services.create_url_project(
+        "https://www.youtube.com/watch?v=example",
+        {
+            "title": "Public video",
+            "duration": 90.0,
+            "extractor": "Youtube",
+            "thumbnail_url": thumbnail_url,
+            "width": 1280,
+            "height": 720,
+        },
+    )
+    downloaded = project.directory / "sources" / "public-video.mp4"
+    downloaded.parent.mkdir(parents=True)
+    downloaded.write_bytes(b"downloaded source")
+
+    services.complete_validated_url_download(
+        project,
+        ValidatedSource(downloaded.resolve(), {
+            "duration": 91.0,
+            "width": 1920,
+            "height": 1080,
+            "video_codec": "h264",
+        }),
+    )
+
+    reopened = services.projects.load(project.project_id)
+    assert reopened.source_metadata["thumbnail_url"] == thumbnail_url
+    assert reopened.source_metadata["extractor"] == "Youtube"
+    assert reopened.source_metadata["width"] == 1920
+    assert reopened.source_spec.metadata["thumbnail_url"] == thumbnail_url
 
 
 def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(

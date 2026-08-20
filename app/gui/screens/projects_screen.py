@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.gui.components import CandidateThumbnailLoader, VideoDropZone
+from app.gui.components import ProjectPosterLoader, VideoDropZone
+from app.gui.components.project_poster import project_poster_has_input, project_poster_path
 from app.gui.models import DesktopProject, ProjectPresentation
 from app.gui.responsive import set_responsive_text
 from app.gui.services.error_mapping import dialog_message, map_error
@@ -46,11 +47,9 @@ class ProjectsScreen(QWidget):
         self._compact_source_layout: bool | None = None
         self._thumbnail_labels: dict[str, list[QLabel]] = {}
         self._thumbnail_paths: dict[str, Path] = {}
-        self._thumbnail_loader = CandidateThumbnailLoader(self)
-        self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
-        self._thumbnail_loader.thumbnail_unavailable_with_path.connect(
-            self._thumbnail_unavailable
-        )
+        self._thumbnail_loader = ProjectPosterLoader(self)
+        self._thumbnail_loader.poster_ready.connect(self._thumbnail_ready)
+        self._thumbnail_loader.poster_unavailable.connect(self._thumbnail_unavailable)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 22, 26, 22)
@@ -336,18 +335,13 @@ class ProjectsScreen(QWidget):
         poster.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(poster)
         self._thumbnail_labels.setdefault(project.project_id, []).append(poster)
-        persisted = Path(project.thumbnail_path) if project.thumbnail_path else None
-        if persisted is not None and persisted.is_file():
-            self._apply_thumbnail(project.project_id, persisted)
-            self._thumbnail_paths[project.project_id] = persisted.resolve(strict=False)
-        elif project.source_spec.is_ready and project.source.is_file():
-            destination = self._thumbnail_loader.request(
-                cache_directory=project.directory / "thumbnails",
-                analysis_id="source-poster-v1",
-                candidate_id=project.project_id,
-                source_path=project.source,
-                timestamp_seconds=1.0,
-            )
+        expected = project_poster_path(project).resolve(strict=False)
+        persisted = Path(project.thumbnail_path).resolve(strict=False) if project.thumbnail_path else None
+        if persisted == expected and expected.is_file():
+            self._apply_thumbnail(project.project_id, expected)
+            self._thumbnail_paths[project.project_id] = expected
+        elif project_poster_has_input(project):
+            destination = self._thumbnail_loader.request(project)
             self._thumbnail_paths[project.project_id] = destination.resolve(strict=False)
         else:
             poster.setText("Видео будет доступно после загрузки")

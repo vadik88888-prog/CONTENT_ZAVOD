@@ -144,9 +144,17 @@ class DesktopServices:
         if not source.path.is_relative_to(source_directory):
             raise InputValidationError("Загруженный файл должен находиться в папке проекта.")
         project.source_path = str(source.path)
-        project.source_metadata = source.metadata
+        # Keep inspected URL artwork/provenance while actual media probe facts
+        # take precedence. Project posters can then reuse the real YouTube
+        # thumbnail after download and restart without affecting Analysis.
+        inspected_url_metadata = project.source_metadata
+        source_metadata = dict(source.metadata)
+        for key in ("thumbnail_url", "extractor"):
+            if inspected_url_metadata.get(key):
+                source_metadata[key] = inspected_url_metadata[key]
+        project.source_metadata = source_metadata
         project.source_spec.downloaded_path = str(source.path)
-        project.source_spec.metadata = source.metadata
+        project.source_spec.metadata = dict(source_metadata)
         project.source_spec.download_state = "downloaded"
         project.source_spec.error_message = None
         project.status = ProjectStatus.SOURCE_READY

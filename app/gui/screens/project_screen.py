@@ -27,7 +27,15 @@ from app.content_profile_taxonomy import (
 )
 from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
-from app.gui.components import CandidateThumbnailLoader, FinalOutput, FinalResultsWorkspace, ProcessingProgress, VideoPreview
+from app.gui.components import (
+    CandidateThumbnailLoader,
+    FinalOutput,
+    FinalResultsWorkspace,
+    ProcessingProgress,
+    ProjectPosterLoader,
+    VideoPreview,
+)
+from app.gui.components.project_poster import project_poster_has_input, project_poster_path
 from app.gui.models import DesktopProject, ProcessingSnapshot, ProjectPresentation, ProjectRun, RunKind
 from app.gui.responsive import break_long_tokens, make_label_shrinkable, set_responsive_text
 from app.gui.viewmodels import ProjectViewModel
@@ -195,11 +203,9 @@ class ProjectScreen(QWidget):
         self._thumbnail_loader = CandidateThumbnailLoader(self)
         self._thumbnail_loader.thumbnail_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.thumbnail_unavailable_with_path.connect(self._thumbnail_unavailable)
-        self._project_thumbnail_loader = CandidateThumbnailLoader(self)
-        self._project_thumbnail_loader.thumbnail_ready.connect(self._project_thumbnail_ready)
-        self._project_thumbnail_loader.thumbnail_unavailable_with_path.connect(
-            self._project_thumbnail_unavailable
-        )
+        self._project_thumbnail_loader = ProjectPosterLoader(self)
+        self._project_thumbnail_loader.poster_ready.connect(self._project_thumbnail_ready)
+        self._project_thumbnail_loader.poster_unavailable.connect(self._project_thumbnail_unavailable)
         root = QVBoxLayout(self)
         self._root_layout = root
         root.setContentsMargins(34, 26, 34, 30)
@@ -3849,24 +3855,19 @@ class ProjectScreen(QWidget):
     def _ensure_project_thumbnail(self, project: DesktopProject) -> None:
         """Bind Source/Processing to one durable source-revision poster."""
 
-        persisted = Path(project.thumbnail_path) if project.thumbnail_path else None
-        if persisted is not None and persisted.is_file():
-            self._project_thumbnail_path = persisted.resolve(strict=False)
+        expected = project_poster_path(project).resolve(strict=False)
+        persisted = Path(project.thumbnail_path).resolve(strict=False) if project.thumbnail_path else None
+        if persisted == expected and expected.is_file():
+            self._project_thumbnail_path = expected
             self._paint_project_thumbnail(self._project_thumbnail_path)
             return
-        if not project.source_spec.is_ready or not project.source.is_file():
+        if not project_poster_has_input(project):
             self._project_thumbnail_path = None
             for label in self._project_thumbnail_labels:
                 label.setText("Кадр появится после загрузки")
                 label.setPixmap(QPixmap())
             return
-        destination = self._project_thumbnail_loader.request(
-            cache_directory=project.directory / "thumbnails",
-            analysis_id="source-poster-v1",
-            candidate_id=project.project_id,
-            source_path=project.source,
-            timestamp_seconds=1.0,
-        )
+        destination = self._project_thumbnail_loader.request(project)
         self._project_thumbnail_path = destination.resolve(strict=False)
 
     def _project_thumbnail_ready(self, project_id: str, path: str) -> None:

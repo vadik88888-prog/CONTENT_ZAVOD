@@ -20,12 +20,14 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QCheckBox, QLabel, QPushButton
 
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.draft_artifact import DraftArtifact
 from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.main_window import MainWindow
+from app.gui.components.project_poster import PROJECT_POSTER_MAX_EDGE, PROJECT_POSTER_PROFILE_ID
 from app.gui.models import ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind
 from app.gui.services.desktop_project_store import DesktopProjectStore
 from app.gui.services.desktop_services import DesktopServices
@@ -170,7 +172,10 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
             "caption_preset_version": asset["caption_preset_version"],
             "creative_style_version": asset["creative_style_version"],
             "font_asset_ids": asset["font_asset_ids"],
+            "source_project_poster_visible": not screen.setup_source_poster.pixmap().isNull(),
         }
+        if not stage_evidence["source_project_poster_visible"]:
+            raise AssertionError("Source summary does not show the persisted project poster")
     elif stage == "source":
         cards = window.projects_screen._thumbnail_labels
         visible = [
@@ -179,17 +184,38 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
         ]
         if not visible or any(label.pixmap().isNull() for label in visible):
             raise AssertionError("Projects source cards do not show real persisted posters")
-        persisted = window.projects_screen.viewmodel.services.projects.load(
-            next(iter(cards))
-        )
+        project_id = next(iter(cards))
+        persisted = window.projects_screen.viewmodel.services.projects.load(project_id)
         poster = Path(str(persisted.thumbnail_path or ""))
         if not poster.is_file():
             raise AssertionError("Projects poster identity was not persisted for restart")
+        restarted = DesktopProjectStore(
+            Path(window.projects_screen.viewmodel.services.settings.data_directory)
+        ).load(project_id)
+        source_pixmap = QPixmap(str(poster))
+        if source_pixmap.isNull():
+            raise AssertionError("Persisted project poster cannot be decoded after restart")
+        poster_size = [source_pixmap.width(), source_pixmap.height()]
+        if max(poster_size) != PROJECT_POSTER_MAX_EDGE:
+            raise AssertionError(f"Project poster does not use the HQ profile: {poster_size}")
+        if poster.parent.name != PROJECT_POSTER_PROFILE_ID:
+            raise AssertionError(f"Project poster uses a stale cache profile: {poster.parent.name}")
+        expected_cache = persisted.directory / "thumbnails" / PROJECT_POSTER_PROFILE_ID
+        if not poster.resolve().is_relative_to(expected_cache.resolve()):
+            raise AssertionError("Project poster is not stored in its identity-bound project cache")
         stage_evidence = {
             "real_project_posters": len(visible),
             "persisted_poster_path": str(poster.resolve()),
-            "restart_reload_identity": persisted.thumbnail_path == str(poster.resolve()),
+            "poster_profile": PROJECT_POSTER_PROFILE_ID,
+            "poster_size": poster_size,
+            "poster_bytes": poster.stat().st_size,
+            "identity_bound_project_cache": True,
+            "restart_reload_identity": restarted.thumbnail_path == str(poster.resolve()),
         }
+    elif stage == "processing":
+        if screen.processing_source_poster.pixmap().isNull():
+            raise AssertionError("Processing does not show the persisted project poster")
+        stage_evidence = {"processing_project_poster_visible": True}
     elif stage == "moments":
         detail_text = "\n".join(
             label.text() for label in screen.candidate_detail.findChildren(QLabel)
@@ -369,7 +395,7 @@ def main() -> int:
         _progress("capture source")
         _save_stage(
             application, window, output, "source", args.label, metrics["stages"],
-            media_seconds=3.0,
+            media_seconds=5.0,
         )
 
         real_project = services.projects.load(args.project_id)
