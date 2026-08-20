@@ -148,6 +148,37 @@ def test_ranking_respects_eligibility_floor_and_uses_stable_tie_break():
     assert ranked["rejection_reason"] == "semantic_boundary_violation"
 
 
+def test_virality_report_reflects_successful_semantic_execution() -> None:
+    candidate, story, transcript, audio, *_rest = _diagnostics([
+        "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",
+    ])
+    config = AppConfig()
+    config.virality.semantic_ai_mode = "auto"
+
+    assessments = build_virality_assessments(
+        [candidate], {"story_units": [story.to_dict()]}, transcript, audio, {},
+        {"strategy_id": "motivational_monologue", "analysis_confidence": 0.9}, config.virality,
+        semantic_result={
+            "ai_reranking_used": True,
+            "ai_fallback_used": False,
+            "ai": {
+                "provider": "openai", "model": "gpt-5-mini",
+                "execution_state": "completed", "reason": "semantic_ai_completed",
+                "input_tokens": 12, "output_tokens": 8,
+            },
+        },
+    )
+
+    assert assessments["analysis_mode"] == "semantic_assisted"
+    assert assessments["semantic_ai"] == {
+        "requested_mode": "auto", "used": True, "fallback_used": False,
+        "reason": "semantic_ai_completed", "provider": "openai",
+        "model": "gpt-5-mini", "execution_state": "completed",
+    }
+    assert assessments["cost"]["input_tokens"] == 12
+    assert assessments["cost"]["output_tokens"] == 8
+
+
 def test_profile_weights_apply_only_after_hard_gates_and_cannot_raise_reject() -> None:
     candidate, story, transcript, audio, _profile, _retention, _publishability, _eligibility = _diagnostics([
         "The only reason teams fail is fear.", "Choose one difficult action.", "Therefore, begin now!",

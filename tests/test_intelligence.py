@@ -10,6 +10,7 @@ from app.intelligence_candidates import generate_candidates
 from app.local_scoring import score_candidates
 from app.models import Candidate
 from app.pipeline import Pipeline
+from app.reporting import make_report
 from app.scene_detection import parse_scene_output
 from app.transcript_features import analyse_transcript, candidate_transcript_features
 
@@ -117,9 +118,76 @@ def test_pipeline_ai_error_uses_local_fallback(tmp_path: Path, monkeypatch) -> N
     def unavailable(*args, **kwargs):
         raise RuntimeError("service unavailable")
 
+    monkeypatch.setenv("OPENAI_API_KEY", "test-placeholder")
     monkeypatch.setattr("app.pipeline.get_scorer", unavailable)
     data = Pipeline(tmp_path, AppConfig())._ai_rerank([candidate], [candidate], {"segments": []}, tmp_path / "ai.json")
 
     assert data["ai_fallback_used"]
     assert data["selection_mode"] == "local-fallback"
     assert data["candidates"][0]["score"] == 72
+    assert data["ai"]["provider"] == "openai"
+    assert data["ai"]["reason"] == "provider_unavailable"
+
+
+def test_semantic_ai_auto_reaches_configured_provider_with_virality_enabled(tmp_path: Path, monkeypatch) -> None:
+    candidate = Candidate(
+        "one", 0, 20, "Why this works?", local_quality_score=72,
+        local_scores={"hook": 70, "completeness": 80, "clarity": 70, "context_independence": 70},
+    )
+    calls: list[list[str]] = []
+
+    class Provider:
+        def score(self, candidates, transcript):
+            calls.append([item.id for item in candidates])
+            return local_rank(candidates), {
+                "provider": "openai", "model": "gpt-5-mini",
+                "input_tokens": 12, "output_tokens": 8, "retries": 0, "api_errors": [],
+            }
+
+    config = AppConfig()
+    config.virality.enabled = True
+    config.virality.semantic_ai_mode = "auto"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-placeholder")
+    monkeypatch.setattr("app.pipeline.get_scorer", lambda *_args, **_kwargs: Provider())
+
+    data = Pipeline(tmp_path, config)._ai_rerank(
+        [candidate], [candidate], {"segments": []}, tmp_path / "ai-auto.json",
+    )
+
+    assert calls == [["one"]]
+    assert data["ai_reranking_used"] is True
+    assert data["selection_mode"] == "ai-reranked"
+    assert data["ai"]["provider"] == "openai"
+    assert data["ai"]["execution_state"] == "completed"
+    assert data["ai"]["reason"] == "semantic_ai_completed"
+
+
+def test_missing_semantic_credentials_are_explicit_in_report_without_provider_call(tmp_path: Path, monkeypatch) -> None:
+    candidate = Candidate(
+        "one", 0, 20, "Why this works?", local_quality_score=72,
+        local_scores={"hook": 70, "completeness": 80, "clarity": 70, "context_independence": 70},
+    )
+    config = AppConfig()
+    config.virality.enabled = True
+    config.virality.semantic_ai_mode = "auto"
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "app.pipeline.get_scorer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider must not be constructed")),
+    )
+
+    data = Pipeline(tmp_path, config)._ai_rerank(
+        [candidate], [candidate], {"segments": []}, tmp_path / "ai-missing.json",
+    )
+    report = make_report(
+        tmp_path / "report.json", {}, {}, config, {}, 0, 1, [], [], [], data["ai"], False, False,
+    )
+
+    assert data["ai_reranking_used"] is False
+    assert data["ai_fallback_used"] is True
+    assert report["ai"]["provider"] == "openai"
+    assert report["ai"]["model"] == "gpt-5-mini"
+    assert report["ai"]["execution_state"] == "not_called"
+    assert report["ai"]["reason"] == "missing_credentials"
+    assert report["ai"]["credential_presence"] == "missing"
+    assert report["ai"]["credential_source"] == "environment"

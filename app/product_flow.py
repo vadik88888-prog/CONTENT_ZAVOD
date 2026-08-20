@@ -331,6 +331,31 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     if requested not in DEEP_ANALYSIS_MODES:
         raise ValueError("Unsupported deep analysis mode.")
     metadata = source_metadata or {}
+    effective_profile = metadata.get("effective_profile")
+    if not isinstance(effective_profile, dict):
+        effective_profile = {}
+    detected_profile = metadata.get("detected_profile")
+    if not isinstance(detected_profile, dict):
+        detected_profile = {}
+    detected_format = detected_profile.get("format")
+    if not isinstance(detected_format, dict):
+        detected_format = {}
+    structured_detection = bool(detected_format.get("value"))
+    profile_format = str(
+        detected_format.get("value")
+        or effective_profile.get("format")
+        or ""
+    )
+    detected_traits = detected_profile.get("traits")
+    profile_traits: list[str]
+    if structured_detection and isinstance(detected_traits, list):
+        profile_traits = [
+            str(item.get("value")) for item in detected_traits
+            if isinstance(item, dict) and item.get("value")
+        ]
+    else:
+        raw_profile_traits = effective_profile.get("traits")
+        profile_traits = [str(item) for item in raw_profile_traits] if isinstance(raw_profile_traits, list) else []
     evidence: dict[str, Any] = {}
     for key in (
         "duration", "width", "height", "fps", "visual_activity_score", "scene_density",
@@ -338,19 +363,36 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     ):
         if key in metadata:
             evidence[key] = metadata[key]
+    if profile_format:
+        evidence["profile_format"] = profile_format
+    if profile_traits:
+        evidence["profile_traits"] = [str(item) for item in profile_traits]
+    if not structured_detection and metadata.get("detected_content_type"):
+        evidence["detected_content_type"] = str(metadata["detected_content_type"])
+    if "visual_density" in metadata:
+        evidence["visual_density"] = metadata["visual_density"]
     if requested == "on":
         return DeepAnalysisDecision(requested, True, "Включено по вашему выбору.", evidence, "high")
     if requested == "off":
         return DeepAnalysisDecision(requested, False, "Выключено по вашему выбору.", evidence, "none")
 
-    kind = " ".join(
-        str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename")
-    ).lower()
-    activity = _number(metadata.get("visual_activity_score"))
+    kind = " ".join((
+        *(str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename")),
+        str(metadata.get("detected_content_type", "")) if not structured_detection else "",
+        profile_format,
+        " ".join(str(item) for item in profile_traits),
+    )).lower()
+    activity = _number(
+        metadata.get("visual_activity_score")
+        if metadata.get("visual_activity_score") is not None
+        else metadata.get("visual_density")
+    )
     scene_density = _number(metadata.get("scene_density"))
     speech_ratio = _number(metadata.get("speech_ratio"))
     static_markers = ("podcast", "lecture", "interview", "talking", "talking_head", "webinar", "screen_recording")
     dynamic_markers = ("gameplay", "game", "pubg", "movie", "film", "series", "trailer", "review", "travel", "sport", "concert")
+    if profile_format == "gameplay":
+        return DeepAnalysisDecision("auto", True, "Профиль контента определён как gameplay: события в кадре существенны для анализа.", evidence, "high")
     if any(marker in kind for marker in static_markers):
         return DeepAnalysisDecision("auto", False, "Похоже на разговорный или статичный материал: сначала достаточно анализа речи.", evidence, "low")
     if any(marker in kind for marker in dynamic_markers):

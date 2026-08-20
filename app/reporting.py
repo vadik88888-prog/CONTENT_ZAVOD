@@ -56,15 +56,19 @@ def make_report(
     raw_errors = usage.get("api_errors", [])
     if not isinstance(raw_errors, list):
         raw_errors = [raw_errors]
+    model = usage.get("model") or config.ai.model
     ai = {
         "provider": str(usage.get("provider", "not-called")),
-        "model": str(usage.get("model", config.ai.model)),
+        "model": str(model),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "estimated_cost": price,
         "retries": int(usage.get("retries", 0) or 0),
         "api_errors": [sanitize_api_error(item) for item in raw_errors],
     }
+    for key in ("execution_state", "reason", "credential_presence", "credential_source"):
+        if usage.get(key) is not None:
+            ai[key] = usage[key]
     report = {
         "source": source,
         "source_duration_seconds": metadata.get("duration"),

@@ -13,6 +13,7 @@ from app.gui.services.pipeline_facade import PipelineFacade
 from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
+from app.pipeline import Pipeline
 from app.product_flow import (
     CostPricing,
     ProcessingIntent,
@@ -170,6 +171,40 @@ def test_auto_recommendation_uses_available_content_signals_and_stays_conservati
     assert gameplay.deep_analysis.resolved is True
     assert speech.deep_analysis.resolved is False
     assert unknown.deep_analysis.estimated_benefit == "unknown"
+
+
+def test_vision_auto_is_finalized_from_gameplay_profile_and_explicit_choices_win(tmp_path: Path) -> None:
+    gameplay_profile = {
+        "detected_content_type": "gameplay",
+        "visual_density": 0.8,
+        "detected_profile": {"format": {"value": "gameplay"}},
+        "effective_profile": {"format": "gameplay", "traits": ["visual_led"]},
+    }
+
+    auto_config = load_config()
+    auto_config.product_flow.deep_analysis_requested = "auto"
+    auto_decision = Pipeline(tmp_path / "auto", auto_config)._finalize_deep_analysis(gameplay_profile)
+
+    assert auto_decision.resolved is True
+    assert auto_config.optional_visual_features is True
+    assert auto_config.product_flow.deep_analysis_resolved is True
+    assert auto_decision.evidence["profile_format"] == "gameplay"
+
+    off_config = load_config()
+    off_config.optional_visual_features = True
+    off_config.product_flow.deep_analysis_requested = "off"
+    off_decision = Pipeline(tmp_path / "off", off_config)._finalize_deep_analysis(gameplay_profile)
+
+    assert off_decision.resolved is False
+    assert off_config.optional_visual_features is False
+    assert "вашему выбору" in off_config.product_flow.deep_analysis_reason
+
+    on_config = load_config()
+    on_config.product_flow.deep_analysis_requested = "on"
+    on_decision = Pipeline(tmp_path / "on", on_config)._finalize_deep_analysis({})
+
+    assert on_decision.resolved is True
+    assert on_config.optional_visual_features is True
 
 
 def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() -> None:

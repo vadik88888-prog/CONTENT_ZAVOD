@@ -1766,6 +1766,7 @@ def build_virality_assessments(
     candidates: list[Candidate], content_map: dict[str, Any], transcript_features: dict[str, Any],
     audio_features: dict[str, Any], visual_analysis: dict[str, Any] | None,
     content_profile: dict[str, Any] | None, settings: Any,
+    *, semantic_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build source-scoped deterministic diagnostics without changing source or render data."""
 
@@ -1786,17 +1787,32 @@ def build_virality_assessments(
             "publishability": publishability.to_dict(), "eligibility": eligibility.to_dict(),
         })
     semantic_mode = str(getattr(settings, "semantic_ai_mode", "auto"))
+    usage = dict((semantic_result or {}).get("ai") or {})
+    semantic_used = bool((semantic_result or {}).get("ai_reranking_used", False))
+    fallback_used = bool((semantic_result or {}).get("ai_fallback_used", semantic_mode != "off"))
+    semantic_reason = str(
+        usage.get("reason")
+        or "Grounded deterministic fallback is active; semantic AI execution was not reported."
+    )
+    semantic_ai = {
+        "requested_mode": semantic_mode,
+        "used": semantic_used,
+        "fallback_used": fallback_used,
+        "reason": semantic_reason,
+    }
+    for key in ("provider", "model", "execution_state", "credential_presence", "credential_source"):
+        if usage.get(key) is not None:
+            semantic_ai[key] = usage[key]
     return {
         "schema_version": VIRALITY_SCHEMA_VERSION, "strategy_id": strategy_id,
-        "analysis_mode": "deterministic", "candidates": items,
-        "semantic_ai": {
-            "requested_mode": semantic_mode, "used": False,
-            "fallback_used": semantic_mode != "off",
-            "reason": "Grounded deterministic fallback is active; no semantic AI score was required for this source.",
-        },
+        "analysis_mode": "semantic_assisted" if semantic_used else "deterministic", "candidates": items,
+        "semantic_ai": semantic_ai,
         "cost": {
             "estimated_ai_cost": 0.0, "actual_ai_cost": 0.0, "cache_savings": 0.0,
-            "tokens_per_candidate": 0, "batch_count": 0, "fallback_usage": len(candidates) if semantic_mode != "off" else 0,
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "tokens_per_candidate": 0, "batch_count": 0,
+            "fallback_usage": len(candidates) if fallback_used else 0,
         },
     }
 

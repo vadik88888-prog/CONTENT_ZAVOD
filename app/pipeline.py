@@ -62,7 +62,7 @@ from app.errors import (
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.local_scoring import score_candidates
 from app.media import prepare_media
-from app.models import Candidate, candidate_from_dict, scored_from_dict
+from app.models import Candidate, ScoredCandidate, candidate_from_dict, scored_from_dict
 from app.multimodal_evidence import (
     MULTIMODAL_ANALYSIS_VERSION,
     build_multimodal_timeline,
@@ -95,6 +95,7 @@ from app.production_feasibility import (
     resolve_recommendation_production_feasibility,
     validate_production_feasibility_artifact,
 )
+from app.product_flow import DeepAnalysisDecision, resolve_deep_analysis
 from app.scene_detection import detect_scene_boundaries
 from app.selection import select_clips
 from app.sources import Source, local_source, url_source, validate_source_arguments
@@ -560,6 +561,7 @@ class Pipeline:
             cache_tracker=source_cache,
             validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
         )
+        deep_analysis = self._finalize_deep_analysis(content_profile, metadata)
         vision_provider = None
         if (
             self.config.vision.enabled
@@ -578,6 +580,7 @@ class Pipeline:
                 "timeline": _hash(multimodal_timeline),
                 "boundary_evidence_profile": "genre_neutral",
                 "processing_mode": self.config.product_flow.processing_mode,
+                "deep_analysis": deep_analysis.to_dict(),
                 "vision": self.config.vision,
                 "provider": "mock" if self.mock_ai else self.config.ai.provider,
                 "model": self.config.ai.model,
@@ -591,7 +594,11 @@ class Pipeline:
                 ).analyze_pass1(
                     source=source.path,
                     timeline=multimodal_timeline,
-                    content_type="unknown",
+                    content_type=str(
+                        content_profile.get("detected_content_type")
+                        or (content_profile.get("effective_profile") or {}).get("format")
+                        or "unknown"
+                    ),
                 ),
             ),
             cache_tracker=source_cache,
@@ -714,6 +721,7 @@ class Pipeline:
             {
                 "shortlist": _hash(shortlist_data),
                 "timeline": _hash(multimodal_timeline),
+                "deep_analysis": deep_analysis.to_dict(),
                 "vision": self.config.vision,
                 "processing_mode": self.config.product_flow.processing_mode,
                 "provider": "mock" if self.mock_ai else self.config.ai.provider,
@@ -763,7 +771,16 @@ class Pipeline:
         short_candidates = [rescored_by_id[item.id] for item in short_candidates if item.id in rescored_by_id]
         ai_data = self._cached(
             tracker, "ai_ranking", work_directory / "ai_ranking.json",
-            {"shortlist": _hash(pass2_data), "multimodal_scoring": _hash(multimodal_scoring_data), "ai": self.config.ai, "reranking": self.config.ai_reranking, "mock": self.mock_ai, "disabled": self.no_ai_rerank},
+            {
+                "shortlist": _hash(pass2_data), "multimodal_scoring": _hash(multimodal_scoring_data),
+                "ai": self.config.ai, "reranking": self.config.ai_reranking,
+                "semantic_ai": {
+                    "virality_enabled": self.config.virality.enabled,
+                    "mode": self.config.virality.semantic_ai_mode,
+                    "admission_version": "semantic-auto.1",
+                },
+                "mock": self.mock_ai, "disabled": self.no_ai_rerank,
+            },
             lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
             cache_tracker=source_cache,
         )
@@ -777,6 +794,11 @@ class Pipeline:
                     "source": source.id, "candidates": _hash(multimodal_scoring_data), "content_map": _hash(content_map),
                     "transcript_features": _hash(transcript_features), "audio_features": _hash(audio_features),
                     "visual_features": _hash(visual_analysis), "content_profile": _hash(content_profile),
+                    "semantic_result": _hash({
+                        "ai": ai_data.get("ai", {}),
+                        "ai_reranking_used": ai_data.get("ai_reranking_used", False),
+                        "ai_fallback_used": ai_data.get("ai_fallback_used", False),
+                    }),
                     "virality": {
                         "schema_version": self.config.virality.schema_version,
                         "strategy_version": self.config.virality.strategy_version,
@@ -792,6 +814,7 @@ class Pipeline:
                     build_virality_assessments(
                         [candidate_from_dict(item) for item in multimodal_scoring_data.get("candidates", [])], content_map,
                         transcript_features, audio_features, visual_analysis, content_profile, self.config.virality,
+                        semantic_result=ai_data,
                     ),
                 ),
                 cache_tracker=source_cache,
@@ -964,6 +987,7 @@ class Pipeline:
                 multimodal_timeline=multimodal_timeline,
                 vision_analysis=vision_analysis,
                 vision_pass2=pass2_data,
+                deep_analysis=deep_analysis,
                 content_profile=content_profile,
                 content_map=content_map,
                 story_units=story_units,
@@ -1133,6 +1157,7 @@ class Pipeline:
                 "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {}),
                 "vision_observations_ref": str(work_directory / "vision-observations.json"),
                 "vision": vision_analysis,
+                "deep_analysis": deep_analysis.to_dict(),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "production_feasibility_ref": str(work_directory / "production_feasibility.json"),
@@ -1266,6 +1291,7 @@ class Pipeline:
         multimodal_timeline: dict[str, Any],
         vision_analysis: dict[str, Any],
         vision_pass2: dict[str, Any],
+        deep_analysis: DeepAnalysisDecision,
         content_profile: dict[str, Any],
         content_map: dict[str, Any],
         story_units: dict[str, Any],
@@ -1414,6 +1440,8 @@ class Pipeline:
             "enabled": self.config.virality.enabled,
             "profiles_ref": str(work_directory / "virality_profiles.json") if self.config.virality.enabled else None,
             "ranking_ref": str(work_directory / "virality_ranking.json") if self.config.virality.enabled else None,
+            "cost": dict(virality_profiles.get("cost", {})),
+            "semantic_ai": dict(virality_profiles.get("semantic_ai", {})),
             "candidate_count": len(virality_ranking.get("candidates", [])),
         }
         report_path = output_directory / "report.json"
@@ -1439,6 +1467,7 @@ class Pipeline:
                 "vision_observations_ref": str(work_directory / "vision-observations.json"),
                 "vision_pass2_ref": str(work_directory / "shortlist.vision.json"),
                 "vision": vision_analysis,
+                "deep_analysis": deep_analysis.to_dict(),
                 "story_units_ref": str(work_directory / "story_units.json"),
                 "semantic_boundaries_ref": str(work_directory / "semantic_boundaries.json"),
                 "production_feasibility_ref": str(work_directory / "production_feasibility.json"),
@@ -2575,17 +2604,73 @@ class Pipeline:
         return data
 
     def _ai_rerank(self, candidates: list[Candidate], short_candidates: list[Candidate], transcript: dict[str, Any], path: Path) -> dict[str, Any]:
-        if self.no_ai_rerank or not self.config.ai_reranking.enabled or self.config.virality.enabled:
-            reason = "virality_code_owned" if self.config.virality.enabled else "disabled"
-            data: dict[str, Any] = {"candidates": [item.to_dict() for item in local_rank(candidates)], "ai": _local_ai_usage("disabled"), "ai_reranking_used": False, "ai_fallback_used": False, "selection_mode": "local"}
-            data["ai"]["reason"] = reason
+        semantic_mode = str(self.config.virality.semantic_ai_mode)
+        reason = None
+        if self.no_ai_rerank:
+            reason = "no_ai_rerank_requested"
+        elif not self.config.ai_reranking.enabled:
+            reason = "ai_reranking_disabled"
+        elif self.config.virality.enabled and semantic_mode == "off":
+            reason = "semantic_ai_explicitly_off"
+        if reason is not None:
+            usage = _local_ai_usage(self.config.ai.provider)
+            usage.update({
+                "model": self.config.ai.model,
+                "execution_state": "not_called",
+                "reason": reason,
+            })
+            data: dict[str, Any] = {
+                "candidates": [item.to_dict() for item in local_rank(candidates)],
+                "ai": usage,
+                "ai_reranking_used": False,
+                "ai_fallback_used": False,
+                "selection_mode": "local",
+            }
+            write_json(path, data)
+            return data
+        missing_credential = _missing_ai_credential(self.config, self.mock_ai)
+        if missing_credential:
+            usage = _local_ai_usage(
+                self.config.ai.provider,
+                ["Configured provider credential is not present in the engine environment."],
+            )
+            usage.update({
+                "model": self.config.ai.model,
+                "execution_state": "not_called",
+                "reason": "missing_credentials",
+                "credential_presence": "missing",
+                "credential_source": "environment",
+            })
+            data = {
+                "candidates": [item.to_dict() for item in local_rank(candidates)],
+                "ai": usage,
+                "ai_reranking_used": False,
+                "ai_fallback_used": True,
+                "selection_mode": "local-fallback",
+            }
             write_json(path, data)
             return data
         try:
-            semantic, usage = get_scorer(self.config, self.mock_ai).score(short_candidates, transcript)
-            ai_ok = not usage.get("api_errors")
+            scorer = get_scorer(self.config, self.mock_ai)
         except Exception as error:
-            semantic, usage, ai_ok = [], _local_ai_usage("fallback", [sanitize_api_error(error)]), False
+            semantic: list[ScoredCandidate] = []
+            usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
+            usage.update({"model": self.config.ai.model, "execution_state": "not_called", "reason": "provider_unavailable"})
+            ai_ok = False
+        else:
+            try:
+                semantic, usage = scorer.score(short_candidates, transcript)
+                usage = dict(usage)
+                ai_ok = not usage.get("api_errors")
+                usage.setdefault("provider", self.config.ai.provider)
+                usage.setdefault("model", self.config.ai.model)
+                usage["execution_state"] = "completed" if ai_ok else "failed"
+                usage["reason"] = "semantic_ai_completed" if ai_ok else "provider_call_failed"
+            except Exception as error:
+                semantic = []
+                usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
+                usage.update({"model": self.config.ai.model, "execution_state": "failed", "reason": "provider_call_failed"})
+                ai_ok = False
         data = {
             "candidates": [item.to_dict() for item in merge_ai_ranking(candidates, semantic, ai_ok)],
             "ai": usage,
@@ -2595,6 +2680,16 @@ class Pipeline:
         }
         write_json(path, data)
         return data
+
+    def _finalize_deep_analysis(
+        self, content_profile: dict[str, Any], source_metadata: dict[str, Any] | None = None,
+    ) -> DeepAnalysisDecision:
+        evidence = {**(source_metadata or {}), **content_profile}
+        decision = resolve_deep_analysis(self.config.product_flow.deep_analysis_requested, evidence)
+        self.config.optional_visual_features = decision.resolved
+        self.config.product_flow.deep_analysis_resolved = decision.resolved
+        self.config.product_flow.deep_analysis_reason = decision.reason
+        return decision
 
     # Legacy helper retained for integrations that score an already-built candidate list.
     def _score_candidates(self, candidates: list[Candidate], transcript: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -4834,6 +4929,13 @@ def _write_generated_candidates(path: Path, generated: tuple[list[Candidate], in
 
 def _local_ai_usage(provider: str, errors: list[str] | None = None) -> dict[str, Any]:
     return {"provider": provider, "model": None, "input_tokens": 0, "output_tokens": 0, "retries": 0, "api_errors": errors or []}
+
+
+def _missing_ai_credential(config: AppConfig, force_mock: bool = False) -> str | None:
+    if force_mock or config.mock_ai or config.ai.provider == "mock":
+        return None
+    variable = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}.get(config.ai.provider)
+    return variable if variable and not os.getenv(variable) else None
 
 
 def _audio_handoff_failure_details(error: AudioCompositionError) -> dict[str, Any]:
