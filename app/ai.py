@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 # a failed compact transformation before the deterministic fallback ran.
 TRANSFORMATION_REQUEST_TIMEOUT_SECONDS = 45.0
 
+# Paid semantic-scoring calls use a deliberately small, evidence-only request
+# contract.  Bump this whenever its shape or interpretation changes so the
+# ai_ranking cache cannot reuse an assessment made from a different payload.
+SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.2"
+
 
 class ClipScorer(Protocol):
     name: str
@@ -744,8 +749,135 @@ def get_vision_provider(config: AppConfig, force_mock: bool = False) -> Any:
     return provider
 
 
-def _base_payload(candidates: list[Candidate], transcript: dict[str, Any]) -> dict[str, Any]:
+_SEMANTIC_EVIDENCE_FIELDS = (
+    "hook", "setup", "payoff", "ending", "completeness_score",
+    "context_dependency_score", "information_density",
+)
+_BOUNDARY_SIGNAL_FIELDS = (
+    "word_integrity", "sentence_integrity", "semantic_completion",
+    "context_independence", "head_naturalness", "tail_naturalness",
+    "payoff_preserved", "continuation_risk",
+)
+_SPEECH_SIGNAL_FIELDS = (
+    "transcript_confidence", "speech_density", "words_per_second",
+)
+_AUDIO_EVENT_FIELDS = (
+    "event_type", "start_seconds", "end_seconds", "confidence",
+)
+_VISUAL_OBSERVATION_FIELDS = (
+    "timestamp", "scene_type", "primary_subject", "action", "reaction",
+    "payoff_signal", "on_screen_text", "composition_risk", "confidence",
+    "missing_evidence",
+)
+_VISION_VERIFICATION_FIELDS = (
+    "hook_visible", "action_visible", "reaction_visible", "payoff_visible",
+    "continuity_risk", "confidence",
+)
+_MULTIMODAL_ANCHOR_FIELDS = ("hook", "action", "reaction", "payoff")
+
+
+def _selected_fields(data: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
     return {
+        field: data[field]
+        for field in fields
+        if field in data and data[field] is not None
+    }
+
+
+def _compact_audio_events(provenance: dict[str, Any]) -> list[dict[str, Any]]:
+    events = provenance.get("audio_evidence", [])
+    if not isinstance(events, list):
+        return []
+    return [
+        compact
+        for item in events
+        if isinstance(item, dict)
+        and (compact := _selected_fields(item, _AUDIO_EVENT_FIELDS))
+    ]
+
+
+def _compact_visual_observation(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    nested = item.get("observation")
+    observation = nested if isinstance(nested, dict) else item
+    compact = _selected_fields(observation, _VISUAL_OBSERVATION_FIELDS)
+    if "timestamp" not in compact:
+        timestamp = item.get("timestamp", item.get("start_seconds"))
+        if timestamp is not None:
+            compact["timestamp"] = timestamp
+    return compact
+
+
+def _compact_multimodal_signals(candidate: Candidate) -> dict[str, Any]:
+    provenance = candidate.multimodal_provenance
+    if not isinstance(provenance, dict):
+        provenance = {}
+    generation = provenance.get("generation", {})
+    if not isinstance(generation, dict):
+        generation = {}
+
+    pass2 = candidate.vision_pass2_evidence
+    if not isinstance(pass2, dict):
+        pass2 = {}
+    result = pass2.get("result")
+    if not isinstance(result, dict):
+        result = {}
+    pass2_observations = result.get("observations", [])
+    pass1_observations = provenance.get("visual_evidence", [])
+    if isinstance(pass2_observations, list) and pass2_observations:
+        raw_observations = pass2_observations
+        observation_source = "vision_pass2"
+    elif isinstance(pass1_observations, list) and pass1_observations:
+        raw_observations = pass1_observations
+        observation_source = "vision_pass1"
+    else:
+        raw_observations = []
+        observation_source = "none"
+
+    return {
+        "candidate_kind": candidate.candidate_kind,
+        "anchors": _selected_fields(generation.get("anchors"), _MULTIMODAL_ANCHOR_FIELDS),
+        "audio_events": _compact_audio_events(provenance),
+        "visual_observation_source": observation_source,
+        "visual_observations": [
+            compact
+            for item in raw_observations
+            if (compact := _compact_visual_observation(item))
+        ],
+        "vision_pass2_status": str(pass2.get("status") or "not_available"),
+        "vision_verification": _selected_fields(
+            result.get("verification"), _VISION_VERIFICATION_FIELDS,
+        ),
+    }
+
+
+def _compact_semantic_candidate(candidate: Candidate) -> dict[str, Any]:
+    return {
+        "id": candidate.id,
+        "start": round(candidate.start, 3),
+        "end": round(candidate.end, 3),
+        "duration": round(candidate.duration, 3),
+        "text": candidate.text,
+        "core_idea": candidate.core_idea,
+        "semantic_evidence": _selected_fields(
+            candidate.semantic_evidence, _SEMANTIC_EVIDENCE_FIELDS,
+        ),
+        "boundary_signals": _selected_fields(
+            candidate.boundary_diagnostics, _BOUNDARY_SIGNAL_FIELDS,
+        ),
+        "speech_signals": _selected_fields(
+            candidate.feature_vector, _SPEECH_SIGNAL_FIELDS,
+        ),
+        "multimodal_signals": _compact_multimodal_signals(candidate),
+    }
+
+
+def _semantic_base_payload(candidates: list[Candidate], transcript: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "semantic_payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
         "language": transcript.get("language"),
         "transcript": [
             {
@@ -756,7 +888,7 @@ def _base_payload(candidates: list[Candidate], transcript: dict[str, Any]) -> di
             for segment in transcript.get("segments", [])
             if "start" in segment and "end" in segment
         ],
-        "candidates": [candidate.to_dict() for candidate in candidates],
+        "candidates": [_compact_semantic_candidate(candidate) for candidate in candidates],
     }
 
 
@@ -764,7 +896,7 @@ def build_openai_payload(
     candidates: list[Candidate], transcript: dict[str, Any]
 ) -> dict[str, Any]:
     return {
-        **_base_payload(candidates, transcript),
+        **_semantic_base_payload(candidates, transcript),
         "instruction": (
             "Assess every supplied candidate, not only a best-five list. Scores are integers 0..100. "
             "Ground hook_score, completeness_score, emotional_score, clarity_score and context_dependency_score "
@@ -778,7 +910,7 @@ def build_gemini_payload(
     candidates: list[Candidate], transcript: dict[str, Any]
 ) -> dict[str, Any]:
     return {
-        **_base_payload(candidates, transcript),
+        **_semantic_base_payload(candidates, transcript),
         "instruction": (
             "Assess every supplied candidate for a short vertical clip; do not return only a best-five list. "
             "Return only a JSON array. Every item must contain all fields: "

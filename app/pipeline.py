@@ -10,7 +10,13 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, cast
 
-from app.ai import get_scorer, get_transformer, get_vision_provider, sanitize_api_error
+from app.ai import (
+    SEMANTIC_AI_PAYLOAD_VERSION,
+    get_scorer,
+    get_transformer,
+    get_vision_provider,
+    sanitize_api_error,
+)
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
@@ -780,6 +786,7 @@ class Pipeline:
                     "virality_enabled": self.config.virality.enabled,
                     "mode": self.config.virality.semantic_ai_mode,
                     "admission_version": "semantic-auto.1",
+                    "payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
                 },
                 "mock": self.mock_ai, "disabled": self.no_ai_rerank,
             },
