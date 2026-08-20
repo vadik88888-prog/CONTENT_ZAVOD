@@ -17,6 +17,7 @@ from app.ai import (
     get_vision_provider,
     sanitize_api_error,
 )
+from app.ai_cost import collect_vision_usage
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
@@ -1183,6 +1184,7 @@ class Pipeline:
             virality=virality_report,
             primary_results=[item.to_dict() for item in registry],
             quality_gate=_quality_gate_summary(quality_reports),
+            vision_ai_usage=collect_vision_usage(vision_analysis, pass2_data),
             run={
                 "run_id": self.run_id,
                 "source_id": source.id,
@@ -1490,6 +1492,7 @@ class Pipeline:
             },
             virality=virality_report,
             terminal=terminal,
+            vision_ai_usage=collect_vision_usage(vision_analysis, vision_pass2),
             run={
                 "run_id": self.run_id,
                 "project_id": self.project_id,

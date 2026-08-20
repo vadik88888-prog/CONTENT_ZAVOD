@@ -161,6 +161,8 @@ class CostController:
         self.reserved_input_tokens = 0
         self.reserved_output_tokens = 0
         self.actual_input_tokens = 0
+        self.actual_cached_input_tokens = 0
+        self.actual_cache_write_input_tokens = 0
         self.actual_output_tokens = 0
         self.estimated_cost = 0.0
         self.stop_reason: str | None = None
@@ -211,6 +213,8 @@ class CostController:
 
     def record_usage(self, usage: dict[str, Any]) -> None:
         self.actual_input_tokens += _safe_int(usage.get("input_tokens"))
+        self.actual_cached_input_tokens += _safe_int(usage.get("cached_input_tokens"))
+        self.actual_cache_write_input_tokens += _safe_int(usage.get("cache_write_input_tokens"))
         self.actual_output_tokens += _safe_int(usage.get("output_tokens"))
 
     def diagnostics(self) -> dict[str, Any]:
@@ -227,6 +231,8 @@ class CostController:
             "reserved_output_tokens": self.reserved_output_tokens,
             "reserved_total_tokens": self.reserved_input_tokens + self.reserved_output_tokens,
             "input_tokens": self.actual_input_tokens,
+            "cached_input_tokens": self.actual_cached_input_tokens,
+            "cache_write_input_tokens": self.actual_cache_write_input_tokens,
             "output_tokens": self.actual_output_tokens,
             "total_tokens": self.actual_input_tokens + self.actual_output_tokens,
             "estimated_cost": round(actual_cost, 8),

@@ -60,7 +60,11 @@ def test_openai_provider_maps_structured_response() -> None:
     candidate = _candidate()
     responses = _FakeResponses(SimpleNamespace(
         output_text=json.dumps({"candidates": [_structured_item(candidate)]}),
-        usage=SimpleNamespace(input_tokens=123, output_tokens=45),
+        usage=SimpleNamespace(
+            input_tokens=123,
+            output_tokens=45,
+            input_tokens_details=SimpleNamespace(cached_tokens=80, cache_write_tokens=30),
+        ),
     ))
     provider = OpenAIProvider(
         AppConfig(ai=AIConfig(model="gpt-5-mini")),
@@ -75,6 +79,8 @@ def test_openai_provider_maps_structured_response() -> None:
     assert usage["provider"] == "openai"
     assert usage["model"] == "gpt-5-mini"
     assert usage["input_tokens"] == 123
+    assert usage["cached_input_tokens"] == 80
+    assert usage["cache_write_input_tokens"] == 30
     assert usage["output_tokens"] == 45
     call = responses.calls[0]
     assert call["model"] == "gpt-5-mini"
@@ -127,7 +133,11 @@ def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema(
     }
     responses = _FakeResponses(SimpleNamespace(
         output_text=json.dumps({"observations": [observation]}),
-        usage=SimpleNamespace(input_tokens=321, output_tokens=87),
+        usage=SimpleNamespace(
+            input_tokens=321,
+            output_tokens=87,
+            input_tokens_details={"cached_tokens": 200, "cache_write_tokens": 50},
+        ),
         request_id="request-vision-1",
     ))
     provider = OpenAIProvider(
@@ -142,6 +152,8 @@ def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema(
 
     assert payload["observations"][0]["keyframe_id"] == "keyframe-1"
     assert usage["input_tokens"] == 321
+    assert usage["cached_input_tokens"] == 200
+    assert usage["cache_write_input_tokens"] == 50
     assert len(responses.calls) == 1
     call = responses.calls[0]
     assert call["max_output_tokens"] == 500

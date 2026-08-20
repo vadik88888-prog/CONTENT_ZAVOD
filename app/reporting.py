@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from app.ai import sanitize_api_error
+from app.ai_cost import calculate_ai_cost_telemetry
 from app.config import AppConfig
 from app.utils import write_json
 
@@ -36,6 +37,7 @@ def make_report(
     primary_results: list[dict[str, Any]] | None = None,
     quality_gate: dict[str, Any] | None = None,
     run: dict[str, Any] | None = None,
+    vision_ai_usage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stages = state.get("stages", {})
     durations = {
@@ -43,28 +45,51 @@ def make_report(
         for name, stage in stages.items()
     }
     total = round(sum(durations.values()), 3)
-    usage = ai_usage or {}
+    usage = dict(ai_usage or {})
     input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cached_input_tokens = int(usage.get("cached_input_tokens", 0) or 0)
+    cache_write_input_tokens = int(usage.get("cache_write_input_tokens", 0) or 0)
     output_tokens = int(usage.get("output_tokens", 0) or 0)
-    price = None
-    if config.ai.input_token_price is not None or config.ai.output_token_price is not None:
-        price = round(
-            input_tokens * (config.ai.input_token_price or 0)
-            + output_tokens * (config.ai.output_token_price or 0),
-            8,
-        )
     raw_errors = usage.get("api_errors", [])
     if not isinstance(raw_errors, list):
         raw_errors = [raw_errors]
+    sanitized_errors = [sanitize_api_error(item) for item in raw_errors]
+    usage["api_errors"] = sanitized_errors
+    sanitized_vision_usage: list[dict[str, Any]] = []
+    for record in vision_ai_usage or []:
+        if not isinstance(record, dict):
+            continue
+        safe_record = dict(record)
+        record_errors = safe_record.get("api_errors", [])
+        if not isinstance(record_errors, list):
+            record_errors = [record_errors]
+        safe_record["api_errors"] = [sanitize_api_error(item) for item in record_errors]
+        sanitized_vision_usage.append(safe_record)
+    ai_cost = calculate_ai_cost_telemetry(
+        usage,
+        sanitized_vision_usage,
+        source_duration_seconds=metadata.get("duration"),
+        default_provider=config.ai.provider,
+        default_model=config.ai.model,
+    )
+    semantic_cost = ai_cost["semantic"]["cost_usd"]["total"]
+    vision_cost = ai_cost["vision"]["cost_usd"]["total"]
+    total_ai_cost = ai_cost["total_cost_usd"]
     model = usage.get("model") or config.ai.model
     ai = {
         "provider": str(usage.get("provider", "not-called")),
         "model": str(model),
         "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_write_input_tokens": cache_write_input_tokens,
         "output_tokens": output_tokens,
-        "estimated_cost": price,
+        "semantic_cost_usd": semantic_cost,
+        "vision_cost_usd": vision_cost,
+        "calculated_cost_usd": total_ai_cost,
+        # Backward-compatible Friend Beta summary; the detailed owner is ai_cost.
+        "estimated_cost": total_ai_cost,
         "retries": int(usage.get("retries", 0) or 0),
-        "api_errors": [sanitize_api_error(item) for item in raw_errors],
+        "api_errors": sanitized_errors,
     }
     for key in ("execution_state", "reason", "credential_presence", "credential_source"):
         if usage.get(key) is not None:
@@ -82,6 +107,7 @@ def make_report(
         "warnings": warnings,
         "errors": errors,
         "ai": ai,
+        "ai_cost": ai_cost,
         "clip_intelligence": clip_intelligence or {},
         "content_transformation": content_transformation or {"enabled": False, "status": "skipped"},
         "production_plan": production_plan or {"enabled": False, "status": "skipped"},

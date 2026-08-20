@@ -214,6 +214,35 @@ def test_cost_controller_stops_before_a_call_that_exceeds_any_hard_limit(tmp_pat
     assert controller.stop_reason == "token_budget_exhausted"
 
 
+def test_cached_usage_is_telemetry_only_and_does_not_change_vision_admission_cost() -> None:
+    config = _config()
+    controller = CostController(VisionBudget("standard", 8, 4, 10_000, 1.0, 8), config)
+
+    reservation = controller.reserve(1, "low")
+    assert reservation is not None
+    expected_reservation_cost = (
+        reservation.input_tokens * float(config.ai.input_token_price or 0)
+        + reservation.output_tokens * float(config.ai.output_token_price or 0)
+    )
+    assert reservation.estimated_cost == pytest.approx(expected_reservation_cost)
+
+    controller.record_usage({
+        "input_tokens": 100,
+        "cached_input_tokens": 80,
+        "cache_write_input_tokens": 20,
+        "output_tokens": 10,
+    })
+    usage = controller.diagnostics()
+    assert usage["cached_input_tokens"] == 80
+    assert usage["cache_write_input_tokens"] == 20
+    assert usage["estimated_cost"] == round(
+        100 * float(config.ai.input_token_price or 0)
+        + 10 * float(config.ai.output_token_price or 0),
+        8,
+    )
+    assert usage["hard_budget_consumed_estimated_cost"] == round(expected_reservation_cost, 8)
+
+
 def test_provider_or_schema_failure_falls_back_without_breaking_pipeline(tmp_path: Path) -> None:
     for provider in (_Provider(fail=True), _Provider(malformed=True)):
         artifact = VisionGateway(

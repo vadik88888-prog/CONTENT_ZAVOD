@@ -202,6 +202,9 @@ def _usage(
     model: str,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    *,
+    cached_input_tokens: int = 0,
+    cache_write_input_tokens: int = 0,
     retries: int = 0,
     api_errors: list[str] | None = None,
     started: float | None = None,
@@ -212,6 +215,8 @@ def _usage(
         "provider": provider,
         "model": model,
         "input_tokens": int(input_tokens),
+        "cached_input_tokens": int(cached_input_tokens),
+        "cache_write_input_tokens": int(cache_write_input_tokens),
         "output_tokens": int(output_tokens),
         "retries": int(retries),
         "api_errors": api_errors or [],
@@ -224,6 +229,30 @@ def _usage(
     if response_status is not None:
         data["response_status"] = response_status
     return data
+
+
+def _openai_cached_input_tokens(usage: Any) -> int:
+    details = getattr(usage, "input_tokens_details", None)
+    if isinstance(details, dict):
+        value = details.get("cached_tokens", 0)
+    else:
+        value = getattr(details, "cached_tokens", 0)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _openai_cache_write_input_tokens(usage: Any) -> int:
+    details = getattr(usage, "input_tokens_details", None)
+    if isinstance(details, dict):
+        value = details.get("cache_write_tokens", 0)
+    else:
+        value = getattr(details, "cache_write_tokens", 0)
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass(slots=True)
@@ -406,6 +435,8 @@ class OpenAIProvider:
                     self.config.ai.model,
                     getattr(usage, "input_tokens", 0) or 0,
                     getattr(usage, "output_tokens", 0) or 0,
+                    cached_input_tokens=_openai_cached_input_tokens(usage),
+                    cache_write_input_tokens=_openai_cache_write_input_tokens(usage),
                     retries=attempt,
                     api_errors=errors,
                     started=started,
@@ -469,6 +500,8 @@ class OpenAIProvider:
             self.name, self.config.ai.model,
             getattr(usage, "input_tokens", 0) or 0,
             getattr(usage, "output_tokens", 0) or 0,
+            cached_input_tokens=_openai_cached_input_tokens(usage),
+            cache_write_input_tokens=_openai_cache_write_input_tokens(usage),
             started=started,
             request_id=str(request_id) if request_id else None,
             response_status=200,
@@ -527,6 +560,8 @@ class OpenAIProvider:
                     self.name, self.config.ai.model,
                     getattr(usage, "input_tokens", 0) or 0,
                     getattr(usage, "output_tokens", 0) or 0,
+                    cached_input_tokens=_openai_cached_input_tokens(usage),
+                    cache_write_input_tokens=_openai_cache_write_input_tokens(usage),
                     retries=attempt, api_errors=errors, started=started,
                     request_id=str(request_id) if request_id else None, response_status=200,
                 )
@@ -570,6 +605,8 @@ class OpenAIProvider:
                     self.name, self.config.ai.model,
                     getattr(response_usage, "input_tokens", 0) or 0,
                     getattr(response_usage, "output_tokens", 0) or 0,
+                    cached_input_tokens=_openai_cached_input_tokens(response_usage),
+                    cache_write_input_tokens=_openai_cache_write_input_tokens(response_usage),
                     retries=attempt, api_errors=errors, started=started,
                     request_id=str(request_id) if request_id else None, response_status=200,
                 )
