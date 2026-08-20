@@ -25,7 +25,45 @@ TRANSFORMATION_REQUEST_TIMEOUT_SECONDS = 45.0
 # Paid semantic-scoring calls use a deliberately small, evidence-only request
 # contract.  Bump this whenever its shape or interpretation changes so the
 # ai_ranking cache cannot reuse an assessment made from a different payload.
-SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.2"
+SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.3"
+
+SEMANTIC_FACTOR_CONTRACT: dict[str, Any] = {
+    "scale": {
+        "minimum": 0,
+        "maximum": 100,
+        "judgment": (
+            "Make an independent semantic assessment from the supplied evidence. "
+            "Evidence values are inputs, not target scores; do not copy or mechanically "
+            "rescale local/code scores."
+        ),
+    },
+    "hook_score": {
+        "zero": "The opening gives no credible reason to continue watching.",
+        "hundred": (
+            "The opening is an exceptionally strong, evidence-grounded reason "
+            "to continue watching."
+        ),
+    },
+    "completeness_score": {
+        "zero": "The candidate has no coherent or resolved semantic unit.",
+        "hundred": "The candidate delivers a fully coherent and resolved semantic unit.",
+    },
+    "emotional_score": {
+        "zero": "The evidence supports no emotional or reaction impact.",
+        "hundred": "The evidence supports exceptionally strong emotional or reaction impact.",
+    },
+    "clarity_score": {
+        "zero": "The candidate is not understandable or internally coherent.",
+        "hundred": "The candidate is immediately understandable and internally coherent.",
+    },
+    "context_dependency_score": {
+        "zero": "The candidate is completely understandable on its own.",
+        "hundred": "Understanding the candidate requires previous or external context.",
+        "direction": (
+            "Higher means more context dependency; it never means more context independence."
+        ),
+    },
+}
 
 
 class ClipScorer(Protocol):
@@ -37,6 +75,19 @@ class ClipScorer(Protocol):
         """Score candidates and return provider metadata safe for report.json."""
 
 
+def _factor_score_property(field: str) -> dict[str, Any]:
+    contract = SEMANTIC_FACTOR_CONTRACT[field]
+    description = f"0: {contract['zero']} 100: {contract['hundred']}"
+    if direction := contract.get("direction"):
+        description = f"{description} {direction}"
+    return {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "description": description,
+    }
+
+
 _SCORE_PROPERTIES: dict[str, Any] = {
     "candidate_id": {"type": "string"},
     "start": {"type": "number"},
@@ -45,11 +96,11 @@ _SCORE_PROPERTIES: dict[str, Any] = {
     "hook": {"type": "string"},
     "summary": {"type": "string"},
     "score": {"type": "integer", "minimum": 0, "maximum": 100},
-    "hook_score": {"type": "integer", "minimum": 0, "maximum": 100},
-    "completeness_score": {"type": "integer", "minimum": 0, "maximum": 100},
-    "emotional_score": {"type": "integer", "minimum": 0, "maximum": 100},
-    "clarity_score": {"type": "integer", "minimum": 0, "maximum": 100},
-    "context_dependency_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "hook_score": _factor_score_property("hook_score"),
+    "completeness_score": _factor_score_property("completeness_score"),
+    "emotional_score": _factor_score_property("emotional_score"),
+    "clarity_score": _factor_score_property("clarity_score"),
+    "context_dependency_score": _factor_score_property("context_dependency_score"),
     "rejection_reason": {"type": ["string", "null"]},
     "selected": {"type": "boolean"},
 }
@@ -751,12 +802,12 @@ def get_vision_provider(config: AppConfig, force_mock: bool = False) -> Any:
 
 _SEMANTIC_EVIDENCE_FIELDS = (
     "hook", "setup", "payoff", "ending", "completeness_score",
-    "context_dependency_score", "information_density",
+    "information_density",
 )
 _BOUNDARY_SIGNAL_FIELDS = (
     "word_integrity", "sentence_integrity", "semantic_completion",
-    "context_independence", "head_naturalness", "tail_naturalness",
-    "payoff_preserved", "continuation_risk",
+    "head_naturalness", "tail_naturalness", "payoff_preserved",
+    "continuation_risk",
 )
 _SPEECH_SIGNAL_FIELDS = (
     "transcript_confidence", "speech_density", "words_per_second",
@@ -878,6 +929,10 @@ def _compact_semantic_candidate(candidate: Candidate) -> dict[str, Any]:
 def _semantic_base_payload(candidates: list[Candidate], transcript: dict[str, Any]) -> dict[str, Any]:
     return {
         "semantic_payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
+        "factor_contract": {
+            field: dict(definition)
+            for field, definition in SEMANTIC_FACTOR_CONTRACT.items()
+        },
         "language": transcript.get("language"),
         "transcript": [
             {
@@ -899,9 +954,11 @@ def build_openai_payload(
         **_semantic_base_payload(candidates, transcript),
         "instruction": (
             "Assess every supplied candidate, not only a best-five list. Scores are integers 0..100. "
-            "Ground hook_score, completeness_score, emotional_score, clarity_score and context_dependency_score "
-            "in the supplied candidate evidence. The application ignores AI score/selected for final scoring, "
-            "ranking and selection. Return only candidate_id values from the input and never change start/end."
+            "Apply factor_contract to all five factor fields. Make an independent assessment from the full "
+            "transcript and the supplied semantic, speech, audio and Vision evidence; evidence values are not "
+            "target scores and must not be copied or mechanically rescaled. The application ignores AI "
+            "score/selected for final scoring, ranking and selection. Return only candidate_id values from the "
+            "input and never change start/end."
         ),
     }
 
@@ -915,8 +972,11 @@ def build_gemini_payload(
             "Assess every supplied candidate for a short vertical clip; do not return only a best-five list. "
             "Return only a JSON array. Every item must contain all fields: "
             + ", ".join(AI_FIELDS)
-            + ". Scores are integer 0..100. Do not change start/end. Ground factor fields in candidate evidence. "
-            "The application ignores AI score/selected and owns final scoring, ranking and selection."
+            + ". Scores are integer 0..100. Do not change start/end. Apply factor_contract to all five factor "
+            "fields. Make an independent assessment from the full transcript and supplied semantic, speech, "
+            "audio and Vision evidence; evidence values are not target scores and must not be copied or "
+            "mechanically rescaled. The application ignores AI score/selected and owns final scoring, ranking "
+            "and selection."
         ),
     }
 

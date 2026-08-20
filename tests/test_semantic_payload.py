@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from app.ai import SEMANTIC_AI_PAYLOAD_VERSION, build_openai_payload
+from app.ai import (
+    OPENAI_SCORE_RESPONSE_SCHEMA,
+    SEMANTIC_AI_PAYLOAD_VERSION,
+    build_openai_payload,
+)
 from app.models import Candidate
 
 
@@ -160,6 +164,7 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     }
 
     assert payload["semantic_payload_version"] == SEMANTIC_AI_PAYLOAD_VERSION
+    assert payload["semantic_payload_version"] == "semantic-score.3"
     assert payload["transcript"] == [
         {
             "start": 0.0,
@@ -180,8 +185,10 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     }
     assert set(compact["semantic_evidence"]) == {
         "hook", "setup", "payoff", "ending", "completeness_score",
-        "context_dependency_score", "information_density",
+        "information_density",
     }
+    assert "context_dependency_score" not in compact["semantic_evidence"]
+    assert "context_independence" not in compact["boundary_signals"]
     assert compact["boundary_signals"]["payoff_preserved"] is True
     assert compact["speech_signals"] == {
         "transcript_confidence": 0.96,
@@ -215,6 +222,54 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     assert persisted["multimodal_provenance"]["transcript_evidence"]
     assert persisted["vision_pass2_evidence"]["result"]["diagnostics"]
     assert _serialized_size(legacy_payload) >= _serialized_size(payload) * 4
+
+
+def test_context_dependency_factor_contract_has_one_noninverted_polarity() -> None:
+    candidate = _evidence_heavy_candidate()
+    payload = build_openai_payload(
+        [candidate],
+        {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0,
+                    "end": 40,
+                    "text": "The full transcript provides prior and external context.",
+                }
+            ],
+        },
+    )
+
+    contract = payload["factor_contract"]
+    assert set(contract) == {
+        "scale", "hook_score", "completeness_score", "emotional_score",
+        "clarity_score", "context_dependency_score",
+    }
+    assert contract["scale"]["minimum"] == 0
+    assert contract["scale"]["maximum"] == 100
+    dependency = contract["context_dependency_score"]
+    assert dependency["zero"] == "The candidate is completely understandable on its own."
+    assert dependency["hundred"] == (
+        "Understanding the candidate requires previous or external context."
+    )
+    assert dependency["direction"] == (
+        "Higher means more context dependency; it never means more context independence."
+    )
+
+    compact = payload["candidates"][0]
+    assert "context_dependency_score" not in compact["semantic_evidence"]
+    assert "context_independence" not in compact["boundary_signals"]
+    assert "independent assessment" in payload["instruction"]
+    assert "must not be copied or mechanically rescaled" in payload["instruction"]
+
+    response_property = OPENAI_SCORE_RESPONSE_SCHEMA["properties"]["candidates"][
+        "items"
+    ]["properties"]["context_dependency_score"]
+    assert response_property["minimum"] == 0
+    assert response_property["maximum"] == 100
+    assert dependency["zero"] in response_property["description"]
+    assert dependency["hundred"] in response_property["description"]
+    assert dependency["direction"] in response_property["description"]
 
 
 def test_semantic_payload_keeps_concise_pass1_signals_when_pass2_is_unavailable() -> None:
