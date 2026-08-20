@@ -246,7 +246,9 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
     }
     Pipeline(tmp_path, profile_override, mock_ai=True).run(input_path=str(source))
 
-    assert calls == {"profile": 2, "map": 1, "boundaries": 2}
+    # The manual gameplay profile preserves the evidence-only content map, but
+    # its accepted Vision admission invalidates the dependent boundaries.
+    assert calls == {"profile": 2, "map": 1, "boundaries": 3}
     report = read_json(first_result.report_path, {})
     understanding = report["content_understanding"]
     assert understanding["coverage_map"]["schema_version"] == "5A.1"

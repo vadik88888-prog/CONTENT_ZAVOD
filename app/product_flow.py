@@ -347,19 +347,16 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     effective_format = str(effective_profile.get("format") or "")
     format_resolution = str(effective_resolution.get("format") or "")
     profile_format = ""
-    if (
-        format_resolution == "detected"
-        and effective_format
-        and effective_format == detected_format_value
-    ) or (format_resolution == "legacy_migration" and effective_format):
+    accepted_resolutions = {"detected", "manual_override", "legacy_migration"}
+    if effective_format and format_resolution in accepted_resolutions:
         profile_format = effective_format
-    has_structured_profile = bool(detected_format_value or effective_format)
+    has_structured_profile = bool(detected_profile or effective_profile)
     raw_profile_traits = effective_profile.get("traits")
     traits_resolution = str(effective_resolution.get("traits") or "")
     profile_traits = (
         [str(item) for item in raw_profile_traits]
         if isinstance(raw_profile_traits, list)
-        and traits_resolution in {"detected", "legacy_migration"}
+        and traits_resolution in accepted_resolutions
         else []
     )
     evidence: dict[str, Any] = {}
@@ -392,12 +389,13 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     if requested == "off":
         return DeepAnalysisDecision(requested, False, "Выключено по вашему выбору.", evidence, "none")
 
-    kind = " ".join((
-        *(str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename")),
-        str(metadata.get("detected_content_type", "")) if not has_structured_profile else "",
-        profile_format,
-        " ".join(str(item) for item in profile_traits),
-    )).lower()
+    raw_marker_sources = (
+        tuple(str(metadata.get(key, "")) for key in ("content_kind", "genre", "title", "filename"))
+        + (str(metadata.get("detected_content_type", "")),)
+        if not has_structured_profile
+        else ()
+    )
+    kind = " ".join((*raw_marker_sources, profile_format, " ".join(profile_traits))).lower()
     activity = _number(
         metadata.get("visual_activity_score")
         if metadata.get("visual_activity_score") is not None

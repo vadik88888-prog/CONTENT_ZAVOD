@@ -233,7 +233,9 @@ def test_vision_auto_rejects_low_confidence_filename_only_gameplay_profile(tmp_p
     config = load_config()
     config.product_flow.deep_analysis_requested = "auto"
 
-    decision = Pipeline(tmp_path, config)._finalize_deep_analysis(weak_profile)
+    decision = Pipeline(tmp_path, config)._finalize_deep_analysis(
+        weak_profile, {"filename": "pubg-gameplay.mp4"},
+    )
 
     assert decision.resolved is False
     assert config.optional_visual_features is False
@@ -242,6 +244,33 @@ def test_vision_auto_rejects_low_confidence_filename_only_gameplay_profile(tmp_p
     assert decision.evidence["effective_profile_format"] == "unknown"
     assert decision.evidence["profile_format_resolution"] == "safe_fallback"
     assert "profile_format" not in decision.evidence
+
+
+def test_vision_auto_accepts_manual_override_gameplay_profile(tmp_path: Path) -> None:
+    manual_profile = {
+        "detected_content_type": "interview",
+        "detected_profile": {
+            "format": {
+                "value": "talking_head", "confidence": 0.91,
+                "evidence": ["transcript:speech_led"],
+            },
+        },
+        "effective_profile": {
+            "format": "gameplay", "traits": ["visual_led"],
+            "resolution": {"format": "manual_override", "traits": "manual_override"},
+        },
+    }
+    config = load_config()
+    config.product_flow.deep_analysis_requested = "auto"
+
+    decision = Pipeline(tmp_path, config)._finalize_deep_analysis(
+        manual_profile, {"filename": "podcast-interview.mp4"},
+    )
+
+    assert decision.resolved is True
+    assert config.optional_visual_features is True
+    assert decision.evidence["profile_format"] == "gameplay"
+    assert decision.evidence["profile_format_resolution"] == "manual_override"
 
 
 def test_auto_preset_recommendation_resolves_effective_preset_with_provenance() -> None:
