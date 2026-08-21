@@ -253,6 +253,96 @@ def test_profile_matching_is_word_aware_and_editorial_intent_is_not_detection_ev
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "proposed_profile"),
+    (
+        ("A question remains.", "interview"),
+        ("This story continues.", "story_entertainment"),
+        ("Here is a review.", "review"),
+    ),
+)
+def test_single_generic_transcript_keyword_is_not_admitted(
+    text: str, proposed_profile: str,
+) -> None:
+    data = _profile(text)
+    proposal = data["detected_profile"]["profile_id"]
+
+    assert proposal["value"] == proposed_profile
+    assert proposal["admitted"] is False
+    assert proposal["confidence"] < 0.45
+    assert "admission:insufficient_independent_evidence" in proposal["evidence"]
+    assert data["effective_profile"]["profile_id"] == "unknown"
+    assert data["effective_profile_reason"] == "auto_low_confidence_conservative_fallback"
+
+
+def test_conflicting_weak_profile_signals_use_conservative_fallback() -> None:
+    data = _profile("This review starts a story.")
+    proposal = data["detected_profile"]["profile_id"]
+
+    assert proposal["admitted"] is False
+    assert proposal["confidence"] < 0.45
+    assert "admission:conflicting_profile_evidence" in proposal["evidence"]
+    assert data["effective_profile"]["profile_id"] == "unknown"
+    assert data["effective_profile_reason"] == "auto_low_confidence_conservative_fallback"
+
+
+def test_single_strong_unambiguous_structured_signal_can_be_admitted() -> None:
+    data = _profile(
+        "Neutral source material without category terms.",
+        visual_analysis={
+            "status": "completed",
+            "evidence_status": "observed",
+            "sample_count": 1,
+            "subject_keyframes": [{"scene_type": "GAMEPLAY"}],
+        },
+    )
+    proposal = data["detected_profile"]["profile_id"]
+
+    assert proposal["value"] == "gameplay"
+    assert proposal["admitted"] is True
+    assert proposal["confidence"] >= 0.45
+    assert "admission:independent_evidence_units:1" in proposal["evidence"]
+    assert data["effective_profile"]["profile_id"] == "gameplay"
+
+
+def test_single_supporting_structured_label_is_not_admitted() -> None:
+    data = _profile(
+        "Neutral source material without category terms.",
+        visual_analysis={
+            "status": "completed",
+            "evidence_status": "observed",
+            "sample_count": 1,
+            "subject_keyframes": [{"label": "landmark"}],
+        },
+    )
+    proposal = data["detected_profile"]["profile_id"]
+
+    assert proposal["value"] == "travel"
+    assert proposal["admitted"] is False
+    assert proposal["confidence"] < 0.45
+    assert data["effective_profile"]["profile_id"] == "unknown"
+
+
+def test_strong_multi_evidence_profile_is_admitted() -> None:
+    data = _profile(
+        "PUBG gameplay ends with a decisive round and clutch.",
+        visual_analysis={
+            "status": "completed",
+            "evidence_status": "observed",
+            "sample_count": 2,
+            "subject_keyframes": [{"scene_type": "GAMEPLAY"}],
+        },
+    )
+    proposal = data["detected_profile"]["profile_id"]
+
+    assert proposal["value"] == "gameplay"
+    assert proposal["admitted"] is True
+    assert proposal["confidence"] >= 0.45
+    assert any(item.startswith("transcript:phrase:") for item in proposal["evidence"])
+    assert any(item.startswith("structured_visual:phrase:") for item in proposal["evidence"])
+    assert data["effective_profile"]["profile_id"] == "gameplay"
+
+
 def test_transcript_and_structured_evidence_beat_conflicting_filename_hint() -> None:
     data = _profile(
         "Готовим рецепт: ингредиент превращается в блюдо, затем дегустация.",

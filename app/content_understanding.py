@@ -49,7 +49,7 @@ VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = CONTENT_PROFILE_SCHEMA_VERSION
 LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS[0]
 CONTENT_STRATEGY_VERSION = "5A.4"
 CONTENT_PROFILE_CONTRACT_VERSION = "source-content-profile.3"
-CONTENT_PROFILE_DETECTOR_VERSION = "source-content-profile-detector.1"
+CONTENT_PROFILE_DETECTOR_VERSION = "source-content-profile-detector.2"
 SEMANTIC_CANDIDATE_GENERATION_VERSION = "5A.candidate-generation.2"
 SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
@@ -79,6 +79,15 @@ _STRUCTURED_VISUAL_SIGNAL_KEYS = frozenset({
     "action", "actions", "category", "categories", "content_kind", "label", "labels",
     "object", "objects", "scene_type", "tracking_target", "framing_observation",
 })
+_STRONG_STRUCTURED_VISUAL_SIGNAL_KEYS = frozenset({
+    "category", "categories", "content_kind", "scene_type",
+})
+_TRANSCRIPT_PROFILE_EVIDENCE_STRENGTH = 1.0
+_SUPPORTING_VISUAL_PROFILE_EVIDENCE_STRENGTH = 1.0
+_STRUCTURED_VISUAL_PROFILE_EVIDENCE_STRENGTH = 2.0
+_CROSS_SOURCE_PROFILE_EVIDENCE_BONUS = 0.5
+_AUTO_PROFILE_MIN_EVIDENCE_STRENGTH = 2.0
+_AUTO_PROFILE_MIN_COMPETING_MARGIN = 1.0
 _MOTIVATIONAL_TERMS = (
     "не сдавай", "побед*", "вер*", "мечт*", "шанс", "успех*", "сильн*",
     "never give up", "believe", "win", "success", "fight", "dream",
@@ -781,26 +790,68 @@ def _phrase_matches(text: str, phrase: str) -> bool:
     return False
 
 
-def _structured_visual_signal_blob(visual_analysis: dict[str, Any]) -> str:
-    """Read only declared semantic fields from structured visual evidence."""
+def _independent_phrase_hits(text: str, phrases: tuple[str, ...]) -> list[str]:
+    """Return matched phrases backed by non-overlapping token spans.
+
+    Nested aliases such as ``история`` inside ``смешная история`` describe one
+    observation, not two independent evidence units. Repeating one generic
+    word likewise cannot manufacture additional support.
+    """
+
+    text_tokens = _tokens(text)
+    candidates: list[tuple[int, int, int, str]] = []
+    for order, phrase in enumerate(phrases):
+        phrase_tokens = [item.casefold() for item in _SIGNAL_TOKEN_RE.findall(phrase)]
+        if not phrase_tokens or len(phrase_tokens) > len(text_tokens):
+            continue
+        for start in range(len(text_tokens) - len(phrase_tokens) + 1):
+            if all(
+                text_tokens[start + offset].startswith(raw[:-1])
+                if raw.endswith("*") else text_tokens[start + offset] == raw
+                for offset, raw in enumerate(phrase_tokens)
+            ):
+                candidates.append((len(phrase_tokens), start, order, phrase))
+
+    occupied: set[int] = set()
+    selected: list[tuple[int, str]] = []
+    selected_phrases: set[str] = set()
+    for length, start, order, phrase in sorted(
+        candidates, key=lambda item: (-item[0], item[1], item[2]),
+    ):
+        token_range = set(range(start, start + length))
+        if phrase in selected_phrases or occupied.intersection(token_range):
+            continue
+        selected.append((order, phrase))
+        selected_phrases.add(phrase)
+        occupied.update(token_range)
+    return [phrase for _order, phrase in sorted(selected)]
+
+
+def _structured_visual_signal_blobs(visual_analysis: dict[str, Any]) -> tuple[str, str]:
+    """Return all declared visual semantics and their strong categorical subset."""
 
     values: list[str] = []
+    strong_values: list[str] = []
 
-    def collect(value: Any, *, semantic: bool = False) -> None:
+    def collect(value: Any, *, semantic: bool = False, strong: bool = False) -> None:
         if isinstance(value, dict):
             for key, nested in value.items():
+                normalized_key = str(key).casefold()
                 collect(
                     nested,
-                    semantic=semantic or str(key).casefold() in _STRUCTURED_VISUAL_SIGNAL_KEYS,
+                    semantic=semantic or normalized_key in _STRUCTURED_VISUAL_SIGNAL_KEYS,
+                    strong=strong or normalized_key in _STRONG_STRUCTURED_VISUAL_SIGNAL_KEYS,
                 )
         elif isinstance(value, (list, tuple)):
             for nested in value:
-                collect(nested, semantic=semantic)
+                collect(nested, semantic=semantic, strong=strong)
         elif semantic and isinstance(value, str) and value.strip():
             values.append(value.strip())
+            if strong:
+                strong_values.append(value.strip())
 
     collect(visual_analysis)
-    return " ".join(values).casefold()
+    return " ".join(values).casefold(), " ".join(strong_values).casefold()
 
 
 def _detect_profile_axes(
@@ -812,7 +863,10 @@ def _detect_profile_axes(
 
     lowered = text.casefold()
     filename_lower = filename.casefold()
-    visual_blob = _structured_visual_signal_blob(visual_analysis) if isinstance(visual_analysis, dict) else ""
+    visual_blob, strong_visual_blob = (
+        _structured_visual_signal_blobs(visual_analysis)
+        if isinstance(visual_analysis, dict) else ("", "")
+    )
     scene_count = len(scenes.get("boundaries", []))
     filename_signal_used = False
 
@@ -973,6 +1027,7 @@ def _detect_profile_axes(
         text=lowered,
         filename=filename_lower,
         visual_blob=visual_blob,
+        strong_visual_blob=strong_visual_blob,
         format_axis=format_axis,
         editorial_axis=editorial_axis,
         domain_axis=domain_axis,
@@ -998,26 +1053,23 @@ def _detect_profile_axes(
 
 
 def _detect_registered_profile(
-    *, text: str, filename: str, visual_blob: str,
+    *, text: str, filename: str, visual_blob: str, strong_visual_blob: str,
     format_axis: dict[str, Any], editorial_axis: dict[str, Any], domain_axis: dict[str, Any],
     traits: list[dict[str, Any]], speaker_count: int, scene_count: int,
 ) -> dict[str, Any]:
     """Score every canonical preset once from transcript and structured evidence."""
 
-    scored: list[tuple[float, float, int, str, list[str]]] = []
+    scored: list[tuple[float, float, float, int, int, str, list[str]]] = []
     detected_traits = {
         str(item.get("value")) for item in traits
         if float(item.get("confidence", 0)) >= 0.45
     }
     for order, (profile_id, preset) in enumerate(CONTENT_PROFILE_PRESETS.items()):
-        transcript_hits = [
-            phrase for phrase in _PROFILE_TRANSCRIPT_SIGNALS[profile_id]
-            if _phrase_matches(text, phrase)
-        ]
-        visual_hits = [
-            phrase for phrase in _PROFILE_VISUAL_SIGNALS[profile_id]
-            if _phrase_matches(visual_blob, phrase)
-        ]
+        transcript_hits = _independent_phrase_hits(text, _PROFILE_TRANSCRIPT_SIGNALS[profile_id])
+        visual_hits = _independent_phrase_hits(visual_blob, _PROFILE_VISUAL_SIGNALS[profile_id])
+        strong_visual_hits = set(
+            _independent_phrase_hits(strong_visual_blob, _PROFILE_VISUAL_SIGNALS[profile_id])
+        )
         filename_hits = [
             phrase for phrase in _PROFILE_TRANSCRIPT_SIGNALS[profile_id]
             if _phrase_matches(filename, phrase)
@@ -1051,11 +1103,39 @@ def _detect_registered_profile(
             compatibility += 0.3
             evidence.append("structured_scenes:high_scene_count")
         auxiliary_score = min(0.4, len(filename_hits) * 0.2)
-        scored.append((primary_score + compatibility + auxiliary_score, primary_score, -order, profile_id, evidence))
+        direct_evidence_units = len(transcript_hits) + len(visual_hits)
+        supporting_visual_units = sum(phrase not in strong_visual_hits for phrase in visual_hits)
+        evidence_strength = (
+            len(transcript_hits) * _TRANSCRIPT_PROFILE_EVIDENCE_STRENGTH
+            + len(strong_visual_hits) * _STRUCTURED_VISUAL_PROFILE_EVIDENCE_STRENGTH
+            + supporting_visual_units * _SUPPORTING_VISUAL_PROFILE_EVIDENCE_STRENGTH
+            + (
+                _CROSS_SOURCE_PROFILE_EVIDENCE_BONUS
+                if transcript_hits and visual_hits else 0.0
+            )
+        )
+        scored.append((
+            primary_score + compatibility + auxiliary_score,
+            primary_score,
+            evidence_strength,
+            direct_evidence_units,
+            -order,
+            profile_id,
+            evidence,
+        ))
 
     scored.sort(reverse=True)
-    top_total, top_primary, _order, profile_id, evidence = scored[0]
+    (
+        top_total, top_primary, top_evidence_strength, top_direct_units,
+        _order, profile_id, evidence,
+    ) = scored[0]
     runner_total = scored[1][0] if len(scored) > 1 else 0.0
+    runner_evidence_strength = max((item[2] for item in scored[1:]), default=0.0)
+    competing_margin = top_evidence_strength - runner_evidence_strength
+    admitted = (
+        top_evidence_strength >= _AUTO_PROFILE_MIN_EVIDENCE_STRENGTH
+        and competing_margin >= _AUTO_PROFILE_MIN_COMPETING_MARGIN
+    )
     if top_primary <= 0:
         confidence = min(0.4, 0.18 + top_total * 0.07)
     else:
@@ -1063,8 +1143,26 @@ def _detect_registered_profile(
         margin = min(1.0, max(0.0, top_total - runner_total) / 3.0)
         confidence = min(0.96, 0.46 + strength * 0.36 + margin * 0.14)
     if top_total <= 0:
-        return _axis(UNKNOWN_PROFILE_ID, 0.2, ["fallback:insufficient_profile_evidence"])
-    return _axis(profile_id, confidence, list(dict.fromkeys(evidence)))
+        proposal = _axis(UNKNOWN_PROFILE_ID, 0.2, ["fallback:insufficient_profile_evidence"])
+        proposal["admitted"] = False
+        return proposal
+    evidence.extend((
+        f"admission:evidence_strength:{top_evidence_strength:.1f}",
+        f"admission:competing_margin:{competing_margin:.1f}",
+        f"admission:independent_evidence_units:{top_direct_units}",
+    ))
+    if not admitted:
+        confidence = min(0.4, confidence)
+        evidence.append(
+            "admission:conflicting_profile_evidence"
+            if runner_evidence_strength > 0 and competing_margin < _AUTO_PROFILE_MIN_COMPETING_MARGIN
+            else "admission:insufficient_independent_evidence"
+        )
+    else:
+        evidence.append("admission:accepted")
+    proposal = _axis(profile_id, confidence, list(dict.fromkeys(evidence)))
+    proposal["admitted"] = admitted
+    return proposal
 
 
 def _normalise_manual_override(value: Any) -> dict[str, Any]:
@@ -1101,6 +1199,7 @@ def _resolve_effective_profile(
         if (
             isinstance(profile_proposal, dict)
             and profile_proposal.get("value") in CONTENT_PROFILE_PRESETS
+            and profile_proposal.get("admitted") is True
             and float(profile_proposal.get("confidence", 0)) >= min_confidence
         ):
             profile_id = str(profile_proposal["value"])
@@ -1206,6 +1305,7 @@ def _validate_detected_profile(profile: dict[str, Any]) -> None:
         or profile_id.get("value") not in {*CONTENT_PROFILE_PRESETS, UNKNOWN_PROFILE_ID}
         or not 0 <= float(profile_id.get("confidence", -1)) <= 1
         or not isinstance(profile_id.get("evidence"), list)
+        or ("admitted" in profile_id and not isinstance(profile_id.get("admitted"), bool))
     ):
         raise ValueError("VideoContentProfile detected profile_id is invalid.")
     for name in PROFILE_AXIS_ORDER[:-1]:
