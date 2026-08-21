@@ -11,8 +11,14 @@ import app.source_download as download_module
 from app.gui.services import url_source_service
 from app.errors import SourceError
 from app.source_download import (
+    build_ytdlp_download_arguments,
+    build_ytdlp_inspect_arguments,
+    classify_ytdlp_failure,
     DownloadCancelled,
     YtDlpSource,
+    YtDlpCapabilities,
+    YtDlpFailureReason,
+    YtDlpSourceError,
     cleanup_partial_downloads,
     describe_public_url_failure,
     find_ytdlp_executable,
@@ -42,6 +48,92 @@ def test_public_url_failure_is_explained_without_suggesting_a_bypass(raw: str, e
     message = describe_public_url_failure(raw)
     assert expected in message
     assert "cookies" not in message.lower()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("ERROR: Sign in to confirm you’re not a bot", YtDlpFailureReason.BOT_CHECK),
+        ("WARNING: No supported JavaScript runtime could be found", YtDlpFailureReason.JS_RUNTIME_MISSING),
+        ("ERROR: This client requires a PO Token", YtDlpFailureReason.PO_TOKEN_REQUIRED),
+        ("ERROR: Private video. Sign in required", YtDlpFailureReason.LOGIN_REQUIRED),
+        ("ERROR: Unsupported URL", YtDlpFailureReason.UNSUPPORTED),
+        ("ERROR: Video unavailable", YtDlpFailureReason.UNAVAILABLE),
+    ],
+)
+def test_ytdlp_failure_categories_keep_diagnostics_but_expose_safe_text(
+    raw: str, expected: YtDlpFailureReason,
+) -> None:
+    error = classify_ytdlp_failure(raw)
+
+    assert error.reason == expected
+    assert error.diagnostics == raw
+    assert "ERROR:" not in str(error)
+    assert "WARNING:" not in str(error)
+
+
+def test_engine_and_desktop_share_public_only_ytdlp_contract(tmp_path: Path) -> None:
+    capabilities = YtDlpCapabilities("yt-dlp.exe", "C:/portable/tools/deno.exe")
+    url = "https://example.test/video"
+    inspect = build_ytdlp_inspect_arguments(capabilities, url)
+    download = build_ytdlp_download_arguments(capabilities, url, tmp_path)
+
+    shared = [
+        "--ignore-config", "--no-playlist", "--js-runtimes", "deno:C:/portable/tools/deno.exe",
+    ]
+    assert inspect[:5] == [*shared, "--skip-download"]
+    assert download[:5] == [*shared, "--newline"]
+    for arguments in (inspect, download):
+        assert "--no-warnings" not in arguments
+        assert not any("cookie" in argument.casefold() for argument in arguments)
+        assert not any(
+            argument in {"-f", "--format", "--remux-video", "--merge-output-format"}
+            for argument in arguments
+        )
+    assert inspect[-1] == download[-1] == url
+
+
+def test_inspect_parses_only_stdout_and_retains_stderr_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    received: dict[str, object] = {}
+
+    class Result:
+        returncode = 0
+        stdout = '{"title":"Public video","duration":12,"ext":"mp4"}'
+        stderr = "WARNING: [youtube] diagnostic warning\n"
+
+    def fake_run(arguments, **kwargs):
+        received["arguments"] = arguments
+        received["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(download_module.subprocess, "run", fake_run)
+    source = YtDlpSource(
+        capabilities=YtDlpCapabilities("yt-dlp.exe", "C:/portable/tools/deno.exe"),
+    )
+
+    metadata = source.inspect("https://example.test/video")
+
+    assert metadata.title == "Public video"
+    assert source.last_diagnostics == "WARNING: [youtube] diagnostic warning"
+    assert received["arguments"] == ["yt-dlp.exe", *build_ytdlp_inspect_arguments(source.capabilities, metadata.url)]
+    assert received["kwargs"]["check"] is False
+
+
+def test_inspect_failure_keeps_raw_diagnostics_on_safe_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR: This client requires a PO Token"
+
+    monkeypatch.setattr(download_module.subprocess, "run", lambda *_args, **_kwargs: Result())
+    source = YtDlpSource(capabilities=YtDlpCapabilities("yt-dlp.exe", "deno.exe"))
+
+    with pytest.raises(YtDlpSourceError) as captured:
+        source.inspect("https://example.test/video")
+
+    assert captured.value.reason == YtDlpFailureReason.PO_TOKEN_REQUIRED
+    assert captured.value.diagnostics == Result.stderr
+    assert "PO Token" in str(captured.value)
 
 
 def test_metadata_and_progress_are_parsed_without_exposing_internal_ytdlp_output() -> None:
@@ -218,6 +310,36 @@ def test_qt_url_download_recovers_direct_media_without_after_move_output(tmp_pat
     service._finished(0, QProcess.ExitStatus.NormalExit)
 
     assert received == [str(completed.resolve())]
+
+
+def test_qt_metadata_keeps_warnings_out_of_json() -> None:
+    QCoreApplication.instance() or QCoreApplication([])
+    service = URLSourceService()
+    received: list[dict] = []
+    service.metadata_ready.connect(received.append)
+    service._mode = "metadata"
+    service._url = "https://example.test/video"
+    service._stdout_chunks = ['{"title":"Public video","duration":9,"ext":"mp4"}\n']
+    service._stderr_chunks = ["WARNING: useful extractor diagnostic\n"]
+
+    service._finished(0, QProcess.ExitStatus.NormalExit)
+
+    assert received[0]["title"] == "Public video"
+    assert service.last_diagnostics == "WARNING: useful extractor diagnostic"
+
+
+def test_qt_service_uses_shared_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    QCoreApplication.instance() or QCoreApplication([])
+    capabilities = YtDlpCapabilities("yt-dlp.exe", "C:/portable/tools/deno.exe")
+    monkeypatch.setattr(url_source_service, "detect_ytdlp_capabilities", lambda: capabilities)
+    service = URLSourceService()
+    received: list[list[str]] = []
+    monkeypatch.setattr(service, "_start", received.append)
+
+    service.inspect("https://example.test/video")
+
+    assert received == [build_ytdlp_inspect_arguments(capabilities, "https://example.test/video")]
+    assert service.process.program() == "yt-dlp.exe"
 
 
 def test_qt_url_service_releases_its_windows_job_on_terminal_state(monkeypatch) -> None:

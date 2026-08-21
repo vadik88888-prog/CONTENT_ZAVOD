@@ -25,6 +25,14 @@
       "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
       "source": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
       "license": "Unlicense"
+    },
+    {
+      "name": "deno.exe",
+      "version": "2.9.5",
+      "size_bytes": 97408288,
+      "sha256": "98f8c2a2d470e4ccb04c935c86ff8050817d877762aec5eaeeb9e409ccb3b9fd",
+      "source": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      "license": "MIT"
     }
   ]
 }

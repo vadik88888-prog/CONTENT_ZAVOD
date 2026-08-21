@@ -16,21 +16,18 @@ def test_exactly_one_source_is_required(input_path, url) -> None:
 def test_url_source_runs_ytdlp_without_shell_interpolation(tmp_path, monkeypatch) -> None:
     downloaded = tmp_path / "downloaded.mp4"
     downloaded.write_bytes(b"video")
-    received: dict[str, list[str]] = {}
+    received: dict[str, object] = {}
 
-    def fake_run(arguments, **kwargs):
-        received["arguments"] = arguments
+    class FakeDownloader:
+        def download(self, url, target_directory):
+            received["url"] = url
+            received["target_directory"] = target_directory
+            return downloaded
 
-        class Result:
-            stdout = str(downloaded) + "\n"
-
-        return Result()
-
-    monkeypatch.setattr("app.sources.shutil.which", lambda value: "yt-dlp.exe")
-    monkeypatch.setattr("app.sources.subprocess.run", fake_run)
+    monkeypatch.setattr("app.sources.YtDlpSource", FakeDownloader)
 
     source = url_source("https://example.test/a video?x=1;not-a-command", tmp_path)
 
     assert source.path == downloaded.resolve()
-    assert received["arguments"][-1] == "https://example.test/a video?x=1;not-a-command"
-    assert received["arguments"][0] == "yt-dlp.exe"
+    assert received["url"] == "https://example.test/a video?x=1;not-a-command"
+    assert received["target_directory"] == tmp_path

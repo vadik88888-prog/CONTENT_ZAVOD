@@ -15,6 +15,7 @@ ContentFactory/
       ffmpeg.exe
       ffprobe.exe
       yt-dlp.exe
+      deno.exe
 ```
 
 Writable settings, projects, engine work, and run metadata use

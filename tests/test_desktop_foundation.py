@@ -171,6 +171,24 @@ def test_error_mapping_redacts_secrets() -> None:
     assert value not in redact_secrets(raw)
 
 
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("Сайт отклонил запрос из-за проверки на автоматические запросы или ограничения частоты.", "url_bot_check_or_rate_limit"),
+        ("Для этой публичной YouTube-ссылки нужен JavaScript runtime Deno, но он не найден.", "url_js_runtime_missing"),
+        ("YouTube требует PO Token для этого видео.", "url_po_token_required"),
+        ("Видео требует входа или имеет ограниченный доступ.", "url_login_required"),
+        ("Видео по этой ссылке недоступно или удалено.", "url_unavailable"),
+        ("Эта ссылка или доступный на ней видеоформат пока не поддерживается.", "url_unsupported"),
+    ],
+)
+def test_url_error_mapping_preserves_precise_reason(message: str, code: str) -> None:
+    mapped = map_error(message)
+
+    assert mapped.error_code == code
+    assert message in mapped.user_message
+
+
 def test_pipeline_facade_reports_missing_output(tmp_path: Path) -> None:
     prepared = PreparedPipelineRun(
         program=sys.executable, arguments=[], working_directory=tmp_path,

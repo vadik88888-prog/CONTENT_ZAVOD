@@ -14,7 +14,7 @@ from pathlib import Path
 
 from app.config import AppConfig
 from app.runtime import RuntimeLayout
-from app.source_download import find_ytdlp_executable
+from app.source_download import find_deno_executable, find_ytdlp_executable
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 
 
@@ -133,6 +133,9 @@ def _find_executable(runtime: RuntimeLayout, command: str) -> str | None:
     if command == "yt-dlp":
         fallback = find_ytdlp_executable()
         return str(fallback) if fallback else None
+    if command == "deno":
+        fallback = find_deno_executable(find_ytdlp_executable())
+        return str(fallback) if fallback else None
     return None
 
 
@@ -140,19 +143,23 @@ def _tool_check(runtime: RuntimeLayout, command: str, label: str, *, blocking: b
     executable = _find_executable(runtime, command)
     status = "error" if blocking else "warn"
     if not executable:
-        action = (
-            "Переустановите portable-сборку или добавьте программу в PATH, затем повторите проверку."
-            if blocking
-            else "Для загрузки по ссылке установите yt-dlp или используйте локальный видеофайл."
-        )
+        if blocking:
+            action = "Переустановите portable-сборку или добавьте программу в PATH, затем повторите проверку."
+        elif command == "deno":
+            action = "Для полной поддержки YouTube обновите portable-сборку или используйте локальный видеофайл."
+        else:
+            action = "Для загрузки по ссылке установите yt-dlp или используйте локальный видеофайл."
         return Check(label, status, "Исполняемый файл не найден.", action)
-    version = _run([executable, "-version"] if command != "yt-dlp" else [executable, "--version"])
+    version = _run(
+        [executable, "--version"] if command in {"yt-dlp", "deno"} else [executable, "-version"]
+    )
     if version is None:
-        action = (
-            "Переустановите portable-сборку или исправьте PATH, затем повторите проверку."
-            if blocking
-            else "Обновите yt-dlp или используйте локальный видеофайл."
-        )
+        if blocking:
+            action = "Переустановите portable-сборку или исправьте PATH, затем повторите проверку."
+        elif command == "deno":
+            action = "Обновите portable-сборку с исправным Deno или используйте локальный видеофайл."
+        else:
+            action = "Обновите yt-dlp или используйте локальный видеофайл."
         return Check(label, status, "Исполняемый файл найден, но не запускается.", action)
     return Check(label, "ok", f"Доступен: {Path(executable).name}.")
 
@@ -300,6 +307,7 @@ def collect_checks(root: Path | RuntimeLayout, config: AppConfig | None = None) 
         _tool_check(runtime, "ffmpeg", "FFmpeg", blocking=True),
         _tool_check(runtime, "ffprobe", "FFprobe", blocking=True),
         _tool_check(runtime, "yt-dlp", "yt-dlp", blocking=False),
+        _tool_check(runtime, "deno", "Deno", blocking=False),
     ])
     checks.extend(_nvidia_checks())
     checks.append(_cuda_check())

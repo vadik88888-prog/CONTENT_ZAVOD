@@ -65,6 +65,62 @@ def map_error(error: object) -> UserFacingError:
             detail,
             "final_output_missing",
         )
+    if "проверки на автоматические запросы" in lowered or "ограничения частоты" in lowered:
+        return UserFacingError(
+            "Сайт временно отклонил загрузку",
+            detail,
+            "Подождите и повторите позже либо попробуйте другую сеть.",
+            detail,
+            "url_bot_check_or_rate_limit",
+        )
+    if "po token" in lowered:
+        return UserFacingError(
+            "Для этой ссылки нужен неподдерживаемый способ доступа",
+            detail,
+            "Добавьте видео как локальный файл; поддержка PO Token требует отдельного обновления Friend Beta.",
+            detail,
+            "url_po_token_required",
+        )
+    if "javascript runtime deno" in lowered:
+        return UserFacingError(
+            "В сборке не найден Deno",
+            detail,
+            "Переустановите или обновите portable-сборку Content Factory.",
+            detail,
+            "url_js_runtime_missing",
+        )
+    if "видео требует входа" in lowered or "имеет ограниченный доступ" in lowered:
+        return UserFacingError(
+            "Видео доступно только с ограничениями",
+            detail,
+            "Выберите публичное видео, которое открывается без авторизации.",
+            detail,
+            "url_login_required",
+        )
+    if "видео защищено" in lowered and "не поддерживается" in lowered:
+        return UserFacingError(
+            "Защищённое видео не поддерживается",
+            detail,
+            "Выберите открытый публичный ролик или добавьте разрешённый локальный файл.",
+            detail,
+            "url_protected",
+        )
+    if "видеоформат пока не поддерживается" in lowered or "ссылка или доступный" in lowered:
+        return UserFacingError(
+            "Ссылка не поддерживается",
+            detail,
+            "Попробуйте другую публичную ссылку или добавьте видео как локальный файл.",
+            detail,
+            "url_unsupported",
+        )
+    if "видео по этой ссылке недоступно" in lowered:
+        return UserFacingError(
+            "Видео недоступно",
+            detail,
+            "Проверьте ссылку и доступность ролика без входа.",
+            detail,
+            "url_unavailable",
+        )
     if "yt-dlp" in lowered or "загрузить видео по этой ссылке" in lowered or "ссылк" in lowered and "видео" in lowered:
         if "компонент" in lowered or "yt-dlp" in lowered:
             return UserFacingError(

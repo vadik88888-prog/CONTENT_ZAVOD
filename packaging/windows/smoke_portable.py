@@ -10,6 +10,8 @@ import subprocess
 import time
 import zipfile
 
+import yaml
+
 
 ARTIFACT_NAME = "ContentFactory-beta-win-x64"
 INTERNAL_CLI_SWITCH = "--content-factory-internal-cli"
@@ -58,6 +60,13 @@ def main() -> int:
     report_path = windows / "reports" / f"{ARTIFACT_NAME}.build.json"
     if not zip_path.is_file() or not report_path.is_file():
         raise RuntimeError("Build the portable ZIP before running smoke.")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    expected_deno = next(
+        (item for item in report.get("binaries", []) if item.get("name") == "deno.exe"),
+        None,
+    )
+    if expected_deno is None:
+        raise RuntimeError("Build report does not contain the pinned Deno runtime.")
     _reset_directory(extracted_root, build_root)
     _reset_directory(profile, build_root)
     with zipfile.ZipFile(zip_path) as archive:
@@ -66,7 +75,8 @@ def main() -> int:
     portable = extracted_root / ARTIFACT_NAME
     executable = portable / "ContentFactory.exe"
     config = portable / "_internal" / "config.example.yaml"
-    if not executable.is_file() or not config.is_file():
+    deno = portable / "_internal" / "tools" / "deno.exe"
+    if not executable.is_file() or not config.is_file() or not deno.is_file():
         raise RuntimeError("Freshly extracted portable folder is incomplete.")
     environment = dict(os.environ)
     environment.update({
@@ -74,10 +84,36 @@ def main() -> int:
         "APPDATA": str(profile),
         "PYTHONIOENCODING": "utf-8",
     })
+    smoke_config = profile / "portable-smoke-config.yaml"
+    smoke_settings = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if not isinstance(smoke_settings, dict) or not isinstance(smoke_settings.get("ai"), dict):
+        raise RuntimeError("Bundled config does not contain the expected AI settings.")
+    smoke_settings["ai"]["provider"] = "mock"
+    smoke_config.write_text(
+        yaml.safe_dump(smoke_settings, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    deno_started = time.perf_counter()
+    deno_check = subprocess.run(
+        [str(deno), "--version"],
+        cwd=portable,
+        env=environment,
+        capture_output=True,
+        timeout=30,
+    )
+    deno_seconds = time.perf_counter() - deno_started
+    deno_output = "\n".join(
+        _decode_output(part) for part in (deno_check.stdout, deno_check.stderr) if part
+    ).strip()
+    if deno_check.returncode != 0 or not deno_output.startswith(f"deno {expected_deno['version']}"):
+        raise RuntimeError(
+            f"Bundled Deno smoke failed ({deno_check.returncode}); output:\n{deno_output[-2000:]}"
+        )
 
     cli_started = time.perf_counter()
     cli = subprocess.run(
-        [str(executable), INTERNAL_CLI_SWITCH, "doctor", "--config", str(config)],
+        [str(executable), INTERNAL_CLI_SWITCH, "doctor", "--config", str(smoke_config)],
         cwd=portable,
         env=environment,
         capture_output=True,
@@ -87,7 +123,7 @@ def main() -> int:
     cli_output = "\n".join(
         _decode_output(part) for part in (cli.stdout, cli.stderr) if part
     ).strip()
-    required_markers = ("Content Factory", "OK FFmpeg", "OK FFprobe", "OK yt-dlp")
+    required_markers = ("Content Factory", "OK FFmpeg", "OK FFprobe", "OK yt-dlp", "OK Deno")
     if cli.returncode != 0 or any(marker not in cli_output for marker in required_markers):
         raise RuntimeError(
             f"Frozen CLI smoke failed ({cli.returncode}); output:\n{cli_output[-4000:]}"
@@ -155,15 +191,20 @@ if (-not $process.HasExited) {{
     ):
         raise RuntimeError(f"Native Content Factory window was not observed: {native_result}")
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
     report["status"] = "smoke_passed"
     report["smoke"] = {
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "source": "fresh_zip_extraction",
         "extracted_path": str(portable.relative_to(root)).replace("\\", "/"),
+        "deno": {
+            "exit_code": deno_check.returncode,
+            "seconds": round(deno_seconds, 3),
+            "version_line": deno_output.splitlines()[0],
+        },
         "frozen_cli": {
             "exit_code": cli.returncode,
             "seconds": round(cli_seconds, 3),
+            "ai_mode": "mock",
             "markers": list(required_markers),
             "output_tail": cli_output[-2000:],
         },

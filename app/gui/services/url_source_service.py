@@ -9,13 +9,16 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 from app.source_download import (
+    build_ytdlp_download_arguments,
+    build_ytdlp_inspect_arguments,
+    classify_ytdlp_failure,
     cleanup_partial_downloads,
-    describe_public_url_failure,
-    find_ytdlp_executable,
+    detect_ytdlp_capabilities,
+    normalize_ytdlp_diagnostics,
     parse_download_progress,
     parse_url_metadata,
     validate_public_video_url,
-    YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
+    YtDlpCapabilities,
 )
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.gui.services.windows_process_job import (
@@ -38,16 +41,21 @@ class URLSourceService(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.process = QProcess(self)
-        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self._read_output)
-        self.process.readyReadStandardError.connect(self._read_output)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self.process.readyReadStandardOutput.connect(self._read_stdout)
+        self.process.readyReadStandardError.connect(self._read_stderr)
         self.process.finished.connect(self._finished)
         self.process.errorOccurred.connect(self._process_error)
         self.process.stateChanged.connect(self._state_changed)
         self._mode: str | None = None
         self._url: str | None = None
         self._target_directory: Path | None = None
-        self._output: list[str] = []
+        self._stdout_chunks: list[str] = []
+        self._stderr_chunks: list[str] = []
+        self._stdout_lines: list[str] = []
+        self._stdout_pending = ""
+        self._capabilities: YtDlpCapabilities | None = None
+        self.last_diagnostics = ""
         self._cancel_requested = False
         self._reported_process_error = False
         self._process_id = 0
@@ -64,9 +72,8 @@ class URLSourceService(QObject):
         safe_url = self._begin(url, "metadata")
         if not safe_url:
             return
-        self._start([
-            "--no-playlist", "--skip-download", "--no-warnings", "--dump-single-json", safe_url,
-        ])
+        assert self._capabilities is not None
+        self._start(build_ytdlp_inspect_arguments(self._capabilities, safe_url))
 
     def download(self, url: str, target_directory: Path) -> None:
         safe_url = self._begin(url, "download")
@@ -75,13 +82,8 @@ class URLSourceService(QObject):
         directory = target_directory.expanduser().resolve()
         directory.mkdir(parents=True, exist_ok=True)
         self._target_directory = directory
-        output_template = str(directory / "%(title).120B-%(id)s.%(ext)s")
-        self._start([
-            "--no-playlist", "--newline", "--no-colors", "--no-warnings", "--no-overwrites", "--progress",
-            "--progress-template",
-            YTDLP_DOWNLOAD_PROGRESS_TEMPLATE,
-            "--print", "after_move:filepath", "-o", output_template, safe_url,
-        ])
+        assert self._capabilities is not None
+        self._start(build_ytdlp_download_arguments(self._capabilities, safe_url, directory))
 
     def cancel(self) -> None:
         if not self.busy:
@@ -100,19 +102,24 @@ class URLSourceService(QObject):
         except Exception as error:
             self.failed.emit(str(error))
             return None
-        executable = find_ytdlp_executable()
-        if not executable:
+        capabilities = detect_ytdlp_capabilities()
+        if not capabilities.executable:
             self.failed.emit("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.")
             return None
         self._mode = mode
         self._url = safe_url
         self._target_directory = None
-        self._output = []
+        self._stdout_chunks = []
+        self._stderr_chunks = []
+        self._stdout_lines = []
+        self._stdout_pending = ""
+        self._capabilities = capabilities
+        self.last_diagnostics = ""
         self._cancel_requested = False
         self._reported_process_error = False
         self._process_id = 0
         self._release_process_job()
-        self.process.setProgram(executable)
+        self.process.setProgram(capabilities.executable)
         self.busy_changed.emit(True)
         return safe_url
 
@@ -120,16 +127,30 @@ class URLSourceService(QObject):
         self.process.setArguments(arguments)
         self.process.start()
 
-    def _read_output(self) -> None:
+    def _read_stdout(self) -> None:
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        for line in text.splitlines():
-            value = line.strip()
-            if value:
-                self._output.append(value)
-            if self._mode == "download":
-                progress = parse_download_progress(value)
-                if progress:
-                    self.download_progress.emit(progress)
+        if not text:
+            return
+        self._stdout_chunks.append(text)
+        pending = self._stdout_pending + text
+        while "\n" in pending:
+            line, pending = pending.split("\n", 1)
+            self._consume_stdout_line(line.rstrip("\r"))
+        self._stdout_pending = pending
+
+    def _read_stderr(self) -> None:
+        text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
+        if text:
+            self._stderr_chunks.append(text)
+
+    def _consume_stdout_line(self, line: str) -> None:
+        value = line.strip()
+        if value:
+            self._stdout_lines.append(value)
+        if self._mode == "download":
+            progress = parse_download_progress(value)
+            if progress:
+                self.download_progress.emit(progress)
 
     def _process_error(self, _error: QProcess.ProcessError) -> None:
         if self._cancel_requested:
@@ -149,7 +170,13 @@ class URLSourceService(QObject):
             self._process_id = 0
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
-        self._read_output()
+        self._read_stdout()
+        self._read_stderr()
+        if self._stdout_pending:
+            self._consume_stdout_line(self._stdout_pending)
+            self._stdout_pending = ""
+        stdout = "".join(self._stdout_chunks)
+        self.last_diagnostics = normalize_ytdlp_diagnostics("".join(self._stderr_chunks))
         # If yt-dlp exited before one of its helpers, closing this final GUI
         # Job handle stops that helper instead of letting it keep writing to a
         # source directory after the operation has reached a terminal state.
@@ -168,14 +195,14 @@ class URLSourceService(QObject):
         if exit_code != 0 or self._reported_process_error:
             if directory:
                 cleanup_partial_downloads(directory)
-            self.failed.emit(describe_public_url_failure("\n".join(self._output)))
+            self.failed.emit(str(classify_ytdlp_failure(self.last_diagnostics or stdout)))
             return
         try:
             if mode == "metadata" and url:
-                self.metadata_ready.emit(parse_url_metadata(url, "\n".join(self._output)).to_dict())
+                self.metadata_ready.emit(parse_url_metadata(url, stdout).to_dict())
                 return
             if mode == "download" and directory:
-                path = next((Path(line).resolve() for line in reversed(self._output) if _project_child(Path(line), directory) and Path(line).is_file()), None)
+                path = next((Path(line).resolve() for line in reversed(self._stdout_lines) if _project_child(Path(line), directory) and Path(line).is_file()), None)
                 if path is None:
                     # Direct-media extractors can complete a file without
                     # emitting the requested after_move line. The command has

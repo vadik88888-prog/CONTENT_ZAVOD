@@ -202,10 +202,14 @@ def main() -> int:
         windows / "ContentFactory.spec",
         windows / "desktop_entrypoint.py",
         windows / "build_portable.py",
+        windows / "smoke_portable.py",
         runtime_lock_path,
         binary_lock_path,
         root / "app" / "runtime.py",
         root / "app" / "frozen_entrypoint.py",
+        root / "app" / "source_download.py",
+        windows / "THIRD_PARTY_NOTICES.md",
+        windows / "licenses" / "LICENSE-deno-MIT.txt",
     ]
     build_info = {
         "schema_version": 1,
