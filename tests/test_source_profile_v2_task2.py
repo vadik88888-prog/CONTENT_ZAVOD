@@ -237,6 +237,7 @@ def test_detector_version_invalidates_profile_dependents_but_reuses_source_and_t
     assert calls == {"source": 1, "transcript": 1}
     assert first.load_reference("content_profile")["detector_version"] != second.load_reference("content_profile")["detector_version"]
     stages = read_json(second_result.report_path, {})["stages"]
+    assert stages["pre_vision_content_profile"]["cache_hit"] is False
     assert stages["video_content_profile"]["cache_hit"] is False
     assert stages["vision_pass1"]["cache_hit"] is False
     assert stages["global_content_map"]["cache_hit"] is False
