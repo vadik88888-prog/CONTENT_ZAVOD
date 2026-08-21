@@ -9,6 +9,7 @@ service and pipeline stage.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -345,6 +346,7 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
         effective_resolution = {}
     detected_format_value = str(detected_format.get("value") or "")
     effective_format = str(effective_profile.get("format") or "")
+    effective_profile_id = str(effective_profile.get("profile_id") or "")
     format_resolution = str(effective_resolution.get("format") or "")
     profile_format = ""
     accepted_resolutions = {"detected", "manual_override", "legacy_migration"}
@@ -374,6 +376,8 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
         evidence["detected_profile_format_evidence"] = [str(item) for item in detected_format["evidence"]]
     if effective_format:
         evidence["effective_profile_format"] = effective_format
+    if effective_profile_id:
+        evidence["effective_profile_id"] = effective_profile_id
     if format_resolution:
         evidence["profile_format_resolution"] = format_resolution
     if profile_format:
@@ -403,13 +407,20 @@ def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None
     )
     scene_density = _number(metadata.get("scene_density"))
     speech_ratio = _number(metadata.get("speech_ratio"))
+    static_profile_ids = {"podcast", "interview", "talking_head_expert", "tutorial_education", "news_commentary"}
+    dynamic_profile_ids = {
+        "gameplay", "stream", "vlog_lifestyle", "food", "travel", "review",
+        "reaction", "story_entertainment", "movie_series", "sports_fitness",
+    }
+    if effective_profile_id in dynamic_profile_ids or profile_format == "gameplay":
+        return DeepAnalysisDecision("auto", True, "Effective profile требует учитывать события и объекты в кадре.", evidence, "high")
+    if effective_profile_id in static_profile_ids:
+        return DeepAnalysisDecision("auto", False, "Похоже на разговорный или статичный материал: сначала достаточно анализа речи.", evidence, "low")
     static_markers = ("podcast", "lecture", "interview", "talking", "talking_head", "webinar", "screen_recording")
     dynamic_markers = ("gameplay", "game", "pubg", "movie", "film", "series", "trailer", "review", "travel", "sport", "concert")
-    if profile_format == "gameplay":
-        return DeepAnalysisDecision("auto", True, "Профиль контента определён как gameplay: события в кадре существенны для анализа.", evidence, "high")
-    if any(marker in kind for marker in static_markers):
+    if not has_structured_profile and _contains_marker(kind, static_markers):
         return DeepAnalysisDecision("auto", False, "Похоже на разговорный или статичный материал: сначала достаточно анализа речи.", evidence, "low")
-    if any(marker in kind for marker in dynamic_markers):
+    if not has_structured_profile and _contains_marker(kind, dynamic_markers):
         return DeepAnalysisDecision("auto", True, "Похоже на динамичное видео, где важны события в кадре.", evidence, "high")
     if activity is not None and activity >= 0.55:
         return DeepAnalysisDecision("auto", True, "В видео заметна высокая визуальная активность.", evidence, "high")
@@ -676,3 +687,8 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def _contains_marker(text: str, markers: tuple[str, ...]) -> bool:
+    tokens = set(re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+", text.casefold()))
+    return any(marker.casefold() in tokens for marker in markers)

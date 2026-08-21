@@ -51,9 +51,9 @@ def test_taxonomy_is_dependency_free_and_owns_schema_axis_order_and_fallbacks() 
     }
 
     assert imported_roots <= {"dataclasses", "types", "typing"}
-    assert CONTENT_PROFILE_SCHEMA_VERSION == VIDEO_CONTENT_PROFILE_SCHEMA_VERSION == "5A.2"
-    assert LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS == ("5A.1",)
-    assert SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS == {"5A.1", "5A.2"}
+    assert CONTENT_PROFILE_SCHEMA_VERSION == VIDEO_CONTENT_PROFILE_SCHEMA_VERSION == "5A.3"
+    assert LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS == ("5A.1", "5A.2")
+    assert SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS == {"5A.1", "5A.2", "5A.3"}
     assert tuple(PROFILE_TAXONOMY) == PROFILE_AXIS_ORDER
     assert unknown_fallback("format") == UNKNOWN_PROFILE_ID
     assert unknown_fallback("editorial_mode") == UNKNOWN_PROFILE_ID
@@ -159,7 +159,7 @@ def test_profile_consumers_do_not_redeclare_axis_order_or_auto_sentinel() -> Non
 
     assert repeated_axis_orders == []
 
-def test_config_preserves_5a1_to_5a2_schema_compatibility() -> None:
+def test_config_preserves_legacy_schema_compatibility() -> None:
     current = AppConfig()
     assert current.content_understanding.profile_schema_version == CONTENT_PROFILE_SCHEMA_VERSION
     current.validate()

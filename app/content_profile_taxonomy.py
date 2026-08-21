@@ -13,8 +13,8 @@ from types import MappingProxyType
 from typing import Literal
 
 
-CONTENT_PROFILE_SCHEMA_VERSION = "5A.2"
-LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS = ("5A.1",)
+CONTENT_PROFILE_SCHEMA_VERSION = "5A.3"
+LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS = ("5A.1", "5A.2")
 SUPPORTED_CONTENT_PROFILE_SCHEMA_VERSIONS = frozenset(
     (*LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS, CONTENT_PROFILE_SCHEMA_VERSION)
 )
@@ -217,6 +217,28 @@ def content_profile_preset_mapping(preset_id: str) -> dict[str, str | list[str]]
     """Return a fresh deterministic override payload for a manual preset."""
 
     return content_profile_preset(preset_id).profile()
+
+
+def content_profile_preset_id_for_mapping(profile: dict[str, object]) -> str | None:
+    """Return the canonical preset whose complete axes exactly match ``profile``.
+
+    Partial/manual axis overrides deliberately return ``None``.  Consumers must
+    not guess a user-facing profile ID from an incomplete request.
+    """
+
+    try:
+        normalized = {
+            "format": str(profile.get("format") or ""),
+            "editorial_mode": str(profile.get("editorial_mode") or ""),
+            "domain": str(profile.get("domain") or ""),
+            "traits": list(order_profile_ids("traits", [str(item) for item in profile.get("traits", [])])),
+        }
+    except (TypeError, ValueError):
+        return None
+    return next(
+        (preset_id for preset_id, preset in CONTENT_PROFILE_PRESETS.items() if preset.profile() == normalized),
+        None,
+    )
 
 
 def taxonomy_axis(axis_id: ProfileAxisId) -> ProfileTaxonomyAxis:

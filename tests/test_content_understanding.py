@@ -5,8 +5,13 @@ from pathlib import Path
 import pytest
 
 from app.config import AppConfig
-from app.content_profile_taxonomy import content_profile_preset_ids, content_profile_preset_mapping
+from app.content_profile_taxonomy import (
+    CONTENT_PROFILE_PRESETS,
+    content_profile_preset_ids,
+    content_profile_preset_mapping,
+)
 from app.content_understanding import (
+    CONTENT_PROFILE_CONTRACT_VERSION,
     VIDEO_CONTENT_PROFILE_SCHEMA_VERSION,
     VideoContentProfile,
     build_global_content_map,
@@ -54,18 +59,19 @@ def _profile(
     )
 
 
-def test_motivational_monologue_profile_is_grounded_in_transcript() -> None:
+def test_unregistered_motivational_shape_keeps_detection_but_uses_honest_fallback() -> None:
     data = _profile("Никогда не сдавайтесь: верьте в свой шанс и боритесь за победу.")
 
     assert data["schema_version"] == VIDEO_CONTENT_PROFILE_SCHEMA_VERSION
-    assert data["detected_content_type"] == "motivational"
-    assert data["dominant_format"] == "single_speaker_monologue"
-    assert data["strategy_id"] == "motivational_monologue"
+    assert data["detected_profile"]["editorial_mode"]["value"] == "motivational"
+    assert data["detected_content_type"] == "unknown"
+    assert data["effective_profile"]["profile_id"] == "unknown"
+    assert data["strategy_id"] == "generic_fallback"
     assert data["estimated_publishable_clip_range"]["min"] >= 1
     VideoContentProfile.from_dict(data)
 
 
-def test_dialogue_and_educational_profiles_choose_compatible_strategies() -> None:
+def test_dialogue_resolves_but_ambiguous_education_uses_conservative_fallback() -> None:
     dialogue = _profile(
         "Вопрос: почему это произошло? | Ответ: потому что мы пропустили важный шаг.",
         speakers=["host", "guest"],
@@ -74,8 +80,9 @@ def test_dialogue_and_educational_profiles_choose_compatible_strategies() -> Non
 
     assert dialogue["dominant_format"] == "multi_speaker_dialogue"
     assert dialogue["strategy_id"] == "generic_dialogue"
-    assert educational["detected_content_type"] == "educational"
-    assert educational["strategy_id"] == "generic_educational"
+    assert educational["detected_profile"]["editorial_mode"]["value"] == "explanatory"
+    assert educational["detected_content_type"] == "unknown"
+    assert educational["strategy_id"] == "generic_fallback"
 
 
 def test_unknown_profile_uses_safe_fallback_and_filename_is_only_weak_signal() -> None:
@@ -87,11 +94,16 @@ def test_unknown_profile_uses_safe_fallback_and_filename_is_only_weak_signal() -
     filename_only = _profile("Ладно.", filename="pubg-gameplay.mp4")
 
     assert unknown["detected_content_type"] == "unknown"
-    assert unknown["strategy_id"] == "generic_monologue"
-    assert educational["detected_content_type"] == "educational"
+    assert unknown["strategy_id"] == "generic_fallback"
+    assert unknown["effective_profile"]["profile_id"] == "unknown"
+    assert unknown["effective_profile"]["format"] == "mixed"
+    assert unknown["effective_profile_reason"] == "auto_low_confidence_conservative_fallback"
+    assert educational["detected_profile"]["editorial_mode"]["value"] == "explanatory"
+    assert educational["effective_profile"]["profile_id"] == "unknown"
     assert educational["evidence"]["filename_signal_used"] is False
     assert filename_only["detected_profile"]["format"]["value"] == "gameplay"
-    assert filename_only["effective_profile"]["format"] == "unknown"
+    assert filename_only["effective_profile"]["profile_id"] == "unknown"
+    assert filename_only["effective_profile"]["format"] == "mixed"
     assert filename_only["effective_profile"]["resolution"]["format"] == "safe_fallback"
 
 
@@ -124,7 +136,12 @@ def test_profile_v2_auto_detection_keeps_detected_and_effective_axes() -> None:
         scenes={"boundaries": [{"timestamp": float(index)} for index in range(10)]},
     )
 
-    assert data["schema_version"] == "5A.2"
+    assert data["schema_version"] == "5A.3"
+    assert data["requested_mode"] == "auto"
+    assert data["requested_profile_id"] is None
+    assert data["detected_profile"]["profile_id"]["value"] == "gameplay"
+    assert data["effective_profile"]["profile_id"] == "gameplay"
+    assert data["effective_profile_reason"] == "auto_detected_profile_accepted"
     assert data["detected_profile"]["format"]["value"] == "gameplay"
     assert data["detected_profile"]["domain"]["value"] == "gaming"
     assert data["effective_profile"]["format"] == "gameplay"
@@ -143,6 +160,7 @@ def test_manual_override_changes_effective_profile_without_replacing_detection()
 
     assert data["detected_profile"]["editorial_mode"]["value"] == "explanatory"
     assert data["effective_profile"] == {
+        "profile_id": "interview",
         "format": "dialogue",
         "editorial_mode": "interview",
         "domain": "business",
@@ -163,11 +181,15 @@ def test_each_manual_content_preset_creates_effective_profile_and_preserves_dete
     detected = _profile(text)["detected_profile"]
     expected = content_profile_preset_mapping(preset_id)
     config = AppConfig()
-    config.content_understanding.manual_override = expected
+    config.product_flow.content_profile_preset = preset_id
 
     data = _profile(text, config=config)
 
     assert data["detected_profile"] == detected
+    assert data["requested_mode"] == "manual"
+    assert data["requested_profile_id"] == preset_id
+    assert data["effective_profile"]["profile_id"] == preset_id
+    assert data["effective_profile_reason"] == "manual_profile_selected"
     assert {axis: data["effective_profile"][axis] for axis in ("format", "editorial_mode", "domain", "traits")} == expected
     assert data["effective_profile"]["resolution"] == {
         "format": "manual_override",
@@ -175,6 +197,78 @@ def test_each_manual_content_preset_creates_effective_profile_and_preserves_dete
         "domain": "manual_override",
         "traits": "manual_override",
     }
+
+
+AUTO_PROFILE_CASES = {
+    "podcast": ("Это подкаст: в этом выпуске обсуждаем работу и личный опыт.", []),
+    "interview": ("Интервью: ведущий спрашивает, а гость отвечает на вопрос.", ["host"]),
+    "talking_head_expert": ("Эксперт объясняю главную ошибку и даю практический совет.", []),
+    "gameplay": ("Геймплей PUBG: в этой катке решающий раунд и клатч.", []),
+    "stream": ("Стрим в прямом эфире: чат и зрители прислали донат.", []),
+    "vlog_lifestyle": ("Влог про мой день и утреннюю рутину в стиле лайфстайл.", []),
+    "food": ("Готовим рецепт: ингредиент превращается в блюдо, затем дегустация.", []),
+    "travel": ("Путешествие: поездка через аэропорт, отель и скрытое место.", []),
+    "tutorial_education": ("Туториал и урок: нажмите кнопку и повторите шаг за шагом.", []),
+    "review": ("Обзор и тест продукта: плюсы и минусы, затем честный вердикт.", []),
+    "reaction": ("Моя реакция: впервые смотрю и не могу поверить увиденному.", []),
+    "story_entertainment": ("Однажды случилась смешная история, а в конце была шутка.", []),
+    "movie_series": ("Это сцена из фильма: персонаж вспоминает эпизод сериала.", []),
+    "sports_fitness": ("Спорт и фитнес: тренировка, упражнение и план workout.", []),
+    "news_commentary": ("Новости и аналитика: репортаж про выборы и события дня.", []),
+}
+
+
+@pytest.mark.parametrize("profile_id", content_profile_preset_ids())
+def test_auto_matrix_detects_all_15_registered_profiles(profile_id: str) -> None:
+    text, speakers = AUTO_PROFILE_CASES[profile_id]
+
+    data = _profile(text, speakers=speakers)
+
+    proposal = data["detected_profile"]["profile_id"]
+    assert proposal["value"] == profile_id
+    assert proposal["confidence"] >= 0.45
+    assert proposal["evidence"]
+    assert data["requested_mode"] == "auto"
+    assert data["effective_profile"]["profile_id"] == profile_id
+    assert {
+        axis: data["effective_profile"][axis]
+        for axis in ("format", "editorial_mode", "domain", "traits")
+    } == content_profile_preset_mapping(profile_id)
+    assert data["effective_profile_reason"] == "auto_detected_profile_accepted"
+
+
+def test_profile_matching_is_word_aware_and_editorial_intent_is_not_detection_evidence() -> None:
+    promo = _profile("Промокод даёт скидку покупателю и действует только сегодня.")
+    config = AppConfig()
+    config.content_understanding.editorial_intent = "Ищи gameplay, стрим и игровые клатчи"
+    news = _profile("Новости и аналитика: репортаж про выборы и события дня.", config=config)
+
+    assert promo["detected_profile"]["format"]["value"] != "screen_demo"
+    assert promo["detected_profile"]["domain"]["value"] != "technology"
+    assert promo["effective_profile"]["profile_id"] == "unknown"
+    assert news["effective_profile"]["profile_id"] == "news_commentary"
+    assert all(
+        "editorial_intent" not in evidence
+        for evidence in news["detected_profile"]["profile_id"]["evidence"]
+    )
+
+
+def test_transcript_and_structured_evidence_beat_conflicting_filename_hint() -> None:
+    data = _profile(
+        "Готовим рецепт: ингредиент превращается в блюдо, затем дегустация.",
+        filename="pubg-gameplay-review.mp4",
+        visual_analysis={
+            "status": "completed",
+            "evidence_status": "observed",
+            "source_path": "captures/pubg-gameplay.mp4",
+            "sample_count": 8,
+            "subject_keyframes": [{"label": "cooking kitchen food"}],
+        },
+    )
+
+    assert data["detected_profile"]["profile_id"]["value"] == "food"
+    assert data["effective_profile"]["profile_id"] == "food"
+    assert data["evidence"]["filename_signal_used"] is True
 
 
 def test_profile_reads_current_audio_and_visual_evidence_contracts() -> None:
@@ -198,8 +292,24 @@ def test_profile_validator_migrates_legacy_shape_and_checks_source_identity() ->
     legacy["schema_version"] = "5A.1"
 
     migrated = VideoContentProfile.from_dict(legacy)
-    assert migrated.schema_version == "5A.2"
+    assert migrated.schema_version == "5A.3"
     assert migrated.effective_profile["resolution"]["format"] == "legacy_migration"
+
+    legacy_5a2 = dict(current)
+    legacy_5a2["schema_version"] = "5A.2"
+    for key in ("contract_version", "detector_version", "requested_mode", "requested_profile_id", "effective_profile_reason"):
+        legacy_5a2.pop(key)
+    legacy_5a2["detected_profile"] = dict(current["detected_profile"])
+    legacy_5a2["detected_profile"].pop("profile_id")
+    legacy_5a2["detected_profile"]["provenance"] = {"filename_signal_used": False, "detector": "5A.4"}
+    legacy_5a2["effective_profile"] = dict(current["effective_profile"])
+    legacy_5a2["effective_profile"].pop("profile_id")
+
+    migrated_5a2 = VideoContentProfile.from_dict(legacy_5a2)
+    assert migrated_5a2.schema_version == "5A.3"
+    assert migrated_5a2.contract_version == CONTENT_PROFILE_CONTRACT_VERSION
+    assert migrated_5a2.detector_version == "legacy_5A.2"
+    assert migrated_5a2.effective_profile["profile_id"] in CONTENT_PROFILE_PRESETS
     validate_video_content_profile(current, expected_source_id="source-1")
     with pytest.raises(ValueError, match="source_id"):
         validate_video_content_profile(current, expected_source_id="other-source")

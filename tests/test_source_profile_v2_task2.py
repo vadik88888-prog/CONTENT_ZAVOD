@@ -6,6 +6,7 @@ import pytest
 
 from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError
 from app.config import AppConfig
+from app.content_profile_taxonomy import content_profile_preset_mapping
 from app.continuity import build_continuity_decision
 from app.draft_artifact import DraftArtifact, new_draft_artifact
 from app.errors import ClipEngineError
@@ -13,8 +14,12 @@ from app.pipeline import Pipeline
 from app.utils import read_json, stable_file_hash, write_json
 
 
-def _install_analysis_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_analysis_fakes(
+    monkeypatch: pytest.MonkeyPatch, calls: dict[str, int] | None = None,
+) -> None:
     def fake_prepare_media(_source_path: Path, work_directory: Path) -> dict:
+        if calls is not None:
+            calls["source"] = calls.get("source", 0) + 1
         audio = work_directory / "audio.wav"
         audio.write_bytes(b"wav")
         metadata = {
@@ -31,6 +36,8 @@ def _install_analysis_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_transcribe(
         _audio_path: Path, source_id: str, source_duration: float, _config: AppConfig, destination: Path,
     ) -> dict:
+        if calls is not None:
+            calls["transcript"] = calls.get("transcript", 0) + 1
         sentences = (
             "Why do projects fail before launch?",
             "They fail when teams skip the smallest validation step.",
@@ -109,7 +116,8 @@ def _primary_evidence(candidate: dict) -> list[dict]:
 def test_profile_and_editorial_intent_do_not_change_boundaries_or_a2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_analysis_fakes(monkeypatch)
+    calls: dict[str, int] = {}
+    _install_analysis_fakes(monkeypatch, calls)
     source = tmp_path / "same-source.mp4"
     source.write_bytes(b"same source bytes")
     config_a = _config(
@@ -136,8 +144,13 @@ def test_profile_and_editorial_intent_do_not_change_boundaries_or_a2(
     assert analysis_a.load_reference("content_map") == analysis_b.load_reference("content_map")
     assert boundary_a == boundary_b
     report_b = read_json(result_b.report_path, {})
-    for stage in ("vision_pass1", "global_content_map", "semantic_boundaries"):
-        assert report_b["stages"][stage]["cache_hit"] is True
+    assert calls == {"source": 1, "transcript": 1}
+    assert report_b["stages"]["video_content_profile"]["cache_hit"] is False
+    assert report_b["stages"]["vision_pass1"]["cache_hit"] is False
+    # Content Map stays evidence-driven, while the Vision Auto input invalidates
+    # the semantic consumer. The regenerated boundary/A-2 result stays equal.
+    assert report_b["stages"]["global_content_map"]["cache_hit"] is True
+    assert report_b["stages"]["semantic_boundaries"]["cache_hit"] is False
 
     continuity_a = build_continuity_decision(
         candidate_id=candidate_a["id"],
@@ -205,6 +218,29 @@ def test_analysis_a_snapshot_survives_analysis_b_and_draft_binds_to_a(
     assert draft.analysis_artifact_sha256 == stable_file_hash(result_a.analysis_path)
     draft_report = read_json(draft_result.report_path, {})
     assert draft_report["content_understanding"]["profile"]["manual_override"]["format"] == "dialogue"
+
+
+def test_detector_version_invalidates_profile_dependents_but_reuses_source_and_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, int] = {}
+    _install_analysis_fakes(monkeypatch, calls)
+    source = tmp_path / "same-source.mp4"
+    source.write_bytes(b"same source bytes")
+    config = _config(profile=content_profile_preset_mapping("food"), intent="")
+
+    _first_result, first = _analysis_run(tmp_path, source, config, "detector-a")
+    monkeypatch.setattr("app.pipeline.CONTENT_PROFILE_DETECTOR_VERSION", "source-content-profile-detector.test-2")
+    monkeypatch.setattr("app.content_understanding.CONTENT_PROFILE_DETECTOR_VERSION", "source-content-profile-detector.test-2")
+    second_result, second = _analysis_run(tmp_path, source, config, "detector-b")
+
+    assert calls == {"source": 1, "transcript": 1}
+    assert first.load_reference("content_profile")["detector_version"] != second.load_reference("content_profile")["detector_version"]
+    stages = read_json(second_result.report_path, {})["stages"]
+    assert stages["video_content_profile"]["cache_hit"] is False
+    assert stages["vision_pass1"]["cache_hit"] is False
+    assert stages["global_content_map"]["cache_hit"] is False
+    assert stages["semantic_boundaries"]["cache_hit"] is False
 
 
 def test_integrity_mismatch_stops_draft_before_transformation(

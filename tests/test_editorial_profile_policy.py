@@ -61,6 +61,7 @@ def _candidate(*reason_codes: str, boundary: dict | None = None, score: float = 
 def _profile(profile_id: str) -> dict:
     preset = CONTENT_PROFILE_PRESETS[profile_id]
     effective = preset.profile()
+    effective["profile_id"] = profile_id
     effective["resolution"] = {
         "format": "manual_override",
         "editorial_mode": "manual_override",
@@ -69,6 +70,10 @@ def _profile(profile_id: str) -> dict:
     }
     return {
         "content_profile_preset": profile_id,
+        "requested_mode": "manual",
+        "requested_profile_id": profile_id,
+        "effective_profile_reason": "manual_profile_selected",
+        "detector_version": "test-detector.1",
         "effective_profile": effective,
         "detected_profile": {"format": {"value": "unknown", "confidence": 0.2}},
         "manual_override": {**preset.profile(), "provenance": "user", "revision_id": "revision-1"},
@@ -163,6 +168,26 @@ def test_auto_preserves_detected_effective_and_manual_provenance() -> None:
     assert resolved.detected_profile == profile["detected_profile"]
     assert resolved.effective_profile == profile["effective_profile"]
     assert resolved.manual_override == profile["manual_override"]
+
+
+def test_editorial_policy_uses_effective_contract_over_conflicting_legacy_and_filename_hints() -> None:
+    profile = _profile("gameplay")
+    profile.update({
+        "content_profile_preset": "movie_series",
+        "detected_content_type": "movie_or_series",
+        "requested_mode": "auto",
+        "requested_profile_id": None,
+        "effective_profile_reason": "auto_detected_profile_accepted",
+    })
+    profile["detected_profile"] = {
+        "profile_id": {"value": "movie_series", "confidence": 0.8, "evidence": ["legacy:test"]},
+    }
+
+    resolved = resolve_editorial_profile(profile, source={"filename": "movie-series.mp4"})
+
+    assert resolved.profile_id == "gameplay"
+    assert resolved.resolution == "effective_profile_contract"
+    assert resolved.effective_profile == profile["effective_profile"]
 
 
 def test_real_95_analysis_is_immutable_and_has_only_evidence_backed_integrity_blocks() -> None:

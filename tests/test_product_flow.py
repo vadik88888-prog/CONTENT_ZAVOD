@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.analysis_artifact import AnalysisArtifact
 from app.config import load_config
 from app.content_profile_taxonomy import content_profile_preset_mapping
@@ -20,6 +22,7 @@ from app.product_flow import (
     apply_resolved_processing_config,
     calibrate_processing_estimate,
     estimate_processing,
+    resolve_deep_analysis,
     resolve_processing_intent,
 )
 
@@ -127,6 +130,34 @@ def test_deep_analysis_auto_is_conservative_and_manual_choice_wins() -> None:
     assert active.deep_analysis.resolved is True
     assert manual_off.deep_analysis.resolved is False
     assert "вашему выбору" in manual_off.deep_analysis.reason
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected"),
+    (
+        ("podcast", False), ("interview", False), ("talking_head_expert", False),
+        ("gameplay", True), ("stream", True), ("vlog_lifestyle", True),
+        ("food", True), ("travel", True), ("tutorial_education", False),
+        ("review", True), ("reaction", True), ("story_entertainment", True),
+        ("movie_series", True), ("sports_fitness", True), ("news_commentary", False),
+    ),
+)
+def test_vision_auto_reads_effective_contract_for_all_15_profiles(
+    profile_id: str, expected: bool,
+) -> None:
+    effective = content_profile_preset_mapping(profile_id)
+    effective.update({
+        "profile_id": profile_id,
+        "resolution": {
+            "format": "detected", "editorial_mode": "detected",
+            "domain": "detected", "traits": "detected",
+        },
+    })
+
+    decision = resolve_deep_analysis("auto", {"effective_profile": effective})
+
+    assert decision.resolved is expected
+    assert decision.evidence["effective_profile_id"] == profile_id
 
 
 def test_estimate_is_a_range_and_does_not_invent_local_ai_cost() -> None:

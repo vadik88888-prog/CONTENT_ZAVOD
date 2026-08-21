@@ -10,10 +10,11 @@ selectability.
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
+from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS, UNKNOWN_PROFILE_ID
 
 
 EDITORIAL_PROFILE_POLICY_VERSION = "editorial-profile-policy.1"
@@ -50,6 +51,10 @@ class ResolvedEditorialProfile:
     manual_override: Mapping[str, Any]
     resolution: str
     confidence: float
+    requested_mode: str = "auto"
+    requested_profile_id: str | None = None
+    effective_profile_reason: str = "legacy_effective_profile_resolution"
+    detector_version: str = "legacy"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +64,10 @@ class ResolvedEditorialProfile:
             "manual_override": dict(self.manual_override),
             "resolution": self.resolution,
             "confidence": round(self.confidence, 6),
+            "requested_mode": self.requested_mode,
+            "requested_profile_id": self.requested_profile_id,
+            "effective_profile_reason": self.effective_profile_reason,
+            "detector_version": self.detector_version,
         }
 
 
@@ -278,8 +287,20 @@ EDITORIAL_PROFILE_POLICIES = MappingProxyType({
 if tuple(EDITORIAL_PROFILE_POLICIES) != tuple(CONTENT_PROFILE_PRESETS):
     raise RuntimeError("Editorial policy registry must cover the canonical 15 content profiles in order.")
 
+_CONSERVATIVE_AUTO_POLICY = _policy(
+    UNKNOWN_PROFILE_ID,
+    ("coherent_editorial_unit", "complete_thought", "logical_scene_unit"),
+    "conservative mixed fallback; preserve plausible human choices",
+    ("meaning_preserved", "context_sufficient", "coherence"),
+    ("meaning_preserved",),
+    ("hook", "payoff", "profile_fit", "high_emotion", "visual_activity"),
+    (8, 120),
+    ("topic", "speaker", "scene", "emotion"),
+    101,
+)
 
-_CONTENT_TYPE_PROFILE = {
+
+_LEGACY_CONTENT_TYPE_PROFILE = {
     "podcast": "podcast",
     "interview": "interview",
     "educational": "tutorial_education",
@@ -289,7 +310,6 @@ _CONTENT_TYPE_PROFILE = {
     "news_or_analysis": "news_commentary",
     "commentary": "talking_head_expert",
 }
-_MOVIE_SOURCE_HINTS = ("сериал", "фильм", "series", "movie")
 
 
 def resolve_editorial_profile(
@@ -305,7 +325,36 @@ def resolve_editorial_profile(
     effective = dict(raw.get("effective_profile") or {})
     manual = dict(raw.get("manual_override") or {})
     confidence = _bounded(float(raw.get("content_type_confidence") or 0.0), 0.0, 1.0)
+    requested_mode = str(raw.get("requested_mode") or "auto")
+    requested_profile_id = (
+        str(raw["requested_profile_id"])
+        if raw.get("requested_profile_id") is not None else None
+    )
+    effective_reason = str(raw.get("effective_profile_reason") or "legacy_effective_profile_resolution")
+    detector_version = str(raw.get("detector_version") or "legacy")
 
+    effective_id = str(effective.get("profile_id") or "")
+    if effective_id in {*EDITORIAL_PROFILE_POLICIES, UNKNOWN_PROFILE_ID}:
+        detected_id = detected.get("profile_id")
+        detected_confidence = (
+            float(detected_id.get("confidence", 0))
+            if isinstance(detected_id, Mapping) else confidence
+        )
+        return ResolvedEditorialProfile(
+            effective_id,
+            detected,
+            effective,
+            manual,
+            "effective_profile_contract",
+            1.0 if requested_mode == "manual" else _bounded(detected_confidence, 0.0, 1.0),
+            requested_mode,
+            requested_profile_id,
+            effective_reason,
+            detector_version,
+        )
+
+    # Compatibility for persisted pre-contract artifacts only.  New artifacts
+    # always resolve through ``effective_profile.profile_id`` above.
     explicit_id = str(raw.get("editorial_policy_profile_id") or raw.get("content_profile_preset") or "")
     if explicit_id in EDITORIAL_PROFILE_POLICIES:
         return ResolvedEditorialProfile(explicit_id, detected, effective, manual, "explicit_profile_id", 1.0)
@@ -317,11 +366,14 @@ def resolve_editorial_profile(
         profile_id, affinity = _closest_profile(effective)
         return ResolvedEditorialProfile(profile_id, detected, effective, manual, "manual_override", max(confidence, affinity))
 
-    source_name = " ".join(str((source or {}).get(key) or "") for key in ("filename", "name", "path", "original_url")).casefold()
-    if any(hint in source_name for hint in _MOVIE_SOURCE_HINTS):
+    source_tokens = set(re.findall(
+        r"[A-Za-zА-Яа-яЁё0-9]+",
+        " ".join(str((source or {}).get(key) or "") for key in ("filename", "name", "path", "original_url")).casefold(),
+    ))
+    if source_tokens.intersection({"сериал", "фильм", "series", "movie"}):
         return ResolvedEditorialProfile("movie_series", detected, effective, manual, "auto_source_metadata_hint", max(confidence, 0.75))
 
-    projected = _CONTENT_TYPE_PROFILE.get(str(raw.get("detected_content_type") or ""))
+    projected = _LEGACY_CONTENT_TYPE_PROFILE.get(str(raw.get("detected_content_type") or ""))
     if projected:
         return ResolvedEditorialProfile(projected, detected, effective, manual, "auto_detected_content_type", confidence)
     profile_id, affinity = _closest_profile(effective)
@@ -348,7 +400,7 @@ def evaluate_editorial_candidate(
     """
 
     resolved = resolve_editorial_profile(content_profile, source=source)
-    policy = EDITORIAL_PROFILE_POLICIES[resolved.profile_id]
+    policy = EDITORIAL_PROFILE_POLICIES.get(resolved.profile_id, _CONSERVATIVE_AUTO_POLICY)
     eligibility = _eligibility_mapping(candidate)
     reason_codes = _unique(str(item) for item in eligibility.get("reason_codes", []) if str(item))
     hard_blockers: list[str] = []

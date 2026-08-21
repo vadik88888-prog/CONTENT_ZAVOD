@@ -15,6 +15,7 @@ from typing import Any, Iterable, Literal, Mapping
 
 from app.candidate_quality import cached_hard_eligibility_reason_codes
 from app.clip_results import ClipResult
+from app.content_profile_taxonomy import UNKNOWN_PROFILE_ID
 from app.editorial_profile_policy import (
     EDITORIAL_PROFILE_POLICIES,
     EDITORIAL_PROFILE_POLICY_VERSION,
@@ -67,7 +68,7 @@ def validate_persisted_editorial_decision(
         return None, [*errors, "EDITORIAL_DECISION_MALFORMED"]
     if decision.policy_version != EDITORIAL_PROFILE_POLICY_VERSION:
         errors.append("EDITORIAL_POLICY_VERSION_MISMATCH")
-    if decision.profile_id not in EDITORIAL_PROFILE_POLICIES:
+    if decision.profile_id not in EDITORIAL_PROFILE_POLICIES and decision.profile_id != UNKNOWN_PROFILE_ID:
         errors.append("EDITORIAL_PROFILE_UNKNOWN")
     provenance = value.get("profile_provenance")
     if not isinstance(provenance, Mapping):

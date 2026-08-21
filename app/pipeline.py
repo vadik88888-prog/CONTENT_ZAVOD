@@ -37,6 +37,8 @@ from app.creative_lifecycle import (
     revise_creative_intent,
 )
 from app.content_understanding import (
+    CONTENT_PROFILE_CONTRACT_VERSION,
+    CONTENT_PROFILE_DETECTOR_VERSION,
     CONTENT_STRATEGY_VERSION,
     SEMANTIC_CANDIDATE_GENERATION_VERSION,
     build_coverage_map,
@@ -554,6 +556,8 @@ class Pipeline:
                 "manual_override": self.config.content_understanding.manual_override,
                 "content_profile_preset": self.config.product_flow.content_profile_preset,
                 "profile_detection_min_confidence": self.config.content_understanding.profile_detection_min_confidence,
+                "profile_contract_version": CONTENT_PROFILE_CONTRACT_VERSION,
+                "profile_detector_version": CONTENT_PROFILE_DETECTOR_VERSION,
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
@@ -589,6 +593,8 @@ class Pipeline:
                 "boundary_evidence_profile": "genre_neutral",
                 "processing_mode": self.config.product_flow.processing_mode,
                 "deep_analysis": deep_analysis.to_dict(),
+                "effective_profile": _hash(content_profile.get("effective_profile", {})),
+                "profile_detector_version": content_profile.get("detector_version"),
                 "vision": self.config.vision,
                 "provider": "mock" if self.mock_ai else self.config.ai.provider,
                 "model": self.config.ai.model,
@@ -603,7 +609,7 @@ class Pipeline:
                     source=source.path,
                     timeline=multimodal_timeline,
                     content_type=str(
-                        content_profile.get("detected_content_type")
+                        (content_profile.get("effective_profile") or {}).get("profile_id")
                         or (content_profile.get("effective_profile") or {}).get("format")
                         or "unknown"
                     ),
@@ -1400,7 +1406,7 @@ class Pipeline:
                 "candidate_count": len(final_scored),
                 "recommended_count": len(selected_ids),
                 "source_duration_seconds": metadata.get("duration"),
-                "content_type": content_profile.get("detected_content_type"),
+                "content_type": (content_profile.get("effective_profile") or {}).get("profile_id"),
                 "potential_counts": potential_counts(review_candidates),
             },
             content_profile={
@@ -1411,6 +1417,11 @@ class Pipeline:
                 "effective_profile": content_profile.get("effective_profile"),
                 "manual_override": content_profile.get("manual_override"),
                 "content_profile_preset": content_profile.get("content_profile_preset", "auto"),
+                "contract_version": content_profile.get("contract_version"),
+                "detector_version": content_profile.get("detector_version"),
+                "requested_mode": content_profile.get("requested_mode"),
+                "requested_profile_id": content_profile.get("requested_profile_id"),
+                "effective_profile_reason": content_profile.get("effective_profile_reason"),
             },
             duration_seconds=float(metadata["duration"]) if metadata.get("duration") is not None else None,
             analysis_run_id=self.run_id,
