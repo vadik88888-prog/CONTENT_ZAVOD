@@ -31,6 +31,7 @@ def _profile(
     text: str, *, speakers: list[str] | None = None, filename: str = "source.mp4",
     config: AppConfig | None = None, audio_features: dict | None = None,
     visual_analysis: dict | None = None, scenes: dict | None = None,
+    vision_pass1: dict | None = None,
 ) -> dict:
     speakers = speakers or []
     segments = []
@@ -56,7 +57,15 @@ def _profile(
         scenes or {"boundaries": []},
         visual_analysis or {"status": "skipped", "evidence_status": "skipped", "subject_keyframes": [], "sample_count": 0},
         active_config,
+        vision_pass1=vision_pass1,
     )
+
+
+def _completed_vision(*scene_types: str) -> dict:
+    return {
+        "status": "completed",
+        "observations": [{"scene_type": scene_type} for scene_type in scene_types],
+    }
 
 
 def test_unregistered_motivational_shape_keeps_detection_but_uses_honest_fallback() -> None:
@@ -303,6 +312,59 @@ def test_single_strong_unambiguous_structured_signal_can_be_admitted() -> None:
     assert proposal["confidence"] >= 0.45
     assert "admission:independent_evidence_units:1" in proposal["evidence"]
     assert data["effective_profile"]["profile_id"] == "gameplay"
+
+
+def test_completed_vision_gameplay_evidence_resolves_auto_profile() -> None:
+    data = _profile(
+        "Neutral source material without category terms.",
+        vision_pass1=_completed_vision(*(["GAMEPLAY"] * 13), "PRESENTATION_SCREEN", "TALKING_HEAD", "PRESENTATION_SCREEN"),
+    )
+
+    assert data["effective_profile"]["profile_id"] == "gameplay"
+    assert data["effective_profile_reason"] == "auto_detected_profile_accepted"
+    assert data["evidence"]["vision_pass1"] == {"status": "completed", "observation_count": 16}
+    assert "structured_visual:phrase:gameplay" in data["detected_profile"]["profile_id"]["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("scene_type", "expected_profile"),
+    (("PODCAST", "podcast"), ("INTERVIEW_MULTI", "interview")),
+)
+def test_completed_vision_dialogue_evidence_resolves_matching_auto_profile(
+    scene_type: str, expected_profile: str,
+) -> None:
+    data = _profile(
+        "Neutral source material without category terms.",
+        vision_pass1=_completed_vision(scene_type),
+    )
+
+    assert data["effective_profile"]["profile_id"] == expected_profile
+
+
+def test_weak_or_conflicting_completed_vision_evidence_keeps_unknown_profile() -> None:
+    data = _profile(
+        "Neutral source material without category terms.",
+        vision_pass1=_completed_vision("GAMEPLAY", "PODCAST"),
+    )
+
+    assert data["effective_profile"]["profile_id"] == "unknown"
+    assert data["effective_profile_reason"] == "auto_low_confidence_conservative_fallback"
+    assert "admission:conflicting_profile_evidence" in data["detected_profile"]["profile_id"]["evidence"]
+
+
+def test_manual_profile_remains_authoritative_over_completed_vision_evidence() -> None:
+    config = AppConfig()
+    config.product_flow.content_profile_preset = "food"
+
+    data = _profile(
+        "Neutral source material without category terms.",
+        config=config,
+        vision_pass1=_completed_vision(*(["GAMEPLAY"] * 13)),
+    )
+
+    assert data["detected_profile"]["profile_id"]["value"] == "gameplay"
+    assert data["effective_profile"]["profile_id"] == "food"
+    assert data["effective_profile_reason"] == "manual_profile_selected"
 
 
 def test_single_supporting_structured_label_is_not_admitted() -> None:

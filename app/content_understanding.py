@@ -133,7 +133,7 @@ _PROFILE_TRANSCRIPT_SIGNALS: dict[str, tuple[str, ...]] = {
 }
 
 _PROFILE_VISUAL_SIGNALS: dict[str, tuple[str, ...]] = {
-    "podcast": ("podcast studio", "microphones"),
+    "podcast": ("podcast studio", "podcast", "microphones"),
     "interview": ("interview", "host and guest"),
     "talking_head_expert": ("talking head", "presenter"),
     "gameplay": ("gameplay", "game ui", "video game"),
@@ -724,10 +724,18 @@ def build_video_content_profile(
     scenes: dict[str, Any],
     visual_analysis: dict[str, Any],
     config: Any,
+    *,
+    vision_pass1: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a validated profile without treating filename data as primary evidence."""
+    """Build a validated profile without treating filename data as primary evidence.
+
+    PASS 1 Vision is optional, already-validated evidence from the same source.
+    It may enrich the final auto profile, but never changes the local profile
+    used to admit that Vision pass.
+    """
 
     enabled = bool(getattr(config.content_understanding, "enabled", True))
+    profile_visual_evidence = _profile_visual_evidence(visual_analysis, vision_pass1)
     profile = DeterministicContentStrategy().build_profile(
         source if enabled else {"id": source.get("id")},
         metadata,
@@ -735,13 +743,50 @@ def build_video_content_profile(
         transcript_features if enabled else {"segments": []},
         audio_features if enabled else {},
         scenes if enabled else {},
-        visual_analysis if enabled else {},
+        profile_visual_evidence if enabled else {},
         config,
     )
     profile.evidence["detection_enabled"] = enabled
+    if vision_pass1 is not None:
+        profile.evidence["vision_pass1"] = _vision_profile_evidence_summary(vision_pass1)
     if not enabled:
         profile.warnings.append("Автоопределение профиля отключено; применён manual override или безопасный fallback.")
     return profile.to_dict()
+
+
+def _profile_visual_evidence(
+    visual_analysis: dict[str, Any], vision_pass1: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach completed PASS 1 observations without changing local visual inputs.
+
+    The detector already consumes structured ``scene_type`` values, so this is
+    an evidence adapter rather than a second profile detector. Fallback,
+    partial, and skipped Vision output is deliberately not profile evidence.
+    """
+
+    local_evidence = dict(visual_analysis) if isinstance(visual_analysis, dict) else {}
+    if not isinstance(vision_pass1, dict) or vision_pass1.get("status") != "completed":
+        return local_evidence
+    observations = [
+        dict(item) for item in vision_pass1.get("observations", [])
+        if isinstance(item, dict)
+    ]
+    if not observations:
+        return local_evidence
+    return {
+        **local_evidence,
+        "vision_pass1": {"observations": observations},
+    }
+
+
+def _vision_profile_evidence_summary(vision_pass1: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(vision_pass1, dict):
+        return {"status": "not_available", "observation_count": 0}
+    observations = vision_pass1.get("observations", [])
+    return {
+        "status": str(vision_pass1.get("status") or "unknown"),
+        "observation_count": len(observations) if isinstance(observations, list) else 0,
+    }
 
 
 def _tokens(text: str) -> list[str]:
@@ -825,6 +870,24 @@ def _independent_phrase_hits(text: str, phrases: tuple[str, ...]) -> list[str]:
         selected_phrases.add(phrase)
         occupied.update(token_range)
     return [phrase for _order, phrase in sorted(selected)]
+
+
+def _phrase_occurrence_count(text: str, phrase: str) -> int:
+    """Count complete phrase occurrences for persisted structured observations."""
+
+    text_tokens = _tokens(text)
+    phrase_tokens = [item.casefold() for item in _SIGNAL_TOKEN_RE.findall(phrase)]
+    if not phrase_tokens or len(phrase_tokens) > len(text_tokens):
+        return 0
+    return sum(
+        1
+        for start in range(len(text_tokens) - len(phrase_tokens) + 1)
+        if all(
+            text_tokens[start + offset].startswith(raw[:-1])
+            if raw.endswith("*") else text_tokens[start + offset] == raw
+            for offset, raw in enumerate(phrase_tokens)
+        )
+    )
 
 
 def _structured_visual_signal_blobs(visual_analysis: dict[str, Any]) -> tuple[str, str]:
@@ -1070,6 +1133,10 @@ def _detect_registered_profile(
         strong_visual_hits = set(
             _independent_phrase_hits(strong_visual_blob, _PROFILE_VISUAL_SIGNALS[profile_id])
         )
+        strong_visual_units = sum(
+            _phrase_occurrence_count(strong_visual_blob, phrase)
+            for phrase in strong_visual_hits
+        )
         filename_hits = [
             phrase for phrase in _PROFILE_TRANSCRIPT_SIGNALS[profile_id]
             if _phrase_matches(filename, phrase)
@@ -1103,11 +1170,11 @@ def _detect_registered_profile(
             compatibility += 0.3
             evidence.append("structured_scenes:high_scene_count")
         auxiliary_score = min(0.4, len(filename_hits) * 0.2)
-        direct_evidence_units = len(transcript_hits) + len(visual_hits)
+        direct_evidence_units = len(transcript_hits) + len(visual_hits) - len(strong_visual_hits) + strong_visual_units
         supporting_visual_units = sum(phrase not in strong_visual_hits for phrase in visual_hits)
         evidence_strength = (
             len(transcript_hits) * _TRANSCRIPT_PROFILE_EVIDENCE_STRENGTH
-            + len(strong_visual_hits) * _STRUCTURED_VISUAL_PROFILE_EVIDENCE_STRENGTH
+            + strong_visual_units * _STRUCTURED_VISUAL_PROFILE_EVIDENCE_STRENGTH
             + supporting_visual_units * _SUPPORTING_VISUAL_PROFILE_EVIDENCE_STRENGTH
             + (
                 _CROSS_SOURCE_PROFILE_EVIDENCE_BONUS

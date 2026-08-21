@@ -248,7 +248,9 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
 
     # The manual gameplay profile preserves the evidence-only content map, but
     # its accepted Vision admission invalidates the dependent boundaries.
-    assert calls == {"profile": 2, "map": 1, "boundaries": 3}
+    # The detector runs once for Vision admission and once for the persisted
+    # final profile; no new content-map pass is needed.
+    assert calls == {"profile": 4, "map": 1, "boundaries": 3}
     report = read_json(first_result.report_path, {})
     understanding = report["content_understanding"]
     assert understanding["coverage_map"]["schema_version"] == "5A.1"
@@ -261,7 +263,7 @@ def test_content_artifacts_are_source_cached_and_boundary_config_isolated(tmp_pa
 
     changed_transcript = AppConfig(score_threshold=0, whisper_model="base")
     Pipeline(tmp_path, changed_transcript, mock_ai=True).run(input_path=str(source))
-    assert calls["profile"] == 3
+    assert calls["profile"] == 6
     assert calls["map"] == 2
 
 
@@ -320,10 +322,13 @@ def test_repeated_analysis_reuses_source_intelligence_cache(tmp_path: Path, monk
     first = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
     second = Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True, analysis_only=True).run(input_path=str(source))
 
-    assert calls == {"profile": 1, "map": 1, "boundaries": 1}
+    assert calls == {"profile": 2, "map": 1, "boundaries": 1}
     assert first.analysis_id == second.analysis_id
     report = read_json(second.report_path, {})
     assert report["stages"]["transcription"]["cache_hit"] is True
+    assert report["stages"]["pre_vision_content_profile"]["cache_hit"] is True
+    assert report["stages"]["vision_pass1"]["cache_hit"] is True
+    assert report["stages"]["video_content_profile"]["cache_hit"] is True
     assert report["stages"]["production_feasibility"]["cache_hit"] is True
     feasibility = read_json(first.work_directory / "production_feasibility.json", {})
     assert feasibility["provider_mode"] == "local_only"

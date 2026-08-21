@@ -129,7 +129,7 @@ from app.virality import (
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "video_content_profile", "vision_pass1",
+    "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "pre_vision_content_profile", "video_content_profile", "vision_pass1",
     "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
     "production_feasibility", "coverage_map", "clip_count_recommendation", "render", "report",
 )
@@ -541,8 +541,8 @@ class Pipeline:
                 data, expected_source_id=source.id, expected_analysis_run_id=multimodal_analysis_id,
             ),
         )
-        content_profile = self._cached(
-            tracker, "video_content_profile", work_directory / "video_content_profile.json",
+        pre_vision_content_profile = self._cached(
+            tracker, "pre_vision_content_profile", work_directory / "pre_vision_content_profile.json",
             {
                 "source": source.id,
                 "transcript": _hash(transcript),
@@ -561,7 +561,7 @@ class Pipeline:
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
-                work_directory / "video_content_profile.json",
+                work_directory / "pre_vision_content_profile.json",
                 {
                     **build_video_content_profile(
                         source_data, metadata, transcript, transcript_features, audio_features, scenes,
@@ -573,7 +573,9 @@ class Pipeline:
             cache_tracker=source_cache,
             validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
         )
-        deep_analysis = self._finalize_deep_analysis(content_profile, metadata)
+        # Admission must remain acyclic: the local profile decides whether
+        # PASS 1 is worth running, and cannot depend on its own output.
+        deep_analysis = self._finalize_deep_analysis(pre_vision_content_profile, metadata)
         vision_provider = None
         if (
             self.config.vision.enabled
@@ -593,8 +595,8 @@ class Pipeline:
                 "boundary_evidence_profile": "genre_neutral",
                 "processing_mode": self.config.product_flow.processing_mode,
                 "deep_analysis": deep_analysis.to_dict(),
-                "effective_profile": _hash(content_profile.get("effective_profile", {})),
-                "profile_detector_version": content_profile.get("detector_version"),
+                "effective_profile": _hash(pre_vision_content_profile.get("effective_profile", {})),
+                "profile_detector_version": pre_vision_content_profile.get("detector_version"),
                 "vision": self.config.vision,
                 "provider": "mock" if self.mock_ai else self.config.ai.provider,
                 "model": self.config.ai.model,
@@ -609,14 +611,35 @@ class Pipeline:
                     source=source.path,
                     timeline=multimodal_timeline,
                     content_type=str(
-                        (content_profile.get("effective_profile") or {}).get("profile_id")
-                        or (content_profile.get("effective_profile") or {}).get("format")
+                        (pre_vision_content_profile.get("effective_profile") or {}).get("profile_id")
+                        or (pre_vision_content_profile.get("effective_profile") or {}).get("format")
                         or "unknown"
                     ),
                 ),
             ),
             cache_tracker=source_cache,
             validator=lambda data: validate_vision_artifact(data, multimodal_timeline),
+        )
+        content_profile = self._cached(
+            tracker, "video_content_profile", work_directory / "video_content_profile.json",
+            {
+                "pre_vision_profile": _hash(pre_vision_content_profile),
+                "vision_pass1": _hash(vision_analysis),
+                "profile_detector_version": CONTENT_PROFILE_DETECTOR_VERSION,
+                "implementation_version": CONTENT_STRATEGY_VERSION,
+            },
+            lambda: _write(
+                work_directory / "video_content_profile.json",
+                {
+                    **build_video_content_profile(
+                        source_data, metadata, transcript, transcript_features, audio_features, scenes,
+                        visual_analysis, self.config, vision_pass1=vision_analysis,
+                    ),
+                    "content_profile_preset": self.config.product_flow.content_profile_preset,
+                },
+            ),
+            cache_tracker=source_cache,
+            validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
         )
         content_map = self._cached(
             tracker, "global_content_map", work_directory / "global_content_map.json",
