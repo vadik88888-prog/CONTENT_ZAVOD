@@ -213,7 +213,7 @@ def test_doctor_checks_only_selected_provider_key(
     by_label = {check.label: check for check in checks}
 
     assert by_label["AI provider"].detail == "openai · gpt-5-mini"
-    assert by_label["OpenAI API key"].status == "warn"
+    assert by_label["OpenAI API key"].status == "error"
     assert "Gemini API key" not in by_label
 
 

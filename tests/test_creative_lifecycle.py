@@ -8,6 +8,7 @@ import pytest
 from app.audio_service import AudioCompositionService
 from app.creative_evidence import build_native_evidence_handoff
 from app.creative_execution import compile_native_creative_plan, default_native_creative_intent
+from app.creative_policy import CREATIVE_POLICY_VERSION
 from app.creative_lifecycle import (
     CreativeArtifactError,
     build_creative_execution,
@@ -104,6 +105,10 @@ def _parent_candidate(tmp_path: Path):
 def test_candidate_creative_identity_is_stable_revisionable_and_corruption_blocking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    policy_family, policy_revision = CREATIVE_POLICY_VERSION.rsplit(".", 1)
+    next_policy_version = f"{policy_family}.{int(policy_revision) + 1}"
+    current_policy_marker = f"creative_policy:{CREATIVE_POLICY_VERSION}"
+    next_policy_marker = f"creative_policy:{next_policy_version}"
     config, _source, transcript, plan, _audio, _upstream, root, evidence, compiled = _parent_candidate(tmp_path)
 
     loaded_intent, loaded_compiled, loaded_handoff, loaded_execution = load_candidate_creative_identity(
@@ -114,14 +119,14 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     assert loaded_handoff.candidate_id == loaded_execution.candidate_id == plan.metadata.candidate_id
 
     assert not creative_policy_changed(loaded_intent, config)
-    assert "creative_policy:7J.1" in loaded_intent.provenance
+    assert current_policy_marker in loaded_intent.provenance
     parent_hash = loaded_intent.canonical_hash()
-    monkeypatch.setattr("app.creative_lifecycle.CREATIVE_POLICY_VERSION", "7J.2")
+    monkeypatch.setattr("app.creative_lifecycle.CREATIVE_POLICY_VERSION", next_policy_version)
     unchanged = revise_creative_intent(loaded_intent, config)
     assert unchanged is loaded_intent
     assert unchanged.canonical_hash() == parent_hash
-    assert "creative_policy:7J.1" in unchanged.provenance
-    assert "creative_policy:7J.2" not in unchanged.provenance
+    assert current_policy_marker in unchanged.provenance
+    assert next_policy_marker not in unchanged.provenance
 
     legacy_intent = loaded_intent.model_copy(update={
         "provenance": tuple(
@@ -152,8 +157,8 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     assert revised.evidence_fingerprint == loaded_intent.evidence_fingerprint
     assert revised.source_output_mapping.fingerprint == loaded_intent.source_output_mapping.fingerprint
     assert revised.source_broll == loaded_intent.source_broll
-    assert "creative_policy:7J.2" in revised.provenance
-    assert "creative_policy:7J.1" not in revised.provenance
+    assert next_policy_marker in revised.provenance
+    assert current_policy_marker not in revised.provenance
     assert revised.canonical_hash() != parent_hash
     revised_compiled = compile_native_creative_plan(
         revised, transcript, config, source_width=320, source_height=180,
@@ -177,15 +182,15 @@ def test_candidate_creative_identity_is_stable_revisionable_and_corruption_block
     baseline_compiled = compile_native_creative_plan(
         baseline_intent, transcript, config, source_width=320, source_height=180,
     )
-    monkeypatch.setattr("app.creative_execution.CREATIVE_POLICY_VERSION", "7J.2")
+    monkeypatch.setattr("app.creative_execution.CREATIVE_POLICY_VERSION", next_policy_version)
     updated_intent = default_native_creative_intent(
         plan, evidence.intent.source_output_mapping, config,
     )
     updated_compiled = compile_native_creative_plan(
         updated_intent, transcript, config, source_width=320, source_height=180,
     )
-    assert "creative_policy:7J.1" in baseline_intent.provenance
-    assert "creative_policy:7J.2" in updated_intent.provenance
+    assert current_policy_marker in baseline_intent.provenance
+    assert next_policy_marker in updated_intent.provenance
     assert updated_intent.canonical_hash() != baseline_intent.canonical_hash()
     assert updated_compiled.intent_hash != baseline_compiled.intent_hash
     assert {

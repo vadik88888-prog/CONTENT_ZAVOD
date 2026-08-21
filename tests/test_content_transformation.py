@@ -324,7 +324,15 @@ def test_local_generation_keeps_complete_boundary_when_required_facts_exceed_wor
         for source_id in sentence["source_segment_ids"]
     } == {0, 1, 2}
     plan = build_production_plan(result, config.production)
-    assert {item.transcript_segment_id for item in plan.dialogue_mappings} == {0, 1, 2}
+    assert [
+        (item.source_start_seconds, item.source_end_seconds)
+        for item in plan.dialogue_mappings
+    ] == [(10.0, 16.0)]
+    assert {
+        evidence.transcript_segment_id
+        for item in plan.dialogue_mappings
+        for evidence in item.evidence_mappings
+    } == {0, 1, 2}
 
 
 def test_local_fallback_does_not_deduplicate_required_completion_evidence() -> None:

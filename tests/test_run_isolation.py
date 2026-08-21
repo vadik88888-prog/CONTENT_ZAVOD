@@ -126,7 +126,9 @@ def test_manifest_path_outside_current_run_is_rejected(tmp_path: Path, monkeypat
 
     completion = PipelineFacade(tmp_path).completion(prepared)
 
-    assert completion.error_summary == "Manifest содержит путь вне текущего запуска."
+    assert completion.error_summary is not None
+    assert completion.technical_details == "Canonical result path escapes run directory."
+    assert completion.output_files == []
 
 
 def test_manifest_rejects_result_owned_by_another_run(tmp_path: Path) -> None:

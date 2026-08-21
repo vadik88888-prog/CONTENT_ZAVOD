@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.audio_service import AudioCompositionService
 from app.config import AppConfig
+from app.content_transformation import run_content_transformation
 from app.creative_contracts import (
     CompiledRenderPlan,
     EditMapSegment,
@@ -14,16 +15,17 @@ from app.creative_contracts import (
 )
 from app.creative_evidence import build_native_evidence_handoff
 from app.creative_execution import compile_native_creative_plan
+from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker, _hash
 from app.production_models import BoundaryDecision, ProductionPlan
-from app.continuity import build_continuity_decision
-from app.production_plan import ProductionPlanEnvelopeContext
+from app.production_plan import ProductionPlanEnvelopeContext, build_production_plan
+from app.semantic_extraction import build_source_context
 from app.sources import Source
 from app.tts_providers import MockTTSProvider
 from app.tts_service import TTSService
 from app.utils import stable_file_hash
 from app.video_composition import _reconcile_native_execution_status
-from tests.test_audio_composition import _audio_config, _plan
+from tests.test_audio_composition import _audio_config
 from tests.test_video_composition import _source_video
 
 
@@ -116,15 +118,40 @@ def _phase6_artifacts(candidate_id: str) -> tuple[dict, dict, dict]:
     return candidate, timeline, stories
 
 
-def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) -> ProductionPlan:
-    legacy = _plan(narration=False, dialogue=True)
-    boundary = BoundaryDecision.model_validate({
+def _current_native_plan(
+    config: AppConfig | None = None,
+    *,
+    transcript: dict | None = None,
+    boundary: BoundaryDecision | None = None,
+    source_sha256: str = "c" * 64,
+) -> ProductionPlan:
+    config = config or AppConfig()
+    transcript = transcript or {
+        "source_id": "source-audio",
+        "segments": [{
+            "id": 0,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "Source dialogue remains audible.",
+        }],
+        "words": [],
+    }
+    source_id = str(transcript.get("source_id") or "source-audio")
+    source_segments = [
+        item for item in transcript.get("segments", [])
+        if isinstance(item, dict)
+    ]
+    assert source_segments
+    start = min(float(item["start"]) for item in source_segments)
+    end = max(float(item["end"]) for item in source_segments)
+    candidate_id = boundary.candidate_id if boundary is not None else "candidate-audio"
+    boundary_payload = boundary.model_dump(mode="json") if boundary is not None else {
         "schema_version": "5C.1",
         "decision_id": "boundary-candidate-audio-native",
-        "candidate_id": legacy.metadata.candidate_id,
-        "rough_range": {"start_seconds": 1.0, "end_seconds": 2.0},
-        "refined_range": {"start_seconds": 1.0, "end_seconds": 2.0},
-        "allowed_source_range": {"start_seconds": 1.0, "end_seconds": 2.0},
+        "candidate_id": candidate_id,
+        "rough_range": {"start_seconds": start, "end_seconds": end},
+        "refined_range": {"start_seconds": start, "end_seconds": end},
+        "allowed_source_range": {"start_seconds": start, "end_seconds": end},
         "start_reason": "Complete source sentence start.",
         "end_reason": "Complete source sentence and payoff.",
         "word_integrity": True,
@@ -142,22 +169,57 @@ def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) 
         "required_evidence": [{
             "requirement_type": "completion",
             "required": True,
-            "source_range": {"start_seconds": 1.0, "end_seconds": 2.0},
-            "transcript_segment_id": 0,
+            "source_range": {"start_seconds": start, "end_seconds": end},
+            "transcript_segment_id": int(source_segments[0]["id"]),
             "reason": "The source sentence remains complete.",
-            "evidence": {"text": "Source dialogue remains audible."},
+            "evidence": {"text": str(source_segments[0].get("text") or "Source dialogue")},
         }],
-        "safe_start_points": [1.0],
-        "safe_end_points": [2.0],
+        "safe_start_points": [start],
+        "safe_end_points": [end],
         "fallback_used": False,
         "fallback_reason": None,
-    })
+    }
+    text = " ".join(str(item.get("text") or "").strip() for item in source_segments).strip()
+    candidate = Candidate(
+        candidate_id,
+        start,
+        end,
+        text,
+        transcript_segment_ids=[int(item["id"]) for item in source_segments],
+        boundary_diagnostics={"eligible": True, "boundary_decision": boundary_payload},
+    )
+    features = {"segments": [{
+        **item,
+        "sentence_start": True,
+        "sentence_end": True,
+        "speech_density": 0.7,
+        "pause_before_seconds": 0.1,
+        "pause_after_seconds": 0.1,
+        "filler_word_ratio": 0.0,
+        "repetition_score": 0.0,
+    } for item in source_segments]}
+    source_context = build_source_context(
+        {"id": source_id, "path": "source.mp4"},
+        {},
+        candidate,
+        transcript,
+        features,
+        {},
+        {"boundaries": []},
+        config.transformation,
+    )
+    transformation = run_content_transformation(
+        source_context,
+        config.transformation,
+        None,
+        force_local=True,
+    )
     context = ProductionPlanEnvelopeContext(
         project_id="project-native-regression",
         run_id="run-native-regression",
         analysis_id="analysis-phase6",
         analysis_fingerprint="b" * 64,
-        source_sha256=stable_file_hash(source.path),
+        source_sha256=source_sha256,
         transcript_sha256=_hash(transcript),
         preset_id=config.product_flow.subtitle_preset,
         preset_version=config.product_flow.preset_version,
@@ -167,33 +229,23 @@ def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) 
         target_fps=config.production_render.output_fps,
         created_at="2026-08-10T00:00:00Z",
     )
-    raw = legacy.model_dump(mode="json")
-    raw["boundary_decision"] = boundary.model_dump(mode="json")
-    continuity = build_continuity_decision(
-        candidate_id=legacy.metadata.candidate_id,
-        boundary_decision=boundary,
-        primary_evidence=[{"segment_id": 0, "start": 1.0, "end": 2.0}],
-        multimodal_context={},
+    return build_production_plan(
+        transformation,
+        config.production,
+        envelope_context=context,
     )
-    assert continuity is not None
-    raw["continuity_decision"] = continuity.model_dump(mode="json")
-    for item in raw["dialogue_mappings"]:
-        item["boundary_decision_id"] = boundary.decision_id
-    for item in raw["segments"]:
-        if item.get("segment_type") == "original_dialogue":
-            item["boundary_decision_id"] = boundary.decision_id
-    raw["envelope"] = context.build(
-        candidate_id=legacy.metadata.candidate_id,
-        source_id=legacy.metadata.source_id,
-        final_script_hash=legacy.metadata.final_script_hash,
-        boundary_decision=boundary,
-        continuity_decision=continuity,
-    ).model_dump(mode="json")
-    return ProductionPlan.model_validate(raw)
+
+
+def _native_plan_for_media(config: AppConfig, source: Source, transcript: dict) -> ProductionPlan:
+    return _current_native_plan(
+        config,
+        transcript=transcript,
+        source_sha256=stable_file_hash(source.path),
+    )
 
 
 def test_phase6_artifacts_build_rich_native_handoff_without_analysis_calls() -> None:
-    plan = _plan()
+    plan = _current_native_plan()
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="candidate-map",
         source=SourceInterval.from_seconds(1.0, 2.0),
@@ -231,11 +283,10 @@ def test_phase6_artifacts_build_rich_native_handoff_without_analysis_calls() -> 
 
 
 def test_discontiguous_story_edges_follow_authoritative_boundary_ranges() -> None:
-    legacy = _plan()
     boundary = BoundaryDecision.model_validate({
         "schema_version": "5C.1",
         "decision_id": "boundary-discontiguous-native",
-        "candidate_id": legacy.metadata.candidate_id,
+        "candidate_id": "candidate-audio",
         "rough_range": {"start_seconds": 1.0, "end_seconds": 10.0},
         "refined_range": {"start_seconds": 1.0, "end_seconds": 10.0},
         "allowed_source_range": {"start_seconds": 1.0, "end_seconds": 10.0},
@@ -284,7 +335,15 @@ def test_discontiguous_story_edges_follow_authoritative_boundary_ranges() -> Non
             "confidence": 0.0,
         },
     })
-    plan = legacy.model_copy(update={"boundary_decision": boundary})
+    transcript = {
+        "source_id": "source-audio",
+        "segments": [
+            {"id": 0, "start": 1.0, "end": 2.0, "text": "Source dialogue opens clearly."},
+            {"id": 1, "start": 9.0, "end": 10.0, "text": "The ending remains audible."},
+        ],
+        "words": [],
+    }
+    plan = _current_native_plan(transcript=transcript, boundary=boundary)
     mapping = SourceOutputTimeMap(segments=(
         EditMapSegment(
             map_id="opening-map",
@@ -330,7 +389,7 @@ def test_discontiguous_story_edges_follow_authoritative_boundary_ranges() -> Non
 
 
 def test_optional_broll_off_does_not_demote_other_native_creative_layers() -> None:
-    plan = _plan()
+    plan = _current_native_plan()
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="candidate-map",
         source=SourceInterval.from_seconds(1.0, 2.0),
@@ -351,7 +410,7 @@ def test_optional_broll_off_does_not_demote_other_native_creative_layers() -> No
 
 
 def test_native_rich_status_is_demoted_when_compilation_drops_required_layers() -> None:
-    plan = _plan()
+    plan = _current_native_plan()
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="candidate-map",
         source=SourceInterval.from_seconds(1.0, 2.0),
@@ -389,7 +448,77 @@ def test_native_rich_status_is_demoted_when_compilation_drops_required_layers() 
 
 
 def test_compiled_hook_motion_can_present_hook_alongside_semantic_emphasis_without_broll() -> None:
-    plan = _plan()
+    words = (
+        "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
+        "nu xi omicron pi rho sigma tau omega"
+    ).split()
+    transcript = {
+        "source_id": "source-audio",
+        "segments": [{
+            "id": 0, "start": 1.0, "end": 11.0, "text": " ".join(words),
+        }],
+        "words": [
+            {
+                "start": 1.0 + index * 0.5,
+                "end": 1.0 + (index + 1) * 0.5,
+                "text": word,
+            }
+            for index, word in enumerate(words)
+        ],
+    }
+    boundary = BoundaryDecision.model_validate({
+        "schema_version": "5C.1",
+        "decision_id": "boundary-candidate-audio-long-native",
+        "candidate_id": "candidate-audio",
+        "rough_range": {"start_seconds": 1.0, "end_seconds": 11.0},
+        "refined_range": {"start_seconds": 1.0, "end_seconds": 11.0},
+        "allowed_source_range": {"start_seconds": 1.0, "end_seconds": 11.0},
+        "start_reason": "Complete source hook.",
+        "end_reason": "Complete source payoff.",
+        "word_integrity": True,
+        "sentence_integrity": True,
+        "semantic_completion": True,
+        "payoff_preserved": True,
+        "continuation_risk": 0.0,
+        "continuation_risk_threshold": 0.65,
+        "pre_roll_seconds": 0.0,
+        "post_roll_seconds": 0.0,
+        "confidence": 0.95,
+        "start_evidence": {"reason": "sentence_start"},
+        "end_evidence": {"reason": "sentence_completion"},
+        "pause_evidence": {},
+        "required_evidence": [
+            {
+                "requirement_type": "hook",
+                "required": True,
+                "source_range": {"start_seconds": 1.0, "end_seconds": 2.5},
+                "transcript_segment_id": 0,
+                "reason": "The opening hook remains present.",
+                "evidence": {"text": "Alpha beta gamma"},
+            },
+            {
+                "requirement_type": "completion",
+                "required": True,
+                "source_range": {"start_seconds": 9.5, "end_seconds": 11.0},
+                "transcript_segment_id": 0,
+                "reason": "The ending remains complete.",
+                "evidence": {"text": "sigma tau omega"},
+            },
+            {
+                "requirement_type": "payoff",
+                "required": True,
+                "source_range": {"start_seconds": 10.0, "end_seconds": 11.0},
+                "transcript_segment_id": 0,
+                "reason": "The payoff remains present.",
+                "evidence": {"text": "tau omega"},
+            },
+        ],
+        "safe_start_points": [1.0],
+        "safe_end_points": [11.0],
+        "fallback_used": False,
+        "fallback_reason": None,
+    })
+    plan = _current_native_plan(transcript=transcript, boundary=boundary)
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="candidate-map",
         source=SourceInterval.from_seconds(1.0, 11.0),
@@ -403,23 +532,6 @@ def test_compiled_hook_motion_can_present_hook_alongside_semantic_emphasis_witho
         plan, mapping, config, candidate=candidate,
         multimodal_timeline=timeline, story_units=stories,
     )
-    words = (
-        "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
-        "nu xi omicron pi rho sigma tau omega"
-    ).split()
-    transcript = {
-        "segments": [{
-            "id": 0, "start": 1.0, "end": 11.0, "text": " ".join(words),
-        }],
-        "words": [
-            {
-                "start": 1.0 + index * 0.5,
-                "end": 1.0 + (index + 1) * 0.5,
-                "text": word,
-            }
-            for index, word in enumerate(words)
-        ],
-    }
     compiled = compile_native_creative_plan(
         handoff.intent,
         transcript,

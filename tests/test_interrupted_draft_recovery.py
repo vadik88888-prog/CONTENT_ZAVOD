@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from app.analysis_artifact import AnalysisArtifact
 from app.draft_artifact import new_draft_artifact
 from app.gui.models import ProjectStatus, RunKind, RunStatus
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
-from app.utils import write_json
 
 from test_draft_workflow import _services
+from test_gui_analysis_integrity import _write_verified_analysis
 
 
 def _progress_candidate(
@@ -47,11 +48,11 @@ def _progress_candidate(
 
 def _interrupted_draft_context(tmp_path: Path, candidate_ids: list[str]):
     services, project, _source = _services(tmp_path)
-    analysis = tmp_path / "analysis.json"
-    write_json(analysis, {"analysis": "already complete"})
-    project.analysis_artifact_path = str(analysis)
-    project.analysis_id = "analysis-001"
-    project.analysis_fingerprint = "fingerprint-001"
+    analysis_path, analysis = _write_verified_analysis(tmp_path, project)
+    assert isinstance(analysis, AnalysisArtifact)
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = analysis.analysis_id
+    project.analysis_fingerprint = analysis.analysis_fingerprint
     project.review_selected_candidate_ids = list(candidate_ids)
     project.candidate_states = {candidate_id: "draft_planning" for candidate_id in candidate_ids}
     project.status = ProjectStatus.PROCESSING
@@ -85,7 +86,7 @@ def test_interrupted_draft_restores_only_bound_preview_and_resumes_missing(tmp_p
     preview.write_bytes(b"verified preview")
     new_draft_artifact(
         draft_id=f"draft-progress-{run.run_id}",
-        analysis_id="analysis-001", analysis_fingerprint="fingerprint-001",
+        analysis_id=project.analysis_id, analysis_fingerprint=project.analysis_fingerprint,
         analysis_artifact_path=project.analysis_artifact_path, project_id=project.project_id,
         source_fingerprint="source-fingerprint", status="draft_partial", run_id=run.run_id,
         candidates=[
@@ -152,7 +153,7 @@ def test_interrupted_draft_rejects_random_or_partial_mp4(
     output.write_bytes(b"not a trusted preview" if untrusted_output == "wrong_path" else b"")
     new_draft_artifact(
         draft_id=f"draft-progress-{run.run_id}",
-        analysis_id="analysis-001", analysis_fingerprint="fingerprint-001",
+        analysis_id=project.analysis_id, analysis_fingerprint=project.analysis_fingerprint,
         analysis_artifact_path=project.analysis_artifact_path, project_id=project.project_id,
         source_fingerprint="source-fingerprint", status="draft_partial", run_id=run.run_id,
         candidates=[_progress_candidate("candidate-a", 1, state="draft_ready", output_file=output)],
