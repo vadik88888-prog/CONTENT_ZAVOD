@@ -3,9 +3,50 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.config import AppConfig
-from app.pipeline import Pipeline
+from app.multimodal_evidence import build_multimodal_timeline
+from app.pipeline import Pipeline, _rebind_vision_artifact
 from app.sources import Source
 from app.utils import read_json, write_json
+
+
+def test_audio_v1_migration_rebinds_unchanged_vision_plan_without_provider(tmp_path: Path) -> None:
+    timeline = build_multimodal_timeline(
+        source_id="source", source_duration_seconds=20.0,
+        transcript={"segments": [{"start": 1.0, "end": 4.0, "text": "Complete thought."}]},
+        audio_features={"window_seconds": 0.5, "energy_frames": [], "silence_intervals": []},
+        scenes={"enabled": False, "boundaries": []},
+        visual_analysis={"status": "skipped", "subject_keyframes": []},
+    )
+    artifact_path = tmp_path / "vision-observations.json"
+    write_json(artifact_path, {
+        "schema_version": "6B.pass-result.1", "pass": "pass1", "status": "skipped",
+        "source_id": "source", "analysis_run_id": "old-analysis", "candidate_id": None,
+        "observations": [],
+        "diagnostics": {
+            "processing_mode": "standard",
+            "keyframes_found": [
+                {"keyframe_id": item["keyframe_id"], "timestamp": float(item["time_seconds"])}
+                for item in timeline["keyframes"]
+            ],
+        },
+        "provenance": {
+            "provider": "mock", "model": "mock-model", "prompt_version": "6B.pass1.1",
+            "schema_version": "6B.1", "timeline_schema_version": "6A.1",
+        },
+    })
+
+    rebound = _rebind_vision_artifact(
+        artifact_path, timeline, provider="mock", model="mock-model",
+        processing_mode="standard", prompt_version="6B.pass1.1", schema_version="6B.1",
+    )
+
+    assert rebound is not None
+    assert rebound["analysis_run_id"] == timeline["analysis_run_id"]
+    assert rebound["provenance"]["audio_v1_migration"] == "identity_rebound_without_provider_call"
+    assert _rebind_vision_artifact(
+        artifact_path, timeline, provider="openai", model="mock-model",
+        processing_mode="standard", prompt_version="6B.pass1.1", schema_version="6B.1",
+    ) is None
 
 
 def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkeypatch) -> None:

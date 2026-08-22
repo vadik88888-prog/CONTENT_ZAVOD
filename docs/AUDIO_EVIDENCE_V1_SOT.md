@@ -56,7 +56,7 @@ Low speech must not be penalized when strong visual or audio action evidence exi
 
 Signal cache key: prepared-audio fingerprint + signal config/version. Semantic-audio cache key: Audio Evidence/content-map/Vision fingerprints + model/class-map hashes + semantic config/version + deterministic bounded-region derivation inputs.
 
-Audio signal/model/config changes invalidate Audio Evidence, candidate provenance, Brain scoring and downstream selection only. They do not invalidate transcription, source/scene analysis, paid AI/Vision provider caches, boundary algorithms, Creative/Render, or Preview/Final lineage. Style, caption, crop, playback/mix and render changes never rerun Audio Intelligence.
+Audio signal/model/config changes invalidate Audio Evidence, candidate provenance, Brain scoring and downstream selection only. They do not invalidate transcription, source/scene analysis, boundary algorithms, Creative/Render, or Preview/Final lineage. A pre-v1 Vision artifact is rebound locally without a provider call only when its complete keyframe ID/timestamp plan and provider contract are unchanged; a real Vision-input change still invalidates it. Style, caption, crop, playback/mix and render changes never rerun Audio Intelligence.
 
 ## Acceptance
 

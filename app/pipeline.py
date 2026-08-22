@@ -595,6 +595,15 @@ class Pipeline:
                 vision_provider = get_vision_provider(self.config, self.mock_ai)
             except ClipEngineError as error:
                 self.warnings.append(f"Vision Gateway uses local evidence fallback: {sanitize_api_error(error)}")
+        reusable_vision = _rebind_vision_artifact(
+            work_directory / "vision-observations.json",
+            multimodal_seed_timeline,
+            provider="mock" if self.mock_ai else self.config.ai.provider,
+            model=self.config.ai.model,
+            processing_mode=self.config.product_flow.processing_mode,
+            prompt_version=self.config.vision.prompt_version,
+            schema_version=self.config.vision.schema_version,
+        )
         vision_analysis = self._cached(
             tracker, "vision_pass1", work_directory / "vision-observations.json",
             {
@@ -612,7 +621,7 @@ class Pipeline:
             },
             lambda: _write(
                 work_directory / "vision-observations.json",
-                VisionGateway(
+                reusable_vision if reusable_vision is not None else VisionGateway(
                     config=self.config,
                     cache_directory=self.root / "work" / "vision-cache",
                     provider=vision_provider,
@@ -4535,6 +4544,56 @@ class Pipeline:
         tracker.start("report"); tracker.finish("report")
         make_report(report_path, source, metadata, self.config, tracker.data, 0, 0, [], self.warnings, self.errors, _local_ai_usage("not-called"), False, False, clip_intelligence={"version": "1.6", "selection_mode": "no-audio"}, content_understanding={"enabled": True, "status": "insufficient_audio", "multimodal_timeline_ref": str(work_directory / "multimodal_timeline.json"), "multimodal_diagnostics": multimodal_timeline.get("diagnostics", {})}, content_transformation={"enabled": bool(self.config.transformation.enabled), "status": "skipped", "reason": "no-audio"}, production_plan={"enabled": bool(self.config.production.enabled), "status": "skipped", "reason": "no-audio"}, audio={"enabled": bool(self.config.audio_composition.enabled), "status": "skipped", "reason": "no-audio"}, production_render={"enabled": bool(self.config.production_render.enabled), "status": "skipped", "reason": "no-audio"})
         return PipelineResult(work_directory, output_directory, report_path, 0, [], self.warnings)
+
+
+def _rebind_vision_artifact(
+    path: Path,
+    timeline: dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+    processing_mode: str,
+    prompt_version: str,
+    schema_version: str,
+) -> dict[str, Any] | None:
+    """Reuse pre-Audio-v1 PASS 1 only when its complete frame plan is unchanged."""
+
+    existing = read_json(path, {})
+    if not isinstance(existing, dict) or existing.get("pass") != "pass1":
+        return None
+    provenance = existing.get("provenance")
+    diagnostics = existing.get("diagnostics")
+    if not isinstance(provenance, dict) or not isinstance(diagnostics, dict):
+        return None
+    if (
+        provenance.get("timeline_schema_version") != "6A.1"
+        or provenance.get("provider") != provider
+        or provenance.get("model") != model
+        or provenance.get("prompt_version") != prompt_version
+        or provenance.get("schema_version") != schema_version
+        or diagnostics.get("processing_mode") != processing_mode
+    ):
+        return None
+    previous_frames = diagnostics.get("keyframes_found")
+    current_frames = [
+        {"keyframe_id": item["keyframe_id"], "timestamp": float(item["time_seconds"])}
+        for item in timeline.get("keyframes", [])
+    ]
+    if previous_frames != current_frames:
+        return None
+    rebound = {
+        **existing,
+        "analysis_run_id": timeline["analysis_run_id"],
+        "provenance": {
+            **provenance,
+            "timeline_schema_version": timeline["schema_version"],
+            "audio_v1_migration": "identity_rebound_without_provider_call",
+        },
+    }
+    try:
+        return validate_vision_artifact(rebound, timeline)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hash(value: Any) -> str:
