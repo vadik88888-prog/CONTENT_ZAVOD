@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from app.ai import (
     MockProvider,
     OPENAI_SCORE_RESPONSE_SCHEMA,
     OpenAIProvider,
+    SEMANTIC_REQUEST_TIMEOUT_SECONDS,
     get_scorer,
 )
 from app.config import AIConfig, AppConfig, load_config
@@ -115,6 +117,40 @@ def test_openai_provider_rejects_unknown_candidate_id() -> None:
     assert not scored[0].selected
     assert usage["api_errors"]
     assert "candidate_id" in usage["api_errors"][0]
+
+
+def test_openai_semantic_connection_wait_is_bounded_without_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor_options: list[dict[str, object]] = []
+
+    class FailingResponses:
+        @staticmethod
+        def create(**_kwargs: object) -> object:
+            raise ConnectionError("offline")
+
+    def client(**options: object) -> object:
+        constructor_options.append(options)
+        return SimpleNamespace(responses=FailingResponses())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=client))
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=0)), "sk-test-secret",
+    )
+
+    scored, usage = provider.score([_candidate()], {"segments": []})
+
+    assert constructor_options == [{
+        "api_key": "sk-test-secret",
+        "timeout": SEMANTIC_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": 0,
+    }]
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0
+    assert usage["api_errors"] == [
+        "Semantic AI attempt 1/1 failed (timeout=45s; sdk_retries=0): offline"
+    ]
+    assert "Semantic AI attempt 1/1" in (scored[0].rejection_reason or "")
 
 
 def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema() -> None:

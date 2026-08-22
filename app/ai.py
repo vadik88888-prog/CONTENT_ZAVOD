@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 # a failed compact transformation before the deterministic fallback ran.
 TRANSFORMATION_REQUEST_TIMEOUT_SECONDS = 45.0
 
+# Semantic scoring owns its retry loop.  Disable the SDK retry loop so a
+# transient connection failure consumes at most this timeout per configured
+# application attempt instead of nesting multiple long SDK attempts.
+SEMANTIC_REQUEST_TIMEOUT_SECONDS = 45.0
+
 # Paid semantic-scoring calls use a deliberately small, evidence-only request
 # contract.  Bump this whenever its shape or interpretation changes so the
 # ai_ranking cache cannot reuse an assessment made from a different payload.
@@ -397,7 +402,11 @@ class OpenAIProvider:
         if client is None:
             from openai import OpenAI
 
-            client = OpenAI(api_key=self.api_key)
+            client = OpenAI(
+                api_key=self.api_key,
+                timeout=SEMANTIC_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         payload = build_openai_payload(candidates, transcript)
         errors: list[str] = []
         started = time.perf_counter()
@@ -442,7 +451,12 @@ class OpenAIProvider:
                     started=started,
                 )
             except Exception as error:
-                errors.append(sanitize_api_error(error, self.api_key))
+                detail = sanitize_api_error(error, self.api_key)
+                errors.append(
+                    "Semantic AI attempt "
+                    f"{attempt + 1}/{self.config.ai.max_retries + 1} failed "
+                    f"(timeout={SEMANTIC_REQUEST_TIMEOUT_SECONDS:g}s; sdk_retries=0): {detail}"
+                )
         message = errors[-1] if errors else "Неизвестная ошибка OpenAI API."
         return _reject_candidates(candidates, self.name, message), _usage(
             self.name,
