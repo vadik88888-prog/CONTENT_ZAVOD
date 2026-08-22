@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from app.caption_planning import (
     CaptionProtectedRegion,
     _Layout,
+    _MappedWord,
+    _fit_single_layout,
     _normalize_cue_output_overlaps,
     _simultaneous_caption_collisions,
     build_caption_plan,
@@ -258,12 +260,12 @@ def test_feasible_gameplay_phrase_promotes_the_fitted_layout_into_the_compiled_p
         source=SourceInterval.from_seconds(0, 3),
         output=OutputInterval(start_frame=0, end_frame=90),
     ),))
-    words = "\u0412\u043e\u0437\u044c\u043c\u0438 \u043c\u043e\u044e \u043c\u0430\u0448\u0438\u043d\u043a\u0443 \u043e\u043d\u0430 \u0437\u0434\u0435\u0441\u044c \u043d\u0430 \u043c\u0435\u0442\u043a\u0435 \u0447\u0442\u043e \u043f\u0440\u043e\u0438\u0441\u0445\u043e\u0434\u0438\u0442 \u0432\u043e\u043e\u0431\u0449\u0435".split()
+    words = "\u0412\u043e\u0437\u044c\u043c\u0438 \u043c\u043e\u044e \u043c\u0430\u0448\u0438\u043d\u043a\u0443 \u043e\u043d\u0430 \u0437\u0434\u0435\u0441\u044c \u043d\u0430 \u043c\u0435\u0442\u043a\u0435".split()
     transcript = {"words": [
         {
             "text": word,
-            "start": index / 3,
-            "end": (index + 1) / 3 - 0.01,
+            "start": index * 3 / len(words),
+            "end": (index + 1) * 3 / len(words) - 0.01,
             "confidence": 0.99,
             "timing_source": "verified",
         }
@@ -287,9 +289,43 @@ def test_feasible_gameplay_phrase_promotes_the_fitted_layout_into_the_compiled_p
     assert plan.feasibility_decision.status == "FEASIBLE"
     assert "CAPTION_FEASIBILITY_LAYOUT_APPLIED" in plan.diagnostics
     assert any(len(cue.resolved_lines) == 2 for cue in plan.cues)
+    base_size = round(plan.typography.font_size_ratio * config.output_height)
+    assert all(
+        round(cue.resolved_font_size_ratio * config.output_height) == base_size
+        for cue in plan.cues
+    )
+    assert all(cue.fallback_reason is None for cue in plan.cues)
+    assert "CAPTION_READABILITY_FALLBACK" not in {
+        finding.code for finding in plan.quality_report.findings
+    }
     assert "CAPTION_LINE_OVERFLOW" not in {
         finding.code for finding in plan.quality_report.findings
     }
+
+
+def test_feasibility_layout_uses_minimum_font_only_when_larger_sizes_do_not_fit() -> None:
+    class _LinearMeasurer:
+        def width(self, text: str, pixel_size: int) -> float:
+            return len(text) * pixel_size
+
+    word = _MappedWord(
+        word_id="minimum-size-word",
+        text="x" * 9,
+        output=OutputInterval(start_frame=0, end_frame=90),
+        timing_source="verified",
+        confidence=0.99,
+        source=SourceInterval.from_seconds(0, 3),
+        map_ids=("minimum-size-map",),
+    )
+
+    fitted = _fit_single_layout(
+        (word,), _LinearMeasurer(), base_size=20, minimum_size=16,
+        maximum_width=150, protected_phrases=(),
+    )
+
+    assert fitted is not None
+    assert fitted.font_size == 16
+    assert fitted.fallback is True
 
 
 def test_physically_unbreakable_caption_remains_blocked_by_the_native_gate() -> None:

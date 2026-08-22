@@ -325,7 +325,7 @@ class CaptionPlanner:
             )
 
         feasibility_search = _caption_feasibility_search(
-            words, intent, self.config, measurer, minimum_size, max_width,
+            words, intent, self.config, measurer, base_size, minimum_size, max_width,
             protected_phrases,
         )
         feasibility_layout_applied = False
@@ -473,7 +473,7 @@ class CaptionPlanner:
         if measurer.used_heuristic and manifest.metrics_backend != "heuristic":
             manifest = manifest.model_copy(update={"metrics_backend": "heuristic"})
         feasibility = _caption_feasibility_decision(
-            words, cues, intent, self.config, measurer, minimum_size, max_width,
+            words, cues, intent, self.config, measurer, base_size, minimum_size, max_width,
             protected_phrases, search=feasibility_search,
         )
         findings = _assess_plan(
@@ -1279,12 +1279,11 @@ def _fit_layout(
     base_size: int, minimum_size: int, maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
 ) -> list[_Layout]:
-    sizes = list(dict.fromkeys((base_size, round(base_size * 0.95), round(base_size * 0.90), minimum_size)))
-    sizes = [max(minimum_size, value) for value in sizes]
-    for size in sizes:
-        lines = _best_lines(words, measurer, size, maximum_width, protected_phrases)
-        if lines is not None:
-            return [_Layout(words, lines, size, size != base_size)]
+    fitted = _fit_single_layout(
+        words, measurer, base_size, minimum_size, maximum_width, protected_phrases,
+    )
+    if fitted is not None:
+        return [fitted]
     if len(words) > 1:
         split = _best_layout_split(words, protected_phrases)
         if split is None:
@@ -1297,6 +1296,22 @@ def _fit_layout(
             *_fit_layout(words[split:], measurer, base_size, minimum_size, maximum_width, protected_phrases),
         ]
     return [_Layout(words, (words[0].text,), minimum_size, True)]
+
+
+def _fit_single_layout(
+    words: tuple[_MappedWord, ...], measurer: _FontMeasurer,
+    base_size: int, minimum_size: int, maximum_width: float,
+    protected_phrases: tuple[tuple[str, ...], ...],
+) -> _Layout | None:
+    """Return the largest allowed font size that fits this legal cue."""
+
+    sizes = list(dict.fromkeys((base_size, round(base_size * 0.95), round(base_size * 0.90), minimum_size)))
+    sizes = [max(minimum_size, value) for value in sizes]
+    for size in sizes:
+        lines = _best_lines(words, measurer, size, maximum_width, protected_phrases)
+        if lines is not None:
+            return _Layout(words, lines, size, size != base_size)
+    return None
 
 
 def _best_lines(
@@ -1696,6 +1711,7 @@ def _caption_feasibility_decision(
     intent: CreativeIntent,
     config: ProductionRenderConfig,
     measurer: _FontMeasurer,
+    base_size: int,
     minimum_size: int,
     maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
@@ -1710,7 +1726,7 @@ def _caption_feasibility_decision(
     """
 
     search = search or _caption_feasibility_search(
-        words, intent, config, measurer, minimum_size, maximum_width,
+        words, intent, config, measurer, base_size, minimum_size, maximum_width,
         protected_phrases,
     )
     feasible = search.layouts is not None
@@ -1811,6 +1827,7 @@ def _caption_feasibility_search(
     intent: CreativeIntent,
     config: ProductionRenderConfig,
     measurer: _FontMeasurer,
+    base_size: int,
     minimum_size: int,
     maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
@@ -1822,7 +1839,7 @@ def _caption_feasibility_search(
     failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
     for run in _word_runs(words, intent):
         run_layouts, run_evaluated, run_failed_windows = _caption_run_is_feasible(
-            run, intent, config, measurer, minimum_size, maximum_width,
+            run, intent, config, measurer, base_size, minimum_size, maximum_width,
             protected_phrases,
         )
         evaluated += run_evaluated
@@ -1846,6 +1863,7 @@ def _caption_run_is_feasible(
     intent: CreativeIntent,
     config: ProductionRenderConfig,
     measurer: _FontMeasurer,
+    base_size: int,
     minimum_size: int,
     maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
@@ -1877,10 +1895,11 @@ def _caption_run_is_feasible(
             raw = _words_output(selected)
             if raw.end_frame - raw.start_frame > maximum_frames:
                 continue
-            lines = _best_lines(
-                selected, measurer, minimum_size, maximum_width, protected_phrases,
+            candidate_layout = _fit_single_layout(
+                selected, measurer, base_size, minimum_size, maximum_width,
+                protected_phrases,
             )
-            if lines is None:
+            if candidate_layout is None:
                 continue
             evaluated += 1
             required = max(
@@ -1897,9 +1916,6 @@ def _caption_run_is_feasible(
                 if end == len(words):
                     failed_windows.append((selected, chain_end - earliest_start, required))
                 continue
-            candidate_layout = _Layout(
-                selected, lines, minimum_size, minimum_size > 0,
-            )
             current = best.get(end)
             if current is None or earliest_end < current[0]:
                 best[end] = (earliest_end, (*previous_layouts, candidate_layout))
