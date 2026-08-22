@@ -733,7 +733,7 @@ class Pipeline:
             {
                 "candidates": _hash(raw_candidates), "settings": self.config.scoring,
                 "duration_constraints": [self.config.min_clip_duration, self.config.max_clip_duration],
-                "visual_analysis": _hash(visual_analysis),
+                "visual_analysis": _hash(visual_analysis), "speech_clarity_policy": "6D.2",
             },
             lambda: _write_candidates(
                 work_directory / "candidates.local.json",
@@ -742,6 +742,7 @@ class Pipeline:
                     min_duration_seconds=self.config.min_clip_duration,
                     max_duration_seconds=self.config.max_clip_duration,
                     visual_analysis=visual_analysis,
+                    transcript_features=transcript_features,
                 ),
             ),
             cache_tracker=source_cache,
@@ -790,7 +791,7 @@ class Pipeline:
             tracker, "multimodal_scoring", work_directory / "candidates.multimodal.json",
             {
                 "local_scoring": _hash(local_data), "pass2": _hash(pass2_data),
-                "scoring_contract": "6D.1", "settings": self.config.scoring,
+                "scoring_contract": "6D.2", "settings": self.config.scoring,
                 "visual_analysis": _hash(visual_analysis),
             },
             lambda: _write_candidates(
@@ -800,6 +801,7 @@ class Pipeline:
                     min_duration_seconds=self.config.min_clip_duration,
                     max_duration_seconds=self.config.max_clip_duration,
                     visual_analysis=visual_analysis,
+                    transcript_features=transcript_features,
                 ),
             ),
             cache_tracker=source_cache,

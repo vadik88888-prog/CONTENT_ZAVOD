@@ -153,7 +153,7 @@ virality:
     retention: 0.08
     publishability: 0.05
 scoring:
-  candidate_quality_config_version: 6D.1
+  candidate_quality_config_version: 6D.2
   weights:
     hook: 0.18
     completeness: 0.18

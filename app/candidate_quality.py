@@ -13,7 +13,10 @@ import re
 from typing import Any
 
 
-CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.1"
+CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.2"
+SPEECH_CLARITY_CONFIDENCE_THRESHOLD = 0.45
+SPEECH_CLARITY_MATERIAL_DURATION_SECONDS = 1.0
+SPEECH_CLARITY_MATERIAL_COVERAGE_RATIO = 0.15
 
 FACTOR_WEIGHTS: dict[str, float] = {
     "hook": 0.12,
@@ -59,6 +62,7 @@ class EligibilityReasonCode(StrEnum):
     NO_PAYOFF = "NO_PAYOFF"
     FALSE_HOOK_RISK = "FALSE_HOOK_RISK"
     AUDIO_UNINTELLIGIBLE = "AUDIO_UNINTELLIGIBLE"
+    SPEECH_CLARITY_RISK = "SPEECH_CLARITY_RISK"
     SPEECH_CLARITY_EVIDENCE_UNAVAILABLE = "SPEECH_CLARITY_EVIDENCE_UNAVAILABLE"
     VERTICAL_COMPOSITION_IMPOSSIBLE = "VERTICAL_COMPOSITION_IMPOSSIBLE"
     VISUAL_EVIDENCE_UNAVAILABLE = "VISUAL_EVIDENCE_UNAVAILABLE"
@@ -473,9 +477,17 @@ def build_eligibility_decision(
         evidence.append(EvidenceReference("speech_clarity", EvidenceState.UNAVAILABLE, "transcript_features"))
     else:
         clarity = float(confidence)
-        evidence.append(EvidenceReference("speech_clarity", EvidenceState.AVAILABLE, "transcript_features", {"transcript_confidence": round(clarity, 3)}))
-        if clarity < 0.45:
-            reason(EligibilityReasonCode.AUDIO_UNINTELLIGIBLE)
+        clarity_materiality = _speech_clarity_materiality(candidate, features, clarity)
+        clarity_details = {"transcript_confidence": round(clarity, 3)}
+        if clarity_materiality is not None:
+            clarity_details.update(clarity_materiality)
+        evidence.append(EvidenceReference("speech_clarity", EvidenceState.AVAILABLE, "transcript_features", clarity_details))
+        if clarity < SPEECH_CLARITY_CONFIDENCE_THRESHOLD:
+            if clarity_materiality is None or clarity_materiality["material"]:
+                reason(EligibilityReasonCode.AUDIO_UNINTELLIGIBLE)
+            else:
+                reason(EligibilityReasonCode.SPEECH_CLARITY_RISK)
+                recoverable.append(EligibilityReasonCode.SPEECH_CLARITY_RISK)
 
     visual_status = str((visual_analysis or {}).get("status") or "unavailable")
     visual_keyframes = (visual_analysis or {}).get("subject_keyframes", [])
@@ -514,6 +526,87 @@ def build_eligibility_decision(
         required_boundary_actions=list(dict.fromkeys(actions)),
         evidence_refs=evidence,
     )
+
+
+def _speech_clarity_materiality(
+    candidate: Any,
+    features: dict[str, Any],
+    aggregate_confidence: float,
+) -> dict[str, Any] | None:
+    """Classify low ASR confidence by exact saved speech coverage.
+
+    The aggregate remains an evidence signal, but only exact low-confidence
+    speech that is sustained or occupies a material share of the candidate can
+    prove that its dialogue is unintelligible.  Missing exact evidence keeps
+    the existing strict outcome rather than silently upgrading legacy data.
+    """
+
+    raw_segments = features.get("speech_clarity_segments")
+    if not isinstance(raw_segments, list):
+        return None
+    low_ranges: list[tuple[float, float]] = []
+    low_segments: list[dict[str, Any]] = []
+    malformed_low_segment = False
+    for raw in raw_segments:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            segment_confidence = float(raw.get("transcript_confidence"))
+        except (TypeError, ValueError):
+            continue
+        if segment_confidence >= SPEECH_CLARITY_CONFIDENCE_THRESHOLD:
+            continue
+        try:
+            start = max(float(candidate.start), float(raw["start"]))
+            end = min(float(candidate.end), float(raw["end"]))
+        except (KeyError, TypeError, ValueError):
+            malformed_low_segment = True
+            continue
+        if end < start:
+            malformed_low_segment = True
+            continue
+        low_ranges.append((start, end))
+        low_segments.append({
+            "segment_id": raw.get("id"),
+            "start_seconds": round(start, 3),
+            "end_seconds": round(end, 3),
+            "duration_seconds": round(end - start, 3),
+            "confidence": round(segment_confidence, 6),
+        })
+    if not low_segments:
+        return None
+    low_duration = _merged_duration(low_ranges)
+    candidate_duration = max(0.0, float(candidate.end) - float(candidate.start))
+    coverage_ratio = low_duration / candidate_duration if candidate_duration > 0 else None
+    reasons: list[str] = []
+    if malformed_low_segment or coverage_ratio is None:
+        reasons.append("SPEECH_COVERAGE_UNPROVABLE")
+    if low_duration >= SPEECH_CLARITY_MATERIAL_DURATION_SECONDS:
+        reasons.append("LOW_CONFIDENCE_DURATION_MATERIAL")
+    if coverage_ratio is not None and coverage_ratio >= SPEECH_CLARITY_MATERIAL_COVERAGE_RATIO:
+        reasons.append("LOW_CONFIDENCE_COVERAGE_MATERIAL")
+    return {
+        "decision": "blocker" if reasons else "warning",
+        "material": bool(reasons),
+        "low_confidence_segments": low_segments,
+        "low_confidence_duration_seconds": round(low_duration, 3),
+        "candidate_duration_seconds": round(candidate_duration, 3),
+        "low_confidence_coverage_ratio": round(coverage_ratio, 6) if coverage_ratio is not None else None,
+        "duration_threshold_seconds": SPEECH_CLARITY_MATERIAL_DURATION_SECONDS,
+        "coverage_threshold_ratio": SPEECH_CLARITY_MATERIAL_COVERAGE_RATIO,
+        "materiality_reasons": reasons,
+        "aggregate_confidence": round(aggregate_confidence, 6),
+    }
+
+
+def _merged_duration(ranges: list[tuple[float, float]]) -> float:
+    merged: list[list[float]] = []
+    for start, end in sorted(ranges):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return sum(end - start for start, end in merged)
 
 
 def resolve_eligibility_decision(

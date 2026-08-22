@@ -211,6 +211,62 @@ def test_missing_visual_evidence_is_explicit_recoverable_state_not_a_pass_signal
     assert any(item.code == "VISUAL_EVIDENCE_UNAVAILABLE" for item in candidate.candidate_score_v2.penalties)
 
 
+def test_short_isolated_gameplay_asr_fragment_is_a_risk_not_an_audio_blocker() -> None:
+    # Values are preserved from the fresh Gameplay evidence: a 0.14s fragment
+    # at 0.218 confidence plus a 0.59 neighboring segment yielded aggregate
+    # 0.404 and previously rejected the full candidate.
+    candidate = _candidate("candidate-gameplay-isolated")
+    candidate.start = 562.01
+    candidate.end = 582.01
+    candidate.transcript_segment_ids = [282, 283]
+    candidate.feature_vector["transcript_confidence"] = 0.404
+    config = AppConfig()
+    score_candidates(
+        [candidate], {"energy_frames": [], "silence_intervals": []}, {"boundaries": []}, config.scoring,
+        min_duration_seconds=config.min_clip_duration, max_duration_seconds=config.max_clip_duration,
+        visual_analysis={"status": "completed", "subject_keyframes": [{"timestamp": 1.0}]},
+        transcript_features={"segments": [
+            {"id": 282, "start": 562.26, "end": 562.40, "transcript_confidence": 0.218},
+            {"id": 283, "start": 564.22, "end": 565.02, "transcript_confidence": 0.590},
+        ]},
+    )
+
+    decision = candidate.eligibility_decision
+    assert decision is not None and decision.eligible is True
+    assert EligibilityReasonCode.AUDIO_UNINTELLIGIBLE not in decision.reason_codes
+    assert EligibilityReasonCode.SPEECH_CLARITY_RISK in decision.reason_codes
+    speech = next(item for item in decision.evidence_refs if item.code == "speech_clarity")
+    assert speech.details["decision"] == "warning"
+    assert speech.details["low_confidence_duration_seconds"] == 0.14
+
+
+def test_materially_corrupted_dialogue_remains_an_audio_blocker() -> None:
+    candidate = _candidate("candidate-corrupt-dialogue")
+    candidate.feature_vector.update({
+        "transcript_confidence": 0.20,
+        "speech_clarity_segments": [
+            {"id": 1, "start": 1.0, "end": 3.0, "transcript_confidence": 0.02},
+            {"id": 2, "start": 3.0, "end": 30.0, "transcript_confidence": 0.95},
+        ],
+    })
+    candidate = _score(candidate)
+
+    assert candidate.eligibility_decision is not None
+    assert EligibilityReasonCode.AUDIO_UNINTELLIGIBLE in candidate.eligibility_decision.reason_codes
+    speech = next(item for item in candidate.eligibility_decision.evidence_refs if item.code == "speech_clarity")
+    assert speech.details["decision"] == "blocker"
+    assert "LOW_CONFIDENCE_DURATION_MATERIAL" in speech.details["materiality_reasons"]
+
+
+def test_low_confidence_without_exact_asr_coverage_remains_strictly_blocked() -> None:
+    candidate = _candidate("candidate-legacy-audio")
+    candidate.feature_vector["transcript_confidence"] = 0.20
+    candidate = _score(candidate)
+
+    assert candidate.eligibility_decision is not None
+    assert EligibilityReasonCode.AUDIO_UNINTELLIGIBLE in candidate.eligibility_decision.reason_codes
+
+
 def test_ungrounded_ai_item_keeps_deterministic_v2_fallback_provenance() -> None:
     candidate = _score(_candidate())
     ungrounded = ScoredCandidate(

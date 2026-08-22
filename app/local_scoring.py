@@ -13,9 +13,12 @@ def score_candidates(
     candidates: list[Candidate], audio_features: dict[str, Any], scene_boundaries: dict[str, Any], config: ScoringConfig,
     *, min_duration_seconds: float | None = None, max_duration_seconds: float | None = None,
     visual_analysis: dict[str, Any] | None = None,
+    transcript_features: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     for candidate in candidates:
-        transcript = candidate.feature_vector
+        transcript = dict(candidate.feature_vector)
+        if transcript_features is not None:
+            transcript["speech_clarity_segments"] = _speech_clarity_segments(candidate, transcript_features)
         audio = window_audio_features(candidate.start, candidate.end, audio_features)
         visual = window_scene_features(candidate.start, candidate.end, scene_boundaries)
         features = {**transcript, **audio, **visual}
@@ -55,6 +58,26 @@ def score_candidates(
         candidate.composition_intent = build_composition_intent(candidate)
         candidate.explanations = _explanations(candidate, scores, repetition_penalty, filler_penalty)
     return candidates
+
+
+def _speech_clarity_segments(candidate: Candidate, transcript_features: dict[str, Any]) -> list[dict[str, Any]]:
+    """Reuse persisted ASR segments for A-1 without invoking any provider."""
+
+    expected_ids = set(candidate.transcript_segment_ids)
+    segments: list[dict[str, Any]] = []
+    for item in transcript_features.get("segments", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            segment_id = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if segment_id in expected_ids:
+            segments.append({
+                "id": segment_id, "start": item.get("start"), "end": item.get("end"),
+                "transcript_confidence": item.get("transcript_confidence"),
+            })
+    return segments
 
 
 def _bounded(value: float) -> float:
