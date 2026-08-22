@@ -164,7 +164,7 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     }
 
     assert payload["semantic_payload_version"] == SEMANTIC_AI_PAYLOAD_VERSION
-    assert payload["semantic_payload_version"] == "semantic-score.3"
+    assert payload["semantic_payload_version"] == "semantic-score.4"
     assert payload["transcript"] == [
         {
             "start": 0.0,

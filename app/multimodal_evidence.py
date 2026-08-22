@@ -14,11 +14,12 @@ import math
 import re
 from typing import Any
 
+from app.audio_semantics import project_semantic_audio_event
 from app.utils import stable_text_hash
 
 
-MULTIMODAL_TIMELINE_SCHEMA_VERSION = "6A.1"
-MULTIMODAL_ANALYSIS_VERSION = "6A.local.1"
+MULTIMODAL_TIMELINE_SCHEMA_VERSION = "audio-evidence.1"
+MULTIMODAL_ANALYSIS_VERSION = "multimodal.audio-v1.1"
 STORY_UNIT_EVIDENCE_SCHEMA_VERSION = "6A.story-range.1"
 TIME_BASE = {
     "unit": "seconds",
@@ -51,10 +52,11 @@ def multimodal_analysis_run_id(
     audio_features: dict[str, Any],
     scenes: dict[str, Any],
     visual_analysis: dict[str, Any],
+    semantic_audio: dict[str, Any] | None = None,
 ) -> str:
     """Return the immutable analysis identity shared by cache reusers."""
 
-    fingerprint = _fingerprints(transcript, audio_features, scenes, visual_analysis)
+    fingerprint = _fingerprints(transcript, audio_features, scenes, visual_analysis, semantic_audio)
     payload = {
         "schema_version": MULTIMODAL_TIMELINE_SCHEMA_VERSION,
         "analysis_version": MULTIMODAL_ANALYSIS_VERSION,
@@ -72,20 +74,21 @@ def build_multimodal_timeline(
     audio_features: dict[str, Any],
     scenes: dict[str, Any],
     visual_analysis: dict[str, Any],
+    semantic_audio: dict[str, Any] | None = None,
     analysis_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Build one validated timeline solely from existing local evidence."""
 
     duration = max(0.0, _number(source_duration_seconds) or 0.0)
-    fingerprints = _fingerprints(transcript, audio_features, scenes, visual_analysis)
+    fingerprints = _fingerprints(transcript, audio_features, scenes, visual_analysis, semantic_audio)
     expected_run_id = multimodal_analysis_run_id(
-        source_id, transcript, audio_features, scenes, visual_analysis,
+        source_id, transcript, audio_features, scenes, visual_analysis, semantic_audio,
     )
     if analysis_run_id is not None and analysis_run_id != expected_run_id:
         raise MultimodalEvidenceError("Multimodal analysis_run_id does not match its input evidence.")
 
     transcript_events = _transcript_events(transcript, duration)
-    audio_events = _audio_events(transcript_events, audio_features, duration)
+    audio_events = _audio_events(transcript_events, audio_features, semantic_audio or {}, duration)
     scene_intervals, scene_events, scene_status = _scene_evidence(scenes, duration)
     subject_events, subject_status = _subject_events(visual_analysis, duration)
     visual_events = sorted(
@@ -138,6 +141,7 @@ def build_multimodal_timeline(
         "provenance": [
             _provenance("transcript.json", "segments/words", "direct_timestamped_observation"),
             _provenance("audio_features.json", "energy_frames/silence_intervals", "local_pcm_measurement"),
+            _provenance("audio_semantic_events.json", "bounded_regions/events", "bounded_yamnet_onnx_inference"),
             _provenance("scene_boundaries.json", "boundaries", "local_ffmpeg_scene_detection"),
             _provenance("visual_analysis.json", "subject_keyframes", "existing_analysis_only"),
         ],
@@ -175,7 +179,7 @@ def validate_multimodal_timeline(
     if data.get("time_base") != TIME_BASE:
         raise MultimodalEvidenceError("Multimodal timeline uses an unsupported time base.")
     if not isinstance(data.get("input_fingerprints"), dict) or set(data["input_fingerprints"]) != {
-        "transcript", "audio", "scenes", "visual",
+        "transcript", "audio", "scenes", "visual", "semantic_audio",
     }:
         raise MultimodalEvidenceError("Multimodal timeline input fingerprints are incomplete.")
     if any(not isinstance(value, str) or len(value) != 64 for value in data["input_fingerprints"].values()):
@@ -321,6 +325,102 @@ def evidence_for_range(
     }
 
 
+def audio_summary_for_range(
+    timeline: dict[str, Any], start_seconds: float, end_seconds: float,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    """Compact code-owned activity/semantic evidence for one existing candidate."""
+
+    validate_multimodal_timeline(timeline)
+    start = float(start_seconds)
+    end = float(end_seconds)
+    duration = max(0.001, end - start)
+    overlapping = [item for item in timeline.get("audio_event_map", []) if _overlaps(item, start, end)]
+    speech = _merged_ranges(overlapping, start, end, {"speech"})
+    activity = _merged_ranges(overlapping, start, end, {"activity"})
+    dead = _merged_ranges(overlapping, start, end, {"dead_zone"})
+    projected = [
+        project_semantic_audio_event(item, profile_id)
+        if profile_id and item.get("event_type") in {"semantic_audio_event", "background_music"}
+        else item
+        for item in overlapping
+    ]
+    semantic = [
+        item for item in projected
+        if item.get("event_type") == "semantic_audio_event"
+        and isinstance(item.get("observation"), dict)
+        and item["observation"].get("meaningful_for_profile") is True
+    ]
+    music = [item for item in projected if item.get("event_type") == "background_music"]
+    spikes = [item for item in overlapping if item.get("event_type") in {"relative_spike", "burst", "peak_region"}]
+    speech_gap = _longest_gap(start, end, speech)
+    longest_dead = max((upper - lower for lower, upper in dead), default=0.0)
+    meaningful = sorted(semantic, key=lambda item: (-float(item.get("confidence", 0)), item["start_seconds"]))[:6]
+    return {
+        "schema_version": "audio-range-summary.1",
+        "start_seconds": round(start, 3),
+        "end_seconds": round(end, 3),
+        "speech_coverage_ratio": round(_ranges_duration(speech) / duration, 6),
+        "longest_speech_gap_seconds": round(speech_gap, 3),
+        "activity_ratio": round(_ranges_duration(activity) / duration, 6),
+        "dead_zone_ratio": round(_ranges_duration(dead) / duration, 6),
+        "longest_audio_dead_zone_seconds": round(longest_dead, 3),
+        "spike_count": len(spikes),
+        "spike_peak": round(max((float(item.get("confidence", 0)) for item in spikes), default=0.0), 6),
+        "meaningful_event_count": len(semantic),
+        "meaningful_events": [{
+            "event_id": item["event_id"],
+            "label": item["observation"].get("label"),
+            "event_group": item["observation"].get("event_group"),
+            "start_seconds": item["start_seconds"],
+            "end_seconds": item["end_seconds"],
+            "confidence": item["confidence"],
+            "signal_salience": item["observation"].get("signal_salience"),
+            "editorial_roles": list(item["observation"].get("editorial_roles") or []),
+            "payoff_claim": False,
+        } for item in meaningful],
+        "background_music_present": bool(music),
+        "background_music_only": bool(music and not semantic),
+        "semantic_classifier_status": (
+            "available" if any(item.get("event_type") in {"semantic_audio_event", "background_music"} for item in overlapping)
+            else "no_event_in_range"
+        ),
+        "payoff_claim": False,
+        "analysis_run_id": timeline["analysis_run_id"],
+    }
+
+
+def _merged_ranges(
+    events: list[dict[str, Any]], start: float, end: float, event_types: set[str],
+) -> list[tuple[float, float]]:
+    ranges = sorted((
+        (max(start, float(item["start_seconds"])), min(end, float(item["end_seconds"])))
+        for item in events if item.get("event_type") in event_types
+    ), key=lambda item: item[0])
+    merged: list[tuple[float, float]] = []
+    for lower, upper in ranges:
+        if upper <= lower:
+            continue
+        if merged and lower <= merged[-1][1] + 0.001:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], upper))
+        else:
+            merged.append((lower, upper))
+    return merged
+
+
+def _ranges_duration(ranges: list[tuple[float, float]]) -> float:
+    return sum(upper - lower for lower, upper in ranges)
+
+
+def _longest_gap(start: float, end: float, ranges: list[tuple[float, float]]) -> float:
+    cursor = start
+    longest = 0.0
+    for lower, upper in ranges:
+        longest = max(longest, lower - cursor)
+        cursor = max(cursor, upper)
+    return max(longest, end - cursor)
+
+
 def _transcript_events(transcript: dict[str, Any], duration: float) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     raw_global_words = transcript.get("words")
@@ -361,7 +461,8 @@ def _transcript_events(transcript: dict[str, Any], duration: float) -> list[dict
 
 
 def _audio_events(
-    transcript_events: list[dict[str, Any]], audio: dict[str, Any], duration: float,
+    transcript_events: list[dict[str, Any]], audio: dict[str, Any],
+    semantic_audio: dict[str, Any], duration: float,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     previous_speaker: str | None = None
@@ -397,7 +498,7 @@ def _audio_events(
             ))
 
     window = max(0.001, _number(audio.get("window_seconds")) or 0.5)
-    energy_rows: list[tuple[float, float, float | None]] = []
+    energy_rows: list[tuple[float, float, float | None, dict[str, Any]]] = []
     for item in audio.get("energy_frames", []):
         if not isinstance(item, dict):
             continue
@@ -406,13 +507,22 @@ def _audio_events(
         raw_energy = _number(item.get("audio_energy"))
         if timestamp is None or loudness is None or not 0 <= timestamp <= duration or not 0 <= loudness <= 1:
             continue
-        energy_rows.append((timestamp, loudness, raw_energy))
+        energy_rows.append((timestamp, loudness, raw_energy, item))
     threshold = _emphasis_threshold([item[1] for item in energy_rows])
-    for index, (timestamp, loudness, raw_energy) in enumerate(energy_rows):
+    for index, (timestamp, loudness, raw_energy, signal) in enumerate(energy_rows):
         end = min(duration, timestamp + window)
         events.append(_event(
             "audio", "energy", timestamp, end, 1.0,
-            {"normalized_loudness": round(loudness, 6), "audio_energy": raw_energy, "measurement_window_seconds": window},
+            {
+                "normalized_loudness": round(loudness, 6), "audio_energy": raw_energy,
+                "relative_loudness": _number(signal.get("relative_loudness")),
+                "spike_score": _number(signal.get("spike_score")),
+                "onset_score": _number(signal.get("onset_score")),
+                "burst_score": _number(signal.get("burst_score")),
+                "activity_score": _number(signal.get("activity_score")),
+                "noisiness": _number(signal.get("noisiness")),
+                "measurement_window_seconds": window,
+            },
             [_provenance("audio_features.json", f"energy_frames[{index}]", "local_pcm_rms_measurement")],
         ))
         if loudness >= threshold and loudness > 0:
@@ -420,6 +530,21 @@ def _audio_events(
                 "audio", "emphasis", timestamp, end, min(1.0, loudness),
                 {"normalized_loudness": round(loudness, 6), "threshold": threshold, "method": "relative_pcm_energy"},
                 [_provenance("audio_features.json", f"energy_frames[{index}]", "deterministic_energy_threshold")],
+            ))
+        spike = _number(signal.get("spike_score")) or 0.0
+        onset = _number(signal.get("onset_score")) or 0.0
+        burst = _number(signal.get("burst_score")) or 0.0
+        if spike >= 0.62 or onset >= 0.58:
+            events.append(_event(
+                "audio", "relative_spike", timestamp, end, max(spike, onset),
+                {"spike_score": round(spike, 6), "onset_score": round(onset, 6), "method": "source_relative_pcm"},
+                [_provenance("audio_features.json", f"energy_frames[{index}]", "deterministic_relative_spike")],
+            ))
+        if burst >= 0.58:
+            events.append(_event(
+                "audio", "burst", timestamp, end, burst,
+                {"burst_score": round(burst, 6), "method": "bounded_onset_density"},
+                [_provenance("audio_features.json", f"energy_frames[{index}]", "deterministic_onset_density")],
             ))
     for index, item in enumerate(audio.get("silence_intervals", [])):
         if not isinstance(item, dict):
@@ -434,6 +559,42 @@ def _audio_events(
                 "audio", "pause", silence_start, silence_end, 1.0,
                 {"duration_seconds": round(silence_end - silence_start, 3), "minimum_pause_seconds": 0.5}, provenance,
             ))
+    for event_type, field in (("activity", "activity_intervals"), ("dead_zone", "dead_zones")):
+        for index, item in enumerate(audio.get(field, [])):
+            if not isinstance(item, dict):
+                continue
+            start, end = _bounded_interval(item.get("start"), item.get("end"), duration)
+            if start is None or end is None:
+                continue
+            events.append(_event(
+                "audio", event_type, start, end, 1.0,
+                {"duration_seconds": round(end - start, 3), "source": "audio_signal_analysis"},
+                [_provenance("audio_features.json", f"{field}[{index}]", "deterministic_activity_segmentation")],
+            ))
+    for index, item in enumerate(audio.get("peak_regions", [])):
+        if not isinstance(item, dict):
+            continue
+        start, end = _bounded_interval(item.get("start"), item.get("end"), duration)
+        confidence = _number(item.get("score"))
+        if start is None or end is None or confidence is None:
+            continue
+        events.append(_event(
+            "audio", "peak_region", start, end, confidence,
+            {**{key: item.get(key) for key in (
+                "region_id", "peak_time", "score", "relative_loudness", "spike_score", "onset_score", "burst_score",
+            )}, "candidate_seed": True, "payoff_claim": False},
+            [_provenance("audio_features.json", f"peak_regions[{index}]", "bounded_audio_peak_seed")],
+            stable_hint=str(item.get("region_id") or index),
+        ))
+    if semantic_audio.get("status") in {"completed", "partial"}:
+        for item in semantic_audio.get("events", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                _validate_event(item, duration)
+            except MultimodalEvidenceError:
+                continue
+            events.append(dict(item))
     return sorted(events, key=lambda item: (item["start_seconds"], item["event_id"]))
 
 
@@ -693,6 +854,10 @@ def _evidence_diagnostics(
                     "energy_emphasis": any(item["event_type"] == "energy" for item in audio_events),
                     "speaker_changes": any(item["event_type"] == "speaker_change" for item in audio_events),
                     "reaction_labels": any(item["event_type"] == "reaction_label" for item in audio_events),
+                    "relative_spikes": any(item["event_type"] == "relative_spike" for item in audio_events),
+                    "bursts": any(item["event_type"] == "burst" for item in audio_events),
+                    "activity_dead_zones": any(item["event_type"] in {"activity", "dead_zone"} for item in audio_events),
+                    "semantic_events": any(item["event_type"] in {"semantic_audio_event", "background_music"} for item in audio_events),
                 }.items() if present
             ],
             "missing_fields": ["pcm_energy", "silence"] if not pcm_available else [],
@@ -854,12 +1019,14 @@ def _bounded_interval(start_value: Any, end_value: Any, duration: float) -> tupl
 
 def _fingerprints(
     transcript: dict[str, Any], audio: dict[str, Any], scenes: dict[str, Any], visual: dict[str, Any],
+    semantic_audio: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     return {
         "transcript": stable_text_hash(_canonical(transcript)),
         "audio": stable_text_hash(_canonical(audio)),
         "scenes": stable_text_hash(_canonical(scenes)),
         "visual": stable_text_hash(_canonical(visual)),
+        "semantic_audio": stable_text_hash(_canonical(semantic_audio or {})),
     }
 
 

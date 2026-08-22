@@ -148,17 +148,72 @@ class TranscriptFeatureConfig:
 
 @dataclass(slots=True)
 class AudioAnalysisConfig:
+    signal_schema_version: str = "audio-evidence.1"
     window_seconds: float = 0.1
     silence_threshold: float = 0.08
     min_silence_seconds: float = 0.3
+    activity_threshold: float = 0.36
+    min_activity_seconds: float = 0.3
+    dead_zone_seconds: float = 4.0
+    spike_threshold: float = 0.62
+    onset_threshold: float = 0.58
+    peak_region_count: int = 12
+    peak_region_seconds: float = 12.0
+    peak_min_separation_seconds: float = 6.0
+    semantic_enabled: bool = True
+    semantic_schema_version: str = "audio-semantic.1"
+    semantic_model_path: str = "assets/audio/yamnet.onnx"
+    semantic_class_map_path: str = "assets/audio/yamnet_class_map.csv"
+    semantic_model_sha256: str = "d3835ffbbd4a1bb3e777f0ca217b5007907f5171dd5d17c4236b95b2af8f908e"
+    semantic_class_map_sha256: str = "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2"
+    semantic_max_peak_regions: int = 10
+    semantic_max_shortlist_regions: int = 8
+    semantic_max_region_seconds: float = 12.0
+    semantic_max_total_seconds: float = 180.0
+    semantic_min_confidence: float = 0.18
+    semantic_top_classes: int = 4
 
     def validate(self) -> None:
+        if not isinstance(self.signal_schema_version, str) or not self.signal_schema_version.strip():
+            raise ClipEngineError("audio_analysis.signal_schema_version must not be empty.")
         if not 0.02 <= self.window_seconds <= 2:
             raise ClipEngineError("audio_analysis.window_seconds должен быть от 0.02 до 2.")
         if not 0 <= self.silence_threshold <= 1:
             raise ClipEngineError("audio_analysis.silence_threshold должен быть от 0 до 1.")
         if not 0 <= self.min_silence_seconds <= 10:
             raise ClipEngineError("audio_analysis.min_silence_seconds должен быть от 0 до 10.")
+        for name, value in (
+            ("activity_threshold", self.activity_threshold),
+            ("spike_threshold", self.spike_threshold),
+            ("onset_threshold", self.onset_threshold),
+            ("semantic_min_confidence", self.semantic_min_confidence),
+        ):
+            if not 0 <= value <= 1:
+                raise ClipEngineError(f"audio_analysis.{name} must be between 0 and 1.")
+        if not 0 <= self.min_activity_seconds <= 10 or not 0.5 <= self.dead_zone_seconds <= 60:
+            raise ClipEngineError("audio_analysis activity/dead-zone durations are outside safe bounds.")
+        if not 1 <= self.peak_region_count <= 50 or not 1 <= self.semantic_max_peak_regions <= 50:
+            raise ClipEngineError("audio_analysis peak-region limits must be between 1 and 50.")
+        if not 0 <= self.semantic_max_shortlist_regions <= 50 or not 1 <= self.semantic_top_classes <= 10:
+            raise ClipEngineError("audio_analysis semantic shortlist/top-class limits are invalid.")
+        for name, value in (
+            ("peak_region_seconds", self.peak_region_seconds),
+            ("peak_min_separation_seconds", self.peak_min_separation_seconds),
+            ("semantic_max_region_seconds", self.semantic_max_region_seconds),
+            ("semantic_max_total_seconds", self.semantic_max_total_seconds),
+        ):
+            if not 0.5 <= value <= 600:
+                raise ClipEngineError(f"audio_analysis.{name} is outside safe bounds.")
+        if not isinstance(self.semantic_enabled, bool):
+            raise ClipEngineError("audio_analysis.semantic_enabled must be true or false.")
+        if not self.semantic_schema_version.strip() or not self.semantic_model_path.strip() or not self.semantic_class_map_path.strip():
+            raise ClipEngineError("audio_analysis semantic contract paths/version must not be empty.")
+        for name, value in (
+            ("semantic_model_sha256", self.semantic_model_sha256),
+            ("semantic_class_map_sha256", self.semantic_class_map_sha256),
+        ):
+            if value and (len(value) != 64 or any(character not in "0123456789abcdefABCDEF" for character in value)):
+                raise ClipEngineError(f"audio_analysis.{name} must be an SHA-256 hex digest.")
 
 
 @dataclass(slots=True)
@@ -429,7 +484,7 @@ DEFAULT_SCORING_WEIGHTS = {
 
 @dataclass(slots=True)
 class ScoringConfig:
-    candidate_quality_config_version: str = "6D.3"
+    candidate_quality_config_version: str = "6D.4"
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
     repetition_penalty_weight: float = 12.0
     filler_penalty_weight: float = 18.0

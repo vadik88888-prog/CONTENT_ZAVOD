@@ -25,6 +25,11 @@ from app.audio_modes import tts_eligibility
 from app.clip_results import ClipResult, primary_clip_results, result_paths
 from app.diversity import interval_metrics, transcript_similarity
 from app.audio_features import analyse_audio
+from app.audio_semantics import (
+    AUDIO_SEMANTIC_ANALYSIS_VERSION,
+    analyse_semantic_audio,
+    validate_semantic_audio,
+)
 from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
@@ -46,6 +51,7 @@ from app.content_understanding import (
     build_video_content_profile,
     generate_semantic_candidates,
     recommend_clip_count,
+    refresh_content_map_multimodal_evidence,
     select_with_coverage,
     story_units_artifact,
     ensure_candidate_boundary_decision,
@@ -83,6 +89,8 @@ from app.multimodal_candidates import (
     CANDIDATE_PROVENANCE_SCHEMA_VERSION,
     enrich_shortlist_with_pass2,
     generate_multimodal_candidates,
+    project_candidate_audio_evidence,
+    refresh_candidate_timeline_evidence,
 )
 from app.rendering import render_clip
 from app.reporting import make_report
@@ -130,11 +138,11 @@ from app.virality import (
 
 INTELLIGENCE_STAGES = (
     "transcript_features", "audio_features", "scene_detection", "candidates_v2",
-    "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_timeline", "pre_vision_content_profile", "video_content_profile", "vision_pass1",
-    "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
+    "local_scoring", "shortlist", "multimodal_scoring", "ai_ranking", "final_selection", "visual_analysis", "multimodal_seed_timeline", "audio_semantics", "multimodal_timeline", "pre_vision_content_profile", "video_content_profile", "vision_pass1",
+    "global_content_map_base", "candidate_seed_basis", "global_content_map", "story_units", "semantic_boundaries", "vision_pass2", "virality_profiles", "virality_ranking",
     "production_feasibility", "coverage_map", "clip_count_recommendation", "render", "report",
 )
-INTELLIGENCE_ENGINE_VERSION = "1.9.0"
+INTELLIGENCE_ENGINE_VERSION = "1.10.0"
 TRANSFORMATION_STAGES = (
     "transformation_source_context", "transformation_semantic_representation",
     "transformation_narrative_plan", "transformation_script_draft",
@@ -511,14 +519,14 @@ class Pipeline:
             lambda: _write(work_directory / "visual_analysis.json", analyse_video_subjects(source.path, float(metadata.get("duration") or 0), self.config)),
             cache_tracker=source_cache,
         )
-        multimodal_analysis_id = multimodal_analysis_run_id(
+        multimodal_seed_analysis_id = multimodal_analysis_run_id(
             source.id, transcript, audio_features, scenes, visual_analysis,
         )
-        multimodal_timeline = self._cached(
-            tracker, "multimodal_timeline", work_directory / "multimodal_timeline.json",
+        multimodal_seed_timeline = self._cached(
+            tracker, "multimodal_seed_timeline", work_directory / "multimodal_seed_timeline.json",
             {
                 "source": source.id,
-                "analysis_run_id": multimodal_analysis_id,
+                "analysis_run_id": multimodal_seed_analysis_id,
                 "analysis_version": MULTIMODAL_ANALYSIS_VERSION,
                 "transcript": _hash(transcript),
                 "audio_features": _hash(audio_features),
@@ -526,7 +534,7 @@ class Pipeline:
                 "visual_analysis": _hash(visual_analysis),
             },
             lambda: _write(
-                work_directory / "multimodal_timeline.json",
+                work_directory / "multimodal_seed_timeline.json",
                 build_multimodal_timeline(
                     source_id=source.id,
                     source_duration_seconds=float(metadata.get("duration") or 0),
@@ -534,12 +542,12 @@ class Pipeline:
                     audio_features=audio_features,
                     scenes=scenes,
                     visual_analysis=visual_analysis,
-                    analysis_run_id=multimodal_analysis_id,
+                    analysis_run_id=multimodal_seed_analysis_id,
                 ),
             ),
             cache_tracker=source_cache,
             validator=lambda data: validate_multimodal_timeline(
-                data, expected_source_id=source.id, expected_analysis_run_id=multimodal_analysis_id,
+                data, expected_source_id=source.id, expected_analysis_run_id=multimodal_seed_analysis_id,
             ),
         )
         pre_vision_content_profile = self._cached(
@@ -591,8 +599,8 @@ class Pipeline:
             tracker, "vision_pass1", work_directory / "vision-observations.json",
             {
                 "source": source.id,
-                "timeline_analysis_run_id": multimodal_timeline["analysis_run_id"],
-                "timeline": _hash(multimodal_timeline),
+                "timeline_analysis_run_id": multimodal_seed_timeline["analysis_run_id"],
+                "timeline": _hash(multimodal_seed_timeline),
                 "boundary_evidence_profile": "genre_neutral",
                 "processing_mode": self.config.product_flow.processing_mode,
                 "deep_analysis": deep_analysis.to_dict(),
@@ -610,7 +618,7 @@ class Pipeline:
                     provider=vision_provider,
                 ).analyze_pass1(
                     source=source.path,
-                    timeline=multimodal_timeline,
+                    timeline=multimodal_seed_timeline,
                     content_type=str(
                         (pre_vision_content_profile.get("effective_profile") or {}).get("profile_id")
                         or (pre_vision_content_profile.get("effective_profile") or {}).get("format")
@@ -619,7 +627,7 @@ class Pipeline:
                 ),
             ),
             cache_tracker=source_cache,
-            validator=lambda data: validate_vision_artifact(data, multimodal_timeline),
+            validator=lambda data: validate_vision_artifact(data, multimodal_seed_timeline),
         )
         content_profile = self._cached(
             tracker, "video_content_profile", work_directory / "video_content_profile.json",
@@ -642,8 +650,8 @@ class Pipeline:
             cache_tracker=source_cache,
             validator=lambda data: validate_video_content_profile(data, expected_source_id=source.id),
         )
-        content_map = self._cached(
-            tracker, "global_content_map", work_directory / "global_content_map.json",
+        base_content_map = self._cached(
+            tracker, "global_content_map_base", work_directory / "global_content_map.base.json",
             {
                 "source": source.id,
                 "transcript": _hash(transcript),
@@ -651,7 +659,7 @@ class Pipeline:
                 "audio_features": _hash(audio_features),
                 "scenes": _hash(scenes),
                 "visual_analysis": _hash(visual_analysis),
-                "multimodal_timeline": _hash(multimodal_timeline),
+                "multimodal_timeline": _hash(multimodal_seed_timeline),
                 # ContentMap and semantic boundaries are evidence-driven. A
                 # manual profile override must not invalidate them.
                 "profile_evidence": _hash({
@@ -673,26 +681,20 @@ class Pipeline:
                 "implementation_version": CONTENT_STRATEGY_VERSION,
             },
             lambda: _write(
-                work_directory / "global_content_map.json",
+                work_directory / "global_content_map.base.json",
                 build_global_content_map(
                     source_data, metadata, transcript, transcript_features, audio_features, scenes,
-                    visual_analysis, content_profile, self.config, multimodal_timeline,
+                    visual_analysis, content_profile, self.config, multimodal_seed_timeline,
                 ),
             ),
             cache_tracker=source_cache,
         )
-        story_units = self._cached(
-            tracker, "story_units", work_directory / "story_units.json",
-            {"content_map": _hash(content_map), "schema_version": self.config.content_understanding.story_unit_schema_version},
-            lambda: _write(work_directory / "story_units.json", story_units_artifact(content_map, transcript)),
-            cache_tracker=source_cache,
-        )
-        semantic_boundaries = self._cached(
-            tracker, "semantic_boundaries", work_directory / "semantic_boundaries.json",
+        candidate_seed_basis = self._cached(
+            tracker, "candidate_seed_basis", work_directory / "candidate_seed_basis.json",
             {
-                "content_map": _hash(content_map), "transcript": _hash(transcript),
+                "content_map": _hash(base_content_map), "transcript": _hash(transcript),
                 "transcript_features": _hash(transcript_features), "scenes": _hash(scenes),
-                "multimodal_timeline": _hash(multimodal_timeline),
+                "multimodal_seed_timeline": _hash(multimodal_seed_timeline),
                 "vision_pass1": _hash(vision_analysis),
                 "candidate_generation": self.config.candidate_generation,
                 "semantic_candidate_generation_version": SEMANTIC_CANDIDATE_GENERATION_VERSION,
@@ -709,11 +711,116 @@ class Pipeline:
                 },
             },
             lambda: _write_generated_candidates(
-                work_directory / "semantic_boundaries.json",
+                work_directory / "candidate_seed_basis.json",
                 generate_multimodal_candidates(
-                    content_map, transcript, transcript_features, scenes,
-                    multimodal_timeline, vision_analysis, self.config,
+                    base_content_map, transcript, transcript_features, scenes,
+                    multimodal_seed_timeline, vision_analysis, self.config,
                     semantic_generator=generate_semantic_candidates,
+                ),
+            ),
+            cache_tracker=source_cache,
+        )
+        # Semantic audio is deliberately bounded by source-relative peaks and
+        # the existing local shortlist.  This provisional pass invokes no AI
+        # provider and uses the same candidate/boundary owner as the final pass.
+        audio_profile_id = resolve_editorial_profile(content_profile).profile_id
+
+        def build_semantic_audio_artifact() -> dict[str, Any]:
+            provisional_candidates = [
+                candidate_from_dict(item) for item in candidate_seed_basis.get("candidates", [])
+            ]
+            score_candidates(
+                provisional_candidates, audio_features, scenes, self.config.scoring,
+                min_duration_seconds=self.config.min_clip_duration,
+                max_duration_seconds=self.config.max_clip_duration,
+                visual_analysis=vision_analysis,
+                transcript_features=transcript_features,
+            )
+            semantic_shortlist = shortlist(provisional_candidates, self.config.ai_reranking.shortlist_size)
+            return analyse_semantic_audio(
+                Path(str(metadata["audio_path"])), audio_features, semantic_shortlist,
+                None, self.config.audio_analysis,
+            )
+
+        semantic_audio = self._cached(
+            tracker, "audio_semantics", work_directory / "audio_semantic_events.json",
+            {
+                "audio_features": _hash(audio_features),
+                "prepared_audio": str(metadata["audio_path"]),
+                "candidate_seed_basis": _hash(candidate_seed_basis),
+                "seed_timeline": _hash(multimodal_seed_timeline),
+                "vision_pass1": _hash(vision_analysis),
+                "candidate_generation": self.config.candidate_generation,
+                "shortlist_size": self.config.ai_reranking.shortlist_size,
+                "settings": self.config.audio_analysis,
+                "analysis_version": AUDIO_SEMANTIC_ANALYSIS_VERSION,
+            },
+            lambda: _write(
+                work_directory / "audio_semantic_events.json",
+                build_semantic_audio_artifact(),
+            ),
+            cache_tracker=source_cache,
+            validator=lambda data: validate_semantic_audio(data, self.config.audio_analysis),
+        )
+        multimodal_analysis_id = multimodal_analysis_run_id(
+            source.id, transcript, audio_features, scenes, visual_analysis, semantic_audio,
+        )
+        multimodal_timeline = self._cached(
+            tracker, "multimodal_timeline", work_directory / "multimodal_timeline.json",
+            {
+                "source": source.id,
+                "analysis_run_id": multimodal_analysis_id,
+                "analysis_version": MULTIMODAL_ANALYSIS_VERSION,
+                "seed_timeline": _hash(multimodal_seed_timeline),
+                "semantic_audio": _hash(semantic_audio),
+            },
+            lambda: _write(
+                work_directory / "multimodal_timeline.json",
+                build_multimodal_timeline(
+                    source_id=source.id,
+                    source_duration_seconds=float(metadata.get("duration") or 0),
+                    transcript=transcript,
+                    audio_features=audio_features,
+                    scenes=scenes,
+                    visual_analysis=visual_analysis,
+                    semantic_audio=semantic_audio,
+                    analysis_run_id=multimodal_analysis_id,
+                ),
+            ),
+            cache_tracker=source_cache,
+            validator=lambda data: validate_multimodal_timeline(
+                data, expected_source_id=source.id, expected_analysis_run_id=multimodal_analysis_id,
+            ),
+        )
+        content_map = self._cached(
+            tracker, "global_content_map", work_directory / "global_content_map.json",
+            {"base_content_map": _hash(base_content_map), "multimodal_timeline": _hash(multimodal_timeline)},
+            lambda: _write(
+                work_directory / "global_content_map.json",
+                refresh_content_map_multimodal_evidence(base_content_map, transcript, multimodal_timeline),
+            ),
+            cache_tracker=source_cache,
+        )
+        story_units = self._cached(
+            tracker, "story_units", work_directory / "story_units.json",
+            {"content_map": _hash(content_map), "schema_version": self.config.content_understanding.story_unit_schema_version},
+            lambda: _write(work_directory / "story_units.json", story_units_artifact(content_map, transcript)),
+            cache_tracker=source_cache,
+        )
+        semantic_boundaries = self._cached(
+            tracker, "semantic_boundaries", work_directory / "semantic_boundaries.json",
+            {
+                "candidate_seed_basis": _hash(candidate_seed_basis),
+                "multimodal_timeline": _hash(multimodal_timeline),
+            },
+            lambda: _write_generated_candidates(
+                work_directory / "semantic_boundaries.json",
+                (
+                    refresh_candidate_timeline_evidence(
+                        [candidate_from_dict(item) for item in candidate_seed_basis.get("candidates", [])],
+                        multimodal_timeline,
+                    ),
+                    int(candidate_seed_basis.get("candidates_before_deduplication") or 0),
                 ),
             ),
             cache_tracker=source_cache,
@@ -722,8 +829,21 @@ class Pipeline:
             tracker, "candidates_v2", work_directory / "candidates_v2.json",
             {
                 "semantic_boundaries": _hash(semantic_boundaries),
+                "audio_profile_id": audio_profile_id,
             },
-            lambda: _write(work_directory / "candidates_v2.json", dict(semantic_boundaries)),
+            lambda: _write(
+                work_directory / "candidates_v2.json",
+                {
+                    **semantic_boundaries,
+                    "candidates": [
+                        item.to_dict() for item in project_candidate_audio_evidence(
+                            [candidate_from_dict(raw) for raw in semantic_boundaries.get("candidates", [])],
+                            multimodal_timeline,
+                            audio_profile_id,
+                        )
+                    ],
+                },
+            ),
             cache_tracker=source_cache,
         )
         # Compatibility artifact retained for existing users of the pre-1.6 cache layout.
@@ -792,7 +912,7 @@ class Pipeline:
             tracker, "multimodal_scoring", work_directory / "candidates.multimodal.json",
             {
                 "local_scoring": _hash(local_data), "pass2": _hash(pass2_data),
-                "scoring_contract": "6D.3", "settings": self.config.scoring,
+                "scoring_contract": "6D.4", "settings": self.config.scoring,
                 "visual_analysis": _hash(visual_analysis),
             },
             lambda: _write_candidates(

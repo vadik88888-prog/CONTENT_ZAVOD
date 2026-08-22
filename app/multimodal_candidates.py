@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from app.ai import sanitize_api_error
+from app.audio_semantics import project_semantic_audio_event
 from app.content_understanding import (
     GlobalContentMap,
     SemanticBoundaryEngine,
@@ -15,12 +16,12 @@ from app.content_understanding import (
     generate_semantic_candidates,
 )
 from app.models import Candidate
-from app.multimodal_evidence import validate_multimodal_timeline
+from app.multimodal_evidence import audio_summary_for_range, validate_multimodal_timeline
 from app.utils import stable_text_hash
 from app.vision_intelligence import build_pass2_request
 
 
-CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.1"
+CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.2"
 PASS2_EVIDENCE_SCHEMA_VERSION = "6C.pass2-evidence.1"
 
 
@@ -39,6 +40,7 @@ def generate_multimodal_candidates(
     vision_pass1: dict[str, Any],
     config: Any,
     semantic_generator: Callable[..., tuple[list[Candidate], int]] = generate_semantic_candidates,
+    audio_profile_id: str | None = None,
 ) -> tuple[list[Candidate], int]:
     """Extend semantic candidates with grounded audio/visual seeds and linked ranges."""
 
@@ -62,19 +64,26 @@ def generate_multimodal_candidates(
         _attach_provenance(
             candidate, timeline, vision_pass1, candidate_signals,
             kind=kind, initial_score=score, reasons=reasons,
+            audio_profile_id=audio_profile_id,
             original_ranges=[{"story_unit_id": value, "start": stories[value].start, "end": stories[value].end}
                              for value in candidate.story_unit_ids if value in stories],
         )
 
+    audio_seeds = _audio_seed_candidates(
+        content_map.story_units, signals, transcript, transcript_features, scenes, timeline,
+        vision_pass1, config,
+        audio_profile_id,
+    )
     composites = _composite_candidates(
         content_map.story_units, signals, transcript, transcript_features, scenes, timeline,
         vision_pass1, config,
+        audio_profile_id,
     )
     available = max(0, int(config.candidate_generation.max_candidates) - len(baseline))
-    composites = composites[:min(
-        available, int(config.candidate_generation.multimodal_max_composite_candidates),
-    )]
-    return baseline + composites, baseline_count + len(composites)
+    audio_seeds = audio_seeds[:min(available, int(config.audio_analysis.semantic_max_peak_regions))]
+    available -= len(audio_seeds)
+    composites = composites[:min(available, int(config.candidate_generation.multimodal_max_composite_candidates))]
+    return baseline + audio_seeds + composites, baseline_count + len(audio_seeds) + len(composites)
 
 
 def enrich_shortlist_with_pass2(
@@ -124,6 +133,56 @@ def enrich_shortlist_with_pass2(
     return candidates
 
 
+def project_candidate_audio_evidence(
+    candidates: list[Candidate], timeline: dict[str, Any], profile_id: str,
+) -> list[Candidate]:
+    """Attach profile-aware audio interpretation without changing candidate ranges."""
+
+    validate_multimodal_timeline(timeline)
+    for candidate in candidates:
+        provenance = candidate.multimodal_provenance
+        if not isinstance(provenance, dict):
+            provenance = {}
+            candidate.multimodal_provenance = provenance
+        provenance["audio_evidence"] = _candidate_audio_evidence(
+            timeline, candidate.start, candidate.end, profile_id,
+        )
+        provenance["audio_summary"] = audio_summary_for_range(
+            timeline, candidate.start, candidate.end, profile_id,
+        )
+        provenance["audio_profile_id"] = profile_id
+    return candidates
+
+
+def refresh_candidate_timeline_evidence(
+    candidates: list[Candidate], timeline: dict[str, Any],
+) -> list[Candidate]:
+    """Rebind unchanged candidate ranges to the enriched source timeline."""
+
+    validate_multimodal_timeline(timeline)
+    for candidate in candidates:
+        provenance = candidate.multimodal_provenance
+        if not isinstance(provenance, dict):
+            provenance = {}
+            candidate.multimodal_provenance = provenance
+        provenance["analysis_run_id"] = timeline["analysis_run_id"]
+        provenance["transcript_evidence"] = [
+            item for item in timeline.get("transcript_events", [])
+            if _overlaps(item, candidate.start, candidate.end)
+        ]
+        provenance["audio_evidence"] = _candidate_audio_evidence(
+            timeline, candidate.start, candidate.end, None,
+        )
+        provenance["audio_summary"] = audio_summary_for_range(
+            timeline, candidate.start, candidate.end,
+        )
+        provenance["keyframe_evidence"] = [
+            item for item in timeline.get("keyframes", [])
+            if candidate.start <= float(item["time_seconds"]) <= candidate.end
+        ]
+    return candidates
+
+
 def _strong_signals(
     timeline: dict[str, Any], vision_pass1: dict[str, Any], minimum: float,
 ) -> list[dict[str, Any]]:
@@ -131,13 +190,29 @@ def _strong_signals(
     for event in timeline.get("audio_event_map", []):
         event_type = str(event.get("event_type") or "")
         confidence = float(event.get("confidence", 0))
-        if confidence < minimum or event_type not in {"emphasis", "reaction_label"}:
+        observation = event.get("observation", {}) if isinstance(event.get("observation"), dict) else {}
+        if confidence < minimum:
             continue
-        signals.append(_signal(
-            "audio", "reaction" if event_type == "reaction_label" else "hook",
-            float(event["start_seconds"]), float(event["end_seconds"]), confidence,
-            f"timeline:{event['event_id']}", event,
-        ))
+        if event_type == "background_music":
+            continue
+        if event_type == "semantic_audio_event":
+            # Profile-neutral classifier output is Brain evidence. Candidate
+            # boundaries remain owned by source-stable peaks/signals.
+            continue
+        elif event_type == "reaction_label":
+            roles = ["reaction"]
+        elif event_type == "peak_region" and observation.get("candidate_seed") is True:
+            roles = ["attention"]
+        elif event_type == "emphasis":
+            roles = ["attention"]
+        else:
+            continue
+        for role in roles:
+            signals.append(_signal(
+                "audio", role,
+                float(event["start_seconds"]), float(event["end_seconds"]), confidence,
+                f"timeline:{event['event_id']}", event,
+            ))
     for event in timeline.get("visual_event_map", []):
         confidence = float(event.get("confidence", 0))
         if confidence < minimum or event.get("event_type") != "subject_observation":
@@ -179,10 +254,63 @@ def _strong_signals(
     return sorted(signals, key=lambda item: (item["time"], item["modality"], item["role"], item["source_ref"]))
 
 
+def _audio_seed_candidates(
+    stories: list[StoryUnit], signals: list[dict[str, Any]], transcript: dict[str, Any],
+    transcript_features: dict[str, Any], scenes: dict[str, Any], timeline: dict[str, Any],
+    vision_pass1: dict[str, Any], config: Any,
+    audio_profile_id: str | None,
+) -> list[Candidate]:
+    """Resolve bounded audio proposals through the existing SemanticBoundaryEngine."""
+
+    audio = [
+        item for item in signals
+        if item["modality"] == "audio"
+        and item["evidence"].get("event_type") in {"peak_region", "semantic_audio_event"}
+    ]
+    engine = SemanticBoundaryEngine(config.content_understanding)
+    ordered_stories = sorted(stories, key=lambda item: (item.start, item.end, item.story_unit_id))
+    result: list[Candidate] = []
+    seen: set[tuple[str, str]] = set()
+    link_gap = float(config.candidate_generation.multimodal_link_gap_seconds)
+    for signal in sorted(audio, key=lambda item: (-item["confidence"], item["time"])):
+        center = (signal["start"] + signal["end"]) / 2
+        nearby = [
+            unit for unit in ordered_stories
+            if unit.start <= signal["end"] + link_gap and unit.end >= signal["start"] - link_gap
+        ]
+        if not nearby:
+            continue
+        unit = min(nearby, key=lambda item: (0.0 if item.start <= center <= item.end else min(abs(center - item.start), abs(center - item.end)), -item.standalone_score, item.story_unit_id))
+        seed_id = str((signal["evidence"].get("observation") or {}).get("region_id") or signal["evidence"].get("event_id"))
+        key = (unit.story_unit_id, seed_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate_id = f"candidate-audio-{stable_text_hash('|'.join(key))[:12]}"
+        candidate = build_semantic_candidate(
+            [unit], transcript, transcript_features, scenes, engine, candidate_id=candidate_id,
+        )
+        _attach_provenance(
+            candidate, timeline, vision_pass1, _signals_for_range(signals, candidate.start, candidate.end),
+            kind="audio", initial_score=_initial_score(_transcript_strength([unit]), [signal]),
+            reasons=[
+                "candidate_source:audio_seed", "bounded_audio_peak_seed",
+                f"audio_seed_event:{signal['evidence'].get('event_type')}",
+                "resolved_by_existing_semantic_boundary_engine",
+            ],
+            audio_profile_id=audio_profile_id,
+            original_ranges=[{"story_unit_id": unit.story_unit_id, "start": unit.start, "end": unit.end}],
+        )
+        candidate.reason = "Bounded audio seed resolved by the existing SemanticBoundaryEngine."
+        result.append(candidate)
+    return result
+
+
 def _composite_candidates(
     stories: list[StoryUnit], signals: list[dict[str, Any]], transcript: dict[str, Any],
     transcript_features: dict[str, Any], scenes: dict[str, Any], timeline: dict[str, Any],
     vision_pass1: dict[str, Any], config: Any,
+    audio_profile_id: str | None,
 ) -> list[Candidate]:
     proposals: list[tuple[float, list[StoryUnit], list[dict[str, Any]]]] = []
     ordered = sorted(stories, key=lambda item: (item.start, item.end, item.story_unit_id))
@@ -227,6 +355,7 @@ def _composite_candidates(
         _attach_provenance(
             candidate, timeline, vision_pass1, linked, kind="multimodal",
             initial_score=score, reasons=reasons,
+            audio_profile_id=audio_profile_id,
             original_ranges=[{"story_unit_id": unit.story_unit_id, "start": unit.start, "end": unit.end} for unit in units],
         )
         candidate.reason = "Multimodal evidence linked adjacent StoryUnits; boundaries remain SemanticBoundaryEngine decisions."
@@ -237,7 +366,7 @@ def _composite_candidates(
 def _attach_provenance(
     candidate: Candidate, timeline: dict[str, Any], vision_pass1: dict[str, Any],
     signals: list[dict[str, Any]], *, kind: str, initial_score: float,
-    reasons: list[str], original_ranges: list[dict[str, Any]],
+    reasons: list[str], original_ranges: list[dict[str, Any]], audio_profile_id: str | None,
 ) -> None:
     start, end = candidate.start, candidate.end
     candidate.candidate_kind = kind
@@ -248,9 +377,8 @@ def _attach_provenance(
         "transcript_evidence": [
             item for item in timeline.get("transcript_events", []) if _overlaps(item, start, end)
         ],
-        "audio_evidence": [
-            item["evidence"] for item in signals if item["modality"] == "audio"
-        ],
+        "audio_evidence": _candidate_audio_evidence(timeline, start, end, audio_profile_id),
+        "audio_summary": audio_summary_for_range(timeline, start, end, audio_profile_id),
         "visual_evidence": [
             item["evidence"] for item in signals if item["modality"] == "visual"
         ],
@@ -269,6 +397,24 @@ def _attach_provenance(
             "resolved_candidate_range": {"start": start, "end": end},
         },
     }
+
+
+def _candidate_audio_evidence(
+    timeline: dict[str, Any], start: float, end: float, profile_id: str | None,
+) -> list[dict[str, Any]]:
+    allowed = {
+        "reaction_label", "emphasis", "relative_spike", "burst", "peak_region",
+        "semantic_audio_event", "background_music",
+    }
+    result: list[dict[str, Any]] = []
+    for item in timeline.get("audio_event_map", []):
+        if item.get("event_type") not in allowed or not _overlaps(item, start, end):
+            continue
+        if item.get("event_type") in {"semantic_audio_event", "background_music"} and profile_id:
+            result.append(project_semantic_audio_event(item, profile_id))
+        else:
+            result.append(item)
+    return result
 
 
 def _candidate_kind(transcript_strength: float, signals: list[dict[str, Any]]) -> str:

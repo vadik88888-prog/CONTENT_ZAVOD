@@ -20,7 +20,7 @@ from app.speech_clarity_policy import (
 )
 
 
-CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.3"
+CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.4"
 
 FACTOR_WEIGHTS: dict[str, float] = {
     "hook": 0.12,
@@ -682,7 +682,19 @@ def build_score_v2(
         information *= 100
     audio_score = _bounded(float(features.get("audio_energy", 0)) * 100)
     audio_evidence = (candidate.multimodal_provenance or {}).get("audio_evidence", [])
-    audio_editorial_grounded = bool(audio_evidence) or float(features.get("exclamation_count", 0)) > 0
+    grounded_audio_events = [
+        item for item in audio_evidence
+        if isinstance(item, dict) and (
+            item.get("event_type") in {"reaction_label", "emphasis"}
+            or (
+                item.get("event_type") == "semantic_audio_event"
+                and isinstance(item.get("observation"), dict)
+                and item["observation"].get("meaningful_for_profile") is True
+                and item["observation"].get("background_music_only") is not True
+            )
+        )
+    ]
+    audio_editorial_grounded = bool(grounded_audio_events) or float(features.get("exclamation_count", 0)) > 0
     # Goal 6E benchmark: raw loudness alone repeatedly lifted candidates without
     # an editorial event.  Preserve it as weak relevance evidence, while a
     # grounded emphasis/reaction event keeps the full audio contribution.
@@ -776,6 +788,13 @@ def build_score_v2(
         penalty("VISUAL_EVIDENCE_UNAVAILABLE", 2.0, [visual_ref])
     if float(scores.get("clarity", 0)) < 45:
         penalty("LOW_SPEECH_CLARITY", 15.0, [item for item in decision.evidence_refs if item.code == "speech_clarity"])
+    sparse = assess_sparse_multimodal_content(candidate)
+    if sparse["applies"]:
+        sparse_ref = EvidenceReference(
+            "sparse_multimodal_content", EvidenceState.AVAILABLE, "multimodal_candidate_provenance",
+            sparse,
+        )
+        penalty("SPARSE_MULTIMODAL_CONTENT", float(sparse["penalty"]), [sparse_ref])
     final = round(_bounded(raw - sum(item.amount for item in penalties)), 3)
     return CandidateScoreV2(
         schema_version=CANDIDATE_QUALITY_SCHEMA_VERSION,
@@ -793,8 +812,86 @@ def build_score_v2(
             "context_debt_deduction": round(context_contribution, 3),
             "penalty_total": round(sum(item.amount for item in penalties), 3),
             "modalities_available": _modalities_available(candidate, visual_ref),
+            "sparse_content": sparse,
         },
     )
+
+
+def assess_sparse_multimodal_content(candidate: Any) -> dict[str, Any]:
+    """Strong soft downgrade for long empty padding; never an eligibility blocker."""
+
+    provenance = candidate.multimodal_provenance or {}
+    summary = provenance.get("audio_summary", {}) if isinstance(provenance, dict) else {}
+    if not isinstance(summary, dict) or summary.get("schema_version") != "audio-range-summary.1":
+        return {"applies": False, "reason": "audio_range_summary_unavailable", "penalty": 0.0}
+    duration = max(0.001, float(candidate.duration))
+    speech_gap = max(0.0, float(summary.get("longest_speech_gap_seconds", 0) or 0))
+    dead_ratio = max(0.0, min(1.0, float(summary.get("dead_zone_ratio", 0) or 0)))
+    activity_ratio = max(0.0, min(1.0, float(summary.get("activity_ratio", 0) or 0)))
+    meaningful_count = max(0, int(summary.get("meaningful_event_count", 0) or 0))
+    longest_audio_dead = max(0.0, float(summary.get("longest_audio_dead_zone_seconds", 0) or 0))
+    spike_count = max(0, int(summary.get("spike_count", 0) or 0))
+    visual_action, visual_payoff = _meaningful_visual_action_payoff(candidate)
+    long_gap_threshold = max(10.0, duration * 0.45)
+    meaningful_audio = bool(
+        summary.get("background_music_only") is not True
+        and (
+            (meaningful_count > 0 and activity_ratio >= 0.24 and longest_audio_dead < long_gap_threshold)
+            or (activity_ratio >= 0.42 and spike_count >= 2)
+        )
+    )
+    long_gap = speech_gap >= long_gap_threshold
+    audio_sparse = dead_ratio >= 0.45 or longest_audio_dead >= long_gap_threshold
+    applies = bool(long_gap and audio_sparse and not visual_action and not visual_payoff and not meaningful_audio)
+    gap_ratio = min(1.0, speech_gap / duration)
+    penalty = min(34.0, 20.0 + gap_ratio * 10.0 + dead_ratio * 6.0) if applies else 0.0
+    return {
+        "applies": applies,
+        "reason": "long_semantic_gap_without_meaningful_visual_or_audio_evidence" if applies else "meaningful_content_evidence_or_no_long_gap",
+        "penalty": round(penalty, 3),
+        "duration_seconds": round(duration, 3),
+        "long_gap_threshold_seconds": round(long_gap_threshold, 3),
+        "longest_speech_gap_seconds": round(speech_gap, 3),
+        "speech_gap_ratio": round(gap_ratio, 6),
+        "audio_activity_ratio": round(activity_ratio, 6),
+        "audio_dead_zone_ratio": round(dead_ratio, 6),
+        "longest_audio_dead_zone_seconds": round(longest_audio_dead, 3),
+        "meaningful_audio_event_count": meaningful_count,
+        "meaningful_audio_action": meaningful_audio,
+        "meaningful_visual_action": visual_action,
+        "meaningful_visual_payoff": visual_payoff,
+        "background_music_only": bool(summary.get("background_music_only", False)),
+        "surfacing_effect": "strong_soft_downgrade_only",
+        "blocked": False,
+    }
+
+
+def _meaningful_visual_action_payoff(candidate: Any) -> tuple[bool, bool]:
+    pass2 = _pass2_verification(candidate)
+    if pass2 is not None:
+        action = pass2.get("action_visible") is True or pass2.get("reaction_visible") is True
+        payoff = pass2.get("payoff_visible") is True
+        if action or payoff:
+            return action, payoff
+    provenance = candidate.multimodal_provenance or {}
+    raw = provenance.get("visual_evidence", []) if isinstance(provenance, dict) else []
+    meaningful_action = False
+    meaningful_payoff = False
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or float(item.get("confidence", 0) or 0) < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE:
+            continue
+        observation = item.get("observation") if isinstance(item.get("observation"), dict) else item
+        missing = {str(value) for value in observation.get("missing_evidence", [])}
+        action = str(observation.get("action") or "none")
+        reaction = str(observation.get("reaction") or "none")
+        payoff = str(observation.get("payoff_signal") or "none")
+        if "action" not in missing and action in {"interaction", "demonstration", "gesture"}:
+            meaningful_action = True
+        if reaction not in {"none", "unknown"}:
+            meaningful_action = True
+        if payoff in {"reveal", "result", "resolution", "payoff"}:
+            meaningful_payoff = True
+    return meaningful_action, meaningful_payoff
 
 
 def apply_ai_factor_assessments(candidate: Any, assessment: Any) -> None:

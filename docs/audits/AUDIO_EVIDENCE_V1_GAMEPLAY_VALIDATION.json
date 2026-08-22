@@ -1,0 +1,3923 @@
+{
+  "schema_version": "audio-evidence-v1.gameplay-benchmark.1",
+  "source_work_directory": "work\\САМАЯ_БЕЗУМНАЯ_КАТКА_ОТ_ПЕРВОГО_ЛИЦА_30_КИЛЛОВ_В_PUBG_-vEUmQFrVnSY-bc2ec91aded2",
+  "provider_calls": {
+    "ai": 0,
+    "vision": 0
+  },
+  "performance": {
+    "signal_analysis_seconds": 4.35,
+    "semantic_analysis_seconds": 1.088,
+    "source_duration_seconds": 1259.4,
+    "signal_analysis_passes": 1,
+    "prepared_pcm_reads": 2,
+    "source_video_decodes": 0,
+    "semantic_classified_seconds": 180.0,
+    "semantic_region_count": 15,
+    "semantic_full_source_scan": false
+  },
+  "bad_candidate_before": {
+    "id": "candidate-chapter-034-story-001",
+    "start": 746.3,
+    "end": 782.59,
+    "duration": 36.29,
+    "text": "Слева, куда надо джокер играть. Два раза по тебе должно быть значит. Не на краю. Вижу.",
+    "score": 49,
+    "selected": true,
+    "surfacing": "RECOMMENDED"
+  },
+  "bad_candidate_evidence": {
+    "speech_segments": [
+      {
+        "start": 746.55,
+        "end": 748.25,
+        "text": "Слева, куда надо джокер играть."
+      },
+      {
+        "start": 748.93,
+        "end": 750.31,
+        "text": "Два раза по тебе должно быть значит."
+      },
+      {
+        "start": 751.35,
+        "end": 752.39,
+        "text": "Не на краю."
+      },
+      {
+        "start": 781.76,
+        "end": 781.94,
+        "text": "Вижу."
+      }
+    ],
+    "longest_speech_gap_seconds": 29.37,
+    "vision_pass1": [
+      {
+        "observation_schema_version": "6B.1",
+        "keyframe_id": "keyframe-0050-c2796747",
+        "timestamp": 769.667,
+        "scene_type": "GAMEPLAY",
+        "primary_subject": "scene",
+        "normalized_center_x": null,
+        "normalized_center_y": null,
+        "visible_face_count": 1,
+        "action": "movement",
+        "reaction": "none",
+        "payoff_signal": "none",
+        "on_screen_text": "КОПИЛКА СТРИМА",
+        "composition_risk": "none",
+        "confidence": 0.76,
+        "missing_evidence": [
+          "action",
+          "text"
+        ],
+        "origin": "cache",
+        "provenance": {
+          "provider": "openai",
+          "model": "gpt-5-mini",
+          "detail": "low",
+          "prompt_version": "6B.pass1.1",
+          "schema_version": "6B.1",
+          "frame_hash": "63df59281a4a4447bb0fa998c9902d6af2570e24170468dbbe4dbeadfc188d7b",
+          "cache_key": "57c46ae82c58bea1d977741d77c9fc68090b028c4512c9d860d846129522c4c2",
+          "request_id": null
+        }
+      }
+    ],
+    "audio_window": {
+      "audio_energy": 0.053,
+      "audio_energy_change": 0.014,
+      "relative_loudness": 0.056,
+      "audio_activity_ratio": 0.058,
+      "audio_dead_zone_ratio": 0.832,
+      "audio_spike_peak": 1.0,
+      "audio_onset_count": 4.0,
+      "audio_burst_peak": 0.818,
+      "audio_noisiness": 0.126,
+      "silence_before": 0.0,
+      "silence_after": 1.0
+    },
+    "semantic_audio_events": [
+      {
+        "event_id": "audio-semantic-3f87ef6407900067",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 746.28,
+        "end_seconds": 753.0,
+        "confidence": 0.998713,
+        "observation": {
+          "class_index": 0,
+          "class_mid": "/m/09x0r",
+          "label": "Speech",
+          "event_group": "speech",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:6:class:0",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-aa018e1a7ce9b02f",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 750.6,
+        "end_seconds": 751.56,
+        "confidence": 0.241089,
+        "observation": {
+          "class_index": 500,
+          "class_mid": "/t/dd00125",
+          "label": "Inside, small room",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.015209,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:15:class:500",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-446413fd532ae9dd",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 752.52,
+        "end_seconds": 753.48,
+        "confidence": 0.274902,
+        "observation": {
+          "class_index": 500,
+          "class_mid": "/t/dd00125",
+          "label": "Inside, small room",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.196363,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:19:class:500",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-6953add3bc4b8263",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 753.0,
+        "end_seconds": 753.96,
+        "confidence": 0.604497,
+        "observation": {
+          "class_index": 59,
+          "class_mid": "/m/01jg02",
+          "label": "Heart sounds, heartbeat",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.089433,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:20:class:59",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-174bac70f9ab7d41",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 753.0,
+        "end_seconds": 753.96,
+        "confidence": 0.37259,
+        "observation": {
+          "class_index": 516,
+          "class_mid": "/m/07p_0gm",
+          "label": "Throbbing",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.089433,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:20:class:516",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-0c57ef8d9c3bab8b",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 753.0,
+        "end_seconds": 753.96,
+        "confidence": 0.278547,
+        "observation": {
+          "class_index": 490,
+          "class_mid": "/m/07rcgpl",
+          "label": "Hum",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.089433,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:20:class:490",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-3e7156cd5523859f",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 753.96,
+        "end_seconds": 755.4,
+        "confidence": 0.353323,
+        "observation": {
+          "class_index": 500,
+          "class_mid": "/t/dd00125",
+          "label": "Inside, small room",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.110588,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:22:class:500",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-e93706bae4c840b5",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 753.96,
+        "end_seconds": 754.92,
+        "confidence": 0.240196,
+        "observation": {
+          "class_index": 50,
+          "class_mid": "/m/07pdhp0",
+          "label": "Biting",
+          "event_group": "other",
+          "meaningful_profile_ids": [],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.070474,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:22:class:50",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      }
+    ]
+  },
+  "bad_candidate_after": {
+    "score": 49,
+    "local_quality_score": 30.177,
+    "surfacing": "AVAILABLE",
+    "penalties": [
+      {
+        "code": "INTERNAL_REPETITION",
+        "amount": 0.75,
+        "evidence_refs": [
+          {
+            "code": "repetition_score",
+            "state": "available",
+            "source": "transcript_features",
+            "details": {
+              "value": 0.05
+            }
+          }
+        ]
+      },
+      {
+        "code": "SPARSE_MULTIMODAL_CONTENT",
+        "amount": 33.085,
+        "evidence_refs": [
+          {
+            "code": "sparse_multimodal_content",
+            "state": "available",
+            "source": "multimodal_candidate_provenance",
+            "details": {
+              "applies": true,
+              "reason": "long_semantic_gap_without_meaningful_visual_or_audio_evidence",
+              "penalty": 33.085,
+              "duration_seconds": 36.29,
+              "long_gap_threshold_seconds": 16.331,
+              "longest_speech_gap_seconds": 29.37,
+              "speech_gap_ratio": 0.809314,
+              "audio_activity_ratio": 0.057867,
+              "audio_dead_zone_ratio": 0.83191,
+              "longest_audio_dead_zone_seconds": 30.19,
+              "meaningful_audio_event_count": 0,
+              "meaningful_audio_action": false,
+              "meaningful_visual_action": false,
+              "meaningful_visual_payoff": false,
+              "background_music_only": false,
+              "surfacing_effect": "strong_soft_downgrade_only",
+              "blocked": false
+            }
+          }
+        ]
+      }
+    ],
+    "sparse_content": {
+      "applies": true,
+      "reason": "long_semantic_gap_without_meaningful_visual_or_audio_evidence",
+      "penalty": 33.085,
+      "duration_seconds": 36.29,
+      "long_gap_threshold_seconds": 16.331,
+      "longest_speech_gap_seconds": 29.37,
+      "speech_gap_ratio": 0.809314,
+      "audio_activity_ratio": 0.057867,
+      "audio_dead_zone_ratio": 0.83191,
+      "longest_audio_dead_zone_seconds": 30.19,
+      "meaningful_audio_event_count": 0,
+      "meaningful_audio_action": false,
+      "meaningful_visual_action": false,
+      "meaningful_visual_payoff": false,
+      "background_music_only": false,
+      "surfacing_effect": "strong_soft_downgrade_only",
+      "blocked": false
+    }
+  },
+  "recommended_after": [
+    {
+      "id": "candidate-chapter-021-story-001",
+      "text": "Ну, не знаю, да, игрывать как-то можно. А, там есть, да. А этого что, мне убивать надо, что ли? Мой бинок какой-нибудь, да, мне знаю. Залетает он? 17 секунд. Почему? Потому что там 9 секунд.",
+      "start": 461.53,
+      "end": 481.82,
+      "duration": 20.29000000000002,
+      "profile": "gameplay",
+      "score": 52,
+      "audio_summary": {
+        "schema_version": "audio-range-summary.1",
+        "start_seconds": 461.53,
+        "end_seconds": 481.82,
+        "speech_coverage_ratio": 0.444554,
+        "longest_speech_gap_seconds": 5.45,
+        "activity_ratio": 0.290784,
+        "dead_zone_ratio": 0.392804,
+        "longest_audio_dead_zone_seconds": 7.5,
+        "spike_count": 31,
+        "spike_peak": 1.0,
+        "meaningful_event_count": 0,
+        "meaningful_events": [],
+        "background_music_present": false,
+        "background_music_only": false,
+        "semantic_classifier_status": "no_event_in_range",
+        "payoff_claim": false,
+        "analysis_run_id": "multimodal-55d223db6ea09759c8cb"
+      },
+      "visual_evidence": [
+        {
+          "observation_schema_version": "6B.1",
+          "keyframe_id": "keyframe-0028-35d33f26",
+          "timestamp": 462.317,
+          "scene_type": "GAMEPLAY",
+          "primary_subject": "screen",
+          "normalized_center_x": null,
+          "normalized_center_y": null,
+          "visible_face_count": 1,
+          "action": "movement",
+          "reaction": "none",
+          "payoff_signal": "none",
+          "on_screen_text": "juicecreator; КОПИЛКА СТРИМА",
+          "composition_risk": "none",
+          "confidence": 0.86,
+          "missing_evidence": [
+            "payoff",
+            "reaction",
+            "text"
+          ],
+          "origin": "cache",
+          "provenance": {
+            "provider": "openai",
+            "model": "gpt-5-mini",
+            "detail": "low",
+            "prompt_version": "6B.pass1.1",
+            "schema_version": "6B.1",
+            "frame_hash": "deca11115876ecf518db6f13068c05b7657bb61b45a08fdcd8e028de3800ad0d",
+            "cache_key": "ec79a2832bade9ea6acf10c9beaff6bdf8019f66738db18dc1cdc34b9476c13a",
+            "request_id": null
+          }
+        }
+      ],
+      "ranking_reason": "tight self-contained candidate retained by existing Brain/virality/editorial owners; no sparse multimodal penalty"
+    }
+  ],
+  "audio_signal_seeds": {
+    "peak_regions": [
+      {
+        "region_id": "audio-peak-001",
+        "start": 0.0,
+        "end": 12.0,
+        "peak_time": 2.4,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.272727,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-002",
+        "start": 57.7,
+        "end": 69.7,
+        "peak_time": 63.7,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.545455,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-003",
+        "start": 84.0,
+        "end": 96.0,
+        "peak_time": 90.0,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.545455,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-004",
+        "start": 92.9,
+        "end": 104.9,
+        "peak_time": 98.9,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.272727,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-005",
+        "start": 106.5,
+        "end": 118.5,
+        "peak_time": 112.5,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.545455,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-006",
+        "start": 113.5,
+        "end": 125.5,
+        "peak_time": 119.5,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.545455,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-007",
+        "start": 127.2,
+        "end": 139.2,
+        "peak_time": 133.2,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.272727,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-008",
+        "start": 137.8,
+        "end": 149.8,
+        "peak_time": 143.8,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 1.0,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-009",
+        "start": 146.3,
+        "end": 158.3,
+        "peak_time": 152.3,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.545455,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-010",
+        "start": 155.6,
+        "end": 167.6,
+        "peak_time": 161.6,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.272727,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-011",
+        "start": 185.1,
+        "end": 197.1,
+        "peak_time": 191.1,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 0.818182,
+        "source": "audio_signal_peak"
+      },
+      {
+        "region_id": "audio-peak-012",
+        "start": 191.9,
+        "end": 203.9,
+        "peak_time": 197.9,
+        "score": 1.0,
+        "relative_loudness": 1.0,
+        "spike_score": 1.0,
+        "onset_score": 1.0,
+        "burst_score": 1.0,
+        "source": "audio_signal_peak"
+      }
+    ],
+    "semantic_regions": [
+      {
+        "region_id": "audio-peak-001",
+        "start": 0.0,
+        "end": 12.0,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 2.4,
+        "activity_ratio": 0.492,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.361
+      },
+      {
+        "region_id": "audio-peak-002",
+        "start": 57.7,
+        "end": 69.7,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 63.7,
+        "activity_ratio": 0.1,
+        "dead_zone_ratio": 0.742,
+        "relative_loudness": 0.103
+      },
+      {
+        "region_id": "audio-peak-003",
+        "start": 84.0,
+        "end": 96.0,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 90.0,
+        "activity_ratio": 0.358,
+        "dead_zone_ratio": 0.592,
+        "relative_loudness": 0.265
+      },
+      {
+        "region_id": "audio-peak-004",
+        "start": 92.9,
+        "end": 104.9,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 98.9,
+        "activity_ratio": 0.1,
+        "dead_zone_ratio": 0.533,
+        "relative_loudness": 0.171
+      },
+      {
+        "region_id": "audio-peak-005",
+        "start": 106.5,
+        "end": 118.5,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 112.5,
+        "activity_ratio": 0.175,
+        "dead_zone_ratio": 0.458,
+        "relative_loudness": 0.163
+      },
+      {
+        "region_id": "audio-peak-006",
+        "start": 113.5,
+        "end": 125.5,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 119.5,
+        "activity_ratio": 0.492,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.343
+      },
+      {
+        "region_id": "shortlist-1a89c1d5ed4e",
+        "start": 119.0,
+        "end": 131.0,
+        "sources": [
+          "shortlist"
+        ],
+        "candidate_ids": [
+          "candidate-chapter-006-story-001"
+        ],
+        "signal_score": 1.0,
+        "peak_time": 125.0,
+        "shortlist_rank": 2,
+        "activity_ratio": 0.342,
+        "dead_zone_ratio": 0.192,
+        "relative_loudness": 0.241
+      },
+      {
+        "region_id": "audio-peak-007",
+        "start": 127.2,
+        "end": 139.2,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 133.2,
+        "activity_ratio": 0.083,
+        "dead_zone_ratio": 0.375,
+        "relative_loudness": 0.074
+      },
+      {
+        "region_id": "audio-peak-008",
+        "start": 137.8,
+        "end": 149.8,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 143.8,
+        "activity_ratio": 0.5,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.362
+      },
+      {
+        "region_id": "audio-peak-009",
+        "start": 146.3,
+        "end": 158.3,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 152.3,
+        "activity_ratio": 0.308,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.23
+      },
+      {
+        "region_id": "audio-peak-010",
+        "start": 155.6,
+        "end": 167.6,
+        "sources": [
+          "audio_peak"
+        ],
+        "candidate_ids": [],
+        "signal_score": 1.0,
+        "peak_time": 161.6,
+        "activity_ratio": 0.158,
+        "dead_zone_ratio": 0.267,
+        "relative_loudness": 0.132
+      },
+      {
+        "region_id": "shortlist-83e1586852d1",
+        "start": 229.9,
+        "end": 241.9,
+        "sources": [
+          "shortlist"
+        ],
+        "candidate_ids": [
+          "candidate-chapter-010-story-001"
+        ],
+        "signal_score": 1.0,
+        "peak_time": 235.9,
+        "shortlist_rank": 3,
+        "activity_ratio": 0.275,
+        "dead_zone_ratio": 0.125,
+        "relative_loudness": 0.209
+      },
+      {
+        "region_id": "shortlist-2e5ac518353d",
+        "start": 503.0,
+        "end": 515.0,
+        "sources": [
+          "shortlist"
+        ],
+        "candidate_ids": [
+          "candidate-chapter-023-story-001"
+        ],
+        "signal_score": 1.0,
+        "peak_time": 509.0,
+        "shortlist_rank": 4,
+        "activity_ratio": 0.275,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.341
+      },
+      {
+        "region_id": "shortlist-0071a2679fa5",
+        "start": 743.4,
+        "end": 755.4,
+        "sources": [
+          "shortlist"
+        ],
+        "candidate_ids": [
+          "candidate-chapter-034-story-001"
+        ],
+        "signal_score": 1.0,
+        "peak_time": 749.4,
+        "shortlist_rank": 0,
+        "activity_ratio": 0.208,
+        "dead_zone_ratio": 0.383,
+        "relative_loudness": 0.169
+      },
+      {
+        "region_id": "shortlist-36795eed8b31",
+        "start": 1238.9,
+        "end": 1250.9,
+        "sources": [
+          "shortlist"
+        ],
+        "candidate_ids": [
+          "candidate-chapter-042-story-001"
+        ],
+        "signal_score": 1.0,
+        "peak_time": 1244.9,
+        "shortlist_rank": 1,
+        "activity_ratio": 0.883,
+        "dead_zone_ratio": 0.0,
+        "relative_loudness": 0.68
+      }
+    ],
+    "meaningful_events": [
+      {
+        "event_id": "audio-semantic-101f14406b291839",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 64.42,
+        "end_seconds": 65.38,
+        "confidence": 0.548331,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.892067,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-002:frame:14:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-c2aaea98cca7d8f0",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 64.42,
+        "end_seconds": 65.38,
+        "confidence": 0.504353,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.892067,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-002:frame:14:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-eeb1826fa92bc25a",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 64.42,
+        "end_seconds": 65.38,
+        "confidence": 0.394787,
+        "observation": {
+          "class_index": 422,
+          "class_mid": "/m/04zjc",
+          "label": "Machine gun",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.892067,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-002:frame:14:class:422",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-c730aebdab5f6f5a",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 84.0,
+        "end_seconds": 84.96,
+        "confidence": 0.761863,
+        "observation": {
+          "class_index": 424,
+          "class_mid": "/m/0_1c",
+          "label": "Artillery fire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-003:frame:0:class:424",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-61cf10cf218170fb",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 84.0,
+        "end_seconds": 85.92,
+        "confidence": 0.670738,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-003:frame:0:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-22ea863a9b081376",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 84.0,
+        "end_seconds": 84.96,
+        "confidence": 0.344738,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-003:frame:0:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-01abaddfeb9f1b48",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 98.18,
+        "end_seconds": 99.62,
+        "confidence": 0.816514,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-004:frame:11:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-a04bf9903e3ee368",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 98.18,
+        "end_seconds": 100.1,
+        "confidence": 0.861063,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-004:frame:11:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-6d218d0667729556",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 98.18,
+        "end_seconds": 99.14,
+        "confidence": 0.378798,
+        "observation": {
+          "class_index": 422,
+          "class_mid": "/m/04zjc",
+          "label": "Machine gun",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-004:frame:11:class:422",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-3d13e2783287d739",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 98.18,
+        "end_seconds": 99.14,
+        "confidence": 0.33485,
+        "observation": {
+          "class_index": 423,
+          "class_mid": "/m/02z32qm",
+          "label": "Fusillade",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-004:frame:11:class:423",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-13784e5dd34ef9af",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 98.66,
+        "end_seconds": 99.62,
+        "confidence": 0.829422,
+        "observation": {
+          "class_index": 424,
+          "class_mid": "/m/0_1c",
+          "label": "Artillery fire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-004:frame:12:class:424",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-20d3310ea6b2b6b6",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 128.12,
+        "end_seconds": 129.12,
+        "confidence": 0.22384,
+        "observation": {
+          "class_index": 454,
+          "class_mid": "/m/07qnq_y",
+          "label": "Thump, thud",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.535695,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-006-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-1a89c1d5ed4e:frame:19:class:454",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-8092e832543b21be",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 138.76,
+        "end_seconds": 140.2,
+        "confidence": 0.876452,
+        "observation": {
+          "class_index": 422,
+          "class_mid": "/m/04zjc",
+          "label": "Machine gun",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-008:frame:2:class:422",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-68f23ed9011f6ef6",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 138.76,
+        "end_seconds": 142.12,
+        "confidence": 0.858234,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-008:frame:2:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-0b1a9e39aac032a6",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 138.76,
+        "end_seconds": 142.12,
+        "confidence": 0.774161,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-008:frame:2:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-ddbcd589af94adae",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 140.68,
+        "end_seconds": 142.12,
+        "confidence": 0.653649,
+        "observation": {
+          "class_index": 423,
+          "class_mid": "/m/02z32qm",
+          "label": "Fusillade",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-008:frame:6:class:423",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-d0901056fddff7a1",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 140.68,
+        "end_seconds": 142.12,
+        "confidence": 0.650825,
+        "observation": {
+          "class_index": 422,
+          "class_mid": "/m/04zjc",
+          "label": "Machine gun",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 1.0,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-008:frame:6:class:422",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-491ad480b891d88f",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 149.18,
+        "end_seconds": 150.14,
+        "confidence": 0.276549,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.468367,
+          "region_sources": [
+            "audio_peak"
+          ],
+          "candidate_ids": [],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:audio-peak-009:frame:6:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-c96e7324ddf146d4",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 237.58,
+        "end_seconds": 240.94,
+        "confidence": 0.971905,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.825075,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-010-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-83e1586852d1:frame:16:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-ec38ac5210757e1f",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 237.58,
+        "end_seconds": 240.94,
+        "confidence": 0.962084,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.825075,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-010-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-83e1586852d1:frame:16:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-1ba58d7359712123",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 237.58,
+        "end_seconds": 238.54,
+        "confidence": 0.212384,
+        "observation": {
+          "class_index": 454,
+          "class_mid": "/m/07qnq_y",
+          "label": "Thump, thud",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.459136,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-010-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-83e1586852d1:frame:16:class:454",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-6fef8d47bd84674e",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 238.06,
+        "end_seconds": 240.46,
+        "confidence": 0.593218,
+        "observation": {
+          "class_index": 422,
+          "class_mid": "/m/04zjc",
+          "label": "Machine gun",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.825075,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-010-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-83e1586852d1:frame:17:class:422",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-4ac184efdb4c95d0",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 238.06,
+        "end_seconds": 240.46,
+        "confidence": 0.896584,
+        "observation": {
+          "class_index": 423,
+          "class_mid": "/m/02z32qm",
+          "label": "Fusillade",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.825075,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-010-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-83e1586852d1:frame:17:class:423",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-8e399853522d3924",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 513.08,
+        "end_seconds": 514.04,
+        "confidence": 0.304118,
+        "observation": {
+          "class_index": 421,
+          "class_mid": "/m/032s66",
+          "label": "Gunshot, gunfire",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.720941,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-023-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-2e5ac518353d:frame:21:class:421",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-3b33f05c5adc444f",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 513.08,
+        "end_seconds": 514.04,
+        "confidence": 0.29281,
+        "observation": {
+          "class_index": 423,
+          "class_mid": "/m/02z32qm",
+          "label": "Fusillade",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.720941,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-023-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-2e5ac518353d:frame:21:class:423",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-f764900c1e2d2759",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 513.08,
+        "end_seconds": 514.04,
+        "confidence": 0.245994,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.720941,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-023-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-2e5ac518353d:frame:21:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      },
+      {
+        "event_id": "audio-semantic-9ff289efa5196d24",
+        "event_type": "semantic_audio_event",
+        "start_seconds": 744.36,
+        "end_seconds": 746.28,
+        "confidence": 0.389203,
+        "observation": {
+          "class_index": 420,
+          "class_mid": "/m/014zdl",
+          "label": "Explosion",
+          "event_group": "impact",
+          "meaningful_profile_ids": [
+            "gameplay",
+            "movie_series",
+            "reaction",
+            "sports_fitness",
+            "story_entertainment",
+            "stream",
+            "travel",
+            "vlog_lifestyle"
+          ],
+          "payoff_claim": false,
+          "background_music_only": false,
+          "signal_salience": 0.51419,
+          "region_sources": [
+            "shortlist"
+          ],
+          "candidate_ids": [
+            "candidate-chapter-034-story-001"
+          ],
+          "profile_id": "gameplay",
+          "meaningful_for_profile": true,
+          "editorial_roles": [
+            "action"
+          ]
+        },
+        "provenance": [
+          {
+            "artifact": "audio_semantic_events.json",
+            "locator": "regions:shortlist-0071a2679fa5:frame:2:class:420",
+            "method": "bounded_yamnet_onnx_inference"
+          }
+        ]
+      }
+    ],
+    "candidate_seeds": [
+      {
+        "id": "candidate-audio-9892cbadaf32",
+        "start": 1.14,
+        "end": 13.81,
+        "story_unit_ids": [
+          "chapter-001-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-9892cbadaf32-ad8d6d93cf21",
+          "candidate_id": "candidate-audio-9892cbadaf32",
+          "rough_range": {
+            "start_seconds": 1.39,
+            "end_seconds": 13.43
+          },
+          "refined_range": {
+            "start_seconds": 1.14,
+            "end_seconds": 13.81
+          },
+          "allowed_source_range": {
+            "start_seconds": 1.14,
+            "end_seconds": 13.81
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.38,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 1.39,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 0,
+            "word_index": 0,
+            "scene_boundary_distance": 28.843,
+            "silence_before": 1.39,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 13.43,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 5,
+            "word_index": 30,
+            "scene_boundary_distance": 16.803,
+            "silence_before": 0.0,
+            "silence_after": 0.38,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.39,
+            "tail_silence_seconds": 0.38,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.38,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 1.39,
+                "end_seconds": 2.57
+              },
+              "transcript_segment_id": 0,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Ну, гон на псяге.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 12.99,
+                "end_seconds": 13.43
+              },
+              "transcript_segment_id": 5,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Угу.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 12.99,
+                "end_seconds": 13.43
+              },
+              "transcript_segment_id": 5,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            1.14,
+            1.39,
+            1.91,
+            2.15,
+            2.29,
+            2.89,
+            3.15,
+            4.11,
+            4.51,
+            4.61,
+            5.15,
+            5.25,
+            5.37,
+            5.67,
+            5.79,
+            6.05,
+            6.57,
+            6.71,
+            7.29,
+            7.55,
+            7.85,
+            8.11,
+            8.19,
+            8.45,
+            8.71,
+            8.97,
+            10.37,
+            11.17,
+            11.25,
+            11.49,
+            11.63,
+            12.99,
+            13.81
+          ],
+          "safe_end_points": [
+            1.87,
+            2.15,
+            2.29,
+            2.57,
+            3.07,
+            3.37,
+            4.51,
+            4.61,
+            4.93,
+            5.25,
+            5.37,
+            5.67,
+            5.79,
+            6.05,
+            6.35,
+            6.71,
+            7.07,
+            7.49,
+            7.73,
+            8.11,
+            8.19,
+            8.45,
+            8.71,
+            8.97,
+            9.27,
+            11.17,
+            11.25,
+            11.49,
+            11.63,
+            12.09,
+            13.43,
+            13.81
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-ad5c8cbae084",
+        "start": 61.29,
+        "end": 83.09,
+        "story_unit_ids": [
+          "chapter-003-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-ad5c8cbae084-77169f0d2d39",
+          "candidate_id": "candidate-audio-ad5c8cbae084",
+          "rough_range": {
+            "start_seconds": 61.54,
+            "end_seconds": 82.44
+          },
+          "refined_range": {
+            "start_seconds": 61.29,
+            "end_seconds": 83.09
+          },
+          "allowed_source_range": {
+            "start_seconds": 61.29,
+            "end_seconds": 83.09
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 61.54,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 11,
+            "word_index": 62,
+            "scene_boundary_distance": 27.34,
+            "silence_before": 1.68,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 82.44,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 13,
+            "word_index": 72,
+            "scene_boundary_distance": 16.227,
+            "silence_before": 0.0,
+            "silence_after": 7.47,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.68,
+            "tail_silence_seconds": 7.47,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 61.54,
+                "end_seconds": 62.0
+              },
+              "transcript_segment_id": 11,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Ну, просто.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 64.88,
+                "end_seconds": 82.44
+              },
+              "transcript_segment_id": 13,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Это разные.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 64.88,
+                "end_seconds": 82.44
+              },
+              "transcript_segment_id": 13,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            61.29,
+            61.54,
+            61.8,
+            63.0,
+            63.22,
+            63.36,
+            63.72,
+            63.88,
+            64.1,
+            64.3,
+            64.84,
+            64.88,
+            80.98
+          ],
+          "safe_end_points": [
+            61.76,
+            62.0,
+            63.16,
+            63.36,
+            63.72,
+            63.88,
+            64.1,
+            64.3,
+            64.68,
+            64.88,
+            82.44,
+            83.09
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-106216a99091",
+        "start": 89.66,
+        "end": 104.79,
+        "story_unit_ids": [
+          "chapter-004-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-106216a99091-6c86442d81ec",
+          "candidate_id": "candidate-audio-106216a99091",
+          "rough_range": {
+            "start_seconds": 89.91,
+            "end_seconds": 104.14
+          },
+          "refined_range": {
+            "start_seconds": 89.66,
+            "end_seconds": 104.79
+          },
+          "allowed_source_range": {
+            "start_seconds": 89.66,
+            "end_seconds": 104.79
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 89.91,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 14,
+            "word_index": 73,
+            "scene_boundary_distance": 8.757,
+            "silence_before": 7.47,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 104.14,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 18,
+            "word_index": 102,
+            "scene_boundary_distance": 5.473,
+            "silence_before": 0.0,
+            "silence_after": 1.54,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 7.47,
+            "tail_silence_seconds": 1.54,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 89.91,
+                "end_seconds": 91.55
+              },
+              "transcript_segment_id": 14,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Спустился как будто.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 102.74,
+                "end_seconds": 104.14
+              },
+              "transcript_segment_id": 18,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "И ты, окей, окей.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 102.74,
+                "end_seconds": 104.14
+              },
+              "transcript_segment_id": 18,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            89.66,
+            89.91,
+            90.19,
+            90.41,
+            90.67,
+            90.79,
+            91.17,
+            91.79,
+            92.05,
+            92.47,
+            92.61,
+            92.77,
+            92.95,
+            93.29,
+            100.14,
+            100.34,
+            100.48,
+            100.68,
+            101.0,
+            101.1,
+            101.18,
+            101.34,
+            101.52,
+            102.16,
+            102.42,
+            102.48,
+            102.66,
+            102.74,
+            102.84,
+            103.64,
+            104.04
+          ],
+          "safe_end_points": [
+            90.19,
+            90.41,
+            90.53,
+            90.79,
+            91.17,
+            91.55,
+            91.97,
+            92.39,
+            92.61,
+            92.77,
+            92.85,
+            93.29,
+            93.49,
+            100.34,
+            100.48,
+            100.68,
+            100.98,
+            101.1,
+            101.18,
+            101.34,
+            101.52,
+            101.68,
+            102.38,
+            102.48,
+            102.66,
+            102.72,
+            102.84,
+            102.96,
+            103.9,
+            104.14,
+            104.79
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-ddf51ef77983",
+        "start": 89.66,
+        "end": 104.79,
+        "story_unit_ids": [
+          "chapter-004-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-ddf51ef77983-bd6fdc2cb806",
+          "candidate_id": "candidate-audio-ddf51ef77983",
+          "rough_range": {
+            "start_seconds": 89.91,
+            "end_seconds": 104.14
+          },
+          "refined_range": {
+            "start_seconds": 89.66,
+            "end_seconds": 104.79
+          },
+          "allowed_source_range": {
+            "start_seconds": 89.66,
+            "end_seconds": 104.79
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 89.91,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 14,
+            "word_index": 73,
+            "scene_boundary_distance": 8.757,
+            "silence_before": 7.47,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 104.14,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 18,
+            "word_index": 102,
+            "scene_boundary_distance": 5.473,
+            "silence_before": 0.0,
+            "silence_after": 1.54,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 7.47,
+            "tail_silence_seconds": 1.54,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 89.91,
+                "end_seconds": 91.55
+              },
+              "transcript_segment_id": 14,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Спустился как будто.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 102.74,
+                "end_seconds": 104.14
+              },
+              "transcript_segment_id": 18,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "И ты, окей, окей.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 102.74,
+                "end_seconds": 104.14
+              },
+              "transcript_segment_id": 18,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            89.66,
+            89.91,
+            90.19,
+            90.41,
+            90.67,
+            90.79,
+            91.17,
+            91.79,
+            92.05,
+            92.47,
+            92.61,
+            92.77,
+            92.95,
+            93.29,
+            100.14,
+            100.34,
+            100.48,
+            100.68,
+            101.0,
+            101.1,
+            101.18,
+            101.34,
+            101.52,
+            102.16,
+            102.42,
+            102.48,
+            102.66,
+            102.74,
+            102.84,
+            103.64,
+            104.04
+          ],
+          "safe_end_points": [
+            90.19,
+            90.41,
+            90.53,
+            90.79,
+            91.17,
+            91.55,
+            91.97,
+            92.39,
+            92.61,
+            92.77,
+            92.85,
+            93.29,
+            93.49,
+            100.34,
+            100.48,
+            100.68,
+            100.98,
+            101.1,
+            101.18,
+            101.34,
+            101.52,
+            101.68,
+            102.38,
+            102.48,
+            102.66,
+            102.72,
+            102.84,
+            102.96,
+            103.9,
+            104.14,
+            104.79
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-8c0a857bb01d",
+        "start": 105.43,
+        "end": 121.17,
+        "story_unit_ids": [
+          "chapter-005-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-8c0a857bb01d-5505465d7647",
+          "candidate_id": "candidate-audio-8c0a857bb01d",
+          "rough_range": {
+            "start_seconds": 105.68,
+            "end_seconds": 120.52
+          },
+          "refined_range": {
+            "start_seconds": 105.43,
+            "end_seconds": 121.17
+          },
+          "allowed_source_range": {
+            "start_seconds": 105.43,
+            "end_seconds": 121.17
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 105.68,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 19,
+            "word_index": 103,
+            "scene_boundary_distance": 7.013,
+            "silence_before": 1.54,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 120.52,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 23,
+            "word_index": 133,
+            "scene_boundary_distance": 21.853,
+            "silence_before": 0.0,
+            "silence_after": 1.56,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.54,
+            "tail_silence_seconds": 1.56,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 105.68,
+                "end_seconds": 106.54
+              },
+              "transcript_segment_id": 19,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я поднялся, понял.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 120.3,
+                "end_seconds": 120.52
+              },
+              "transcript_segment_id": 23,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я не знаю.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 120.3,
+                "end_seconds": 120.52
+              },
+              "transcript_segment_id": 23,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            105.43,
+            105.68,
+            106.04,
+            106.44,
+            111.24,
+            111.44,
+            111.74,
+            112.04,
+            112.06,
+            112.38,
+            112.68,
+            113.7,
+            114.0,
+            114.1,
+            114.24,
+            114.34,
+            114.36,
+            114.48,
+            118.02,
+            118.38,
+            118.68,
+            118.82,
+            119.36,
+            119.42,
+            119.54,
+            119.84,
+            119.88,
+            119.96,
+            120.04,
+            120.3,
+            120.34,
+            120.4
+          ],
+          "safe_end_points": [
+            106.04,
+            106.4,
+            106.54,
+            111.44,
+            111.74,
+            111.94,
+            112.06,
+            112.38,
+            112.68,
+            113.08,
+            114.0,
+            114.1,
+            114.22,
+            114.34,
+            114.36,
+            114.48,
+            114.8,
+            118.38,
+            118.68,
+            118.82,
+            119.14,
+            119.42,
+            119.54,
+            119.76,
+            119.88,
+            119.96,
+            120.04,
+            120.26,
+            120.34,
+            120.4,
+            120.52,
+            121.17
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-e0fc6a156e48",
+        "start": 105.43,
+        "end": 121.17,
+        "story_unit_ids": [
+          "chapter-005-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-e0fc6a156e48-a5ebe00065ae",
+          "candidate_id": "candidate-audio-e0fc6a156e48",
+          "rough_range": {
+            "start_seconds": 105.68,
+            "end_seconds": 120.52
+          },
+          "refined_range": {
+            "start_seconds": 105.43,
+            "end_seconds": 121.17
+          },
+          "allowed_source_range": {
+            "start_seconds": 105.43,
+            "end_seconds": 121.17
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 105.68,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 19,
+            "word_index": 103,
+            "scene_boundary_distance": 7.013,
+            "silence_before": 1.54,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 120.52,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 23,
+            "word_index": 133,
+            "scene_boundary_distance": 21.853,
+            "silence_before": 0.0,
+            "silence_after": 1.56,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.54,
+            "tail_silence_seconds": 1.56,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 105.68,
+                "end_seconds": 106.54
+              },
+              "transcript_segment_id": 19,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я поднялся, понял.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 120.3,
+                "end_seconds": 120.52
+              },
+              "transcript_segment_id": 23,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я не знаю.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 120.3,
+                "end_seconds": 120.52
+              },
+              "transcript_segment_id": 23,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            105.43,
+            105.68,
+            106.04,
+            106.44,
+            111.24,
+            111.44,
+            111.74,
+            112.04,
+            112.06,
+            112.38,
+            112.68,
+            113.7,
+            114.0,
+            114.1,
+            114.24,
+            114.34,
+            114.36,
+            114.48,
+            118.02,
+            118.38,
+            118.68,
+            118.82,
+            119.36,
+            119.42,
+            119.54,
+            119.84,
+            119.88,
+            119.96,
+            120.04,
+            120.3,
+            120.34,
+            120.4
+          ],
+          "safe_end_points": [
+            106.04,
+            106.4,
+            106.54,
+            111.44,
+            111.74,
+            111.94,
+            112.06,
+            112.38,
+            112.68,
+            113.08,
+            114.0,
+            114.1,
+            114.22,
+            114.34,
+            114.36,
+            114.48,
+            114.8,
+            118.38,
+            118.68,
+            118.82,
+            119.14,
+            119.42,
+            119.54,
+            119.76,
+            119.88,
+            119.96,
+            120.04,
+            120.26,
+            120.34,
+            120.4,
+            120.52,
+            121.17
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-e810ddea0782",
+        "start": 121.83,
+        "end": 135.37,
+        "story_unit_ids": [
+          "chapter-006-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-e810ddea0782-9dae5902229c",
+          "candidate_id": "candidate-audio-e810ddea0782",
+          "rough_range": {
+            "start_seconds": 122.08,
+            "end_seconds": 134.89
+          },
+          "refined_range": {
+            "start_seconds": 121.83,
+            "end_seconds": 135.37
+          },
+          "allowed_source_range": {
+            "start_seconds": 121.83,
+            "end_seconds": 135.37
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.48,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 122.08,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 24,
+            "word_index": 134,
+            "scene_boundary_distance": 23.413,
+            "silence_before": 1.56,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 134.89,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 27,
+            "word_index": 155,
+            "scene_boundary_distance": 36.223,
+            "silence_before": 0.0,
+            "silence_after": 0.48,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.56,
+            "tail_silence_seconds": 0.48,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.48,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 122.08,
+                "end_seconds": 122.74
+              },
+              "transcript_segment_id": 24,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "На втором.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 134.19,
+                "end_seconds": 134.89
+              },
+              "transcript_segment_id": 27,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Над нами.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": true,
+              "source_range": {
+                "start_seconds": 134.19,
+                "end_seconds": 134.89
+              },
+              "transcript_segment_id": 27,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Над нами.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            121.83,
+            122.08,
+            122.44,
+            123.06,
+            123.42,
+            123.74,
+            124.0,
+            124.2,
+            124.46,
+            124.92,
+            125.06,
+            125.16,
+            125.46,
+            125.54,
+            132.89,
+            133.11,
+            133.45,
+            133.57,
+            133.71,
+            134.03,
+            134.09,
+            134.19,
+            134.71,
+            135.37
+          ],
+          "safe_end_points": [
+            122.44,
+            122.74,
+            123.42,
+            123.74,
+            124.0,
+            124.18,
+            124.46,
+            124.68,
+            125.06,
+            125.16,
+            125.46,
+            125.54,
+            125.72,
+            133.11,
+            133.45,
+            133.57,
+            133.65,
+            133.87,
+            134.09,
+            134.19,
+            134.71,
+            134.89,
+            135.37
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-0bd790dbd148",
+        "start": 138.28,
+        "end": 153.98,
+        "story_unit_ids": [
+          "chapter-007-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-0bd790dbd148-abee664e8f91",
+          "candidate_id": "candidate-audio-0bd790dbd148",
+          "rough_range": {
+            "start_seconds": 138.53,
+            "end_seconds": 153.33
+          },
+          "refined_range": {
+            "start_seconds": 138.28,
+            "end_seconds": 153.98
+          },
+          "allowed_source_range": {
+            "start_seconds": 138.28,
+            "end_seconds": 153.98
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 138.53,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 29,
+            "word_index": 160,
+            "scene_boundary_distance": 39.863,
+            "silence_before": 2.0,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 153.33,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 34,
+            "word_index": 184,
+            "scene_boundary_distance": 54.663,
+            "silence_before": 0.0,
+            "silence_after": 1.4,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 2.0,
+            "tail_silence_seconds": 1.4,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 138.53,
+                "end_seconds": 139.45
+              },
+              "transcript_segment_id": 29,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "О, фига.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 152.09,
+                "end_seconds": 153.33
+              },
+              "transcript_segment_id": 34,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я пятерых видел.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 152.09,
+                "end_seconds": 153.33
+              },
+              "transcript_segment_id": 34,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            138.28,
+            138.53,
+            139.11,
+            141.85,
+            142.49,
+            143.63,
+            143.91,
+            144.17,
+            144.49,
+            144.57,
+            144.63,
+            144.75,
+            144.97,
+            145.13,
+            145.79,
+            146.19,
+            146.31,
+            146.85,
+            146.97,
+            147.17,
+            147.37,
+            148.47,
+            148.97,
+            152.09,
+            152.61,
+            153.13
+          ],
+          "safe_end_points": [
+            139.03,
+            139.45,
+            142.37,
+            143.63,
+            143.91,
+            144.17,
+            144.37,
+            144.57,
+            144.63,
+            144.75,
+            144.97,
+            145.13,
+            145.29,
+            146.05,
+            146.31,
+            146.61,
+            146.97,
+            147.17,
+            147.37,
+            147.61,
+            148.97,
+            149.09,
+            152.61,
+            153.13,
+            153.33,
+            153.98
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-beb031330a96",
+        "start": 138.28,
+        "end": 153.98,
+        "story_unit_ids": [
+          "chapter-007-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-beb031330a96-bf0f482f7789",
+          "candidate_id": "candidate-audio-beb031330a96",
+          "rough_range": {
+            "start_seconds": 138.53,
+            "end_seconds": 153.33
+          },
+          "refined_range": {
+            "start_seconds": 138.28,
+            "end_seconds": 153.98
+          },
+          "allowed_source_range": {
+            "start_seconds": 138.28,
+            "end_seconds": 153.98
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.65,
+          "confidence": 0.957,
+          "start_evidence": {
+            "timestamp": 138.53,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 29,
+            "word_index": 160,
+            "scene_boundary_distance": 39.863,
+            "silence_before": 2.0,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 153.33,
+            "boundary_type": "strong_end",
+            "confidence": 0.96,
+            "supporting_signals": [
+              "sentence_completion",
+              "silence_after"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 34,
+            "word_index": 184,
+            "scene_boundary_distance": 54.663,
+            "silence_before": 0.0,
+            "silence_after": 1.4,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 2.0,
+            "tail_silence_seconds": 1.4,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.65,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 138.53,
+                "end_seconds": 139.45
+              },
+              "transcript_segment_id": 29,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "О, фига.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 152.09,
+                "end_seconds": 153.33
+              },
+              "transcript_segment_id": 34,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Я пятерых видел.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 152.09,
+                "end_seconds": 153.33
+              },
+              "transcript_segment_id": 34,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            138.28,
+            138.53,
+            139.11,
+            141.85,
+            142.49,
+            143.63,
+            143.91,
+            144.17,
+            144.49,
+            144.57,
+            144.63,
+            144.75,
+            144.97,
+            145.13,
+            145.79,
+            146.19,
+            146.31,
+            146.85,
+            146.97,
+            147.17,
+            147.37,
+            148.47,
+            148.97,
+            152.09,
+            152.61,
+            153.13
+          ],
+          "safe_end_points": [
+            139.03,
+            139.45,
+            142.37,
+            143.63,
+            143.91,
+            144.17,
+            144.37,
+            144.57,
+            144.63,
+            144.75,
+            144.97,
+            145.13,
+            145.29,
+            146.05,
+            146.31,
+            146.61,
+            146.97,
+            147.17,
+            147.37,
+            147.61,
+            148.97,
+            149.09,
+            152.61,
+            153.13,
+            153.33,
+            153.98
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      },
+      {
+        "id": "candidate-audio-5996db630272",
+        "start": 154.48,
+        "end": 193.32,
+        "story_unit_ids": [
+          "chapter-008-story-001"
+        ],
+        "boundary_decision": {
+          "schema_version": "5C.1",
+          "decision_id": "boundary-candidate-audio-5996db630272-20bc40240fdf",
+          "candidate_id": "candidate-audio-5996db630272",
+          "rough_range": {
+            "start_seconds": 154.73,
+            "end_seconds": 193.12
+          },
+          "refined_range": {
+            "start_seconds": 154.48,
+            "end_seconds": 193.32
+          },
+          "allowed_source_range": {
+            "start_seconds": 154.48,
+            "end_seconds": 193.32
+          },
+          "start_reason": "Начало полного первого слова на границе предложения.",
+          "end_reason": "Конец полного последнего слова и завершённого предложения.",
+          "word_integrity": true,
+          "sentence_integrity": true,
+          "semantic_completion": true,
+          "payoff_preserved": true,
+          "continuation_risk": 0.15,
+          "continuation_risk_threshold": 0.65,
+          "pre_roll_seconds": 0.25,
+          "post_roll_seconds": 0.2,
+          "confidence": 0.912,
+          "start_evidence": {
+            "timestamp": 154.73,
+            "boundary_type": "strong_start",
+            "confidence": 0.95,
+            "supporting_signals": [
+              "sentence_start",
+              "pause_before"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 35,
+            "word_index": 185,
+            "scene_boundary_distance": 56.063,
+            "silence_before": 1.4,
+            "silence_after": 0.0,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 1.0,
+            "continuation_probability": 0.0,
+            "reason": "Начало полного первого слова на границе предложения."
+          },
+          "end_evidence": {
+            "timestamp": 193.12,
+            "boundary_type": "acceptable_end",
+            "confidence": 0.78,
+            "supporting_signals": [
+              "sentence_completion"
+            ],
+            "penalties": [],
+            "transcript_segment_id": 39,
+            "word_index": 201,
+            "scene_boundary_distance": 20.147,
+            "silence_before": 0.0,
+            "silence_after": 0.2,
+            "speaker_change": false,
+            "sentence_completion": true,
+            "semantic_completion_score": 0.95,
+            "continuation_probability": 0.15,
+            "reason": "Конец полного последнего слова и завершённого предложения."
+          },
+          "pause_evidence": {
+            "head_silence_seconds": 1.4,
+            "tail_silence_seconds": 0.2,
+            "pre_roll_seconds": 0.25,
+            "post_roll_seconds": 0.2,
+            "intentional_pause_preserved": true
+          },
+          "question_context": {
+            "start_is_question": false,
+            "end_is_question": false,
+            "answer_or_completion_included": true
+          },
+          "required_evidence": [
+            {
+              "requirement_type": "hook",
+              "required": true,
+              "source_range": {
+                "start_seconds": 154.73,
+                "end_seconds": 155.51
+              },
+              "transcript_segment_id": 35,
+              "reason": "Hook must remain in the final source dialogue.",
+              "evidence": {
+                "text": "60 лайва.",
+                "boundary_reason": "Начало полного первого слова на границе предложения."
+              }
+            },
+            {
+              "requirement_type": "completion",
+              "required": true,
+              "source_range": {
+                "start_seconds": 190.8,
+                "end_seconds": 193.12
+              },
+              "transcript_segment_id": 39,
+              "reason": "The final complete thought must remain in the final source dialogue.",
+              "evidence": {
+                "text": "Друзья, буквально 10 секунд вашего внимания.",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            },
+            {
+              "requirement_type": "payoff",
+              "required": false,
+              "source_range": {
+                "start_seconds": 190.8,
+                "end_seconds": 193.12
+              },
+              "transcript_segment_id": 39,
+              "reason": "Detected payoff must remain in the final source dialogue.",
+              "evidence": {
+                "text": "",
+                "boundary_reason": "Конец полного последнего слова и завершённого предложения."
+              }
+            }
+          ],
+          "safe_start_points": [
+            154.48,
+            154.73,
+            154.99,
+            156.47,
+            157.43,
+            157.55,
+            161.65,
+            161.75,
+            163.29,
+            163.95,
+            164.11,
+            164.21,
+            190.8,
+            191.42,
+            191.68,
+            191.96,
+            192.38,
+            192.7,
+            193.32
+          ],
+          "safe_end_points": [
+            154.99,
+            155.51,
+            156.99,
+            157.55,
+            159.67,
+            161.75,
+            161.89,
+            163.81,
+            164.05,
+            164.21,
+            164.55,
+            191.32,
+            191.68,
+            191.96,
+            192.38,
+            192.7,
+            193.12,
+            193.32
+          ],
+          "fallback_used": false,
+          "fallback_reason": null
+        }
+      }
+    ]
+  },
+  "candidate_counts": {
+    "generated": 65,
+    "after_generation": 65
+  }
+}

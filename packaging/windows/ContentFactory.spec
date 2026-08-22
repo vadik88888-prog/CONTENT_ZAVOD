@@ -24,7 +24,7 @@ binaries = [
     if path.is_file() and path.suffix.casefold() in {".exe", ".dll"}
 ]
 hiddenimports = []
-for package in ("faster_whisper", "ctranslate2", "tokenizers"):
+for package in ("faster_whisper", "ctranslate2", "tokenizers", "onnxruntime"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -35,7 +35,7 @@ hiddenimports += collect_submodules(
 )
 for distribution in (
     "faster-whisper", "ctranslate2", "av", "tokenizers",
-    "huggingface-hub", "openai", "google-genai",
+    "huggingface-hub", "openai", "google-genai", "onnxruntime",
 ):
     datas += copy_metadata(distribution)
 

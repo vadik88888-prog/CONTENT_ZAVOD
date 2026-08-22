@@ -38,7 +38,7 @@ SEMANTIC_MAX_CONNECTION_RETRIES = 1
 # Paid semantic-scoring calls use a deliberately small, evidence-only request
 # contract.  Bump this whenever its shape or interpretation changes so the
 # ai_ranking cache cannot reuse an assessment made from a different payload.
-SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.3"
+SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.4"
 
 SEMANTIC_FACTOR_CONTRACT: dict[str, Any] = {
     "scale": {
@@ -941,6 +941,17 @@ _SPEECH_SIGNAL_FIELDS = (
 _AUDIO_EVENT_FIELDS = (
     "event_type", "start_seconds", "end_seconds", "confidence",
 )
+_AUDIO_OBSERVATION_FIELDS = (
+    "label", "event_group", "meaningful_for_profile", "editorial_roles",
+    "signal_salience", "background_music_only", "payoff_claim",
+)
+_AUDIO_SUMMARY_FIELDS = (
+    "speech_coverage_ratio", "longest_speech_gap_seconds", "activity_ratio",
+    "dead_zone_ratio", "longest_audio_dead_zone_seconds", "spike_count",
+    "spike_peak", "meaningful_event_count", "meaningful_events",
+    "background_music_present", "background_music_only", "semantic_classifier_status",
+    "payoff_claim",
+)
 _VISUAL_OBSERVATION_FIELDS = (
     "timestamp", "scene_type", "primary_subject", "action", "reaction",
     "payoff_signal", "on_screen_text", "composition_risk", "confidence",
@@ -968,7 +979,13 @@ def _compact_audio_events(provenance: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         return []
     return [
-        compact
+        {
+            **compact,
+            **(
+                {"observation": _selected_fields(item.get("observation"), _AUDIO_OBSERVATION_FIELDS)}
+                if _selected_fields(item.get("observation"), _AUDIO_OBSERVATION_FIELDS) else {}
+            ),
+        }
         for item in events
         if isinstance(item, dict)
         and (compact := _selected_fields(item, _AUDIO_EVENT_FIELDS))
@@ -1018,6 +1035,7 @@ def _compact_multimodal_signals(candidate: Candidate) -> dict[str, Any]:
         "candidate_kind": candidate.candidate_kind,
         "anchors": _selected_fields(generation.get("anchors"), _MULTIMODAL_ANCHOR_FIELDS),
         "audio_events": _compact_audio_events(provenance),
+        "audio_summary": _selected_fields(provenance.get("audio_summary"), _AUDIO_SUMMARY_FIELDS),
         "visual_observation_source": observation_source,
         "visual_observations": [
             compact
@@ -1082,7 +1100,10 @@ def build_openai_payload(
             "Assess every supplied candidate, not only a best-five list. Scores are integers 0..100. "
             "Apply factor_contract to all five factor fields. Make an independent assessment from the full "
             "transcript and the supplied semantic, speech, audio and Vision evidence; evidence values are not "
-            "target scores and must not be copied or mechanically rescaled. The application ignores AI "
+            "target scores and must not be copied or mechanically rescaled. An audio event is not payoff, and "
+            "background music alone has no recommendation value. Long speech/semantic gaps with no meaningful "
+            "visual or audio action are filler; low speech is acceptable when grounded action evidence exists. "
+            "The application ignores AI "
             "score/selected for final scoring, ranking and selection. Return only candidate_id values from the "
             "input and never change start/end."
         ),
@@ -1101,7 +1122,9 @@ def build_gemini_payload(
             + ". Scores are integer 0..100. Do not change start/end. Apply factor_contract to all five factor "
             "fields. Make an independent assessment from the full transcript and supplied semantic, speech, "
             "audio and Vision evidence; evidence values are not target scores and must not be copied or "
-            "mechanically rescaled. The application ignores AI score/selected and owns final scoring, ranking "
+            "mechanically rescaled. An audio event is not payoff, and background music alone has no recommendation "
+            "value. Long speech/semantic gaps with no meaningful visual or audio action are filler; low speech is "
+            "acceptable when grounded action evidence exists. The application ignores AI score/selected and owns final scoring, ranking "
             "and selection."
         ),
     }

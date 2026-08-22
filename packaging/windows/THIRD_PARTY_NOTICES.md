@@ -16,6 +16,13 @@ The portable beta includes the exact binaries recorded in
   release. It is bundled so yt-dlp can run the supported YouTube JavaScript
   challenge solver without browser cookies. Deno is distributed under the MIT
   License; see `licenses/LICENSE-deno-MIT.txt`.
+- ONNX Runtime 1.27.0 provides the CPU inference backend for bounded Audio
+  Intelligence. It is distributed under the MIT License; see
+  `licenses/LICENSE-onnxruntime-MIT.txt`.
+- The packaged YAMNet-compatible ONNX graph is an Apache-2.0 format conversion
+  of Google YAMNet. Its pinned provenance, hashes, and AudioSet label notice are
+  recorded in `assets/audio/README.md`; the Apache license is packaged beside
+  the model as `assets/audio/YAMNET_APACHE_LICENSE.txt`.
 
 The Python runtime and libraries collected by PyInstaller retain their own
 package metadata and license files inside the onedir `_internal` tree where

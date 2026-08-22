@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS, UNKNOWN_PROFILE_ID
 
 
-EDITORIAL_PROFILE_POLICY_VERSION = "editorial-profile-policy.1"
+EDITORIAL_PROFILE_POLICY_VERSION = "editorial-profile-policy.2"
 MOMENTS_SURFACING_POLICY_VERSION = "moments-surfacing.1"
 
 
@@ -423,6 +423,9 @@ def evaluate_editorial_candidate(
         hard_blockers.append("INVALID_SOURCE_MAPPING")
     hard_blockers = _unique(hard_blockers)
     soft_issues = _unique(code for code in soft_issues if code not in hard_blockers)
+    sparse_content = _sparse_multimodal_content(candidate)
+    if sparse_content:
+        soft_issues = _unique(["SPARSE_MULTIMODAL_CONTENT", *soft_issues])
     assessment_blockers = list(hard_blockers)
     moments_projection = recommended is not None
     if moments_projection:
@@ -443,6 +446,10 @@ def evaluate_editorial_candidate(
 
     if hard_blockers:
         surfacing = EditorialSurfacingState.BLOCKED
+    elif sparse_content:
+        # Sparse content is an explicit recommendation downgrade, never a
+        # publishability gate. It remains visible and user-selectable.
+        surfacing = EditorialSurfacingState.AVAILABLE
     elif (
         bool(recommended)
         if moments_projection
@@ -470,6 +477,11 @@ def evaluate_editorial_candidate(
             "permission_effect": "ranking_and_warning_only",
             "risk_codes": assessment_blockers,
         }
+    profile_provenance["sparse_multimodal_content"] = {
+        "applies": sparse_content,
+        "effect": "recommended_to_available" if sparse_content else "none",
+        "selectable": True,
+    }
     return CandidateEditorialDecision(
         profile_id=resolved.profile_id,
         archetype=archetype,
@@ -482,6 +494,15 @@ def evaluate_editorial_candidate(
         primary_reason=primary_reason,
         profile_provenance=profile_provenance,
     )
+
+
+def _sparse_multimodal_content(candidate: Any) -> bool:
+    score = _value(candidate, "candidate_score_v2")
+    diagnostics = _value(score, "diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return False
+    sparse = diagnostics.get("sparse_content")
+    return bool(isinstance(sparse, Mapping) and sparse.get("applies") is True)
 
 
 def editorial_decision_from_candidate(candidate: Any) -> CandidateEditorialDecision | None:

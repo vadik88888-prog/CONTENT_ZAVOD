@@ -927,7 +927,9 @@ def test_content_cache_is_never_shared_between_sources(tmp_path: Path, monkeypat
     Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True).run(input_path=str(first_source))
     Pipeline(tmp_path, AppConfig(score_threshold=0), mock_ai=True).run(input_path=str(second_source))
 
-    assert calls == {"profile": 2, "map": 2, "boundaries": 2}
+    # Each source owns both the pre-Vision admission profile and the persisted
+    # post-Vision profile; neither profile stage may leak across source IDs.
+    assert calls == {"profile": 4, "map": 2, "boundaries": 2}
 
 
 def test_virality_cache_ignores_render_revisions_but_respects_scoring_weights(tmp_path: Path, monkeypatch) -> None:

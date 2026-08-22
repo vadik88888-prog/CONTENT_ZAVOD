@@ -1692,6 +1692,19 @@ def story_units_artifact(content_map_data: dict[str, Any], transcript: dict[str,
     }
 
 
+def refresh_content_map_multimodal_evidence(
+    content_map_data: dict[str, Any], transcript: dict[str, Any], multimodal_timeline: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebind existing StoryUnit identities to an enriched timeline without re-extraction."""
+
+    content_map = GlobalContentMap.from_dict(content_map_data, transcript)
+    validate_multimodal_timeline(multimodal_timeline, expected_source_id=content_map.source_id)
+    for unit in content_map.story_units:
+        unit.multimodal_evidence = evidence_for_range(multimodal_timeline, unit.start, unit.end)
+    content_map.validate(transcript)
+    return content_map.to_dict()
+
+
 def validate_global_content_map(data: dict[str, Any], transcript: dict[str, Any]) -> GlobalContentMap:
     """Public validation point for local or future structured AI content maps."""
 

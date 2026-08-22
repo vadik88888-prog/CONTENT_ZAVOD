@@ -81,7 +81,7 @@ def _profile(profile_id: str) -> dict:
 
 
 def test_registry_is_versioned_and_covers_auto_resolvable_15_profiles() -> None:
-    assert EDITORIAL_PROFILE_POLICY_VERSION == "editorial-profile-policy.1"
+    assert EDITORIAL_PROFILE_POLICY_VERSION == "editorial-profile-policy.2"
     assert tuple(EDITORIAL_PROFILE_POLICIES) == tuple(CONTENT_PROFILE_PRESETS)
     assert len(EDITORIAL_PROFILE_POLICIES) == 15
 
@@ -132,6 +132,23 @@ def test_semantic_incomplete_without_truncation_evidence_is_available() -> None:
     assert decision.selectable is True
     assert "SEMANTIC_INCOMPLETE" in decision.soft_issues
     assert not decision.hard_blockers
+
+
+def test_sparse_multimodal_content_downgrades_recommended_to_selectable_available() -> None:
+    candidate = _candidate(score=100)
+    candidate["candidate_score_v2"] = {
+        "diagnostics": {"sparse_content": {"applies": True, "blocked": False}},
+    }
+
+    decision = evaluate_editorial_candidate(candidate, _profile("gameplay"))
+
+    assert decision.surfacing_state is EditorialSurfacingState.AVAILABLE
+    assert decision.selectable is True
+    assert "SPARSE_MULTIMODAL_CONTENT" in decision.soft_issues
+    assert not decision.hard_blockers
+    assert decision.profile_provenance["sparse_multimodal_content"] == {
+        "applies": True, "effect": "recommended_to_available", "selectable": True,
+    }
 
 
 @pytest.mark.parametrize(

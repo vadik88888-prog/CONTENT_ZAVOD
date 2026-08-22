@@ -128,7 +128,7 @@ def _editorial_decision(
         "surfacing_state": state,
         "selectable": selectable,
         "primary_reason": (hard_blockers or ["NO_PAYOFF"])[0],
-        "policy_version": "editorial-profile-policy.1",
+        "policy_version": "editorial-profile-policy.2",
         "profile_provenance": {
             "profile_id": "movie_series",
             "detected_profile": {"format": {"value": "gameplay", "confidence": 0.7}},

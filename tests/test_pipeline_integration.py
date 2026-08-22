@@ -12,6 +12,9 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     calls = {"media": 0, "transcription": 0, "render": 0}
+    semantic_calls = 0
+    import app.pipeline as pipeline_module
+    real_semantic_audio = pipeline_module.analyse_semantic_audio
 
     def fake_prepare_media(source_path: Path, work_directory: Path) -> dict:
         calls["media"] += 1
@@ -54,9 +57,15 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
         destination.write_bytes(b"mp4")
         return destination, False, None
 
+    def counted_semantic_audio(*args, **kwargs):
+        nonlocal semantic_calls
+        semantic_calls += 1
+        return real_semantic_audio(*args, **kwargs)
+
     monkeypatch.setattr("app.pipeline.prepare_media", fake_prepare_media)
     monkeypatch.setattr("app.pipeline.transcribe", fake_transcribe)
     monkeypatch.setattr("app.pipeline.render_clip", fake_render)
+    monkeypatch.setattr("app.pipeline.analyse_semantic_audio", counted_semantic_audio)
 
     config = AppConfig(score_threshold=0)
     first = Pipeline(tmp_path, config, mock_ai=True).run(input_path=str(source))
@@ -69,6 +78,8 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert (first.work_directory / "candidates.raw.json").is_file()
     assert (first.work_directory / "candidates.scored.json").is_file()
     assert calls == {"media": 1, "transcription": 1, "render": 1}
+    assert semantic_calls == 1
+    assert (first.work_directory / "audio_semantic_events.json").is_file()
 
     second = Pipeline(tmp_path, config, mock_ai=True).run(input_path=str(source))
 
@@ -78,6 +89,7 @@ def test_pipeline_creates_artifacts_and_reuses_completed_stages(tmp_path, monkey
     assert second.output_files[0].is_relative_to(second.output_directory)
     assert first.output_files[0].is_relative_to(first.output_directory)
     assert calls == {"media": 1, "transcription": 1, "render": 2}
+    assert semantic_calls == 1
     timeline = read_json(second.work_directory / "multimodal_timeline.json", {})
     story_units = read_json(second.work_directory / "story_units.json", {})["story_units"]
     second_report = read_json(second.report_path, {})
