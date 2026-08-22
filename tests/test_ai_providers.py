@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app.ai import (
@@ -12,7 +13,10 @@ from app.ai import (
     MockProvider,
     OPENAI_SCORE_RESPONSE_SCHEMA,
     OpenAIProvider,
-    SEMANTIC_REQUEST_TIMEOUT_SECONDS,
+    SEMANTIC_CONNECT_TIMEOUT_SECONDS,
+    SEMANTIC_POOL_TIMEOUT_SECONDS,
+    SEMANTIC_READ_TIMEOUT_SECONDS,
+    SEMANTIC_WRITE_TIMEOUT_SECONDS,
     get_scorer,
 )
 from app.config import AIConfig, AppConfig, load_config
@@ -140,17 +144,70 @@ def test_openai_semantic_connection_wait_is_bounded_without_sdk_retries(
 
     scored, usage = provider.score([_candidate()], {"segments": []})
 
-    assert constructor_options == [{
-        "api_key": "sk-test-secret",
-        "timeout": SEMANTIC_REQUEST_TIMEOUT_SECONDS,
-        "max_retries": 0,
-    }]
+    assert len(constructor_options) == 1
+    assert constructor_options[0]["api_key"] == "sk-test-secret"
+    assert constructor_options[0]["max_retries"] == 0
+    timeout = constructor_options[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.as_dict() == {
+        "connect": SEMANTIC_CONNECT_TIMEOUT_SECONDS,
+        "read": SEMANTIC_READ_TIMEOUT_SECONDS,
+        "write": SEMANTIC_WRITE_TIMEOUT_SECONDS,
+        "pool": SEMANTIC_POOL_TIMEOUT_SECONDS,
+    }
     assert usage["input_tokens"] == 0
     assert usage["output_tokens"] == 0
     assert usage["api_errors"] == [
-        "Semantic AI attempt 1/1 failed (timeout=45s; sdk_retries=0): offline"
+        "Semantic AI attempt 1/1 connect_failure "
+        "(connect_timeout=10s; read_timeout=240s; sdk_retries=0): offline"
     ]
     assert "Semantic AI attempt 1/1" in (scored[0].rejection_reason or "")
+
+
+def test_openai_semantic_retries_only_one_genuine_connection_failure() -> None:
+    class FailingResponses:
+        calls = 0
+
+        @classmethod
+        def create(cls, **_kwargs: object) -> object:
+            cls.calls += 1
+            raise ConnectionError("offline")
+
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=2)),
+        "sk-test-secret",
+        SimpleNamespace(responses=FailingResponses()),
+    )
+
+    _, usage = provider.score([_candidate()], {"segments": []})
+
+    assert FailingResponses.calls == 2
+    assert usage["retries"] == 1
+    assert ["connect_failure" in item for item in usage["api_errors"]] == [True, True]
+
+
+def test_openai_semantic_response_timeout_never_retries() -> None:
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+
+    class ReadTimingOutResponses:
+        calls = 0
+
+        @classmethod
+        def create(cls, **_kwargs: object) -> object:
+            cls.calls += 1
+            raise httpx.ReadTimeout("generation deadline", request=request)
+
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=2)),
+        "sk-test-secret",
+        SimpleNamespace(responses=ReadTimingOutResponses()),
+    )
+
+    _, usage = provider.score([_candidate()], {"segments": []})
+
+    assert ReadTimingOutResponses.calls == 1
+    assert usage["retries"] == 0
+    assert "response_timeout" in usage["api_errors"][0]
 
 
 def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema() -> None:

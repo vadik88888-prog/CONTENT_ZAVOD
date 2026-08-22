@@ -4,10 +4,13 @@ import base64
 import json
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Protocol
+
+import httpx
 
 from app.config import AppConfig
 from app.errors import ClipEngineError
@@ -22,10 +25,15 @@ if TYPE_CHECKING:
 # a failed compact transformation before the deterministic fallback ran.
 TRANSFORMATION_REQUEST_TIMEOUT_SECONDS = 45.0
 
-# Semantic scoring owns its retry loop.  Disable the SDK retry loop so a
-# transient connection failure consumes at most this timeout per configured
-# application attempt instead of nesting multiple long SDK attempts.
-SEMANTIC_REQUEST_TIMEOUT_SECONDS = 45.0
+# Semantic scoring owns its retry loop.  A production-size request was measured
+# at 180.294 s, so its response budget must not share the short connection
+# deadline used for availability checks.  The SDK retry loop remains disabled;
+# only one application retry of a genuine connection failure is permitted.
+SEMANTIC_CONNECT_TIMEOUT_SECONDS = 10.0
+SEMANTIC_READ_TIMEOUT_SECONDS = 240.0
+SEMANTIC_WRITE_TIMEOUT_SECONDS = 30.0
+SEMANTIC_POOL_TIMEOUT_SECONDS = 10.0
+SEMANTIC_MAX_CONNECTION_RETRIES = 1
 
 # Paid semantic-scoring calls use a deliberately small, evidence-only request
 # contract.  Bump this whenever its shape or interpretation changes so the
@@ -69,6 +77,54 @@ SEMANTIC_FACTOR_CONTRACT: dict[str, Any] = {
         ),
     },
 }
+
+
+def semantic_request_timeout() -> httpx.Timeout:
+    """Return the separate transport budgets for Semantic scoring.
+
+    A read timeout is the generation deadline, not a connection-health probe.
+    Keep the pool deadline aligned with connection health: a saturated client
+    must not wait through the whole generation budget before failing.
+    """
+
+    return httpx.Timeout(
+        connect=SEMANTIC_CONNECT_TIMEOUT_SECONDS,
+        read=SEMANTIC_READ_TIMEOUT_SECONDS,
+        write=SEMANTIC_WRITE_TIMEOUT_SECONDS,
+        pool=SEMANTIC_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
+    """Return explicit chained causes without looping on malformed exceptions."""
+
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and id(current) not in {id(item) for item in chain}:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return tuple(chain)
+
+
+def semantic_failure_kind(error: BaseException) -> str:
+    """Classify retry-safe connection failures separately from response timeouts."""
+
+    chain = _exception_chain(error)
+    if any(isinstance(item, (httpx.ConnectError, httpx.ConnectTimeout)) for item in chain):
+        return "connect_failure"
+    if any(
+        isinstance(item, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout))
+        for item in chain
+    ):
+        return "response_timeout"
+    if any(isinstance(item, (ConnectionError, socket.gaierror)) for item in chain):
+        return "connect_failure"
+    # OpenAI wraps all transport timeouts in APITimeoutError.  Without a
+    # connect-specific underlying cause it is a response/generation timeout
+    # and must never be retried by the Semantic loop.
+    if error.__class__.__name__ == "APITimeoutError":
+        return "response_timeout"
+    return "request_failure"
 
 
 class ClipScorer(Protocol):
@@ -404,13 +460,16 @@ class OpenAIProvider:
 
             client = OpenAI(
                 api_key=self.api_key,
-                timeout=SEMANTIC_REQUEST_TIMEOUT_SECONDS,
+                timeout=semantic_request_timeout(),
                 max_retries=0,
             )
         payload = build_openai_payload(candidates, transcript)
         errors: list[str] = []
         started = time.perf_counter()
-        for attempt in range(self.config.ai.max_retries + 1):
+        connection_attempts = 1 + min(
+            self.config.ai.max_retries, SEMANTIC_MAX_CONNECTION_RETRIES,
+        )
+        for attempt in range(connection_attempts):
             try:
                 response = client.responses.create(
                     model=self.config.ai.model,
@@ -452,16 +511,21 @@ class OpenAIProvider:
                 )
             except Exception as error:
                 detail = sanitize_api_error(error, self.api_key)
+                failure_kind = semantic_failure_kind(error)
                 errors.append(
                     "Semantic AI attempt "
-                    f"{attempt + 1}/{self.config.ai.max_retries + 1} failed "
-                    f"(timeout={SEMANTIC_REQUEST_TIMEOUT_SECONDS:g}s; sdk_retries=0): {detail}"
+                    f"{attempt + 1}/{connection_attempts} {failure_kind} "
+                    "(connect_timeout="
+                    f"{SEMANTIC_CONNECT_TIMEOUT_SECONDS:g}s; read_timeout="
+                    f"{SEMANTIC_READ_TIMEOUT_SECONDS:g}s; sdk_retries=0): {detail}"
                 )
+                if failure_kind != "connect_failure" or attempt + 1 == connection_attempts:
+                    break
         message = errors[-1] if errors else "Неизвестная ошибка OpenAI API."
         return _reject_candidates(candidates, self.name, message), _usage(
             self.name,
             self.config.ai.model,
-            retries=self.config.ai.max_retries,
+            retries=max(0, len(errors) - 1),
             api_errors=errors,
             started=started,
         )
