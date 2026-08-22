@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.caption_planning import (
     CaptionProtectedRegion,
+    _Layout,
     _normalize_cue_output_overlaps,
     _simultaneous_caption_collisions,
     build_caption_plan,
@@ -243,6 +244,74 @@ def test_infeasible_micro_cut_keeps_reading_speed_ceiling_blocker() -> None:
     assert evidence.available_frames == 15
     assert evidence.required_frames == 45
     assert evidence.measured_cps == 60.0
+
+
+def test_feasible_gameplay_phrase_promotes_the_fitted_layout_into_the_compiled_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the Fresh Gameplay overflow: use the proven layout."""
+
+    import app.caption_planning as caption_planning
+
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="gameplay-overflow-001",
+        source=SourceInterval.from_seconds(0, 3),
+        output=OutputInterval(start_frame=0, end_frame=90),
+    ),))
+    words = "\u0412\u043e\u0437\u044c\u043c\u0438 \u043c\u043e\u044e \u043c\u0430\u0448\u0438\u043d\u043a\u0443 \u043e\u043d\u0430 \u0437\u0434\u0435\u0441\u044c \u043d\u0430 \u043c\u0435\u0442\u043a\u0435 \u0447\u0442\u043e \u043f\u0440\u043e\u0438\u0441\u0445\u043e\u0434\u0438\u0442 \u0432\u043e\u043e\u0431\u0449\u0435".split()
+    transcript = {"words": [
+        {
+            "text": word,
+            "start": index / 3,
+            "end": (index + 1) / 3 - 0.01,
+            "confidence": 0.99,
+            "timing_source": "verified",
+        }
+        for index, word in enumerate(words)
+    ]}
+    config = _config()
+    config.subtitle_max_words_per_cue = len(words)
+    original_fit_layout = caption_planning._fit_layout
+
+    def stale_wide_layout(group, measurer, base_size, minimum_size, maximum_width, protected_phrases):
+        if len(group) > 1:
+            return [_Layout(group, (" ".join(word.text for word in group),), base_size, True)]
+        return original_fit_layout(
+            group, measurer, base_size, minimum_size, maximum_width, protected_phrases,
+        )
+
+    monkeypatch.setattr(caption_planning, "_fit_layout", stale_wide_layout)
+    plan = build_caption_plan(_plain_intent(mapping), transcript, config)
+
+    assert plan.feasibility_decision is not None
+    assert plan.feasibility_decision.status == "FEASIBLE"
+    assert "CAPTION_FEASIBILITY_LAYOUT_APPLIED" in plan.diagnostics
+    assert any(len(cue.resolved_lines) == 2 for cue in plan.cues)
+    assert "CAPTION_LINE_OVERFLOW" not in {
+        finding.code for finding in plan.quality_report.findings
+    }
+
+
+def test_physically_unbreakable_caption_remains_blocked_by_the_native_gate() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="unbreakable-overflow-001",
+        source=SourceInterval.from_seconds(0, 3),
+        output=OutputInterval(start_frame=0, end_frame=90),
+    ),))
+    transcript = {"words": [{
+        "text": "\u0416" * 60,
+        "start": 0.0,
+        "end": 3.0,
+        "confidence": 0.99,
+        "timing_source": "verified",
+    }]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+
+    assert plan.quality_report.status == "BLOCKED"
+    assert "CAPTION_LINE_OVERFLOW" in {
+        finding.code for finding in plan.quality_report.findings
+    }
 
 
 def test_real_interview_overlapping_verified_words_coalesce_before_feasibility() -> None:

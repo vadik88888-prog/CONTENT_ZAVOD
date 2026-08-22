@@ -151,6 +151,20 @@ class _Layout:
 
 
 @dataclass(frozen=True, slots=True)
+class _CaptionFeasibilitySearch:
+    """A legal, physically readable partition of frozen caption words.
+
+    The temporal feasibility gate must not be a disconnected advisory search:
+    when it discovers a legal bounded-font/two-line partition, the compiler can
+    promote that exact partition into the immutable caption plan.
+    """
+
+    layouts: tuple[_Layout, ...] | None
+    evaluated_partition_count: int
+    failed_windows: tuple[tuple[tuple[_MappedWord, ...], int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _SemanticEvent:
     kind: Literal["emphasis", "beat", "motion"]
     output: OutputInterval
@@ -309,6 +323,27 @@ class CaptionPlanner:
             cue_outputs, readability_extended, normalized_overlaps = _cue_outputs(
                 layouts, intent, self.config,
             )
+
+        feasibility_search = _caption_feasibility_search(
+            words, intent, self.config, measurer, minimum_size, max_width,
+            protected_phrases,
+        )
+        feasibility_layout_applied = False
+        if (
+            not word_pop_requested
+            and _layouts_have_line_overflow(layouts, measurer, max_width)
+            and feasibility_search.layouts is not None
+        ):
+            # The feasibility DP found a legal use of the same frozen words,
+            # line-break rules, width limit and bounded font reduction.  The
+            # compiled plan must use it instead of retaining an earlier greedy
+            # fallback that the native quality gate would quite rightly block.
+            layouts = list(feasibility_search.layouts)
+            readability_coalesced = False
+            cue_outputs, readability_extended, normalized_overlaps = _cue_outputs(
+                layouts, intent, self.config,
+            )
+            feasibility_layout_applied = True
         word_pop_semantics = (
             _word_pop_semantic_events(intent, words) if word_pop_requested else {}
         )
@@ -439,7 +474,7 @@ class CaptionPlanner:
             manifest = manifest.model_copy(update={"metrics_backend": "heuristic"})
         feasibility = _caption_feasibility_decision(
             words, cues, intent, self.config, measurer, minimum_size, max_width,
-            protected_phrases,
+            protected_phrases, search=feasibility_search,
         )
         findings = _assess_plan(
             cues, manifest, measurer, intent, self.config, intensity_degraded,
@@ -453,6 +488,8 @@ class CaptionPlanner:
             diagnostics.append("CAPTION_PRESENTATION_WINDOW_EXTENDED")
         if normalized_overlaps:
             diagnostics.append("CAPTION_PRESENTATION_WINDOW_NORMALIZED")
+        if feasibility_layout_applied:
+            diagnostics.append("CAPTION_FEASIBILITY_LAYOUT_APPLIED")
         return CaptionPlan(
             schema_version=CAPTION_PLAN_SCHEMA_VERSION,
             intent_id=intent.intent_id,
@@ -1288,6 +1325,18 @@ def _best_lines(
     return min(candidates, key=lambda item: (item[0], item[1]))[1] if candidates else None
 
 
+def _layouts_have_line_overflow(
+    layouts: Sequence[_Layout], measurer: _FontMeasurer, maximum_width: float,
+) -> bool:
+    """Match the native quality-gate width measurement before cue compilation."""
+
+    return any(
+        max((measurer.width(line, layout.font_size) for line in layout.lines), default=0.0)
+        > maximum_width + 0.5
+        for layout in layouts
+    )
+
+
 def _best_layout_split(
     words: tuple[_MappedWord, ...], protected_phrases: tuple[tuple[str, ...], ...],
 ) -> int | None:
@@ -1650,6 +1699,8 @@ def _caption_feasibility_decision(
     minimum_size: int,
     maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
+    *,
+    search: _CaptionFeasibilitySearch | None = None,
 ) -> CaptionFeasibilityDecision:
     """Exhaustively decide whether legal cue partitions can satisfy hard CPS.
 
@@ -1658,23 +1709,13 @@ def _caption_feasibility_decision(
     rewriting are deliberately absent from the state space.
     """
 
-    feasible = True
-    evaluated = 0
-    failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
-    for run in _word_runs(words, intent):
-        run_feasible, run_evaluated, run_failed_windows = _caption_run_is_feasible(
-            run,
-            intent,
-            config,
-            measurer,
-            minimum_size,
-            maximum_width,
-            protected_phrases,
-        )
-        feasible = feasible and run_feasible
-        evaluated += run_evaluated
-        if not run_feasible and run_failed_windows:
-            failed_windows.extend(run_failed_windows)
+    search = search or _caption_feasibility_search(
+        words, intent, config, measurer, minimum_size, maximum_width,
+        protected_phrases,
+    )
+    feasible = search.layouts is not None
+    evaluated = search.evaluated_partition_count
+    failed_windows = list(search.failed_windows)
 
     evidence: list[CaptionFeasibilityEvidence] = []
     if not feasible:
@@ -1765,6 +1806,41 @@ def _caption_feasibility_decision(
     )
 
 
+def _caption_feasibility_search(
+    words: list[_MappedWord],
+    intent: CreativeIntent,
+    config: ProductionRenderConfig,
+    measurer: _FontMeasurer,
+    minimum_size: int,
+    maximum_width: float,
+    protected_phrases: tuple[tuple[str, ...], ...],
+) -> _CaptionFeasibilitySearch:
+    """Return the same legal layout partition used to prove feasibility."""
+
+    layouts: list[_Layout] = []
+    evaluated = 0
+    failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
+    for run in _word_runs(words, intent):
+        run_layouts, run_evaluated, run_failed_windows = _caption_run_is_feasible(
+            run, intent, config, measurer, minimum_size, maximum_width,
+            protected_phrases,
+        )
+        evaluated += run_evaluated
+        if run_layouts is None:
+            failed_windows.extend(run_failed_windows)
+            return _CaptionFeasibilitySearch(
+                layouts=None,
+                evaluated_partition_count=evaluated,
+                failed_windows=tuple(failed_windows),
+            )
+        layouts.extend(run_layouts)
+    return _CaptionFeasibilitySearch(
+        layouts=tuple(layouts),
+        evaluated_partition_count=evaluated,
+        failed_windows=tuple(failed_windows),
+    )
+
+
 def _caption_run_is_feasible(
     words: tuple[_MappedWord, ...],
     intent: CreativeIntent,
@@ -1773,21 +1849,26 @@ def _caption_run_is_feasible(
     minimum_size: int,
     maximum_width: float,
     protected_phrases: tuple[tuple[str, ...], ...],
-) -> tuple[bool, int, list[tuple[tuple[_MappedWord, ...], int, int]]]:
+) -> tuple[
+    tuple[_Layout, ...] | None,
+    int,
+    list[tuple[tuple[_MappedWord, ...], int, int]],
+]:
     chain_start, chain_end = _mapping_chain_bounds(intent, words[0].map_ids[0])
     maximum_frames = round(config.subtitle_max_duration * 30)
     # index -> earliest possible exclusive end frame. An earlier end dominates
     # every later state because it leaves at least as much time for the tail.
-    best: dict[int, int] = {0: chain_start}
+    best: dict[int, tuple[int, tuple[_Layout, ...]]] = {0: (chain_start, ())}
     evaluated = 0
     failed_windows: list[tuple[tuple[_MappedWord, ...], int, int]] = []
     for end in range(1, len(words) + 1):
         if end < len(words) and _splits_protected_phrase(words, end, protected_phrases):
             continue
         for start in range(max(0, end - config.subtitle_max_words_per_cue), end):
-            previous_end = best.get(start)
-            if previous_end is None:
+            previous = best.get(start)
+            if previous is None:
                 continue
+            previous_end, previous_layouts = previous
             if start > 0 and _cue_boundary_overlaps_words(words, start):
                 continue
             if end - start < config.subtitle_min_words_per_cue and end != len(words):
@@ -1796,9 +1877,10 @@ def _caption_run_is_feasible(
             raw = _words_output(selected)
             if raw.end_frame - raw.start_frame > maximum_frames:
                 continue
-            if _best_lines(
+            lines = _best_lines(
                 selected, measurer, minimum_size, maximum_width, protected_phrases,
-            ) is None:
+            )
+            if lines is None:
                 continue
             evaluated += 1
             required = max(
@@ -1815,10 +1897,18 @@ def _caption_run_is_feasible(
                 if end == len(words):
                     failed_windows.append((selected, chain_end - earliest_start, required))
                 continue
+            candidate_layout = _Layout(
+                selected, lines, minimum_size, minimum_size > 0,
+            )
             current = best.get(end)
-            if current is None or earliest_end < current:
-                best[end] = earliest_end
-    return len(words) in best, evaluated, failed_windows
+            if current is None or earliest_end < current[0]:
+                best[end] = (earliest_end, (*previous_layouts, candidate_layout))
+    solution = best.get(len(words))
+    return (
+        solution[1] if solution is not None else None,
+        evaluated,
+        failed_windows,
+    )
 
 
 def _timing_mode(words: tuple[_MappedWord, ...]) -> tuple[Literal["word", "phrase", "static"], float]:
