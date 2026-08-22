@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from openai import APIConnectionError
 
 from app.ai import (
     GeminiProvider,
@@ -184,6 +185,31 @@ def test_openai_semantic_retries_only_one_genuine_connection_failure() -> None:
     assert FailingResponses.calls == 2
     assert usage["retries"] == 1
     assert ["connect_failure" in item for item in usage["api_errors"]] == [True, True]
+
+
+def test_openai_semantic_retries_real_sdk_connection_exception_once() -> None:
+    request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+
+    class FailingResponses:
+        calls = 0
+
+        @classmethod
+        def create(cls, **_kwargs: object) -> object:
+            cls.calls += 1
+            raise APIConnectionError(request=request)
+
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=2)),
+        "sk-test-secret",
+        SimpleNamespace(responses=FailingResponses()),
+    )
+
+    _, usage = provider.score([_candidate()], {"segments": []})
+
+    assert FailingResponses.calls == 2
+    assert usage["retries"] == 1
+    assert ["connect_failure" in item for item in usage["api_errors"]] == [True, True]
+    assert all("Connection error." in item for item in usage["api_errors"])
 
 
 def test_openai_semantic_response_timeout_never_retries() -> None:

@@ -119,6 +119,17 @@ def semantic_failure_kind(error: BaseException) -> str:
         return "response_timeout"
     if any(isinstance(item, (ConnectionError, socket.gaierror)) for item in chain):
         return "connect_failure"
+    # The OpenAI SDK presents transport failures as APIConnectionError with the
+    # user-facing text "Connection error.".  Its low-level httpx cause is not
+    # part of the stable provider contract, so classify the SDK error itself.
+    # Keep this after explicit timeout checks: APITimeoutError is deliberately
+    # non-retryable for Semantic scoring.
+    try:
+        from openai import APIConnectionError
+    except ImportError:
+        APIConnectionError = ()  # type: ignore[assignment,misc]
+    if isinstance(error, APIConnectionError):
+        return "connect_failure"
     # OpenAI wraps all transport timeouts in APITimeoutError.  Without a
     # connect-specific underlying cause it is a response/generation timeout
     # and must never be retried by the Semantic loop.
