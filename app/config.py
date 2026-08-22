@@ -429,7 +429,7 @@ DEFAULT_SCORING_WEIGHTS = {
 
 @dataclass(slots=True)
 class ScoringConfig:
-    candidate_quality_config_version: str = "6D.2"
+    candidate_quality_config_version: str = "6D.3"
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORING_WEIGHTS))
     repetition_penalty_weight: float = 12.0
     filler_penalty_weight: float = 18.0

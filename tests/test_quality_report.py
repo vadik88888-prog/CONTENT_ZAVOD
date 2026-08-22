@@ -12,6 +12,7 @@ from app.quality_report import (
     build_editorial_final_handoff,
     build_quality_report,
     exact_dialogue_semantic_blocker,
+    exact_dialogue_semantic_finding,
 )
 from app.production_models import ContinuityDecision
 from app.utils import write_json
@@ -495,34 +496,38 @@ def test_corrupt_food_low_confidence_dialogue_remains_a_quality_blocker(tmp_path
     assert next(item for item in report.checks if item["code"] == "SEMANTIC_CONTENT")["status"] == "blocked"
 
 
-def test_preview_and_final_share_exact_dialogue_semantic_blocker_policy(tmp_path: Path) -> None:
+def test_preview_a1_and_final_share_isolated_speech_clarity_warning(tmp_path: Path) -> None:
     artifact, result, plan, candidate, render, audio, diversity = _inputs(tmp_path)
     plan["dialogue_mappings"] = [
         {
             "segment_id": "dialogue-safe", "fact_id": "fact-safe",
             "transcript_segment_id": 1, "confidence": SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD,
-            "source_start_seconds": 1.0, "source_end_seconds": 2.0,
+            "source_start_seconds": 1.0, "source_end_seconds": 5.0,
         },
         {
             "segment_id": "dialogue-unsafe", "fact_id": "fact-unsafe",
             "transcript_segment_id": 2, "confidence": 0.499,
-            "source_start_seconds": 2.0, "source_end_seconds": 3.0,
+            "source_start_seconds": 3.0, "source_end_seconds": 3.18,
         },
     ]
 
     preview_blocker = exact_dialogue_semantic_blocker(plan)
+    preview_finding = exact_dialogue_semantic_finding(plan)
     report = build_quality_report(
         artifact_path=artifact, result=result, run_id="run-1", project_id="project-1",
         source={"id": "source-1"}, plan=plan, candidate=candidate,
         diversity_decision=diversity, render_report=render, audio_report=audio,
         all_results=[result],
     )
-    final_blocker = next(item for item in report.findings if item.code == "AUDIO_UNINTELLIGIBLE")
+    final_finding = next(item for item in report.findings if item.code == "AUDIO_UNINTELLIGIBLE")
 
-    assert preview_blocker is not None
-    assert preview_blocker["code"] == final_blocker.code
-    assert preview_blocker["threshold"] == final_blocker.threshold == ">=0.5"
-    assert preview_blocker["evidence"] == final_blocker.evidence
+    assert preview_blocker is None
+    assert preview_finding is not None
+    assert preview_finding["severity"] == final_finding.severity == "warning"
+    assert preview_finding["code"] == final_finding.code
+    assert preview_finding["threshold"] == final_finding.threshold == ">=0.5"
+    assert preview_finding["evidence"] == final_finding.evidence
+    assert report.status == "PASS_WITH_WARNINGS"
     assert exact_dialogue_semantic_blocker({
         **plan,
         "dialogue_mappings": [plan["dialogue_mappings"][0]],
@@ -548,6 +553,57 @@ def test_semantic_quality_reads_exact_evidence_inside_continuous_media_segment()
 
     assert blocker is not None
     assert blocker["evidence"]["low_confidence_dialogue"][0]["fact_id"] == "fact-low-confidence"
+
+
+def test_saved_friend_beta_a1_speech_clarity_materiality_examples() -> None:
+    def plan_for(*, chapter: str, confidence: float, duration: float) -> dict:
+        return {
+            "chapter": chapter,
+            "dialogue_mappings": [{
+                "segment_id": f"{chapter}-dialogue",
+                "confidence": 0.99,
+                "source_start_seconds": 100.0,
+                "source_end_seconds": 120.0,
+                "evidence_mappings": [{
+                    "fact_id": f"{chapter}-exact",
+                    "transcript_segment_id": chapter,
+                    "confidence": confidence,
+                    "source_start_seconds": 105.0,
+                    "source_end_seconds": 105.0 + duration,
+                }],
+            }],
+        }
+
+    for chapter, confidence, duration in (
+        ("chapter-021", 0.024, 0.40),
+        ("chapter-034", 0.499, 0.18),
+    ):
+        finding = exact_dialogue_semantic_finding(plan_for(
+            chapter=chapter, confidence=confidence, duration=duration,
+        ))
+        assert finding is not None and finding["severity"] == "warning"
+        assert exact_dialogue_semantic_blocker(plan_for(
+            chapter=chapter, confidence=confidence, duration=duration,
+        )) is None
+
+    corrupted = plan_for(chapter="chapter-008", confidence=0.494, duration=1.40)
+    finding = exact_dialogue_semantic_finding(corrupted)
+    assert finding is not None and finding["severity"] == "blocker"
+    assert exact_dialogue_semantic_blocker(corrupted) is not None
+
+
+def test_low_confidence_dialogue_without_exact_geometry_is_strictly_blocked() -> None:
+    finding = exact_dialogue_semantic_finding({
+        "dialogue_mappings": [{
+            "segment_id": "unmapped-dialogue",
+            "confidence": 0.20,
+            "source_start_seconds": None,
+            "source_end_seconds": None,
+        }],
+    })
+
+    assert finding is not None and finding["severity"] == "blocker"
+    assert "EXACT_SPEECH_GEOMETRY_UNAVAILABLE" in finding["evidence"]["materiality"]["materiality_reasons"]
 
 
 def test_semantic_caption_readability_overlap_and_timing_flow_into_quality_report(tmp_path: Path) -> None:

@@ -22,12 +22,17 @@ from app.editorial_profile_policy import (
     CandidateEditorialDecision,
     EditorialSurfacingState,
 )
+from app.speech_clarity_policy import (
+    SPEECH_CLARITY_CONFIDENCE_THRESHOLD,
+    SPEECH_CLARITY_POLICY_VERSION,
+    assess_speech_clarity_materiality,
+)
 from app.utils import stable_file_hash, stable_text_hash, utc_now
 
 
 QUALITY_REPORT_SCHEMA_VERSION = "5G.0"
 QUALITY_STATUSES = frozenset({"PASS", "PASS_WITH_WARNINGS", "BLOCKED"})
-SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD = 0.5
+SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD = SPEECH_CLARITY_CONFIDENCE_THRESHOLD
 EDITORIAL_FINAL_HANDOFF_SCHEMA_VERSION = "editorial-final-handoff.1"
 QualitySeverity = Literal["warning", "blocker"]
 
@@ -258,55 +263,88 @@ def artifact_id_for(result: ClipResult, artifact_sha256: str) -> str:
     return f"artifact-{stable_text_hash(str(identity))[:24]}"
 
 
-def exact_dialogue_semantic_blocker(plan: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the shared blocker for exact dialogue mappings, if any.
-
-    Candidate-level averages are intentionally absent from this policy: every
-    dialogue/fact mapping that the plan would publish must independently meet
-    the existing semantic confidence floor.
-    """
+def exact_dialogue_semantic_finding(plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the shared warning or blocker for exact published dialogue."""
 
     mappings = plan.get("dialogue_mappings") if isinstance(plan, dict) else None
     if not isinstance(mappings, list):
         return None
-    low_confidence: list[dict[str, Any]] = []
+    exact_mappings: list[dict[str, Any]] = []
+    dialogue_ranges: list[dict[str, Any]] = []
     for item in mappings:
         if not isinstance(item, dict):
             continue
         evidence_mappings = item.get("evidence_mappings")
-        exact_mappings = evidence_mappings if isinstance(evidence_mappings, list) and evidence_mappings else [item]
-        for exact in exact_mappings:
+        dialogue_ranges.append({
+            "start_seconds": item.get("source_start_seconds"),
+            "end_seconds": item.get("source_end_seconds"),
+        })
+        nested_mappings = evidence_mappings if isinstance(evidence_mappings, list) and evidence_mappings else [item]
+        for exact in nested_mappings:
             if not isinstance(exact, dict):
                 continue
-            try:
-                confidence = float(exact.get("confidence", 0.0))
-            except (TypeError, ValueError):
-                confidence = 0.0
-            if confidence < SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD:
-                low_confidence.append({
-                    "segment_id": item.get("segment_id"),
-                    "fact_id": exact.get("fact_id"),
-                    "transcript_segment_id": exact.get("transcript_segment_id"),
-                    "confidence": round(confidence, 6),
-                    "source_start_seconds": exact.get("source_start_seconds"),
-                    "source_end_seconds": exact.get("source_end_seconds"),
-                })
-    if not low_confidence:
+            exact_mappings.append({
+                "segment_id": item.get("segment_id"),
+                "fact_id": exact.get("fact_id"),
+                "transcript_segment_id": exact.get("transcript_segment_id"),
+                "confidence": exact.get("confidence"),
+                "start_seconds": exact.get("source_start_seconds"),
+                "end_seconds": exact.get("source_end_seconds"),
+            })
+    materiality = assess_speech_clarity_materiality(
+        exact_mappings,
+        coverage_ranges=_published_candidate_coverage(plan, dialogue_ranges),
+    )
+    if materiality is None:
         return None
-    threshold = SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD
     return {
         "code": "AUDIO_UNINTELLIGIBLE",
-        "severity": "blocker",
-        "evidence": {"low_confidence_dialogue": low_confidence},
-        "measured_value": min(item["confidence"] for item in low_confidence),
-        "threshold": f">={threshold}",
+        "severity": materiality["severity"],
+        "evidence": {"low_confidence_dialogue": materiality["low_confidence_mappings"], "materiality": materiality},
+        "measured_value": min(item["confidence"] for item in materiality["low_confidence_mappings"]),
+        "threshold": f">={SEMANTIC_DIALOGUE_CONFIDENCE_THRESHOLD}",
         "producer": "semantic_content_quality",
-        "message": "Published dialogue contains low-confidence ASR/semantic content.",
-        "details": (
-            "At least one exact dialogue/fact mapping is below the semantic "
-            "confidence floor; aggregate candidate confidence cannot override it."
+        "message": (
+            "Published dialogue contains materially low-confidence ASR/semantic content."
+            if materiality["severity"] == "blocker"
+            else "Published dialogue contains an isolated low-confidence ASR/semantic fragment."
         ),
+        "details": (
+            "Every exact dialogue/fact mapping below the confidence floor is retained; "
+            "the versioned materiality policy uses exact duration and coverage, never an average."
+        ),
+        "policy_version": SPEECH_CLARITY_POLICY_VERSION,
     }
+
+
+def exact_dialogue_semantic_blocker(plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Compatibility wrapper: A-1 callers receive blockers only."""
+
+    finding = exact_dialogue_semantic_finding(plan)
+    return finding if finding is not None and finding["severity"] == "blocker" else None
+
+
+def _published_candidate_coverage(
+    plan: Mapping[str, Any],
+    fallback_dialogue_ranges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use the persisted approved candidate range when a native plan has one."""
+
+    continuity = plan.get("continuity_decision")
+    if isinstance(continuity, Mapping) and isinstance(continuity.get("approved_source_range"), Mapping):
+        approved = continuity["approved_source_range"]
+        return [{
+            "start_seconds": approved.get("start_seconds"),
+            "end_seconds": approved.get("end_seconds"),
+        }]
+    boundary = plan.get("boundary_decision")
+    if isinstance(boundary, Mapping) and isinstance(boundary.get("refined_range"), Mapping):
+        refined = boundary["refined_range"]
+        return [{
+            "start_seconds": refined.get("start_seconds"),
+            "end_seconds": refined.get("end_seconds"),
+        }]
+    return fallback_dialogue_ranges
 
 
 def build_quality_report(
@@ -702,13 +740,13 @@ def _collect_semantic_content(finding: Any, plan: dict[str, Any]) -> None:
     score used during ranking.
     """
 
-    blocker = exact_dialogue_semantic_blocker(plan)
-    if blocker is not None:
+    finding_data = exact_dialogue_semantic_finding(plan)
+    if finding_data is not None:
         finding(
-            blocker["code"], blocker["severity"], blocker["evidence"],
-            measured_value=blocker["measured_value"],
-            threshold=blocker["threshold"], producer=blocker["producer"],
-            message=blocker["message"], details=blocker["details"],
+            finding_data["code"], finding_data["severity"], finding_data["evidence"],
+            measured_value=finding_data["measured_value"],
+            threshold=finding_data["threshold"], producer=finding_data["producer"],
+            message=finding_data["message"], details=finding_data["details"],
         )
 
 
@@ -1435,7 +1473,7 @@ def _check_catalog(
         ),
         (
             "SEMANTIC_CONTENT", "semantic_content_quality", plan.get("dialogue_mappings"),
-            "every published dialogue mapping has grounded confidence >= 0.5",
+            "low-confidence exact dialogue is warning-only unless versioned duration/coverage materiality proves a blocker",
         ),
         ("PLAN_IDENTITY", "production_plan_envelope", plan.get("envelope"), "plan parents match output"),
         (

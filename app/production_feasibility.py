@@ -22,13 +22,13 @@ from app.creative_evidence import NATIVE_EVIDENCE_HANDOFF_VERSION, build_native_
 from app.models import ScoredCandidate, scored_from_dict
 from app.production_models import DialogueSegment, NarrationSegment, ProductionPlan
 from app.production_plan import PRODUCTION_PLAN_VERSION, ProductionPlanEnvelopeContext, build_production_plan
-from app.quality_report import exact_dialogue_semantic_blocker
+from app.quality_report import exact_dialogue_semantic_finding
 from app.semantic_extraction import build_source_context
 
 
-PRODUCTION_FEASIBILITY_SCHEMA_VERSION = "7J.3.production-feasibility.1"
-PRODUCTION_FEASIBILITY_POLICY_VERSION = "7J.3.provider-free-a1-a3.1"
-A1_POLICY_VERSION = "7J.2A-1.exact-dialogue-semantic-confidence.1"
+PRODUCTION_FEASIBILITY_SCHEMA_VERSION = "7J.3.production-feasibility.2"
+PRODUCTION_FEASIBILITY_POLICY_VERSION = "7J.3.provider-free-a1-a3.2"
+A1_POLICY_VERSION = "7J.2A-1.material-speech-clarity.2"
 
 
 def assess_production_feasibility(
@@ -81,7 +81,7 @@ def assess_production_feasibility(
         "provider_calls": {"brain": 0, "vision": 0, "transformation": 0},
         "policy_provenance": {
             "a1": {
-                "policy": "app.quality_report.exact_dialogue_semantic_blocker",
+                "policy": "app.quality_report.exact_dialogue_semantic_finding",
                 "version": A1_POLICY_VERSION,
             },
             "a3": {
@@ -328,15 +328,7 @@ def _assess_candidate(
             config.production,
             envelope_context=envelope_context,
         )
-        a1_blocker = exact_dialogue_semantic_blocker(plan.model_dump(mode="json"))
-        a1 = {
-            "gate": "A-1",
-            "status": "BLOCKED" if a1_blocker is not None else "PASS",
-            "reason_code": a1_blocker["code"] if a1_blocker is not None else "A1_DIALOGUE_CONFIDENCE_PASS",
-            "policy": "app.quality_report.exact_dialogue_semantic_blocker",
-            "policy_version": A1_POLICY_VERSION,
-            "evidence": a1_blocker if a1_blocker is not None else None,
-        }
+        a1 = _a1_gate_result(plan.model_dump(mode="json"))
         mapping = _source_output_map_from_plan(plan)
         handoff = build_native_evidence_handoff(
             plan,
@@ -391,6 +383,25 @@ def _assess_candidate(
             "reason": str(error),
         }]
         return base
+
+
+def _a1_gate_result(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose the canonical A-1 result without promoting a warning to a block."""
+
+    finding = exact_dialogue_semantic_finding(dict(plan))
+    blocker = finding if finding is not None and finding["severity"] == "blocker" else None
+    return {
+        "gate": "A-1",
+        "status": "BLOCKED" if blocker is not None else "PASS",
+        "reason_code": (
+            blocker["code"] if blocker is not None
+            else "A1_DIALOGUE_CONFIDENCE_RISK" if finding is not None
+            else "A1_DIALOGUE_CONFIDENCE_PASS"
+        ),
+        "policy": "app.quality_report.exact_dialogue_semantic_finding",
+        "policy_version": A1_POLICY_VERSION,
+        "evidence": finding,
+    }
 
 
 def _source_output_map_from_plan(plan: ProductionPlan) -> SourceOutputTimeMap:

@@ -89,6 +89,7 @@ from app.reporting import make_report
 from app.run_artifacts import make_run_artifact_metadata, write_run_artifact_metadata
 from app.run_manifest import is_run_scoped_path, write_run_manifest
 from app.production_models import ProductionPlan
+from app.speech_clarity_policy import SPEECH_CLARITY_POLICY_VERSION
 from app.quality_report import (
     build_editorial_final_handoff,
     build_quality_report,
@@ -733,7 +734,7 @@ class Pipeline:
             {
                 "candidates": _hash(raw_candidates), "settings": self.config.scoring,
                 "duration_constraints": [self.config.min_clip_duration, self.config.max_clip_duration],
-                "visual_analysis": _hash(visual_analysis), "speech_clarity_policy": "6D.2",
+                "visual_analysis": _hash(visual_analysis), "speech_clarity_policy": SPEECH_CLARITY_POLICY_VERSION,
             },
             lambda: _write_candidates(
                 work_directory / "candidates.local.json",
@@ -791,7 +792,7 @@ class Pipeline:
             tracker, "multimodal_scoring", work_directory / "candidates.multimodal.json",
             {
                 "local_scoring": _hash(local_data), "pass2": _hash(pass2_data),
-                "scoring_contract": "6D.2", "settings": self.config.scoring,
+                "scoring_contract": "6D.3", "settings": self.config.scoring,
                 "visual_analysis": _hash(visual_analysis),
             },
             lambda: _write_candidates(
@@ -3109,8 +3110,10 @@ class Pipeline:
             plan = item["plan"]
             stage_name = f"semantic_content_preflight:{candidate_id}"
             tracker.start(stage_name, _hash({
-                "policy": "exact-dialogue-semantic-confidence-0.5",
+                "policy": SPEECH_CLARITY_POLICY_VERSION,
                 "dialogue_mappings": plan.get("dialogue_mappings"),
+                "boundary_decision": plan.get("boundary_decision"),
+                "continuity_decision": plan.get("continuity_decision"),
             }))
             blocker = exact_dialogue_semantic_blocker(plan)
             if blocker is None:
@@ -3123,9 +3126,8 @@ class Pipeline:
                 for mapping in low_confidence
             )
             message = (
-                f"{blocker['code']}: exact dialogue/fact mapping confidence "
-                f"{blocker['measured_value']} is below {blocker['threshold']} "
-                f"({segment_ids})."
+                f"{blocker['code']}: materially low-confidence exact dialogue "
+                f"({blocker['measured_value']} below {blocker['threshold']}; {segment_ids})."
             )
             tracker.finish(stage_name, "failed", message)
             outcomes.append({
