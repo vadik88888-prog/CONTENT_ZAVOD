@@ -350,6 +350,35 @@ def test_physically_unbreakable_caption_remains_blocked_by_the_native_gate() -> 
     }
 
 
+def test_adjacent_verified_words_with_one_frame_rounding_overlap_still_fit() -> None:
+    """Frame rounding must not suppress legal source-time caption breaks."""
+
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="rounded-adjacent-words-001", source=SourceInterval.from_seconds(0, 9.8),
+        output=OutputInterval(start_frame=0, end_frame=294),
+    ),))
+    transcript = {"words": [
+        {
+            "text": "да",
+            "start": index * 0.35,
+            "end": (index + 1) * 0.35,
+            "confidence": 0.99,
+            "timing_source": "verified",
+        }
+        for index in range(28)
+    ]}
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, _config())
+
+    assert plan.feasibility_decision is not None
+    assert plan.feasibility_decision.status == "FEASIBLE"
+    assert len(plan.cues) > 1
+    assert all(len(cue.words) <= _config().subtitle_max_words_per_cue for cue in plan.cues)
+    assert "CAPTION_LINE_OVERFLOW" not in {
+        finding.code for finding in plan.quality_report.findings
+    }
+
+
 def test_real_interview_overlapping_verified_words_coalesce_before_feasibility() -> None:
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="interview-dialogue-001",

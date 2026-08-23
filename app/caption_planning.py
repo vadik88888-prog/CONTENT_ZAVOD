@@ -69,8 +69,8 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "caption-presets-tier1.3.caption-overlap.1"
-CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.1"
+CAPTION_PLANNER_VERSION = "caption-presets-tier1.3.caption-overlap.2"
+CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.2"
 CAPTION_HARD_CPS_CEILING = 20.0
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
 CAPTION_TARGET_CPS_MIN = 13.0
@@ -1377,7 +1377,14 @@ def _best_layout_split(
 
 
 def _cue_boundary_overlaps_words(words: tuple[_MappedWord, ...], split: int) -> bool:
-    """Protect trusted word evidence from a real half-open boundary overlap."""
+    """Protect trusted word evidence from a real half-open source overlap.
+
+    ``map_continuous_interval`` conservatively rounds a word end up and the
+    next word start down.  Adjacent verified source intervals can therefore
+    share one output frame even though their source evidence is strictly
+    half-open and non-overlapping.  That rasterisation artefact must not turn
+    an otherwise legal caption break into an unbreakable, overflowing cue.
+    """
 
     left = words[split - 1]
     right = words[split]
@@ -1386,6 +1393,7 @@ def _cue_boundary_overlaps_words(words: tuple[_MappedWord, ...], split: int) -> 
         left.timing_source in trusted
         and right.timing_source in trusted
         and right.output.start_frame < left.output.end_frame
+        and right.source.start_tick < left.source.end_tick
     )
 
 
