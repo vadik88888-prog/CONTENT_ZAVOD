@@ -6,6 +6,7 @@ from typing import Any
 from app.config import AppConfig
 from app.content_understanding import build_global_content_map, build_video_content_profile
 from app.models import Candidate, candidate_from_dict
+from app.candidate_quality import boundary_multimodal_context
 from app.multimodal_candidates import enrich_shortlist_with_pass2, generate_multimodal_candidates
 from app.multimodal_evidence import build_multimodal_timeline
 from app.transcript_features import analyse_transcript
@@ -97,7 +98,7 @@ def test_combined_evidence_expands_story_range_and_preserves_full_provenance() -
 
     provenance = expanded.multimodal_provenance
     assert expanded.candidate_kind == "multimodal"
-    assert provenance["schema_version"] == "6C.3"
+    assert provenance["schema_version"] == "6C.4"
     assert provenance["story_unit_ids"] == expanded.story_unit_ids
     assert provenance["transcript_evidence"]
     assert provenance["audio_evidence"]
@@ -158,6 +159,11 @@ def test_audio_peak_seeds_canonicalize_to_existing_source_moment_without_losing_
         item["seed"]["seed_id"] for item in lineage["absorbed_audio_seed_candidates"]
     } == {"audio-peak-001", "audio-peak-002", "audio-peak-003"}
     assert canonical.multimodal_provenance["audio_evidence"]
+    anchors = canonical.multimodal_provenance["generation"]["anchors"]
+    assert set(anchors) == {"hook", "action", "reaction", "payoff"}
+    assert all(isinstance(value, float) for value in anchors.values())
+    assert len(lineage["merged_anchor_contributors"]) == 4
+    assert boundary_multimodal_context(canonical)["preserve_until_seconds"] >= canonical.end
 
 
 def _pass2_timeline() -> dict[str, Any]:

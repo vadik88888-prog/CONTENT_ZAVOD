@@ -1162,11 +1162,17 @@ def boundary_multimodal_context(candidate: Any) -> dict[str, Any]:
 
     provenance = candidate.multimodal_provenance or {}
     generation = provenance.get("generation", {}) if isinstance(provenance, dict) else {}
+    # Persisted pre-canonicalization.2 analyses may contain an old list of
+    # anchor provenance records. Anchors are optional timing hints, so ignore
+    # that invalid shape rather than treating it as text/vision evidence or
+    # allowing a malformed lineage field to crash Draft transformation.
     anchors = generation.get("anchors", {}) if isinstance(generation, dict) else {}
+    anchors = anchors if isinstance(anchors, dict) else {}
     pass2 = candidate.vision_pass2_evidence or {}
     result = pass2.get("result") if isinstance(pass2, dict) else None
     request = result.get("request", {}) if isinstance(result, dict) else {}
     pass2_anchors = request.get("anchors", {}) if isinstance(request, dict) else {}
+    pass2_anchors = pass2_anchors if isinstance(pass2_anchors, dict) else {}
     verification = result.get("verification", {}) if isinstance(result, dict) else {}
     reasons = generation.get("reasons", []) if isinstance(generation, dict) else []
     linked_payoff = any(any(role in str(item) for role in ("payoff", "reaction")) for item in reasons)

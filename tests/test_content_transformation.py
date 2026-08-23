@@ -366,6 +366,27 @@ def test_mock_modes_repair_and_provider_failure_are_safe_and_deterministic() -> 
     assert fallback["validation"]["grounding"]["passed"]
 
 
+def test_provider_and_fallback_results_share_the_typed_transformation_contract() -> None:
+    context, payload = _provider_payload()
+    provider_result = run_content_transformation(
+        context, AppConfig().transformation, _StaticTransformer(payload),
+    )
+    config = AppConfig()
+    config.transformation.mock_mode = "provider_error"
+    fallback_result = run_content_transformation(
+        context, config.transformation, MockProvider(config),
+    )
+
+    for result, status in ((provider_result, "completed"), (fallback_result, "fallback")):
+        assert result["status"] == status
+        assert isinstance(result["source_context"], dict)
+        assert isinstance(result["semantic_representation"], dict)
+        assert isinstance(result["narrative_plan"], dict)
+        assert isinstance(result["draft_script"], dict)
+        assert isinstance(result["final_script"], dict)
+        assert result["validation"]["final_script"]["passed"]
+
+
 def test_failed_repair_never_returns_unsafe_script() -> None:
     config = AppConfig()
     config.transformation.mock_mode = "repair_failure"

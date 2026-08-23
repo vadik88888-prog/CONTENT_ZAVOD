@@ -22,8 +22,8 @@ from app.utils import stable_text_hash
 from app.vision_intelligence import build_pass2_request
 
 
-CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.3"
-CANDIDATE_MOMENT_CANONICALIZATION_SCHEMA_VERSION = "candidate-moment-canonicalization.1"
+CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.4"
+CANDIDATE_MOMENT_CANONICALIZATION_SCHEMA_VERSION = "candidate-moment-canonicalization.2"
 PASS2_EVIDENCE_SCHEMA_VERSION = "6C.pass2-evidence.1"
 
 
@@ -157,12 +157,7 @@ def _merge_source_moment_provenance(primary: Candidate, variants: list[Candidate
         for candidate in ordered
         for reason in ((candidate.multimodal_provenance or {}).get("generation") or {}).get("reasons", [])
     )
-    generation["anchors"] = _unique_provenance_items(
-        entry
-        for candidate in ordered
-        for entry in ((candidate.multimodal_provenance or {}).get("generation") or {}).get("anchors", [])
-        if isinstance(entry, dict)
-    )
+    generation["anchors"] = _merge_generation_anchors(primary, ordered)
     generation["original_story_unit_ranges"] = _unique_provenance_items(
         entry
         for candidate in ordered
@@ -191,11 +186,60 @@ def _merge_source_moment_provenance(primary: Candidate, variants: list[Candidate
             for candidate in absorbed
             if "candidate_source:audio_seed" in (((candidate.multimodal_provenance or {}).get("generation") or {}).get("reasons") or [])
         ],
+        "merged_anchor_contributors": [
+            {
+                "candidate_id": candidate.id,
+                "anchors": dict(anchors),
+            }
+            for candidate in ordered
+            if isinstance(
+                anchors := ((candidate.multimodal_provenance or {}).get("generation") or {}).get("anchors"),
+                dict,
+            )
+        ],
     }
     primary.multimodal_provenance = provenance
     primary.explanations = _unique_strings(
         explanation for candidate in ordered for explanation in candidate.explanations
     )
+
+
+def _merge_generation_anchors(primary: Candidate, variants: list[Candidate]) -> dict[str, float]:
+    """Keep the generation-anchor contract typed while merging exact moments.
+
+    ``generation.anchors`` is consumed by both PASS 2 request construction and
+    the transformation boundary hand-off.  It is a role-to-timestamp mapping,
+    not an event collection.  Candidate-specific values remain auditable in
+    canonicalization metadata; the canonical mapping keeps the earliest setup
+    anchors and latest payoff without widening the resolved source range.
+    """
+
+    start, end = primary.start, primary.end
+    defaults = {
+        "hook": start,
+        "action": start + (end - start) * 0.35,
+        "reaction": start + (end - start) * 0.65,
+        "payoff": end,
+    }
+    values: dict[str, list[float]] = {role: [] for role in defaults}
+    for candidate in variants:
+        generation = (candidate.multimodal_provenance or {}).get("generation") or {}
+        anchors = generation.get("anchors") if isinstance(generation, dict) else None
+        if not isinstance(anchors, dict):
+            continue
+        for role in values:
+            try:
+                value = float(anchors.get(role))
+            except (TypeError, ValueError):
+                continue
+            if start <= value <= end:
+                values[role].append(value)
+    return {
+        "hook": min(values["hook"], default=defaults["hook"]),
+        "action": min(values["action"], default=defaults["action"]),
+        "reaction": min(values["reaction"], default=defaults["reaction"]),
+        "payoff": max(values["payoff"], default=defaults["payoff"]),
+    }
 
 
 def _unique_strings(values: object) -> list[str]:
