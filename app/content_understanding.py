@@ -55,7 +55,7 @@ SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
-PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.1"
+PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.2"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -2557,7 +2557,7 @@ def build_semantic_candidate(
 
 
 def expand_publishable_story_candidates(
-    selected: list[ScoredCandidate],
+    candidates: list[ScoredCandidate],
     content_map_data: dict[str, Any],
     transcript: dict[str, Any],
     transcript_features: dict[str, Any],
@@ -2566,10 +2566,13 @@ def expand_publishable_story_candidates(
 ) -> list[dict[str, Any]]:
     """Add immediately adjacent StoryUnit evidence only when it completes an arc.
 
-    This is deliberately a post-selection boundary operation.  It neither
-    reranks candidates nor asks Brain/Vision for a second opinion: it reads the
-    persisted source-scoped StoryUnit evidence and resolves any accepted range
-    through the existing ``SemanticBoundaryEngine``.
+    This is deliberately a post-selection boundary operation.  It leaves the
+    selection result and every score untouched, but materializes an approved
+    boundary for every persisted review candidate so a later Draft selection
+    never has to recreate or manually override a grounded expansion.  It never
+    asks Brain/Vision for a second opinion: it reads the persisted source-scoped
+    StoryUnit evidence and resolves any accepted range through the existing
+    ``SemanticBoundaryEngine``.
     """
 
     content_map = GlobalContentMap.from_dict(content_map_data, transcript)
@@ -2584,7 +2587,7 @@ def expand_publishable_story_candidates(
     maximum_gap = float(getattr(generation, "multimodal_link_gap_seconds", 0.0))
     reports: list[dict[str, Any]] = []
 
-    for item in selected:
+    for item in candidates:
         candidate = item.candidate
         original_range = _range_payload(candidate.start, candidate.end)
         base_units = _candidate_story_units(candidate, stories, index_by_id)

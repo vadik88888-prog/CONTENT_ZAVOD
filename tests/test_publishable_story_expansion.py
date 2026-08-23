@@ -140,3 +140,26 @@ def test_final_selection_persists_post_selection_story_expansion(tmp_path) -> No
     assert persisted["publishable_story_expansion"] == data["publishable_story_expansion"]
     candidate = data["candidates"][0]
     assert (candidate["start"], candidate["end"]) == pytest.approx((220.31, 265.07), abs=0.001)
+
+
+def test_post_selection_expansion_persists_for_manual_draft_candidate_without_reranking(tmp_path) -> None:
+    content_map, transcript, features, config = _story_fixture()
+    config.score_threshold = 0
+    config.ai_reranking.final_clip_count = 1
+    draftable = _selected_middle_candidate(content_map, transcript, features, config)
+    draftable.selected = False
+    destination = tmp_path / "final_selection.json"
+
+    data = Pipeline(tmp_path, config, mock_ai=True)._final_selection(
+        [draftable], destination, content_map,
+        transcript=transcript, transcript_features=features, scenes={"boundaries": []},
+    )
+
+    assert data["selected_ids"] == []
+    persisted = read_json(destination, {})
+    candidate = persisted["candidates"][0]
+    assert (candidate["start"], candidate["end"]) == pytest.approx((220.31, 265.07), abs=0.001)
+    boundary = candidate["boundary_diagnostics"]["boundary_decision"]
+    assert boundary["rough_range"] == {"start_seconds": 234.79, "end_seconds": 249.84}
+    assert boundary["refined_range"] == {"start_seconds": 220.31, "end_seconds": 265.07}
+    assert persisted["selected_ids"] == []

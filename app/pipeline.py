@@ -2995,7 +2995,7 @@ class Pipeline:
         story_expansions: list[dict[str, Any]] = []
         if content_map is not None and transcript is not None and transcript_features is not None and scenes is not None:
             story_expansions = expand_publishable_story_candidates(
-                selected, content_map, transcript, transcript_features, scenes, self.config,
+                scored, content_map, transcript, transcript_features, scenes, self.config,
             )
         requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
         warnings: list[str] = []
