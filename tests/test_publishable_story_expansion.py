@@ -18,6 +18,7 @@ from app.content_understanding import (
 )
 from app.models import ScoredCandidate
 from app.pipeline import Pipeline
+from app.semantic_extraction import build_source_context
 from app.transcript_features import analyse_transcript
 from app.utils import read_json
 
@@ -115,6 +116,10 @@ def test_post_selection_expansion_adds_grounded_setup_and_reaction_without_reran
 def test_self_contained_short_candidate_is_not_padded_by_adjacent_story_units() -> None:
     content_map, transcript, features, config = _story_fixture()
     content_map["story_units"][1]["payoff"] = "The result worked."
+    content_map["story_units"][2].update({
+        "setup": "", "development": "A separate neutral topic.",
+        "payoff": "", "ending": "A separate neutral topic.",
+    })
     selected = _selected_middle_candidate(content_map, transcript, features, config)
     original_range = (selected.candidate.start, selected.candidate.end)
 
@@ -125,6 +130,87 @@ def test_self_contained_short_candidate_is_not_padded_by_adjacent_story_units() 
     assert (selected.candidate.start, selected.candidate.end) == pytest.approx(original_range, abs=0.001)
     assert reports[0]["decision"] == "not_expanded"
     assert reports[0]["reason"] == "no_additional_grounded_story_arc"
+
+
+@pytest.mark.parametrize(
+    ("profile", "grounded_ending"),
+    [
+        ("food", "The tasting reaction is wow, it worked."),
+        ("gameplay", "The player reacts: wow, the round is won."),
+        ("podcast", "The guest reacts: that was the result."),
+    ],
+)
+def test_natural_story_ending_extends_publishable_candidates_without_reranking(
+    profile: str, grounded_ending: str,
+) -> None:
+    """Profiles are regression labels only: the policy itself is generic."""
+
+    content_map, transcript, features, config = _story_fixture()
+    content_map["story_units"][1].update({
+        "payoff": "The main point is already complete.",
+        "ending": "The main point is already complete.",
+    })
+    content_map["story_units"][2].update({
+        "setup": "", "development": grounded_ending,
+        "payoff": "", "ending": grounded_ending,
+    })
+    selected = _selected_middle_candidate(content_map, transcript, features, config)
+    original_score = selected.score
+
+    reports = expand_publishable_story_candidates(
+        [selected], content_map, transcript, features, {"boundaries": []}, config,
+    )
+
+    candidate = selected.candidate
+    expansion = reports[0]
+    assert profile in {"food", "gameplay", "podcast"}
+    assert selected.score == original_score
+    assert candidate.end > 249.84
+    assert candidate.duration <= config.max_clip_duration
+    assert expansion["decision"] == "expanded"
+    assert expansion["reason"] == "a1_feasible_grounded_natural_story_ending_added_without_reranking"
+    natural = expansion["natural_ending"]
+    assert natural["requires_extension"] is True
+    assert natural["grounded"] is True
+    assert natural["reason"] == "grounded_adjacent_continuation_resolved_by_existing_boundary_owner"
+    assert natural["following_story_unit_id"] == content_map["story_units"][2]["story_unit_id"]
+    assert "reaction" in natural["following_story_roles"]
+    assert natural["decision"] == "extended"
+    # A-1 was evaluated before the boundary is accepted; A-2 is then built
+    # from the exact expanded boundary rather than a second, profile-specific
+    # ending path.
+    assert "a1_speech_clarity" in expansion
+    assert ensure_candidate_boundary_decision(candidate) is not None
+    context = build_source_context(
+        {"id": transcript["source_id"], "path": "story-expansion.mp4"},
+        {"duration": transcript["duration"]}, candidate, transcript, features,
+        {"energy_frames": []}, {"boundaries": []}, config.transformation,
+    )
+    assert context.continuity_decision
+    assert context.continuity_decision["candidate_id"] == candidate.id
+
+
+def test_natural_story_ending_never_forces_food_past_maximum_duration() -> None:
+    content_map, transcript, features, config = _story_fixture()
+    content_map["story_units"][1].update({
+        "payoff": "The tasting verdict is complete.",
+        "ending": "The tasting verdict is complete.",
+    })
+    content_map["story_units"][2].update({
+        "setup": "", "development": "Wow, the diner reacts to the tasting.",
+        "payoff": "", "ending": "Wow, the diner reacts to the tasting.",
+    })
+    selected = _selected_middle_candidate(content_map, transcript, features, config)
+    original_range = (selected.candidate.start, selected.candidate.end)
+    config.max_clip_duration = selected.candidate.duration + 1.0
+
+    reports = expand_publishable_story_candidates(
+        [selected], content_map, transcript, features, {"boundaries": []}, config,
+    )
+
+    assert (selected.candidate.start, selected.candidate.end) == pytest.approx(original_range, abs=0.001)
+    assert reports[0]["decision"] == "not_expanded"
+    assert reports[0]["natural_ending"]["reason"] == "grounded_continuation_exceeds_maximum_duration"
 
 
 def test_expansion_uses_a1_feasible_result_side_when_setup_is_materially_unclear() -> None:

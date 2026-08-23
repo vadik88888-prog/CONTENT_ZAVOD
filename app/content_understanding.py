@@ -56,7 +56,7 @@ SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
-PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.3"
+PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.4"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -2628,10 +2628,21 @@ def expand_publishable_story_candidates(
         adjacent_options = _grounded_expansion_options(
             base_units, before if add_before else None, after if add_after else None,
         )
+        natural_ending = _grounded_natural_ending(base_units, after, after_roles)
+        if natural_ending["requires_extension"]:
+            # This is intentionally separate from the full-arc branch above.
+            # A selected candidate can already be self-contained while a
+            # directly adjacent, grounded reaction or payoff is still needed
+            # to let the viewer see the ending.  Adding it must not require a
+            # second ranking pass or unrelated setup/filler.
+            natural_option = [*base_units, after]
+            if natural_option not in adjacent_options:
+                adjacent_options.append(natural_option)
         if not adjacent_options:
             reports.append(_story_expansion_report(
                 candidate, original_range, "not_expanded", "no_additional_grounded_story_arc",
                 before=before, after=after, before_roles=before_roles, after_roles=after_roles,
+                natural_ending=natural_ending,
             ))
             continue
 
@@ -2654,6 +2665,12 @@ def expand_publishable_story_candidates(
                 ],
                 "expanded_range": _range_payload(resolution.start, resolution.end),
                 "story_arc_roles": sorted(expanded_roles),
+                "expansion_kind": (
+                    "natural_story_ending"
+                    if natural_ending["requires_extension"]
+                    and expanded_units == [*base_units, after]
+                    else "story_arc_completion"
+                ),
             }
             if not resolution.diagnostics.get("eligible", False):
                 rejected_options.append({**option, "reason": "expanded_boundary_not_eligible"})
@@ -2680,6 +2697,11 @@ def expand_publishable_story_candidates(
                 candidate, original_range, "not_expanded", "no_a1_feasible_grounded_story_arc",
                 before=before, after=after, before_roles=before_roles, after_roles=after_roles,
                 rejected_options=rejected_options,
+                natural_ending={
+                    **natural_ending,
+                    "decision": "not_extended",
+                    "reason": _natural_ending_rejection_reason(rejected_options),
+                },
             ))
             continue
 
@@ -2717,11 +2739,24 @@ def expand_publishable_story_candidates(
                 before_roles, after_roles,
             ),
             "story_arc_roles": sorted(expanded_roles),
+            "natural_ending": {
+                **natural_ending,
+                "decision": "extended" if chosen["expansion_kind"] == "natural_story_ending" else "not_needed",
+                "reason": (
+                    "grounded_adjacent_continuation_resolved_by_existing_boundary_owner"
+                    if chosen["expansion_kind"] == "natural_story_ending"
+                    else "full_story_arc_completion"
+                ),
+            },
             "a1_speech_clarity": chosen["a1_speech_clarity"],
             "rejected_adjacent_options": rejected_options,
             "brain_reused": True,
             "vision_reused": True,
-            "reason": "a1_feasible_adjacent_story_evidence_added_setup_action_and_result_or_reaction",
+            "reason": (
+                "a1_feasible_grounded_natural_story_ending_added_without_reranking"
+                if chosen["expansion_kind"] == "natural_story_ending"
+                else "a1_feasible_adjacent_story_evidence_added_setup_action_and_result_or_reaction"
+            ),
         }
         diagnostics["publishable_story_expansion"] = expansion
         diagnostics["boundary_decision"] = _boundary_decision_payload(candidate.id, diagnostics)
@@ -2739,7 +2774,11 @@ def expand_publishable_story_candidates(
         }
         candidate.explanations = [
             *candidate.explanations,
-            "Publishable Story Expansion added adjacent grounded setup/result evidence; semantic ranking was not rerun.",
+            (
+                "Natural Story Ending added adjacent grounded continuation evidence; semantic ranking was not rerun."
+                if chosen["expansion_kind"] == "natural_story_ending"
+                else "Publishable Story Expansion added adjacent grounded setup/result evidence; semantic ranking was not rerun."
+            ),
         ]
         reports.append(expansion)
     return reports
@@ -2774,6 +2813,62 @@ def _grounded_expansion_options(
         if {"setup", "action"}.issubset(roles) and bool(roles & {"result", "reaction"}):
             options.append(units)
     return options
+
+
+def _grounded_natural_ending(
+    base_units: list[StoryUnit], after: StoryUnit | None, after_roles: set[str],
+) -> dict[str, Any]:
+    """Describe whether the selected boundary needs one grounded ending beat.
+
+    The source-scoped StoryUnit fields are the only inputs.  In particular,
+    this does not infer a continuation from a profile label, ranking score, or
+    nearby media duration.  A candidate that already has a result stays short
+    unless the next *local* StoryUnit explicitly contributes a payoff/reaction
+    or satisfies declared next-context debt.
+    """
+
+    current = base_units[-1]
+    if after is None:
+        return {
+            "requires_extension": False,
+            "grounded": False,
+            "reason": "no_local_following_story_evidence",
+        }
+    context_debt = bool(current.required_next_context.strip())
+    result_or_reaction = bool(after_roles & {"result", "reaction"})
+    if not context_debt and not result_or_reaction:
+        return {
+            "requires_extension": False,
+            "grounded": False,
+            "reason": "following_story_has_no_grounded_continuation_result_or_reaction",
+        }
+    return {
+        "requires_extension": True,
+        "grounded": True,
+        "reason": (
+            "declared_required_next_context" if context_debt
+            else "adjacent_grounded_result_or_reaction"
+        ),
+        "following_story_unit_id": after.story_unit_id,
+        "following_story_roles": sorted(after_roles),
+    }
+
+
+def _natural_ending_rejection_reason(rejected_options: list[dict[str, Any]]) -> str:
+    natural = [
+        item for item in rejected_options
+        if item.get("expansion_kind") == "natural_story_ending"
+    ]
+    if not natural:
+        return "no_a1_feasible_grounded_story_arc"
+    reasons = {str(item.get("reason") or "") for item in natural}
+    if "expanded_range_exceeds_maximum_duration" in reasons:
+        return "grounded_continuation_exceeds_maximum_duration"
+    if "a1_speech_clarity_material" in reasons:
+        return "a1_speech_clarity_material"
+    if "expanded_boundary_not_eligible" in reasons:
+        return "expanded_boundary_not_eligible"
+    return "grounded_continuation_not_feasible"
 
 
 def _expansion_speech_clarity_materiality(
@@ -2864,6 +2959,7 @@ def _story_expansion_report(
     *, before: StoryUnit | None = None, after: StoryUnit | None = None,
     before_roles: set[str] | None = None, after_roles: set[str] | None = None,
     rejected_options: list[dict[str, Any]] | None = None,
+    natural_ending: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
@@ -2876,6 +2972,11 @@ def _story_expansion_report(
             before, after, before_roles or set(), after_roles or set(),
         ),
         "rejected_adjacent_options": rejected_options or [],
+        "natural_ending": natural_ending or {
+            "requires_extension": False,
+            "grounded": False,
+            "reason": "not_evaluated",
+        },
         "brain_reused": True,
         "vision_reused": True,
     }
