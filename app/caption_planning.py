@@ -69,8 +69,8 @@ from app.utils import write_bytes_atomic
 from app.video_models import SubtitleStyle
 
 
-CAPTION_PLANNER_VERSION = "caption-presets-tier1.3.caption-overlap.2"
-CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.2"
+CAPTION_PLANNER_VERSION = "caption-presets-tier1.3.caption-overlap.3"
+CAPTION_FEASIBILITY_VERSION = "7J.2A-3.caption-feasibility.3"
 CAPTION_HARD_CPS_CEILING = 20.0
 LIBASS_BACKEND_VERSION = "tier1-libass-7B"
 CAPTION_TARGET_CPS_MIN = 13.0
@@ -909,23 +909,35 @@ def _mapped_words(
             source=source, map_ids=map_ids,
         ))
     result.sort(key=lambda item: (item.output.start_frame, item.output.end_frame, item.word_id))
-    untrusted = {"phrase", "estimated"}
     for index in range(1, len(result)):
         left = result[index - 1]
         right = result[index]
-        if (
-            right.output.start_frame >= left.output.end_frame
-            or left.timing_source not in untrusted
-            or right.timing_source not in untrusted
-        ):
+        if right.output.start_frame >= left.output.end_frame:
             continue
-        lower = left.output.start_frame + 1
-        upper = right.output.end_frame - 1
-        if lower > upper:
+        if right.source.start_tick >= left.source.end_tick:
+            # Source intervals are half-open and do not overlap.  The one
+            # shared output frame is only ceil(end)/floor(start) quantization;
+            # choose one deterministic frame boundary so downstream cue
+            # windows can remain disjoint without concealing a real overlap.
+            boundary = _quantized_word_boundary(left, right)
+            if boundary is None:
+                continue
+            result[index - 1] = replace(left, output=OutputInterval(
+                start_frame=left.output.start_frame,
+                end_frame=boundary,
+            ))
+            result[index] = replace(right, output=OutputInterval(
+                start_frame=boundary,
+                end_frame=right.output.end_frame,
+            ))
+            diagnostics.append("CAPTION_FRAME_QUANTIZATION_NORMALIZED")
             continue
-        boundary = max(lower, min(upper, round(
-            (left.output.end_frame + right.output.start_frame) / 2,
-        )))
+        untrusted = {"phrase", "estimated"}
+        if left.timing_source not in untrusted or right.timing_source not in untrusted:
+            continue
+        boundary = _quantized_word_boundary(left, right)
+        if boundary is None:
+            continue
         result[index - 1] = replace(left, output=OutputInterval(
             start_frame=left.output.start_frame,
             end_frame=boundary,
@@ -936,6 +948,20 @@ def _mapped_words(
         ))
         diagnostics.append("CAPTION_UNTRUSTED_WORD_TIMING_NORMALIZED")
     return result, list(dict.fromkeys(diagnostics))
+
+
+def _quantized_word_boundary(left: _MappedWord, right: _MappedWord) -> int | None:
+    """Choose one valid frame boundary for two adjacent mapped words."""
+
+    lower = left.output.start_frame + 1
+    upper = right.output.end_frame - 1
+    if lower > upper:
+        # There is no non-empty disjoint frame partition.  Keep the evidence
+        # visible for the overlap gate instead of manufacturing one.
+        return None
+    return max(lower, min(upper, round(
+        (left.output.end_frame + right.output.start_frame) / 2,
+    )))
 
 
 def _word_inputs(

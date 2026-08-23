@@ -10,6 +10,7 @@ from app.caption_planning import (
     _Layout,
     _MappedWord,
     _fit_single_layout,
+    _mapped_words,
     _normalize_cue_output_overlaps,
     _simultaneous_caption_collisions,
     build_caption_plan,
@@ -198,16 +199,17 @@ def test_interview_contiguous_micro_cuts_repartition_to_real_cps_fit() -> None:
     assert "CAPTION_READABILITY_COALESCED" not in plan.diagnostics
     assert "CAPTION_PRESENTATION_WINDOW_EXTENDED" in plan.diagnostics
     assert "CAPTION_CPS_HIGH" not in {finding.code for finding in plan.quality_report.findings}
-    assert [len(cue.words) for cue in plan.cues] == [2, 9, 4]
+    assert [len(cue.words) for cue in plan.cues] == [2, 3, 5, 5]
     assert [(cue.output.start_frame, cue.output.end_frame) for cue in plan.cues] == [
-        (2, 28), (28, 95), (95, 135),
+        (2, 28), (28, 40), (40, 82), (82, 140),
     ]
     assert all(left.output.end_frame <= right.output.start_frame for left, right in zip(plan.cues, plan.cues[1:]))
-    expected_word_outputs = [
-        mapping.map_interval(SourceInterval.from_seconds(start, end))
-        for _text, start, end in word_specs
+    assert "CAPTION_FRAME_QUANTIZATION_NORMALIZED" in plan.diagnostics
+    words = [word for cue in plan.cues for word in cue.words]
+    assert [word.source for word in words] == [
+        SourceInterval.from_seconds(start, end) for _text, start, end in word_specs
     ]
-    assert [word.output for cue in plan.cues for word in cue.words] == expected_word_outputs
+    assert all(left.output.end_frame <= right.output.start_frame for left, right in zip(words, words[1:]))
     assert all(cue.fallback_reason is None for cue in plan.cues)
 
 
@@ -379,7 +381,50 @@ def test_adjacent_verified_words_with_one_frame_rounding_overlap_still_fit() -> 
     }
 
 
-def test_real_interview_overlapping_verified_words_coalesce_before_feasibility() -> None:
+def test_adjacent_verified_words_normalize_quantized_frame_overlap_before_cue_timing() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="rounded-word-timing-001", source=SourceInterval.from_seconds(0, 0.7),
+        output=OutputInterval(start_frame=0, end_frame=21),
+    ),))
+    transcript = {"words": [
+        {"text": "да", "start": 0.0, "end": 0.35, "confidence": 0.99, "timing_source": "verified"},
+        {"text": "нет", "start": 0.35, "end": 0.7, "confidence": 0.99, "timing_source": "verified"},
+    ]}
+    config = _config()
+    config.subtitle_min_words_per_cue = 1
+    config.subtitle_max_words_per_cue = 1
+
+    plan = build_caption_plan(_plain_intent(mapping), transcript, config)
+
+    assert plan.quality_report.status == "PASS"
+    assert "CAPTION_FRAME_QUANTIZATION_NORMALIZED" in plan.diagnostics
+    assert all(
+        left.output.end_frame <= right.output.start_frame
+        for left, right in zip(plan.cues, plan.cues[1:])
+    )
+    assert not any(
+        finding.code == "CAPTION_SIMULTANEOUS_OVERLAP" and finding.severity == "blocker"
+        for finding in plan.quality_report.findings
+    )
+
+
+def test_true_source_overlap_is_not_normalized_as_frame_quantization() -> None:
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="true-word-overlap-001", source=SourceInterval.from_seconds(0, 0.7),
+        output=OutputInterval(start_frame=0, end_frame=21),
+    ),))
+    transcript = {"words": [
+        {"text": "да", "start": 0.0, "end": 0.36, "confidence": 0.99, "timing_source": "verified"},
+        {"text": "нет", "start": 0.35, "end": 0.7, "confidence": 0.99, "timing_source": "verified"},
+    ]}
+
+    words, diagnostics = _mapped_words(_plain_intent(mapping), transcript)
+
+    assert words[0].output.end_frame > words[1].output.start_frame
+    assert "CAPTION_FRAME_QUANTIZATION_NORMALIZED" not in diagnostics
+
+
+def test_real_interview_quantized_adjacent_words_keep_real_cps_blocker() -> None:
     mapping = SourceOutputTimeMap(segments=(EditMapSegment(
         map_id="interview-dialogue-001",
         source=SourceInterval.from_seconds(1200.67, 1202.58),
@@ -405,8 +450,12 @@ def test_real_interview_overlapping_verified_words_coalesce_before_feasibility()
 
     assert plan.feasibility_decision is not None
     assert plan.feasibility_decision.status == "INFEASIBLE"
-    assert len(plan.cues) == 1
-    assert [word.text for word in plan.cues[0].words] == [item[0] for item in specs]
+    assert "CAPTION_FRAME_QUANTIZATION_NORMALIZED" in plan.diagnostics
+    assert [word.text for cue in plan.cues for word in cue.words] == [item[0] for item in specs]
+    assert all(
+        left.output.end_frame <= right.output.start_frame
+        for left, right in zip(plan.cues, plan.cues[1:])
+    )
     evidence = plan.feasibility_decision.evidence[0]
     assert evidence.text == "Представьте, что вам нужно вырастить покупатели,"
     assert evidence.character_count == 43
