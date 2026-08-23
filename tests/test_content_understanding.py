@@ -14,6 +14,7 @@ from app.content_understanding import (
     CONTENT_PROFILE_CONTRACT_VERSION,
     VIDEO_CONTENT_PROFILE_SCHEMA_VERSION,
     VideoContentProfile,
+    _resolve_effective_profile,
     build_global_content_map,
     build_video_content_profile,
     generate_semantic_candidates,
@@ -114,6 +115,53 @@ def test_unknown_profile_uses_safe_fallback_and_filename_is_only_weak_signal() -
     assert filename_only["effective_profile"]["profile_id"] == "unknown"
     assert filename_only["effective_profile"]["format"] == "mixed"
     assert filename_only["effective_profile"]["resolution"]["format"] == "safe_fallback"
+
+
+@pytest.mark.parametrize(
+    ("detected_profile_id", "admitted", "confidence", "expected_profile_id", "expected_reason"),
+    (
+        ("food", True, 0.45, "food", "auto_detected_profile_accepted"),
+        ("gameplay", True, 0.45, "gameplay", "auto_detected_profile_accepted"),
+        ("podcast", True, 0.45, "podcast", "auto_detected_profile_accepted"),
+        ("unknown", False, 0.2, "unknown", "auto_low_confidence_conservative_fallback"),
+    ),
+)
+def test_auto_detected_profile_canonicalization_preserves_registered_identity(
+    detected_profile_id: str,
+    admitted: bool,
+    confidence: float,
+    expected_profile_id: str,
+    expected_reason: str,
+) -> None:
+    effective, reason = _resolve_effective_profile(
+        {"profile_id": {"value": detected_profile_id, "admitted": admitted, "confidence": confidence}},
+        {},
+        min_confidence=0.45,
+        requested_mode="auto",
+        requested_profile_id=None,
+    )
+
+    assert effective["profile_id"] == expected_profile_id
+    assert reason == expected_reason
+
+
+def test_food_auto_admission_uses_selected_runner_not_unrelated_evidence_strength() -> None:
+    data = _profile(
+        "Готовим рецепт блюда экран история.",
+        scenes={"boundaries": [{"timestamp": float(index)} for index in range(9)]},
+        visual_analysis={
+            "status": "completed",
+            "evidence_status": "observed",
+            "sample_count": 9,
+            "subject_keyframes": [{"scene_type": "TALKING_HEAD"} for _ in range(9)],
+        },
+    )
+
+    proposal = data["detected_profile"]["profile_id"]
+    assert proposal["value"] == "food"
+    assert proposal["admitted"] is True
+    assert data["effective_profile"]["profile_id"] == "food"
+    assert data["effective_profile_reason"] == "auto_detected_profile_accepted"
 
 
 @pytest.mark.parametrize(

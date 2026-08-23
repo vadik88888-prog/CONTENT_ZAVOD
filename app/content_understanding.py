@@ -50,7 +50,7 @@ VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = CONTENT_PROFILE_SCHEMA_VERSION
 LEGACY_VIDEO_CONTENT_PROFILE_SCHEMA_VERSION = LEGACY_CONTENT_PROFILE_SCHEMA_VERSIONS[0]
 CONTENT_STRATEGY_VERSION = "5A.4"
 CONTENT_PROFILE_CONTRACT_VERSION = "source-content-profile.3"
-CONTENT_PROFILE_DETECTOR_VERSION = "source-content-profile-detector.3"
+CONTENT_PROFILE_DETECTOR_VERSION = "source-content-profile-detector.4"
 SEMANTIC_CANDIDATE_GENERATION_VERSION = "5A.candidate-generation.2"
 SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
@@ -1214,8 +1214,13 @@ def _detect_registered_profile(
         top_total, top_primary, top_evidence_strength, top_direct_units,
         _order, profile_id, evidence,
     ) = scored[0]
+    # ``scored`` is ordered by the canonical profile-selection score.  The
+    # admission margin must compare the selected proposal with that same
+    # runner-up.  Comparing it with the highest raw evidence strength from an
+    # unrelated, lower-ranked profile can reject the selected identity even
+    # though no competing profile won the detector.
     runner_total = scored[1][0] if len(scored) > 1 else 0.0
-    runner_evidence_strength = max((item[2] for item in scored[1:]), default=0.0)
+    runner_evidence_strength = scored[1][2] if len(scored) > 1 else 0.0
     competing_margin = top_evidence_strength - runner_evidence_strength
     admitted = (
         top_evidence_strength >= _AUTO_PROFILE_MIN_EVIDENCE_STRENGTH
