@@ -34,6 +34,7 @@ from app.audio_models import AudioProject
 from app.audio_service import AudioCompositionService, audio_report_section
 from app.config import AppConfig
 from app.creative_contracts import CompiledRenderPlan, CreativeIntent
+from app.creative_evidence import has_usable_composition_evidence
 from app.creative_lifecycle import (
     CreativeArtifactError,
     creative_policy_changed,
@@ -93,6 +94,8 @@ from app.multimodal_evidence import (
 )
 from app.multimodal_candidates import (
     CANDIDATE_PROVENANCE_SCHEMA_VERSION,
+    PASS2_EVIDENCE_SCHEMA_VERSION,
+    candidate_pass2_anchors,
     enrich_shortlist_with_pass2,
     generate_multimodal_candidates,
     project_candidate_audio_evidence,
@@ -134,7 +137,14 @@ from app.tts_service import TTSService, tts_report_section
 from app.utils import AtomicWriteError, read_json, safe_name, stable_file_hash, stable_text_hash, utc_now, write_json
 from app.video_composition import VideoCompositionService, production_render_report_section
 from app.visual_analysis import analyse_video_subjects
-from app.vision_intelligence import VisionGateway, validate_vision_artifact
+from app.vision_intelligence import (
+    VisionGateway,
+    build_candidate_bounded_pass2_timeline,
+    build_pass2_request,
+    validate_pass2_request,
+    validate_pass2_result,
+    validate_vision_artifact,
+)
 from app.virality import (
     apply_profile_weighting_after_hard_gates,
     apply_virality_ranking,
@@ -158,6 +168,8 @@ PRODUCTION_PLAN_STAGES = ("production_plan",)
 TTS_STAGES = ("tts_generation",)
 AUDIO_COMPOSITION_STAGES = ("audio_composition",)
 PRODUCTION_RENDER_STAGES = ("production_render",)
+DRAFT_COMPOSITION_PASS2_MODEL = "gpt-5.6-terra"
+DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION = "6B.candidate-composition-pass2.1"
 
 
 @dataclass(slots=True)
@@ -1767,6 +1779,14 @@ class Pipeline:
             selected, visual_analysis, tracker, content_profile=content_profile, source=source_data,
         )
         candidate_failures = {**boundary_failures, **preflight_failures}
+        composition_vision = self._ensure_draft_composition_evidence_isolated(
+            [item for item in selected if item.candidate.id not in candidate_failures],
+            source=source,
+            timeline=multimodal_timeline,
+            analysis=analysis,
+            work_directory=work_directory,
+            tracker=tracker,
+        )
         self._write_draft_progress(
             output_directory=output_directory,
             analysis=analysis,
@@ -1839,11 +1859,228 @@ class Pipeline:
             clip_count_recommendation=clip_count_recommendation,
             final_scored=final_scored,
             selected=selected,
+            composition_vision=composition_vision,
             transformation=transformation,
             production=production,
             work_directory=work_directory,
             output_directory=output_directory,
         )
+
+    def _ensure_draft_composition_evidence_isolated(
+        self,
+        selected: list[Any],
+        *,
+        source: Source,
+        timeline: dict[str, Any],
+        analysis: AnalysisArtifact,
+        work_directory: Path,
+        tracker: StageTracker,
+    ) -> dict[str, dict[str, Any]]:
+        """Keep a candidate-only Vision failure local to that candidate."""
+
+        outcomes: dict[str, dict[str, Any]] = {}
+        for scored in selected:
+            candidate = scored.candidate
+            stage_name = f"draft_composition_vision:{candidate.id}"
+            try:
+                outcomes.update(self._ensure_draft_composition_evidence(
+                    [scored],
+                    source=source,
+                    timeline=timeline,
+                    analysis=analysis,
+                    work_directory=work_directory,
+                    tracker=tracker,
+                ))
+            except Exception as error:
+                safe = sanitize_api_error(error)
+                tracker.finish(stage_name, "warning", safe)
+                self.warnings.append(
+                    f"Candidate composition Vision unavailable for {candidate.id}: {safe}"
+                )
+                outcomes[candidate.id] = {
+                    "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                    "status": "skipped",
+                    "reason": safe,
+                    "cache_hit": False,
+                    "usable_composition_evidence": False,
+                    "artifact_ref": None,
+                    "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                    "source_range": {
+                        "start_seconds": candidate.start,
+                        "end_seconds": candidate.end,
+                    },
+                }
+        return outcomes
+
+    def _ensure_draft_composition_evidence(
+        self,
+        selected: list[Any],
+        *,
+        source: Source,
+        timeline: dict[str, Any],
+        analysis: AnalysisArtifact,
+        work_directory: Path,
+        tracker: StageTracker,
+    ) -> dict[str, dict[str, Any]]:
+        """Fill a selected candidate's composition gap without changing analysis.
+
+        The durable candidate artifact is keyed only by source/analysis/range and
+        Vision contract inputs. Caption, style, crop, Preview, and Final settings
+        are absent from the key, so their rerenders cannot trigger another call.
+        """
+
+        outcomes: dict[str, dict[str, Any]] = {}
+        target_config = replace(
+            self.config,
+            ai=replace(self.config.ai, model=DRAFT_COMPOSITION_PASS2_MODEL),
+        )
+        gateway: VisionGateway | None = None
+        provider_label = "mock" if self.mock_ai else target_config.ai.provider
+        cache_directory = work_directory / "candidate-vision-pass2"
+        for scored in selected:
+            candidate = scored.candidate
+            candidate_data = candidate.to_dict()
+            stage_name = f"draft_composition_vision:{candidate.id}"
+            if has_usable_composition_evidence(candidate_data, timeline):
+                tracker.skip(stage_name, "Selected candidate already has usable composition evidence.")
+                outcomes[candidate.id] = {
+                    "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                    "status": "not_required",
+                    "cache_hit": True,
+                    "usable_composition_evidence": True,
+                    "artifact_ref": (
+                        candidate.vision_pass2_evidence.get("artifact_ref")
+                        if isinstance(candidate.vision_pass2_evidence, dict) else None
+                    ),
+                    "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                    "source_range": {"start_seconds": candidate.start, "end_seconds": candidate.end},
+                }
+                continue
+
+            anchors = candidate_pass2_anchors(candidate)
+            bounded_timeline = build_candidate_bounded_pass2_timeline(
+                timeline,
+                candidate_id=candidate.id,
+                window_start=candidate.start,
+                window_end=candidate.end,
+                anchors=anchors,
+                max_frames=int(target_config.vision.pass2_max_frames),
+            )
+            request = build_pass2_request(
+                candidate_id=candidate.id,
+                window_start=candidate.start,
+                window_end=candidate.end,
+                anchors=anchors,
+                timeline=bounded_timeline,
+                max_frames=int(target_config.vision.pass2_max_frames),
+            )
+            cache_key = _hash({
+                "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                "source_id": source.id,
+                "analysis_id": analysis.analysis_id,
+                "analysis_run_id": timeline["analysis_run_id"],
+                "analysis_artifact_sha256": analysis.verified_sha256,
+                "candidate_id": candidate.id,
+                "source_range": [round(candidate.start, 3), round(candidate.end, 3)],
+                "request": request,
+                "timeline_inputs": timeline["input_fingerprints"],
+                "provider": provider_label,
+                "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                "prompt_version": target_config.vision.pass2_prompt_version,
+                "vision_schema_version": target_config.vision.schema_version,
+                "frame_width": target_config.vision.frame_width,
+            })
+            artifact_path = cache_directory / (
+                f"{safe_name(candidate.id, 'candidate')}-{cache_key[:20]}.json"
+            )
+            expected = {
+                "cache_key": cache_key,
+                "source_id": source.id,
+                "analysis_id": analysis.analysis_id,
+                "analysis_run_id": str(timeline["analysis_run_id"]),
+                "analysis_artifact_sha256": analysis.verified_sha256,
+                "candidate_id": candidate.id,
+                "source_range": {
+                    "start_seconds": round(candidate.start, 3),
+                    "end_seconds": round(candidate.end, 3),
+                },
+                "provider": provider_label,
+                "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                "prompt_version": target_config.vision.pass2_prompt_version,
+                "vision_schema_version": target_config.vision.schema_version,
+                "request": request,
+            }
+            cached = _read_candidate_composition_pass2(
+                artifact_path, expected=expected, timeline=bounded_timeline,
+            )
+            if cached is not None:
+                tracker.start(stage_name, cache_key, cache_hit=True)
+                candidate.vision_pass2_evidence = dict(cached["vision_pass2_evidence"])
+                usable = has_usable_composition_evidence(candidate.to_dict(), bounded_timeline)
+                tracker.finish(stage_name, "completed" if usable else "warning")
+                outcomes[candidate.id] = _candidate_composition_pass2_summary(
+                    cached, artifact_path=artifact_path, cache_hit=True, usable=usable,
+                )
+                continue
+
+            tracker.start(stage_name, cache_key, cache_hit=False)
+            if gateway is None:
+                provider = None
+                if target_config.vision.enabled and target_config.optional_visual_features:
+                    try:
+                        provider = get_vision_provider(target_config, self.mock_ai)
+                    except ClipEngineError as error:
+                        self.warnings.append(
+                            "Candidate composition Vision uses local fallback: "
+                            f"{sanitize_api_error(error)}"
+                        )
+                gateway = VisionGateway(
+                    config=target_config,
+                    cache_directory=self.root / "work" / "vision-cache",
+                    provider=provider,
+                )
+            try:
+                result = gateway.analyze_pass2(
+                    source=source.path, timeline=bounded_timeline, request=request,
+                )
+                evidence = {
+                    "schema_version": PASS2_EVIDENCE_SCHEMA_VERSION,
+                    "status": str(result.get("status") or "completed"),
+                    "reason": None,
+                    "result": result,
+                }
+            except Exception as error:
+                evidence = {
+                    "schema_version": PASS2_EVIDENCE_SCHEMA_VERSION,
+                    "status": "skipped",
+                    "reason": sanitize_api_error(error),
+                    "result": None,
+                }
+            lineage_id = f"candidate-composition-pass2-{cache_key[:24]}"
+            evidence["lineage_ref"] = lineage_id
+            evidence["artifact_ref"] = str(artifact_path)
+            artifact = {
+                "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                "cache_key": cache_key,
+                "lineage": {
+                    **expected,
+                    "lineage_id": lineage_id,
+                    "trigger": "draft_candidate_composition_evidence_gap",
+                    "analysis_artifact_ref": str(self.analysis_artifact_path),
+                    "created_at": utc_now(),
+                    "bounded_frame_count": len(request["frames"]),
+                    "analysis_snapshot_mutated": False,
+                },
+                "vision_pass2_evidence": evidence,
+            }
+            write_json(artifact_path, artifact)
+            candidate.vision_pass2_evidence = evidence
+            usable = has_usable_composition_evidence(candidate.to_dict(), bounded_timeline)
+            tracker.finish(stage_name, "completed" if usable else "warning")
+            outcomes[candidate.id] = _candidate_composition_pass2_summary(
+                artifact, artifact_path=artifact_path, cache_hit=False, usable=usable,
+            )
+        return outcomes
 
     def _preflight_selected_candidates(
         self,
@@ -1993,6 +2230,7 @@ class Pipeline:
         clip_count_recommendation: dict[str, Any],
         final_scored: list[Any],
         selected: list[Any],
+        composition_vision: dict[str, dict[str, Any]],
         transformation: dict[str, Any],
         production: dict[str, Any],
         work_directory: Path,
@@ -2022,7 +2260,7 @@ class Pipeline:
         creative_previews = self._run_production_render(
             tracker, production, audio, source, transcript, work_directory, output_directory,
             visual_analysis,
-            creative_candidates=final_scored,
+            creative_candidates=selected,
             multimodal_timeline=multimodal_timeline,
             story_units=story_units,
             render_profile="creative_preview",
@@ -2051,6 +2289,7 @@ class Pipeline:
                 "output_file": None,
                 "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
+                "composition_vision_evidence": composition_vision.get(candidate_id),
             }
             if transformation_item.get("status") not in {"completed", "fallback"}:
                 stage = str(transformation_item.get("stage") or f"transformation_result:{candidate_id}")
@@ -4625,6 +4864,79 @@ def _hash(value: Any) -> str:
             return asdict(cast(Any, item))
         return str(item)
     return stable_text_hash(json.dumps(value, sort_keys=True, ensure_ascii=False, default=default))
+
+
+def _read_candidate_composition_pass2(
+    path: Path,
+    *,
+    expected: dict[str, Any],
+    timeline: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Read a candidate-owned PASS 2 artifact only when all lineage matches."""
+
+    try:
+        data = read_json(path, None)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("schema_version") != DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION
+        or data.get("cache_key") != expected["cache_key"]
+        or not isinstance(data.get("lineage"), dict)
+        or not isinstance(data.get("vision_pass2_evidence"), dict)
+    ):
+        return None
+    lineage = data["lineage"]
+    if any(lineage.get(key) != value for key, value in expected.items()):
+        return None
+    evidence = data["vision_pass2_evidence"]
+    if evidence.get("schema_version") != PASS2_EVIDENCE_SCHEMA_VERSION:
+        return None
+    result = evidence.get("result")
+    if result is None:
+        return data if evidence.get("status") == "skipped" else None
+    try:
+        validate_pass2_request(result["request"], timeline)
+        validate_pass2_result(
+            result, timeline=timeline, request=expected["request"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        result.get("candidate_id") != expected["candidate_id"]
+        or result.get("analysis_run_id") != expected["analysis_run_id"]
+        or result.get("request") != expected["request"]
+    ):
+        return None
+    return data
+
+
+def _candidate_composition_pass2_summary(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: Path,
+    cache_hit: bool,
+    usable: bool,
+) -> dict[str, Any]:
+    lineage = artifact["lineage"]
+    evidence = artifact["vision_pass2_evidence"]
+    result = evidence.get("result")
+    observations = result.get("observations", []) if isinstance(result, dict) else []
+    return {
+        "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+        "status": str(evidence.get("status") or "skipped"),
+        "cache_hit": cache_hit,
+        "usable_composition_evidence": usable,
+        "artifact_ref": str(artifact_path),
+        "lineage_id": str(lineage.get("lineage_id") or ""),
+        "cache_key": str(artifact.get("cache_key") or ""),
+        "model": str(lineage.get("model") or ""),
+        "provider": str(lineage.get("provider") or ""),
+        "source_range": dict(lineage.get("source_range") or {}),
+        "bounded_frame_count": int(lineage.get("bounded_frame_count") or 0),
+        "observation_count": len(observations) if isinstance(observations, list) else 0,
+        "analysis_snapshot_mutated": False,
+    }
 
 
 def _file_fingerprint(path: Path) -> dict[str, Any] | None:

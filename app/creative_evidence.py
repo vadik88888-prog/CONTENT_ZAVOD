@@ -141,15 +141,12 @@ def build_native_evidence_handoff(
     for index, row in enumerate(visual_rows, start=1):
         timestamp = _timestamp(row)
         source = _source_interval_at(mapping, timestamp)
-        bounds = _target_bounds(row)
-        target = _attention_target(row, composition_intent)
-        if source is None or bounds is None or target is None:
+        usable = _usable_composition_row(row, composition_intent)
+        if source is None or usable is None:
             continue
+        bounds, target, confidence = usable
         output = mapping.map_interval(source)
         if output is None:
-            continue
-        confidence = _confidence(row.get("confidence"), default=0.0)
-        if confidence < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE:
             continue
         scene_id = _scene_at(timeline, timestamp)
         target_ref = _id("target", target.value, scene_id or candidate_id)
@@ -691,6 +688,45 @@ def _visual_rows(candidate: Mapping[str, Any], timeline: Mapping[str, Any]) -> l
     if isinstance(result, Mapping):
         rows.extend(item for item in result.get("observations", []) if isinstance(item, Mapping))
     return rows
+
+
+def has_usable_composition_evidence(
+    candidate: Mapping[str, Any], timeline: Mapping[str, Any],
+) -> bool:
+    """Use the native Composition owner's acceptance rules before Draft.
+
+    This is a read-only admission check. It deliberately ignores observations
+    outside the selected candidate range and rejects local fallback rows.
+    """
+
+    start = _float(candidate.get("start"))
+    end = _float(candidate.get("end"))
+    if start is None or end is None or not start < end:
+        return False
+    intent = candidate.get("composition_intent")
+    composition_intent = intent if isinstance(intent, Mapping) else {}
+    return any(
+        start <= _timestamp(row) <= end
+        and _usable_composition_row(row, composition_intent) is not None
+        for row in _visual_rows(candidate, timeline)
+    )
+
+
+def _usable_composition_row(
+    row: Mapping[str, Any], composition_intent: Mapping[str, Any],
+) -> tuple[NormalizedRect, AttentionTarget, float] | None:
+    if str(row.get("origin") or "") == "local_fallback":
+        return None
+    bounds = _target_bounds(row)
+    target = _attention_target(row, composition_intent)
+    confidence = _confidence(row.get("confidence"), default=0.0)
+    if (
+        bounds is None
+        or target is None
+        or confidence < MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
+    ):
+        return None
+    return bounds, target, confidence
 
 
 def _candidate_story_ids(candidate: Mapping[str, Any]) -> tuple[str, ...]:

@@ -426,6 +426,102 @@ def build_pass2_request(
     return validate_pass2_request(request, timeline)
 
 
+def build_candidate_bounded_pass2_timeline(
+    timeline: dict[str, Any],
+    *,
+    candidate_id: str,
+    window_start: float,
+    window_end: float,
+    anchors: dict[str, float | None],
+    max_frames: int = 7,
+) -> dict[str, Any]:
+    """Return a runtime-only timeline with enough in-range frames for PASS 2.
+
+    The source analysis timeline is intentionally never modified. Long sparse
+    sources may have no globally selected keyframe inside a later Draft
+    candidate even though PASS 2 can safely inspect that bounded range. This
+    adapter adds deterministic candidate-owned frame references to a deep copy
+    and keeps the original analysis identity for lineage validation.
+    """
+
+    validate_multimodal_timeline(timeline)
+    if not candidate_id or window_start < 0 or not window_start < window_end:
+        raise VisionContractError("Candidate-bounded PASS 2 window is invalid.")
+    if not 3 <= max_frames <= 7:
+        raise VisionContractError("Candidate-bounded PASS 2 max_frames must be between 3 and 7.")
+    if set(anchors) != {"hook", "action", "reaction", "payoff"}:
+        raise VisionContractError("Candidate-bounded PASS 2 anchors are invalid.")
+    duration = float(timeline["source_duration_seconds"])
+    if window_end > duration + 0.001:
+        raise VisionContractError("Candidate-bounded PASS 2 window exceeds the source duration.")
+
+    in_range = [
+        item for item in timeline["keyframes"]
+        if window_start <= float(item["time_seconds"]) <= window_end
+    ]
+    if len(in_range) >= 3:
+        return timeline
+
+    runtime = json.loads(json.dumps(timeline))
+    span = window_end - window_start
+    proposed = [
+        float(value) for value in anchors.values()
+        if value is not None and window_start <= float(value) <= window_end
+    ]
+    proposed.extend(
+        window_start + span * fraction
+        for fraction in (0.08, 0.24, 0.42, 0.60, 0.78, 0.92)
+    )
+    existing_times = {round(float(item["time_seconds"]), 3) for item in in_range}
+    added: list[dict[str, Any]] = []
+    for raw_timestamp in proposed:
+        timestamp = round(min(window_end, max(window_start, raw_timestamp)), 3)
+        if timestamp in existing_times:
+            continue
+        existing_times.add(timestamp)
+        identity = stable_text_hash(f"{candidate_id}|{timestamp:.3f}")[:16]
+        added.append({
+            "keyframe_id": f"candidate-keyframe-{identity}",
+            "time_seconds": timestamp,
+            "selection_reasons": ["draft_candidate_composition_gap"],
+            "relevance_score": 1.0,
+            "confidence": 1.0,
+            "analysis_status": "candidate_bounded_pass2_planned",
+            "future_vision_api_eligible": True,
+            "evidence_refs": [],
+            "provenance": [{
+                "artifact": "candidate-composition-pass2.json",
+                "locator": f"candidate/{candidate_id}/source-range",
+                "method": "deterministic_candidate_bounded_frame_plan",
+            }],
+        })
+        if len(in_range) + len(added) >= max_frames:
+            break
+    if len(in_range) + len(added) < 3:
+        raise VisionContractError("Candidate-bounded PASS 2 could not plan three distinct frames.")
+
+    runtime["keyframes"] = sorted(
+        [*runtime["keyframes"], *added],
+        key=lambda item: (float(item["time_seconds"]), str(item["keyframe_id"])),
+    )
+    diagnostics = runtime["diagnostics"]["keyframes"]
+    diagnostics["count"] = len(runtime["keyframes"])
+    diagnostics["limit"] = max(int(diagnostics.get("limit") or 0), len(runtime["keyframes"]))
+    diagnostics["analyzed_count"] = sum(
+        item.get("analysis_status") == "existing_visual_evidence"
+        for item in runtime["keyframes"]
+    )
+    diagnostics["future_vision_api_eligible_count"] = sum(
+        bool(item.get("future_vision_api_eligible")) for item in runtime["keyframes"]
+    )
+    diagnostics["candidate_bounded_pass2_added_count"] = len(added)
+    return validate_multimodal_timeline(
+        runtime,
+        expected_source_id=str(timeline["source_id"]),
+        expected_analysis_run_id=str(timeline["analysis_run_id"]),
+    )
+
+
 def validate_pass2_request(data: dict[str, Any], timeline: dict[str, Any]) -> dict[str, Any]:
     validate_multimodal_timeline(timeline)
     if not isinstance(data, dict) or set(data) != {
@@ -547,7 +643,7 @@ class VisionGateway:
             "observations": observations,
             "diagnostics": artifact["diagnostics"],
         }
-        return validate_pass2_result(result)
+        return validate_pass2_result(result, timeline=timeline, request=request)
 
     def _analyze(
         self,
@@ -885,7 +981,12 @@ def validate_vision_artifact(data: dict[str, Any], timeline: dict[str, Any]) -> 
     return data
 
 
-def validate_pass2_result(data: dict[str, Any]) -> dict[str, Any]:
+def validate_pass2_result(
+    data: dict[str, Any],
+    *,
+    timeline: dict[str, Any] | None = None,
+    request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(data, dict) or set(data) != {
         "schema_version", "candidate_id", "analysis_run_id", "request", "status",
         "verification", "observations", "diagnostics",
@@ -900,6 +1001,36 @@ def validate_pass2_result(data: dict[str, Any]) -> dict[str, Any]:
         raise VisionContractError("PASS 2 visibility decisions must be boolean.")
     if verification["continuity_risk"] not in {"low", "medium", "high", "unknown"}:
         raise VisionContractError("PASS 2 continuity risk is invalid.")
+    if not isinstance(data["observations"], list) or not isinstance(data["diagnostics"], dict):
+        raise VisionContractError("PASS 2 observations or diagnostics are invalid.")
+    if timeline is not None:
+        validate_multimodal_timeline(timeline)
+        expected_request = validate_pass2_request(request or data["request"], timeline)
+        if (
+            data["request"] != expected_request
+            or data["candidate_id"] != expected_request["candidate_id"]
+            or data["analysis_run_id"] != timeline["analysis_run_id"]
+        ):
+            raise VisionContractError("PASS 2 result lineage does not match its request.")
+        expected_frames = {
+            str(item["keyframe_id"]): float(item["timestamp"])
+            for item in expected_request["frames"]
+        }
+        seen: set[str] = set()
+        for observation in data["observations"]:
+            if not isinstance(observation, dict):
+                raise VisionContractError("PASS 2 observation is invalid.")
+            keyframe_id = str(observation.get("keyframe_id") or "")
+            timestamp = _number(observation.get("timestamp"))
+            if (
+                keyframe_id not in expected_frames
+                or keyframe_id in seen
+                or timestamp is None
+                or abs(timestamp - expected_frames[keyframe_id]) > 0.05
+            ):
+                raise VisionContractError("PASS 2 observation does not match a requested frame.")
+            _validate_persisted_observation(observation)
+            seen.add(keyframe_id)
     return data
 
 

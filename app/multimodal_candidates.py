@@ -311,6 +311,12 @@ def enrich_shortlist_with_pass2(
     return candidates
 
 
+def candidate_pass2_anchors(candidate: Candidate) -> dict[str, float | None]:
+    """Expose the existing deterministic PASS 2 anchors for Draft reuse."""
+
+    return _pass2_anchors(candidate)
+
+
 def project_candidate_audio_evidence(
     candidates: list[Candidate], timeline: dict[str, Any], profile_id: str,
 ) -> list[Candidate]:
