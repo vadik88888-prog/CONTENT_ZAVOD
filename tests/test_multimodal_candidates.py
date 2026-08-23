@@ -97,7 +97,7 @@ def test_combined_evidence_expands_story_range_and_preserves_full_provenance() -
 
     provenance = expanded.multimodal_provenance
     assert expanded.candidate_kind == "multimodal"
-    assert provenance["schema_version"] == "6C.2"
+    assert provenance["schema_version"] == "6C.3"
     assert provenance["story_unit_ids"] == expanded.story_unit_ids
     assert provenance["transcript_evidence"]
     assert provenance["audio_evidence"]
@@ -112,13 +112,16 @@ def test_combined_evidence_expands_story_range_and_preserves_full_provenance() -
     assert restored.multimodal_provenance == provenance
 
 
-def test_audio_peak_seed_uses_existing_candidate_and_boundary_owners() -> None:
+def test_audio_peak_seeds_canonicalize_to_existing_source_moment_without_losing_lineage() -> None:
     transcript, audio, scenes, visual, config, vision = _candidate_inputs()
     audio.update({
-        "peak_regions": [{
-            "region_id": "audio-peak-001", "start": 3.0, "end": 13.0,
-            "peak_time": 8.0, "score": 0.94, "source": "audio_signal_peak",
-        }],
+        "peak_regions": [
+            {
+                "region_id": f"audio-peak-00{index}", "start": 3.0, "end": 13.0,
+                "peak_time": 8.0 + index / 10, "score": 0.94, "source": "audio_signal_peak",
+            }
+            for index in range(1, 4)
+        ],
         "activity_intervals": [{"start": 7.5, "end": 8.5}],
         "dead_zones": [],
     })
@@ -139,11 +142,22 @@ def test_audio_peak_seed_uses_existing_candidate_and_boundary_owners() -> None:
     candidates, _ = generate_multimodal_candidates(
         content_map, transcript, features, scenes, timeline, vision, config,
     )
-    seed = next(item for item in candidates if item.id.startswith("candidate-audio-"))
+    canonical = next(
+        item for item in candidates
+        if item.multimodal_provenance.get("canonicalization", {}).get("absorbed_audio_seed_candidates")
+    )
+    lineage = canonical.multimodal_provenance["canonicalization"]
 
-    assert seed.reason == "Bounded audio seed resolved by the existing SemanticBoundaryEngine."
-    assert "candidate_source:audio_seed" in seed.multimodal_provenance["generation"]["reasons"]
-    assert seed.boundary_diagnostics["boundary_decision"]["candidate_id"] == seed.id
+    assert not any(item.id.startswith("candidate-audio-") for item in candidates)
+    assert canonical.id.startswith("candidate-chapter-")
+    assert "candidate_source:audio_seed" in canonical.multimodal_provenance["generation"]["reasons"]
+    assert canonical.boundary_diagnostics["boundary_decision"]["candidate_id"] == canonical.id
+    assert lineage["canonical_candidate_id"] == canonical.id
+    assert len(lineage["absorbed_audio_seed_candidates"]) == 3
+    assert {
+        item["seed"]["seed_id"] for item in lineage["absorbed_audio_seed_candidates"]
+    } == {"audio-peak-001", "audio-peak-002", "audio-peak-003"}
+    assert canonical.multimodal_provenance["audio_evidence"]
 
 
 def _pass2_timeline() -> dict[str, Any]:

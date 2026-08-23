@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -21,7 +22,8 @@ from app.utils import stable_text_hash
 from app.vision_intelligence import build_pass2_request
 
 
-CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.2"
+CANDIDATE_PROVENANCE_SCHEMA_VERSION = "6C.3"
+CANDIDATE_MOMENT_CANONICALIZATION_SCHEMA_VERSION = "candidate-moment-canonicalization.1"
 PASS2_EVIDENCE_SCHEMA_VERSION = "6C.pass2-evidence.1"
 
 
@@ -83,7 +85,139 @@ def generate_multimodal_candidates(
     audio_seeds = audio_seeds[:min(available, int(config.audio_analysis.semantic_max_peak_regions))]
     available -= len(audio_seeds)
     composites = composites[:min(available, int(config.candidate_generation.multimodal_max_composite_candidates))]
-    return baseline + audio_seeds + composites, baseline_count + len(audio_seeds) + len(composites)
+    generated = baseline + audio_seeds + composites
+    # Audio peaks are proposals, not independent source moments.  Several
+    # bounded peak regions can resolve through SemanticBoundaryEngine to the
+    # exact same story interval as an existing candidate.  Canonicalize that
+    # identity before scoring, so the established Diversity/selection owner
+    # sees one moment while all seed lineage remains attached to it.
+    return (
+        canonicalize_source_moment_candidates(generated),
+        baseline_count + len(audio_seeds) + len(composites),
+    )
+
+
+def canonicalize_source_moment_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    """Merge exact resolved source moments while retaining every proposal lineage.
+
+    This is intentionally narrower than ranking diversity: it identifies the
+    same already-resolved source interval, StoryUnit lineage, and transcript
+    text.  It never collapses merely similar moments and leaves MMR selection
+    as the sole owner of cross-moment diversity.
+    """
+
+    groups: dict[tuple[object, ...], list[Candidate]] = {}
+    for candidate in candidates:
+        groups.setdefault(_source_moment_key(candidate), []).append(candidate)
+
+    canonical: list[Candidate] = []
+    for variants in groups.values():
+        primary = min(variants, key=_canonical_candidate_sort_key)
+        if len(variants) > 1:
+            _merge_source_moment_provenance(primary, variants)
+        canonical.append(primary)
+    return canonical
+
+
+def _source_moment_key(candidate: Candidate) -> tuple[object, ...]:
+    story_ids = tuple(dict.fromkeys(candidate.story_unit_ids or ([candidate.story_unit_id] if candidate.story_unit_id else [])))
+    text = " ".join(candidate.text.split()).casefold()
+    return (
+        round(candidate.start, 3),
+        round(candidate.end, 3),
+        story_ids,
+        tuple(candidate.transcript_segment_ids),
+        stable_text_hash(text),
+    )
+
+
+def _canonical_candidate_sort_key(candidate: Candidate) -> tuple[bool, str]:
+    generation = candidate.multimodal_provenance.get("generation", {})
+    is_audio_seed = isinstance(generation, dict) and "candidate_source:audio_seed" in generation.get("reasons", [])
+    # Prefer the stable StoryUnit/composite identity when present.  An audio
+    # seed remains canonical only when it is the sole resolved proposal.
+    return is_audio_seed, candidate.id
+
+
+def _merge_source_moment_provenance(primary: Candidate, variants: list[Candidate]) -> None:
+    provenance = dict(primary.multimodal_provenance or {})
+    generation = dict(provenance.get("generation") or {})
+    ordered = sorted(variants, key=lambda item: item.id)
+    absorbed = [item for item in ordered if item is not primary]
+
+    for field in ("transcript_evidence", "audio_evidence", "visual_evidence", "keyframe_evidence"):
+        provenance[field] = _unique_provenance_items(
+            entry
+            for candidate in ordered
+            for entry in (candidate.multimodal_provenance or {}).get(field, [])
+            if isinstance(entry, dict)
+        )
+    generation["reasons"] = _unique_strings(
+        reason
+        for candidate in ordered
+        for reason in ((candidate.multimodal_provenance or {}).get("generation") or {}).get("reasons", [])
+    )
+    generation["anchors"] = _unique_provenance_items(
+        entry
+        for candidate in ordered
+        for entry in ((candidate.multimodal_provenance or {}).get("generation") or {}).get("anchors", [])
+        if isinstance(entry, dict)
+    )
+    generation["original_story_unit_ranges"] = _unique_provenance_items(
+        entry
+        for candidate in ordered
+        for entry in ((candidate.multimodal_provenance or {}).get("generation") or {}).get("original_story_unit_ranges", [])
+        if isinstance(entry, dict)
+    )
+    generation["initial_filter_score"] = round(max(
+        float(((candidate.multimodal_provenance or {}).get("generation") or {}).get("initial_filter_score", 0))
+        for candidate in ordered
+    ), 6)
+    generation["range_expanded"] = any(
+        bool(((candidate.multimodal_provenance or {}).get("generation") or {}).get("range_expanded"))
+        for candidate in ordered
+    )
+    generation["resolved_candidate_range"] = {"start": primary.start, "end": primary.end}
+    provenance["generation"] = generation
+    provenance["canonicalization"] = {
+        "schema_version": CANDIDATE_MOMENT_CANONICALIZATION_SCHEMA_VERSION,
+        "canonical_candidate_id": primary.id,
+        "merged_candidate_ids": [candidate.id for candidate in ordered],
+        "absorbed_audio_seed_candidates": [
+            {
+                "candidate_id": candidate.id,
+                "seed": dict((((candidate.multimodal_provenance or {}).get("generation") or {}).get("audio_seed") or {})),
+            }
+            for candidate in absorbed
+            if "candidate_source:audio_seed" in (((candidate.multimodal_provenance or {}).get("generation") or {}).get("reasons") or [])
+        ],
+    }
+    primary.multimodal_provenance = provenance
+    primary.explanations = _unique_strings(
+        explanation for candidate in ordered for explanation in candidate.explanations
+    )
+
+
+def _unique_strings(values: object) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values if str(value).strip()))
+
+
+def _unique_provenance_items(values: object) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        key = str(value.get("event_id") or value.get("keyframe_id") or stable_text_hash(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ))
+        unique.setdefault(key, value)
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            float(item.get("start_seconds", item.get("time_seconds", 0)) or 0),
+            str(item.get("event_id") or item.get("keyframe_id") or ""),
+        ),
+    )
 
 
 def enrich_shortlist_with_pass2(
@@ -301,6 +435,13 @@ def _audio_seed_candidates(
             audio_profile_id=audio_profile_id,
             original_ranges=[{"story_unit_id": unit.story_unit_id, "start": unit.start, "end": unit.end}],
         )
+        candidate.multimodal_provenance["generation"]["audio_seed"] = {
+            "seed_id": seed_id,
+            "event_id": str(signal["evidence"].get("event_id") or ""),
+            "event_type": str(signal["evidence"].get("event_type") or ""),
+            "source_ref": str(signal["source_ref"]),
+            "source_range": {"start": signal["start"], "end": signal["end"]},
+        }
         candidate.reason = "Bounded audio seed resolved by the existing SemanticBoundaryEngine."
         result.append(candidate)
     return result
