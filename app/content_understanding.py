@@ -41,6 +41,7 @@ from app.diversity import (
 from app.models import Candidate, ScoredCandidate
 from app.multimodal_evidence import evidence_for_range, validate_multimodal_timeline
 from app.production_models import BoundaryDecision
+from app.speech_clarity_policy import assess_speech_clarity_materiality
 from app.transcript_features import candidate_transcript_features
 from app.utils import stable_text_hash
 
@@ -55,7 +56,7 @@ SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
-PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.2"
+PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.3"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -2619,13 +2620,10 @@ def expand_publishable_story_candidates(
         has_development = bool(base_roles & {"action", "development"})
         add_before = bool(before is not None and "setup" in before_roles and has_development and base_needs_result)
         add_after = bool(after is not None and after_roles & {"result", "reaction"} and has_development and base_needs_result)
-        expanded_units = [*([before] if add_before else []), *base_units, *([after] if add_after else [])]
-        expanded_roles = _story_evidence_roles(expanded_units)
-        if not (
-            (add_before or add_after)
-            and {"setup", "action"}.issubset(expanded_roles)
-            and bool(expanded_roles & {"result", "reaction"})
-        ):
+        adjacent_options = _grounded_expansion_options(
+            base_units, before if add_before else None, after if add_after else None,
+        )
+        if not adjacent_options:
             reports.append(_story_expansion_report(
                 candidate, original_range, "not_expanded", "no_additional_grounded_story_arc",
                 before=before, after=after, before_roles=before_roles, after_roles=after_roles,
@@ -2635,23 +2633,62 @@ def expand_publishable_story_candidates(
         primary = max(base_units, key=lambda unit: (
             unit.standalone_score, unit.completeness_score, unit.story_unit_id,
         ))
-        resolution = engine.resolve(
-            _combined_story_unit(expanded_units, primary), transcript, transcript_features, scenes,
-        )
-        if (
-            not resolution.diagnostics.get("eligible", False)
-            or resolution.end - resolution.start > maximum_duration + 0.001
-        ):
-            reason = (
-                "expanded_boundary_not_eligible"
-                if not resolution.diagnostics.get("eligible", False)
-                else "expanded_range_exceeds_maximum_duration"
+        feasible_options: list[dict[str, Any]] = []
+        rejected_options: list[dict[str, Any]] = []
+        for expanded_units in adjacent_options:
+            expanded_roles = _story_evidence_roles(expanded_units)
+            resolution = engine.resolve(
+                _combined_story_unit(expanded_units, primary), transcript, transcript_features, scenes,
             )
+            option = {
+                "story_unit_ids": [unit.story_unit_id for unit in expanded_units],
+                "added_story_unit_ids": [
+                    unit.story_unit_id for unit in expanded_units if unit.story_unit_id not in {
+                        base.story_unit_id for base in base_units
+                    }
+                ],
+                "expanded_range": _range_payload(resolution.start, resolution.end),
+                "story_arc_roles": sorted(expanded_roles),
+            }
+            if not resolution.diagnostics.get("eligible", False):
+                rejected_options.append({**option, "reason": "expanded_boundary_not_eligible"})
+                continue
+            if resolution.end - resolution.start > maximum_duration + 0.001:
+                rejected_options.append({**option, "reason": "expanded_range_exceeds_maximum_duration"})
+                continue
+            materiality = _expansion_speech_clarity_materiality(
+                transcript_features, resolution.start, resolution.end,
+            )
+            option["a1_speech_clarity"] = materiality
+            if materiality is not None and materiality["material"]:
+                rejected_options.append({**option, "reason": "a1_speech_clarity_material"})
+                continue
+            feasible_options.append({
+                **option,
+                "units": expanded_units,
+                "resolution": resolution,
+                "roles": expanded_roles,
+            })
+
+        if not feasible_options:
             reports.append(_story_expansion_report(
-                candidate, original_range, "not_expanded", reason,
+                candidate, original_range, "not_expanded", "no_a1_feasible_grounded_story_arc",
                 before=before, after=after, before_roles=before_roles, after_roles=after_roles,
+                rejected_options=rejected_options,
             ))
             continue
+
+        chosen = max(
+            feasible_options,
+            key=lambda option: (
+                len(option["added_story_unit_ids"]),
+                option["resolution"].end - option["resolution"].start,
+                tuple(option["story_unit_ids"]),
+            ),
+        )
+        expanded_units = chosen["units"]
+        expanded_roles = chosen["roles"]
+        resolution = chosen["resolution"]
 
         diagnostics = dict(resolution.diagnostics)
         # The original selected interval remains the rough range; the typed
@@ -2670,13 +2707,16 @@ def expand_publishable_story_candidates(
             "original_range": original_range,
             "expanded_range": _range_payload(resolution.start, resolution.end),
             "added_story_evidence": _added_story_evidence(
-                before if add_before else None, after if add_after else None,
+                next((unit for unit in expanded_units if unit is before), None),
+                next((unit for unit in expanded_units if unit is after), None),
                 before_roles, after_roles,
             ),
             "story_arc_roles": sorted(expanded_roles),
+            "a1_speech_clarity": chosen["a1_speech_clarity"],
+            "rejected_adjacent_options": rejected_options,
             "brain_reused": True,
             "vision_reused": True,
-            "reason": "adjacent_story_evidence_added_setup_action_and_result_or_reaction",
+            "reason": "a1_feasible_adjacent_story_evidence_added_setup_action_and_result_or_reaction",
         }
         diagnostics["publishable_story_expansion"] = expansion
         diagnostics["boundary_decision"] = _boundary_decision_payload(candidate.id, diagnostics)
@@ -2709,6 +2749,53 @@ def _candidate_story_units(
     return sorted(
         (stories[index_by_id[identifier]] for identifier in dict.fromkeys(identifiers)),
         key=lambda unit: (unit.start, unit.end, unit.story_unit_id),
+    )
+
+
+def _grounded_expansion_options(
+    base_units: list[StoryUnit], before: StoryUnit | None, after: StoryUnit | None,
+) -> list[list[StoryUnit]]:
+    """Return only adjacent evidence combinations that retain a full story arc."""
+
+    options: list[list[StoryUnit]] = []
+    for units in (
+        [*([before] if before is not None else []), *base_units, *([after] if after is not None else [])],
+        [*([before] if before is not None else []), *base_units],
+        [*base_units, *([after] if after is not None else [])],
+    ):
+        if len(units) == len(base_units) or units in options:
+            continue
+        roles = _story_evidence_roles(units)
+        if {"setup", "action"}.issubset(roles) and bool(roles & {"result", "reaction"}):
+            options.append(units)
+    return options
+
+
+def _expansion_speech_clarity_materiality(
+    transcript_features: dict[str, Any], start: float, end: float,
+) -> dict[str, Any] | None:
+    """Reuse A-1's exact materiality policy before accepting added source context."""
+
+    mappings: list[dict[str, Any]] = []
+    for raw in transcript_features.get("segments", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            segment_start = float(raw["start"])
+            segment_end = float(raw["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if segment_end <= start or segment_start >= end:
+            continue
+        mappings.append({
+            "segment_id": raw.get("id"),
+            "confidence": raw.get("transcript_confidence"),
+            "start_seconds": segment_start,
+            "end_seconds": segment_end,
+        })
+    return assess_speech_clarity_materiality(
+        mappings,
+        coverage_ranges=[{"start_seconds": start, "end_seconds": end}],
     )
 
 
@@ -2771,6 +2858,7 @@ def _story_expansion_report(
     candidate: Candidate, original_range: dict[str, float], decision: str, reason: str,
     *, before: StoryUnit | None = None, after: StoryUnit | None = None,
     before_roles: set[str] | None = None, after_roles: set[str] | None = None,
+    rejected_options: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
@@ -2782,6 +2870,7 @@ def _story_expansion_report(
         "adjacent_story_evidence": _added_story_evidence(
             before, after, before_roles or set(), after_roles or set(),
         ),
+        "rejected_adjacent_options": rejected_options or [],
         "brain_reused": True,
         "vision_reused": True,
     }

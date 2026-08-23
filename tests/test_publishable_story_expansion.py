@@ -35,6 +35,11 @@ def _story_fixture() -> tuple[dict, dict, dict, AppConfig]:
         ],
     }
     features = analyse_transcript(transcript, config.transcript_features)
+    # Story Expansion feasibility reuses the persisted A-1 evidence.  Keep the
+    # baseline fixture intelligible; dedicated cases below exercise warnings
+    # and material low-confidence spans.
+    for segment in features["segments"]:
+        segment["transcript_confidence"] = 0.9
     source = {"id": transcript["source_id"], "display_name": "story-expansion.mp4"}
     metadata = {"duration": transcript["duration"]}
     profile = build_video_content_profile(
@@ -120,6 +125,45 @@ def test_self_contained_short_candidate_is_not_padded_by_adjacent_story_units() 
     assert (selected.candidate.start, selected.candidate.end) == pytest.approx(original_range, abs=0.001)
     assert reports[0]["decision"] == "not_expanded"
     assert reports[0]["reason"] == "no_additional_grounded_story_arc"
+
+
+def test_expansion_uses_a1_feasible_result_side_when_setup_is_materially_unclear() -> None:
+    content_map, transcript, features, config = _story_fixture()
+    for segment in features["segments"]:
+        segment["transcript_confidence"] = 0.9
+    features["segments"][0]["transcript_confidence"] = 0.323
+    selected = _selected_middle_candidate(content_map, transcript, features, config)
+
+    reports = expand_publishable_story_candidates(
+        [selected], content_map, transcript, features, {"boundaries": []}, config,
+    )
+
+    candidate = selected.candidate
+    assert (candidate.start, candidate.end) == pytest.approx((234.79, 265.07), abs=0.001)
+    assert candidate.story_unit_ids == [
+        content_map["story_units"][1]["story_unit_id"],
+        content_map["story_units"][2]["story_unit_id"],
+    ]
+    expansion = reports[0]
+    assert expansion["a1_speech_clarity"] is None
+    rejected = next(option for option in expansion["rejected_adjacent_options"] if option["reason"] == "a1_speech_clarity_material")
+    assert "LOW_CONFIDENCE_DURATION_MATERIAL" in rejected["a1_speech_clarity"]["materiality_reasons"]
+
+
+def test_expansion_safely_falls_back_when_no_adjacent_arc_passes_a1() -> None:
+    content_map, transcript, features, config = _story_fixture()
+    features["segments"][0]["transcript_confidence"] = 0.323
+    features["segments"][2]["transcript_confidence"] = 0.323
+    selected = _selected_middle_candidate(content_map, transcript, features, config)
+
+    reports = expand_publishable_story_candidates(
+        [selected], content_map, transcript, features, {"boundaries": []}, config,
+    )
+
+    assert (selected.candidate.start, selected.candidate.end) == pytest.approx((234.79, 249.84), abs=0.001)
+    assert reports[0]["decision"] == "not_expanded"
+    assert reports[0]["reason"] == "no_a1_feasible_grounded_story_arc"
+    assert reports[0]["rejected_adjacent_options"]
 
 
 def test_final_selection_persists_post_selection_story_expansion(tmp_path) -> None:
