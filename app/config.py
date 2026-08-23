@@ -36,7 +36,7 @@ class AIConfig:
     """Configuration shared by every AI provider."""
 
     provider: str = "openai"
-    model: str = "gpt-5-mini"
+    model: str = "gpt-5.6-terra"
     max_retries: int = 2
     # USD per token. Kept in configuration because prices can change.
     input_token_price: float | None = 0.00000025

@@ -74,7 +74,7 @@ def test_openai_provider_maps_structured_response() -> None:
         ),
     ))
     provider = OpenAIProvider(
-        AppConfig(ai=AIConfig(model="gpt-5-mini")),
+        AppConfig(ai=AIConfig(model="gpt-5.6-terra")),
         "sk-test-secret",
         SimpleNamespace(responses=responses),
     )
@@ -84,13 +84,13 @@ def test_openai_provider_maps_structured_response() -> None:
     assert scored[0].title == "Заголовок"
     assert scored[0].score == 88
     assert usage["provider"] == "openai"
-    assert usage["model"] == "gpt-5-mini"
+    assert usage["model"] == "gpt-5.6-terra"
     assert usage["input_tokens"] == 123
     assert usage["cached_input_tokens"] == 80
     assert usage["cache_write_input_tokens"] == 30
     assert usage["output_tokens"] == 45
     call = responses.calls[0]
-    assert call["model"] == "gpt-5-mini"
+    assert call["model"] == "gpt-5.6-terra"
     assert call["text"] == {
         "format": {
             "type": "json_schema",
@@ -284,7 +284,7 @@ def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema(
         request_id="request-vision-1",
     ))
     provider = OpenAIProvider(
-        AppConfig(ai=AIConfig(model="gpt-5-mini")),
+        AppConfig(ai=AIConfig(model="gpt-5.6-terra")),
         "sk-test-secret",
         SimpleNamespace(responses=responses),
     )
@@ -299,6 +299,7 @@ def test_openai_vision_adapter_sends_real_frame_payload_once_with_strict_schema(
     assert usage["cache_write_input_tokens"] == 50
     assert len(responses.calls) == 1
     call = responses.calls[0]
+    assert call["model"] == "gpt-5.6-terra"
     assert call["max_output_tokens"] == 500
     assert call["text"] == {
         "format": {
@@ -317,7 +318,7 @@ def test_openai_vision_adapter_preserves_usage_when_output_json_is_empty() -> No
         request_id="request-empty-vision",
     ))
     provider = OpenAIProvider(
-        AppConfig(ai=AIConfig(model="gpt-5-mini")),
+        AppConfig(ai=AIConfig(model="gpt-5.6-terra")),
         "sk-test-secret",
         SimpleNamespace(responses=responses),
     )
@@ -355,7 +356,7 @@ def test_doctor_checks_only_selected_provider_key(
     checks = collect_checks(tmp_path, AppConfig())
     by_label = {check.label: check for check in checks}
 
-    assert by_label["AI provider"].detail == "openai · gpt-5-mini"
+    assert by_label["AI provider"].detail == "openai · gpt-5.6-terra"
     assert by_label["OpenAI API key"].status == "error"
     assert "Gemini API key" not in by_label
 

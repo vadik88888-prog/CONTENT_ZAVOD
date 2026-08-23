@@ -19,7 +19,7 @@ encoder_preference: auto       # auto, nvenc или cpu
 delete_downloaded_source: false
 ai:
   provider: openai             # openai, gemini или mock
-  model: gpt-5-mini            # модель задаётся только здесь
+  model: gpt-5.6-terra         # модель задаётся только здесь
   max_retries: 2
   # USD за токен; обновляйте по тарифу выбранной модели при необходимости.
   input_token_price: 0.00000025
