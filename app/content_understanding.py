@@ -55,6 +55,7 @@ SEMANTIC_BEAT_PROPOSAL_SCHEMA_VERSION = "5A.semantic-beat.1"
 GLOBAL_CONTENT_MAP_SCHEMA_VERSION = "5A.1"
 STORY_UNIT_SCHEMA_VERSION = "5A.1"
 BOUNDARY_DECISION_SCHEMA_VERSION = "5C.1"
+PUBLISHABLE_STORY_EXPANSION_VERSION = "publishable-story-expansion.1"
 
 CONTENT_TYPES = frozenset({
     "podcast", "interview", "lecture", "educational", "motivational",
@@ -88,6 +89,22 @@ _STRUCTURED_VISUAL_PROFILE_EVIDENCE_STRENGTH = 2.0
 _CROSS_SOURCE_PROFILE_EVIDENCE_BONUS = 0.5
 _AUTO_PROFILE_MIN_EVIDENCE_STRENGTH = 2.0
 _AUTO_PROFILE_MIN_COMPETING_MARGIN = 1.0
+_STORY_SETUP_MARKERS = (
+    "need to", "have to", "must ", "going to", "let's", "plan", "problem", "if ", "when ",
+    "надо", "нужно", "должен", "давай", "сейчас", "если ", "когда ", "чтобы ",
+)
+_STORY_ACTION_MARKERS = (
+    "need to", "have to", "keep ", "move", "run", "hide", "take cover", "do it", "let's",
+    "надо", "давай", "смотри", "бег", "пряч", "делаем", "двиг", "идём", "иду",
+)
+_STORY_RESULT_MARKERS = (
+    "result", "therefore", "done", "worked", "safe", "won", "got it", "finished",
+    "итог", "результат", "готово", "получил", "получилось", "спас",
+)
+_STORY_REACTION_MARKERS = (
+    "i don't think", "do not think", "that was", "no way", "wow", "oh no",
+    "не думаю", "ого", "капец", "получилось",
+)
 _MOTIVATIONAL_TERMS = (
     "не сдавай", "побед*", "вер*", "мечт*", "шанс", "успех*", "сильн*",
     "never give up", "believe", "win", "success", "fight", "dream",
@@ -2537,6 +2554,234 @@ def build_semantic_candidate(
             ),
         },
     )
+
+
+def expand_publishable_story_candidates(
+    selected: list[ScoredCandidate],
+    content_map_data: dict[str, Any],
+    transcript: dict[str, Any],
+    transcript_features: dict[str, Any],
+    scenes: dict[str, Any],
+    config: Any,
+) -> list[dict[str, Any]]:
+    """Add immediately adjacent StoryUnit evidence only when it completes an arc.
+
+    This is deliberately a post-selection boundary operation.  It neither
+    reranks candidates nor asks Brain/Vision for a second opinion: it reads the
+    persisted source-scoped StoryUnit evidence and resolves any accepted range
+    through the existing ``SemanticBoundaryEngine``.
+    """
+
+    content_map = GlobalContentMap.from_dict(content_map_data, transcript)
+    stories = sorted(
+        content_map.story_units,
+        key=lambda item: (item.start, item.end, item.story_unit_id),
+    )
+    index_by_id = {item.story_unit_id: index for index, item in enumerate(stories)}
+    engine = SemanticBoundaryEngine(config.content_understanding)
+    maximum_duration = float(getattr(config, "max_clip_duration", 60.0))
+    generation = getattr(config, "candidate_generation", None)
+    maximum_gap = float(getattr(generation, "multimodal_link_gap_seconds", 0.0))
+    reports: list[dict[str, Any]] = []
+
+    for item in selected:
+        candidate = item.candidate
+        original_range = _range_payload(candidate.start, candidate.end)
+        base_units = _candidate_story_units(candidate, stories, index_by_id)
+        if not base_units:
+            reports.append(_story_expansion_report(
+                candidate, original_range, "not_expanded", "story_evidence_unavailable",
+            ))
+            continue
+        first_index = index_by_id[base_units[0].story_unit_id]
+        last_index = index_by_id[base_units[-1].story_unit_id]
+        if list(range(first_index, last_index + 1)) != [index_by_id[unit.story_unit_id] for unit in base_units]:
+            reports.append(_story_expansion_report(
+                candidate, original_range, "not_expanded", "noncontiguous_story_lineage",
+            ))
+            continue
+
+        before = stories[first_index - 1] if first_index > 0 else None
+        after = stories[last_index + 1] if last_index + 1 < len(stories) else None
+        before = before if _story_gap_is_local(before, base_units[0], maximum_gap) else None
+        after = after if _story_gap_is_local(base_units[-1], after, maximum_gap) else None
+        base_roles = _story_evidence_roles(base_units)
+        before_roles = _story_evidence_roles([before]) if before is not None else set()
+        after_roles = _story_evidence_roles([after]) if after is not None else set()
+
+        # A short clip may already be publishable.  The additional source has
+        # to add a distinct setup and/or observed result/reaction; a nearby
+        # complete sentence alone is never enough.
+        base_needs_result = not bool(base_roles & {"result", "reaction"})
+        has_development = bool(base_roles & {"action", "development"})
+        add_before = bool(before is not None and "setup" in before_roles and has_development and base_needs_result)
+        add_after = bool(after is not None and after_roles & {"result", "reaction"} and has_development and base_needs_result)
+        expanded_units = [*([before] if add_before else []), *base_units, *([after] if add_after else [])]
+        expanded_roles = _story_evidence_roles(expanded_units)
+        if not (
+            (add_before or add_after)
+            and {"setup", "action"}.issubset(expanded_roles)
+            and bool(expanded_roles & {"result", "reaction"})
+        ):
+            reports.append(_story_expansion_report(
+                candidate, original_range, "not_expanded", "no_additional_grounded_story_arc",
+                before=before, after=after, before_roles=before_roles, after_roles=after_roles,
+            ))
+            continue
+
+        primary = max(base_units, key=lambda unit: (
+            unit.standalone_score, unit.completeness_score, unit.story_unit_id,
+        ))
+        resolution = engine.resolve(
+            _combined_story_unit(expanded_units, primary), transcript, transcript_features, scenes,
+        )
+        if (
+            not resolution.diagnostics.get("eligible", False)
+            or resolution.end - resolution.start > maximum_duration + 0.001
+        ):
+            reason = (
+                "expanded_boundary_not_eligible"
+                if not resolution.diagnostics.get("eligible", False)
+                else "expanded_range_exceeds_maximum_duration"
+            )
+            reports.append(_story_expansion_report(
+                candidate, original_range, "not_expanded", reason,
+                before=before, after=after, before_roles=before_roles, after_roles=after_roles,
+            ))
+            continue
+
+        diagnostics = dict(resolution.diagnostics)
+        # The original selected interval remains the rough range; the typed
+        # BoundaryDecision then makes the added story context explicit rather
+        # than presenting it as a newly ranked candidate.
+        diagnostics["requested_range"] = {
+            "start": original_range["start_seconds"], "end": original_range["end_seconds"],
+        }
+        diagnostics["resolved_range"] = {
+            "start": round(resolution.start, 3), "end": round(resolution.end, 3),
+        }
+        expansion = {
+            "schema_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
+            "decision": "expanded",
+            "source_id": content_map.source_id,
+            "original_range": original_range,
+            "expanded_range": _range_payload(resolution.start, resolution.end),
+            "added_story_evidence": _added_story_evidence(
+                before if add_before else None, after if add_after else None,
+                before_roles, after_roles,
+            ),
+            "story_arc_roles": sorted(expanded_roles),
+            "brain_reused": True,
+            "vision_reused": True,
+            "reason": "adjacent_story_evidence_added_setup_action_and_result_or_reaction",
+        }
+        diagnostics["publishable_story_expansion"] = expansion
+        diagnostics["boundary_decision"] = _boundary_decision_payload(candidate.id, diagnostics)
+        candidate.start = resolution.start
+        candidate.end = resolution.end
+        candidate.text = resolution.text
+        candidate.transcript_segment_ids = resolution.transcript_segment_ids
+        candidate.story_unit_ids = [unit.story_unit_id for unit in expanded_units]
+        candidate.start_boundary_reason = str(diagnostics["start_boundary"].get("reason") or "")
+        candidate.end_boundary_reason = str(diagnostics["end_boundary"].get("reason") or "")
+        candidate.boundary_diagnostics = diagnostics
+        candidate.semantic_evidence = {
+            **candidate.semantic_evidence,
+            "publishable_story_expansion": expansion,
+        }
+        candidate.explanations = [
+            *candidate.explanations,
+            "Publishable Story Expansion added adjacent grounded setup/result evidence; semantic ranking was not rerun.",
+        ]
+        reports.append(expansion)
+    return reports
+
+
+def _candidate_story_units(
+    candidate: Candidate, stories: list[StoryUnit], index_by_id: dict[str, int],
+) -> list[StoryUnit]:
+    identifiers = candidate.story_unit_ids or ([candidate.story_unit_id] if candidate.story_unit_id else [])
+    if not identifiers or any(identifier not in index_by_id for identifier in identifiers):
+        return []
+    return sorted(
+        (stories[index_by_id[identifier]] for identifier in dict.fromkeys(identifiers)),
+        key=lambda unit: (unit.start, unit.end, unit.story_unit_id),
+    )
+
+
+def _story_gap_is_local(left: StoryUnit | None, right: StoryUnit | None, maximum_gap: float) -> bool:
+    if left is None or right is None:
+        return False
+    return 0 <= right.start - left.end <= maximum_gap + 0.001
+
+
+def _story_evidence_roles(units: list[StoryUnit | None]) -> set[str]:
+    """Classify only explicit persisted StoryUnit text into arc contributions."""
+
+    roles: set[str] = set()
+    for unit in units:
+        if unit is None:
+            continue
+        text = " ".join((unit.hook_seed, unit.setup, unit.development, unit.payoff, unit.ending)).casefold()
+        if unit.setup.strip() or _contains_story_marker(text, _STORY_SETUP_MARKERS):
+            roles.add("setup")
+        if unit.development.strip():
+            roles.add("development")
+        if _contains_story_marker(text, _STORY_ACTION_MARKERS):
+            roles.add("action")
+        if unit.payoff.strip() or _contains_story_marker(text, _STORY_RESULT_MARKERS):
+            roles.add("result")
+        if _contains_story_marker(text, _STORY_REACTION_MARKERS):
+            roles.add("reaction")
+    return roles
+
+
+def _contains_story_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _range_payload(start: float, end: float) -> dict[str, float]:
+    return {"start_seconds": round(start, 3), "end_seconds": round(end, 3)}
+
+
+def _added_story_evidence(
+    before: StoryUnit | None, after: StoryUnit | None,
+    before_roles: set[str], after_roles: set[str],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for position, unit, roles in (("before", before, before_roles), ("after", after, after_roles)):
+        if unit is None:
+            continue
+        contribution = "setup" if "setup" in roles else "result_or_reaction"
+        result.append({
+            "position": position,
+            "story_unit_id": unit.story_unit_id,
+            "source_range": _range_payload(unit.start, unit.end),
+            "contribution": contribution,
+            "roles": sorted(roles),
+            "evidence_text": unit.development[:1200],
+        })
+    return result
+
+
+def _story_expansion_report(
+    candidate: Candidate, original_range: dict[str, float], decision: str, reason: str,
+    *, before: StoryUnit | None = None, after: StoryUnit | None = None,
+    before_roles: set[str] | None = None, after_roles: set[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
+        "candidate_id": candidate.id,
+        "decision": decision,
+        "original_range": original_range,
+        "expanded_range": original_range,
+        "reason": reason,
+        "adjacent_story_evidence": _added_story_evidence(
+            before, after, before_roles or set(), after_roles or set(),
+        ),
+        "brain_reused": True,
+        "vision_reused": True,
+    }
 
 
 def _combined_story_unit(units: list[StoryUnit], primary: StoryUnit) -> StoryUnit:

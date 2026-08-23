@@ -44,6 +44,7 @@ from app.creative_lifecycle import (
 from app.content_understanding import (
     CONTENT_PROFILE_CONTRACT_VERSION,
     CONTENT_PROFILE_DETECTOR_VERSION,
+    PUBLISHABLE_STORY_EXPANSION_VERSION,
     CONTENT_STRATEGY_VERSION,
     SEMANTIC_CANDIDATE_GENERATION_VERSION,
     build_coverage_map,
@@ -55,6 +56,7 @@ from app.content_understanding import (
     select_with_coverage,
     story_units_artifact,
     ensure_candidate_boundary_decision,
+    expand_publishable_story_candidates,
     validate_video_content_profile,
 )
 from app.candidate_quality import (
@@ -1106,12 +1108,16 @@ class Pipeline:
                     "value": self.config.content_understanding.editorial_intent,
                     "weight": self.config.content_understanding.editorial_intent_weight,
                 },
+                "publishable_story_expansion_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
             },
             lambda: self._final_selection(
                 scored,
                 work_directory / "final_selection.json",
                 content_map,
                 production_feasibility,
+                transcript=transcript,
+                transcript_features=transcript_features,
+                scenes=scenes,
             ),
             cache_tracker=source_cache,
         )
@@ -2966,6 +2972,10 @@ class Pipeline:
         path: Path,
         content_map: dict[str, Any] | None = None,
         production_feasibility: dict[str, Any] | None = None,
+        *,
+        transcript: dict[str, Any] | None = None,
+        transcript_features: dict[str, Any] | None = None,
+        scenes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if content_map is not None:
             selected, coverage = select_with_coverage(
@@ -2982,6 +2992,11 @@ class Pipeline:
                 production_feasibility=production_feasibility,
             )
             coverage = {}
+        story_expansions: list[dict[str, Any]] = []
+        if content_map is not None and transcript is not None and transcript_features is not None and scenes is not None:
+            story_expansions = expand_publishable_story_candidates(
+                selected, content_map, transcript, transcript_features, scenes, self.config,
+            )
         requested = min(self.config.max_clips, self.config.ai_reranking.final_clip_count)
         warnings: list[str] = []
         if len(selected) < requested:
@@ -2996,6 +3011,10 @@ class Pipeline:
             "warnings": warnings,
             "coverage": coverage,
             "diversity_decision": coverage.get("diversity_decision") if content_map is not None else None,
+            "publishable_story_expansion": {
+                "schema_version": PUBLISHABLE_STORY_EXPANSION_VERSION,
+                "candidates": story_expansions,
+            },
             "production_feasibility": {
                 "policy_version": (
                     production_feasibility.get("policy_version")
