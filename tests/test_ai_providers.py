@@ -124,6 +124,30 @@ def test_openai_provider_rejects_unknown_candidate_id() -> None:
     assert "candidate_id" in usage["api_errors"][0]
 
 
+def test_openai_provider_binds_reordered_assessments_by_candidate_id() -> None:
+    first = _candidate()
+    second = Candidate("candidate-2", 30.0, 55.0, "Another complete candidate.")
+    first_item = _structured_item(first)
+    second_item = _structured_item(second)
+    first_item["score"] = 71
+    second_item["score"] = 93
+    responses = _FakeResponses(SimpleNamespace(
+        output_text=json.dumps({"candidates": [second_item, first_item]}),
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    ))
+    provider = OpenAIProvider(
+        AppConfig(ai=AIConfig(max_retries=0)),
+        "sk-test-secret",
+        SimpleNamespace(responses=responses),
+    )
+
+    scored, usage = provider.score([first, second], {"segments": []})
+
+    assert [item.candidate.id for item in scored] == [first.id, second.id]
+    assert [item.score for item in scored] == [71, 93]
+    assert usage["api_errors"] == []
+
+
 def test_openai_semantic_connection_wait_is_bounded_without_sdk_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

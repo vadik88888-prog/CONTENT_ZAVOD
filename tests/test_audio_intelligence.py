@@ -212,6 +212,46 @@ def test_low_speech_with_meaningful_audio_or_visual_action_is_not_sparse() -> No
     assert assess_sparse_multimodal_content(visual_candidate)["applies"] is False
 
 
+def test_context_only_action_without_grounded_result_is_downgraded() -> None:
+    candidate = _candidate("gameplay")
+    candidate.multimodal_provenance["audio_summary"].update({
+        "longest_speech_gap_seconds": 6.5,
+        "activity_ratio": 0.30,
+        "dead_zone_ratio": 0.42,
+        "longest_audio_dead_zone_seconds": 5.0,
+        "meaningful_event_count": 5,
+    })
+    candidate.content_signature = {"narrative_function": "context"}
+    candidate.semantic_evidence = {"setup": "", "payoff": ""}
+    candidate.multimodal_provenance["visual_evidence"] = [{
+        "confidence": 0.9, "action": "interaction", "reaction": "none",
+        "payoff_signal": "none", "missing_evidence": ["payoff"],
+    }]
+
+    assessment = assess_sparse_multimodal_content(candidate)
+
+    assert assessment["applies"] is True
+    assert assessment["reason"] == "context_only_without_grounded_result_or_payoff"
+    assert assessment["meaningful_visual_action"] is True
+    assert assessment["meaningful_visual_payoff"] is False
+    assert assessment["blocked"] is False
+
+
+def test_grounded_nonverbal_result_is_not_downgraded_as_context_only() -> None:
+    candidate = _candidate("gameplay")
+    candidate.content_signature = {"narrative_function": "context"}
+    candidate.semantic_evidence = {"setup": "", "payoff": ""}
+    candidate.multimodal_provenance["visual_evidence"] = [{
+        "confidence": 0.9, "action": "interaction", "reaction": "surprise",
+        "payoff_signal": "result", "missing_evidence": [],
+    }]
+
+    assessment = assess_sparse_multimodal_content(candidate)
+
+    assert assessment["applies"] is False
+    assert assessment["meaningful_visual_payoff"] is True
+
+
 def test_bundled_onnx_runtime_loads_without_tensorflow_and_stays_bounded(tmp_path: Path) -> None:
     wav = tmp_path / "runtime.wav"
     _write_signal(wav, [(2.0, 0.25)])

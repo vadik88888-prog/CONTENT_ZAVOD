@@ -164,7 +164,7 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     }
 
     assert payload["semantic_payload_version"] == SEMANTIC_AI_PAYLOAD_VERSION
-    assert payload["semantic_payload_version"] == "semantic-score.4"
+    assert payload["semantic_payload_version"] == "semantic-score.5"
     assert payload["transcript"] == [
         {
             "start": 0.0,
@@ -179,7 +179,7 @@ def test_openai_semantic_payload_is_compact_allowlisted_and_keeps_global_context
     ]
     assert "source_path" not in payload
     assert set(compact) == {
-        "id", "start", "end", "duration", "text", "core_idea",
+        "candidate_id", "start", "end", "duration", "text", "core_idea",
         "semantic_evidence", "boundary_signals", "speech_signals",
         "multimodal_signals",
     }

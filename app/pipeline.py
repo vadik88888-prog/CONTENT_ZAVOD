@@ -57,7 +57,11 @@ from app.content_understanding import (
     ensure_candidate_boundary_decision,
     validate_video_content_profile,
 )
-from app.candidate_quality import EligibilityDecision, resolve_eligibility_decision
+from app.candidate_quality import (
+    CANDIDATE_QUALITY_SCHEMA_VERSION,
+    EligibilityDecision,
+    resolve_eligibility_decision,
+)
 from app.editorial_profile_policy import evaluate_editorial_candidate, resolve_editorial_profile
 from app.content_transformation import (
     TRANSFORMATION_ENGINE_VERSION,
@@ -921,7 +925,7 @@ class Pipeline:
             tracker, "multimodal_scoring", work_directory / "candidates.multimodal.json",
             {
                 "local_scoring": _hash(local_data), "pass2": _hash(pass2_data),
-                "scoring_contract": "6D.4", "settings": self.config.scoring,
+                "scoring_contract": CANDIDATE_QUALITY_SCHEMA_VERSION, "settings": self.config.scoring,
                 "visual_analysis": _hash(visual_analysis),
             },
             lambda: _write_candidates(

@@ -20,7 +20,7 @@ from app.speech_clarity_policy import (
 )
 
 
-CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.4"
+CANDIDATE_QUALITY_SCHEMA_VERSION = "6D.5"
 
 FACTOR_WEIGHTS: dict[str, float] = {
     "hook": 0.12,
@@ -818,7 +818,12 @@ def build_score_v2(
 
 
 def assess_sparse_multimodal_content(candidate: Any) -> dict[str, Any]:
-    """Strong soft downgrade for long empty padding; never an eligibility blocker."""
+    """Strong soft downgrade for empty padding or context-only non-stories.
+
+    This remains a recommendation downgrade, never an eligibility blocker.
+    A detected action is useful evidence, but it cannot by itself turn a
+    context-only fragment into a complete gameplay moment.
+    """
 
     provenance = candidate.multimodal_provenance or {}
     summary = provenance.get("audio_summary", {}) if isinstance(provenance, dict) else {}
@@ -832,6 +837,7 @@ def assess_sparse_multimodal_content(candidate: Any) -> dict[str, Any]:
     longest_audio_dead = max(0.0, float(summary.get("longest_audio_dead_zone_seconds", 0) or 0))
     spike_count = max(0, int(summary.get("spike_count", 0) or 0))
     visual_action, visual_payoff = _meaningful_visual_action_payoff(candidate)
+    context_only = _context_only_without_grounded_result(candidate, visual_payoff)
     long_gap_threshold = max(10.0, duration * 0.45)
     meaningful_audio = bool(
         summary.get("background_music_only") is not True
@@ -842,12 +848,21 @@ def assess_sparse_multimodal_content(candidate: Any) -> dict[str, Any]:
     )
     long_gap = speech_gap >= long_gap_threshold
     audio_sparse = dead_ratio >= 0.45 or longest_audio_dead >= long_gap_threshold
-    applies = bool(long_gap and audio_sparse and not visual_action and not visual_payoff and not meaningful_audio)
+    applies = bool(
+        context_only
+        or (long_gap and audio_sparse and not visual_action and not visual_payoff and not meaningful_audio)
+    )
     gap_ratio = min(1.0, speech_gap / duration)
     penalty = min(34.0, 20.0 + gap_ratio * 10.0 + dead_ratio * 6.0) if applies else 0.0
     return {
         "applies": applies,
-        "reason": "long_semantic_gap_without_meaningful_visual_or_audio_evidence" if applies else "meaningful_content_evidence_or_no_long_gap",
+        "reason": (
+            "context_only_without_grounded_result_or_payoff"
+            if context_only
+            else "long_semantic_gap_without_meaningful_visual_or_audio_evidence"
+            if applies
+            else "meaningful_content_evidence_or_no_long_gap"
+        ),
         "penalty": round(penalty, 3),
         "duration_seconds": round(duration, 3),
         "long_gap_threshold_seconds": round(long_gap_threshold, 3),
@@ -860,10 +875,31 @@ def assess_sparse_multimodal_content(candidate: Any) -> dict[str, Any]:
         "meaningful_audio_action": meaningful_audio,
         "meaningful_visual_action": visual_action,
         "meaningful_visual_payoff": visual_payoff,
+        "context_only_without_grounded_result": context_only,
         "background_music_only": bool(summary.get("background_music_only", False)),
         "surfacing_effect": "strong_soft_downgrade_only",
         "blocked": False,
     }
+
+
+def _context_only_without_grounded_result(candidate: Any, visual_payoff: bool) -> bool:
+    """Identify context fragments that have activity but no retained outcome."""
+
+    signature = candidate.content_signature or {}
+    semantic = candidate.semantic_evidence or {}
+    if not isinstance(signature, dict) or not isinstance(semantic, dict):
+        return False
+    if str(signature.get("narrative_function") or "").casefold() != "context":
+        return False
+    has_setup = bool(str(semantic.get("setup") or "").strip())
+    has_story_payoff = bool(str(semantic.get("payoff") or "").strip())
+    has_audio_payoff = any(
+        isinstance(item, dict)
+        and isinstance(item.get("observation"), dict)
+        and item["observation"].get("payoff_claim") is True
+        for item in (candidate.multimodal_provenance or {}).get("audio_evidence", [])
+    )
+    return not has_setup and not has_story_payoff and not visual_payoff and not has_audio_payoff
 
 
 def _meaningful_visual_action_payoff(candidate: Any) -> tuple[bool, bool]:

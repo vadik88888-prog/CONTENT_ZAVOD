@@ -38,7 +38,7 @@ SEMANTIC_MAX_CONNECTION_RETRIES = 1
 # Paid semantic-scoring calls use a deliberately small, evidence-only request
 # contract.  Bump this whenever its shape or interpretation changes so the
 # ai_ranking cache cannot reuse an assessment made from a different payload.
-SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.4"
+SEMANTIC_AI_PAYLOAD_VERSION = "semantic-score.5"
 
 SEMANTIC_FACTOR_CONTRACT: dict[str, Any] = {
     "scale": {
@@ -245,6 +245,25 @@ def _make_scored(candidate: Candidate, data: dict[str, Any]) -> ScoredCandidate:
         ),
         selected=bool(data["selected"]),
     )
+
+
+def _scored_candidates_by_id(
+    candidates: list[Candidate], items: list[dict[str, Any]],
+) -> list[ScoredCandidate]:
+    """Bind provider assessments to stable candidate identity, never response order."""
+
+    expected_ids = {candidate.id for candidate in candidates}
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("AI вернул некорректную оценку candidate.")
+        candidate_id = str(item.get("candidate_id", ""))
+        if not candidate_id or candidate_id in by_id:
+            raise ValueError("AI вернул повторяющийся или пустой candidate_id.")
+        by_id[candidate_id] = item
+    if set(by_id) != expected_ids:
+        raise ValueError("AI вернул неизвестный или несоответствующий candidate_id.")
+    return [_make_scored(candidate, by_id[candidate.id]) for candidate in candidates]
 
 
 def _reject_candidates(
@@ -504,10 +523,7 @@ class OpenAIProvider:
                     raise ValueError(
                         "Structured Output должен содержать candidates для каждого кандидата."
                     )
-                for candidate, item in zip(candidates, items):
-                    if str(item.get("candidate_id", "")) != candidate.id:
-                        raise ValueError("AI вернул неизвестный или несоответствующий candidate_id.")
-                scored = [_make_scored(candidate, item) for candidate, item in zip(candidates, items)]
+                scored = _scored_candidates_by_id(candidates, items)
                 usage = getattr(response, "usage", None)
                 return scored, _usage(
                     self.name,
@@ -730,7 +746,7 @@ class GeminiProvider:
                 parsed = json.loads(response.text)
                 if not isinstance(parsed, list) or len(parsed) != len(candidates):
                     raise ValueError("Ответ AI должен быть массивом по числу кандидатов.")
-                scored = [_make_scored(candidate, item) for candidate, item in zip(candidates, parsed)]
+                scored = _scored_candidates_by_id(candidates, parsed)
                 usage = getattr(response, "usage_metadata", None)
                 return scored, _usage(
                     self.name,
@@ -1051,7 +1067,9 @@ def _compact_multimodal_signals(candidate: Candidate) -> dict[str, Any]:
 
 def _compact_semantic_candidate(candidate: Candidate) -> dict[str, Any]:
     return {
-        "id": candidate.id,
+        # The response schema uses candidate_id. Keep the same stable field
+        # in the payload so the provider can copy it verbatim.
+        "candidate_id": candidate.id,
         "start": round(candidate.start, 3),
         "end": round(candidate.end, 3),
         "duration": round(candidate.duration, 3),
@@ -1103,7 +1121,7 @@ def build_openai_payload(
             "target scores and must not be copied or mechanically rescaled. An audio event is not payoff, and "
             "background music alone has no recommendation value. Long speech/semantic gaps with no meaningful "
             "visual or audio action are filler; low speech is acceptable when grounded action evidence exists. "
-            "The application ignores AI "
+            "candidate_id is immutable: copy each supplied value exactly once. The application ignores AI "
             "score/selected for final scoring, ranking and selection. Return only candidate_id values from the "
             "input and never change start/end."
         ),
@@ -1117,7 +1135,7 @@ def build_gemini_payload(
         **_semantic_base_payload(candidates, transcript),
         "instruction": (
             "Assess every supplied candidate for a short vertical clip; do not return only a best-five list. "
-            "Return only a JSON array. Every item must contain all fields: "
+            "Return only a JSON array. Copy each input candidate_id exactly once. Every item must contain all fields: "
             + ", ".join(AI_FIELDS)
             + ". Scores are integer 0..100. Do not change start/end. Apply factor_contract to all five factor "
             "fields. Make an independent assessment from the full transcript and supplied semantic, speech, "
