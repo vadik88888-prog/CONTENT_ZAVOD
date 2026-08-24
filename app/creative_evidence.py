@@ -183,7 +183,7 @@ def build_native_evidence_handoff(
             target=target,
             target_ref=target_ref,
             priority=_target_priority(target),
-            allowed_layouts=_target_layouts(target),
+            allowed_layouts=_target_layouts(target, row),
         ))
 
     scenes, scene_manifest = _source_scenes(
@@ -806,8 +806,25 @@ def _target_bounds(row: Mapping[str, Any]) -> NormalizedRect | None:
         height = _float(row.get("normalized_height"))
     if center_x is None or center_y is None:
         return None
-    width = width if width is not None and width > 0 else 0.32
-    height = height if height is not None and height > 0 else 0.52
+    visible_faces = (
+        observation.get("faces", {}).get("visible_count")
+        if isinstance(observation, Mapping) and isinstance(observation.get("faces"), Mapping)
+        else row.get("visible_face_count")
+    )
+    subject_type = str(
+        active.get("target_type")
+        if isinstance(active, Mapping)
+        else row.get("primary_subject") or ""
+    )
+    inferred_group = (
+        isinstance(visible_faces, int) and visible_faces > 1
+    ) or subject_type in {"subject_group", "group"}
+    # Pass2 center-only observations do not prove the extent of a group.  A
+    # narrow person-sized synthetic box can otherwise authorize a true 9:16
+    # crop whose centre contains no participant.  Protect a conservative wide
+    # region so deterministic containment chooses the declared last fallback.
+    width = width if width is not None and width > 0 else 0.82 if inferred_group else 0.32
+    height = height if height is not None and height > 0 else 0.62 if inferred_group else 0.52
     width, height = min(1.0, width), min(1.0, height)
     x = min(1.0 - width, max(0.0, center_x - width / 2))
     y = min(1.0 - height, max(0.0, center_y - height / 2))
@@ -894,7 +911,22 @@ def _target_priority(target: AttentionTarget) -> int:
     }.get(target, 60)
 
 
-def _target_layouts(target: AttentionTarget) -> tuple[LayoutFamily, ...]:
+def _target_layouts(
+    target: AttentionTarget, row: Mapping[str, Any] | None = None,
+) -> tuple[LayoutFamily, ...]:
+    scene_type = str((row or {}).get("scene_type") or "")
+    visible_faces = (row or {}).get("visible_face_count")
+    if (
+        scene_type == "GAMEPLAY"
+        and target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT, AttentionTarget.GROUP}
+        and isinstance(visible_faces, int)
+        and visible_faces > 0
+    ):
+        return (
+            LayoutFamily.SPLIT,
+            LayoutFamily.SCREEN_PRIORITY,
+            LayoutFamily.FIT_BACKGROUND,
+        )
     if target == AttentionTarget.SCREEN:
         return (LayoutFamily.SCREEN_PRIORITY, LayoutFamily.FIT_BACKGROUND)
     if target == AttentionTarget.PRODUCT:

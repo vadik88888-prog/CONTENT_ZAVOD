@@ -2519,6 +2519,43 @@ def _visual_filter(
         f",fps={canvas.fps},tpad=stop_mode=clone:stop=-1,"
         f"trim=end_frame={frame_count},setpts=PTS-STARTPTS,format={canvas.pixel_format}{output_label}"
     )
+    if crop.strategy == "facecam_gameplay_split":
+        assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
+        top_height = max(2, _even_down(canvas.height * 0.35))
+        bottom_height = canvas.height - top_height
+        game_width, game_height, game_x, game_y = _split_gameplay_crop(
+            crop.source_width, crop.source_height, canvas.width, bottom_height,
+        )
+        face_source = f"[{label_prefix}_face_source]"
+        game_source = f"[{label_prefix}_game_source]"
+        face_crop = f"[{label_prefix}_face_crop]"
+        game_crop = f"[{label_prefix}_game_crop]"
+        face_pane = f"[{label_prefix}_face_pane]"
+        game_pane = f"[{label_prefix}_game_pane]"
+        if crop.tracking_keyframes:
+            face_x = _tracking_crop_expression(
+                crop.tracking_keyframes, crop.source_width, crop.crop_width, "x",
+            )
+            face_y = _tracking_crop_expression(
+                crop.tracking_keyframes, crop.source_height, crop.crop_height, "y",
+            )
+            face_filter = (
+                f"{face_source}crop={crop.crop_width}:{crop.crop_height}:x='{face_x}':y='{face_y}'{face_crop}"
+            )
+        else:
+            face_filter = (
+                f"{face_source}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y}{face_crop}"
+            )
+        return (
+            f"{input_label}split=2{face_source}{game_source};"
+            f"{face_filter};"
+            f"{face_crop}scale={canvas.width}:{top_height}:force_original_aspect_ratio=increase,"
+            f"crop={canvas.width}:{top_height},setsar=1{face_pane};"
+            f"{game_source}crop={game_width}:{game_height}:{game_x}:{game_y}{game_crop};"
+            f"{game_crop}scale={canvas.width}:{bottom_height}:force_original_aspect_ratio=increase,"
+            f"crop={canvas.width}:{bottom_height},setsar=1{game_pane};"
+            f"{face_pane}{game_pane}vstack=inputs=2,setsar=1" + tail
+        )
     if crop.strategy == "fit_blur_background":
         return (
             f"{input_label}split=2{bg_label}{fg_label};{bg_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
@@ -2537,12 +2574,35 @@ def _visual_filter(
         y = _tracking_crop_expression(crop.tracking_keyframes, crop.source_height, crop.crop_height, "y")
         return (
             f"{input_label}crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
-            f"scale={canvas.width}:{canvas.height},setsar=1" + tail
+            f"scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
+            f"crop={canvas.width}:{canvas.height},setsar=1" + tail
         )
     return (
         f"{input_label}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
-        f"scale={canvas.width}:{canvas.height},setsar=1" + tail
+        f"scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
+        f"crop={canvas.width}:{canvas.height},setsar=1" + tail
     )
+
+
+def _split_gameplay_crop(
+    source_width: int,
+    source_height: int,
+    pane_width: int,
+    pane_height: int,
+) -> tuple[int, int, int, int]:
+    target_aspect = pane_width / pane_height
+    source_aspect = source_width / source_height
+    if source_aspect >= target_aspect:
+        height = source_height - source_height % 2
+        width = _even_down(height * target_aspect)
+    else:
+        width = source_width - source_width % 2
+        height = _even_down(width / target_aspect)
+    width = max(2, min(source_width - source_width % 2, width))
+    height = max(2, min(source_height - source_height % 2, height))
+    x = _even_down((source_width - width) / 2)
+    y = _even_down((source_height - height) / 2)
+    return width, height, x, y
 
 
 def _clip_frame_count(clip: VideoClipModel, fps: int) -> int:

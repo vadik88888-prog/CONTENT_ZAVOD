@@ -38,7 +38,8 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.1.composition-calibration.1"
+COMPOSITION_PLANNER_VERSION = "7J.2.scene-family.1"
+SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
 MovementReason = Literal[
@@ -179,6 +180,10 @@ class CompositionPlanner:
         atomic, suppressed = self._resolve_state_machine(
             intent, intervals, raw_states, cuts, source_width, source_height, diagnostics,
         )
+        atomic, family_diagnostics = _lock_scene_layout_families(
+            atomic, cuts, source_width, source_height, self.config,
+        )
+        diagnostics.extend(family_diagnostics)
         atomic, calibration_diagnostics = _calibrate_layout_timeline(atomic, self.config)
         diagnostics.extend(calibration_diagnostics)
         segments, track_diagnostics = self._smooth_and_freeze(
@@ -507,6 +512,261 @@ def _calibrate_layout_timeline(
     return tuple(calibrated), tuple(diagnostics)
 
 
+def _lock_scene_layout_families(
+    atomic: Sequence[_AtomicState],
+    cuts: frozenset[int],
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> tuple[tuple[_AtomicState, ...], tuple[str, ...]]:
+    """Choose presentation family once per source scene, then only track.
+
+    Sparse observations remain evidence for target position, not permission to
+    oscillate between unrelated layouts.  Gaps inherit the scene family and a
+    calm nearest target crop without inheriting that target's semantic claim.
+    """
+
+    if not atomic:
+        return (), ()
+    groups: list[list[_AtomicState]] = []
+    current: list[_AtomicState] = []
+    for item in atomic:
+        boundary = bool(current) and (
+            item.output.start_frame in cuts
+            or current[-1].output.end_frame != item.output.start_frame
+        )
+        if boundary:
+            groups.append(current)
+            current = []
+        current.append(item)
+    if current:
+        groups.append(current)
+
+    result: list[_AtomicState] = []
+    diagnostics: list[str] = []
+    scene_groups: list[list[_AtomicState]] = []
+    for scene in groups:
+        sustained = _split_sustained_family_runs(scene, config)
+        scene_groups.extend(sustained)
+        for group in sustained[1:]:
+            diagnostics.append(
+                f"SUSTAINED_TARGET_FAMILY_CHANGE:{group[0].output.start_frame}"
+            )
+    for scene in scene_groups:
+        evidence = [item for item in scene if item.state is not None]
+        if not evidence:
+            result.extend(scene)
+            continue
+        family = _scene_layout_family(evidence)
+        if family == LayoutFamily.SPLIT:
+            scene_crops = [
+                _split_facecam_crop(
+                    item.state.bounds, source_width, source_height, config,
+                )
+                for item in evidence if item.layout == LayoutFamily.SPLIT and item.state is not None
+            ]
+        else:
+            # Pick the scene family from the protected target geometry, not
+            # from an observation-local editorial punch-in.  A punch-in may
+            # narrow the atomic crop enough to turn the whole scene into a
+            # false fit-background fallback; scene-locked composition permits
+            # tracking inside the chosen family, not observation-local zooms.
+            scene_crops = [
+                _target_crop(
+                    item.state.bounds, source_width, source_height, config,
+                )[0]
+                for item in evidence if item.state is not None
+            ]
+        if not scene_crops:
+            result.extend(scene)
+            continue
+
+        width = max(item.width for item in scene_crops)
+        height = max(item.height for item in scene_crops)
+        if family != LayoutFamily.SPLIT:
+            width, height = _aspect_locked_size(
+                width, height, source_width, source_height,
+            )
+        if width > 1 or height > 1:
+            family = LayoutFamily.FIT_BACKGROUND
+
+        family_items: list[_AtomicState] = []
+        suppressed_punch = any(item.punch_event is not None for item in scene)
+        for index, item in enumerate(scene):
+            if family == LayoutFamily.FIT_BACKGROUND:
+                family_items.append(replace(
+                    item,
+                    layout=LayoutFamily.FIT_BACKGROUND,
+                    desired_crop=NormalizedRect(x=0, y=0, width=1, height=1),
+                    fallback="fit_background",
+                    reason="scene_reset" if item.reason == "scene_reset" else "safe_fallback",
+                    punch_event=None,
+                ))
+                continue
+            anchor = (
+                item.state
+                if item.state is not None and (
+                    family != LayoutFamily.SPLIT or item.layout == LayoutFamily.SPLIT
+                )
+                else _nearest_scene_state(
+                    scene, index,
+                    layout=LayoutFamily.SPLIT if family == LayoutFamily.SPLIT else None,
+                )
+            )
+            assert anchor is not None
+            crop = (
+                _split_facecam_crop(
+                    anchor.bounds, source_width, source_height, config,
+                )
+                if family == LayoutFamily.SPLIT else
+                _centered_rect(anchor.bounds, width, height)
+            )
+            retained_state = (
+                item.state
+                if family != LayoutFamily.SPLIT or item.layout == LayoutFamily.SPLIT
+                else None
+            )
+            family_items.append(replace(
+                item,
+                state=retained_state,
+                layout=family,
+                desired_crop=crop,
+                fallback=(
+                    item.fallback
+                    if retained_state is not None and item.fallback != "fit_background"
+                    else "stable_source" if retained_state is None else "none"
+                ),
+                target=(item.target if retained_state is not None else AttentionTarget.STABLE_SOURCE),
+                target_ref=(item.target_ref if retained_state is not None else None),
+                confidence=(item.confidence if retained_state is not None else 0),
+                evidence_refs=(item.evidence_refs if retained_state is not None else ()),
+                punch_event=None,
+                reason=(
+                    "target_acquired"
+                    if retained_state is not None and item.reason == "editorial_punch_in"
+                    else "none"
+                    if retained_state is not None and item.reason == "punch_out"
+                    else item.reason
+                    if retained_state is not None
+                    else "scene_reset" if item.reason == "scene_reset" else "safe_fallback"
+                ),
+            ))
+
+        if any(
+            item.state is not None
+            and _containment(item.state.bounds, item.desired_crop) < 0.98
+            for item in family_items
+        ):
+            family = LayoutFamily.FIT_BACKGROUND
+            family_items = [replace(
+                item,
+                layout=family,
+                desired_crop=NormalizedRect(x=0, y=0, width=1, height=1),
+                fallback="fit_background",
+                reason="scene_reset" if item.reason == "scene_reset" else "safe_fallback",
+                punch_event=None,
+            ) for item in scene]
+            diagnostics.append(
+                f"SCENE_FAMILY_FIT_FALLBACK:{scene[0].output.start_frame}"
+            )
+        else:
+            diagnostics.append(
+                f"SCENE_LAYOUT_FAMILY_LOCKED:{scene[0].output.start_frame}:{family.value}"
+            )
+            if suppressed_punch:
+                diagnostics.append(
+                    f"SCENE_PUNCH_IN_SUPPRESSED:{scene[0].output.start_frame}"
+                )
+        result.extend(family_items)
+    return tuple(result), tuple(diagnostics)
+
+
+def _split_sustained_family_runs(
+    scene: Sequence[_AtomicState], config: CompositionPlannerConfig,
+) -> list[list[_AtomicState]]:
+    runs: list[tuple[int, int, LayoutFamily | None, int]] = []
+    start = 0
+    while start < len(scene):
+        family = scene[start].layout if scene[start].state is not None else None
+        end = start + 1
+        while end < len(scene):
+            candidate = scene[end].layout if scene[end].state is not None else None
+            if candidate != family:
+                break
+            end += 1
+        duration = scene[end - 1].output.end_frame - scene[start].output.start_frame
+        runs.append((start, end, family, duration))
+        start = end
+    sustained = [
+        run for run in runs
+        if run[2] is not None and run[3] >= config.minimum_layout_dwell_frames
+    ]
+    distinct = [
+        run for index, run in enumerate(sustained)
+        if index == 0 or run[2] != sustained[index - 1][2]
+    ]
+    if len(distinct) < 2:
+        return [list(scene)]
+    boundaries = [run[0] for run in distinct[1:]]
+    points = [0, *boundaries, len(scene)]
+    return [list(scene[left:right]) for left, right in zip(points, points[1:]) if right > left]
+
+
+def _scene_layout_family(evidence: Sequence[_AtomicState]) -> LayoutFamily:
+    if any(item.layout == LayoutFamily.SPLIT for item in evidence):
+        return LayoutFamily.SPLIT
+    if any(item.target == AttentionTarget.SCREEN for item in evidence):
+        return LayoutFamily.SCREEN_PRIORITY
+    if any(item.target == AttentionTarget.PRODUCT for item in evidence):
+        return LayoutFamily.SCREEN_PRODUCT
+    if any(item.target == AttentionTarget.GROUP for item in evidence):
+        return LayoutFamily.WIDE_GROUP
+    if any(item.target == AttentionTarget.SPEAKER for item in evidence):
+        return LayoutFamily.STABLE_SPEAKER
+    return max(
+        evidence,
+        key=lambda item: (item.confidence, _crop_area(item.desired_crop)),
+    ).layout
+
+
+def _nearest_scene_state(
+    scene: Sequence[_AtomicState], index: int, *, layout: LayoutFamily | None = None,
+) -> _TargetState | None:
+    candidates = [
+        (abs(position - index), position, item.state)
+        for position, item in enumerate(scene)
+        if item.state is not None and (layout is None or item.layout == layout)
+    ]
+    return min(candidates, default=(0, 0, None))[2]
+
+
+def _aspect_locked_size(
+    width: float, height: float, source_width: int, source_height: int,
+) -> tuple[float, float]:
+    normalized_ratio = (9 / 16) / (source_width / source_height)
+    required_height = max(height, width / max(normalized_ratio, 1e-9))
+    return normalized_ratio * required_height, required_height
+
+
+def _split_facecam_crop(
+    bounds: NormalizedRect,
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect:
+    source_aspect = source_width / source_height
+    pane_aspect = (9 / 16) / SPLIT_FACE_CAM_RATIO
+    normalized_ratio = pane_aspect / source_aspect
+    usable = 1 - config.target_margin_ratio
+    height = max(
+        0.22,
+        bounds.height / usable,
+        bounds.width / max(normalized_ratio * usable, 1e-9),
+    )
+    height = min(1.0, height, 1 / max(normalized_ratio, 1e-9))
+    return _centered_rect(bounds, normalized_ratio * height, height)
+
+
 def _adopt_layout_if_safe(item: _AtomicState, donor: _AtomicState) -> _AtomicState | None:
     if item.punch_event is not None:
         return None
@@ -687,12 +947,12 @@ def _target_crop(
     normalized_ratio = output_aspect / source_aspect
     usable = 1 - 2 * config.target_margin_ratio
     required_height = max(0.52, bounds.height / usable, bounds.width / max(normalized_ratio * usable, 1e-9))
-    if required_height <= 1:
+    if required_height <= 1 and normalized_ratio <= 1:
         height = min(1.0, required_height)
-        width = max(config.minimum_fill_crop_width, normalized_ratio * height)
+        width = normalized_ratio * height
         return _centered_rect(bounds, width, height), "none"
-    width = min(1.0, max(bounds.width / usable, normalized_ratio, config.minimum_fill_crop_width))
-    height = min(1.0, max(bounds.height / usable, width / max(normalized_ratio, 1e-9) * 0.72))
+    height = min(1.0, 1 / max(normalized_ratio, 1e-9))
+    width = min(1.0, normalized_ratio * height)
     return _centered_rect(bounds, width, height), "wider_crop"
 
 
@@ -702,7 +962,7 @@ def _calm_fallback_crop(
 ) -> tuple[NormalizedRect, LayoutFamily, Literal["stable_source", "fit_background"]]:
     source_aspect = source_width / source_height
     output_aspect = 9 / 16
-    if source_aspect <= output_aspect * 1.12:
+    if abs(source_aspect - output_aspect) <= 0.001:
         return NormalizedRect(x=0, y=0, width=1, height=1), LayoutFamily.SINGLE_SUBJECT, "stable_source"
     return NormalizedRect(x=0, y=0, width=1, height=1), LayoutFamily.FIT_BACKGROUND, "fit_background"
 
@@ -713,7 +973,9 @@ def _layout_for(
 ) -> LayoutFamily:
     allowed = state.decision.allowed_layouts
     preferred: tuple[LayoutFamily, ...]
-    if state.decision.target == AttentionTarget.SPEAKER:
+    if LayoutFamily.SPLIT in allowed:
+        preferred = (LayoutFamily.SPLIT, *allowed)
+    elif state.decision.target == AttentionTarget.SPEAKER:
         preferred = (LayoutFamily.STABLE_SPEAKER, LayoutFamily.SINGLE_SUBJECT)
     elif state.decision.target in {AttentionTarget.SCREEN, AttentionTarget.PRODUCT}:
         preferred = (LayoutFamily.SCREEN_PRODUCT, LayoutFamily.SCREEN_PRIORITY, LayoutFamily.WIDE_GROUP)
@@ -834,7 +1096,11 @@ def _geometry_for(
     source_width: int,
     source_height: int,
 ) -> tuple[CompositionGeometryContract, tuple[NormalizedRect, ...], float]:
-    content = _output_content_bounds(crop, source_width, source_height)
+    content = (
+        NormalizedRect(x=0, y=0, width=1, height=SPLIT_FACE_CAM_RATIO)
+        if item.layout == LayoutFamily.SPLIT else
+        _output_content_bounds(crop, source_width, source_height)
+    )
     relevant = [
         observation for observation in observations
         if item.output.start_frame <= observation.frame < item.output.end_frame

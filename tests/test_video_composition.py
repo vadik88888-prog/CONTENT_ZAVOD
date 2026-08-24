@@ -43,7 +43,7 @@ from app.creative_contracts import (
     compile_render_plan,
     source_output_map_from_legacy_timeline,
 )
-from app.creative_execution import compile_native_creative_plan
+from app.creative_execution import _native_crop_plan, compile_native_creative_plan
 from app.creative_lifecycle import (
     CandidateCaptionFeasibilityArtifact,
     CandidateCaptionFeasibilityReference,
@@ -266,6 +266,79 @@ def test_fit_background_filters_center_the_foreground_instead_of_bottom_aligning
     graph = _visual_filter(clip, canvas)
 
     assert "overlay=(W-w)/2:(H-h)/2" in graph
+
+
+def test_facecam_gameplay_split_filter_is_stable_and_never_stretches_source() -> None:
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+    crop = _native_crop_plan(
+        NormalizedRect(x=0, y=0.44, width=0.5, height=0.56),
+        LayoutFamily.SPLIT,
+        320,
+        180,
+        0,
+        (),
+        0,
+        1,
+    )
+    clip = SourceVideoClip(
+        clip_id="visual-gameplay-split", order=1,
+        timeline_start_seconds=0, timeline_end_seconds=1, duration_seconds=1,
+        source_path="source.mp4", source_start_seconds=0, source_end_seconds=1,
+        visual_strategy="mapped_source", crop_plan=crop, status="ready",
+    )
+
+    graph = _visual_filter(clip, canvas)
+
+    assert crop.strategy == "facecam_gameplay_split"
+    assert "split=2" in graph
+    assert "vstack=inputs=2" in graph
+    assert graph.count("force_original_aspect_ratio=increase") == 2
+    assert "scale=180:320,setsar=1" not in graph
+
+
+def test_facecam_gameplay_split_renders_facecam_above_gameplay(tmp_path: Path) -> None:
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        pytest.skip("ffmpeg is required for split-layout regression")
+    source_path = tmp_path / "gameplay-facecam-source.mp4"
+    subprocess.run([
+        executable, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "color=c=blue:size=320x180:rate=30,drawbox=x=0:y=80:w=160:h=100:color=red:t=fill",
+        "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_path),
+    ], check=True)
+    crop = CropPlan(
+        strategy="facecam_gameplay_split",
+        source_width=320,
+        source_height=180,
+        crop_width=160,
+        crop_height=100,
+        crop_x=0,
+        crop_y=80,
+    )
+    clip = SourceVideoClip(
+        clip_id="visual-gameplay-split", order=1,
+        timeline_start_seconds=0, timeline_end_seconds=1, duration_seconds=1,
+        source_path=str(source_path), source_start_seconds=0, source_end_seconds=1,
+        visual_strategy="mapped_source", crop_plan=crop, status="ready",
+    )
+    rendered = tmp_path / "gameplay-split.mp4"
+    canvas = CanvasConfig(width=180, height=320, fps=30)
+
+    VideoCompositionService(tmp_path, _audio_config())._render_base_visual(
+        [clip], canvas, rendered, [],
+    )
+
+    def sample(x: int, y: int) -> bytes:
+        return subprocess.run([
+            executable, "-hide_banner", "-loglevel", "error", "-i", str(rendered),
+            "-vf", f"select=eq(n\\,10),crop=2:2:{x}:{y},scale=1:1,format=rgb24",
+            "-frames:v", "1", "-f", "rawvideo", "-",
+        ], capture_output=True, check=True).stdout[:3]
+
+    top = sample(90, 50)
+    bottom = sample(150, 220)
+    assert top[0] > top[2] + 80
+    assert bottom[2] > bottom[0] + 80
 
 
 def test_native_visual_boundary_is_half_open_on_the_output_frame_lattice(tmp_path: Path) -> None:
@@ -1133,13 +1206,13 @@ def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: P
         TargetObservation(
             observation_id="observation-native-1", frame=8,
             target=AttentionTarget.SUBJECT, target_ref="subject-native",
-            bounds={"x": 0.04, "y": 0.18, "width": 0.30, "height": 0.58},
+            bounds={"x": 0.04, "y": 0.18, "width": 0.26, "height": 0.58},
             confidence=0.96, evidence_ref="visual-native", scene_id="scene-native",
         ),
         TargetObservation(
             observation_id="observation-native-2", frame=20,
             target=AttentionTarget.SUBJECT, target_ref="subject-native",
-            bounds={"x": 0.08, "y": 0.18, "width": 0.30, "height": 0.58},
+            bounds={"x": 0.08, "y": 0.18, "width": 0.26, "height": 0.58},
             confidence=0.95, evidence_ref="visual-native", scene_id="scene-native",
         ),
     )
@@ -1198,7 +1271,8 @@ def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: P
     assert compiled.source_broll_plan.schema_version == "7E.source-broll-plan.1"
     assert compiled.motion_plan.schema_version == "7F.motion-plan.1"
     assert compiled.source_broll_plan.segments
-    assert any(item.primitive_id == "punch_in" for item in compiled.motion_plan.events)
+    assert not any(item.primitive_id == "punch_in" for item in compiled.motion_plan.events)
+    assert "SCENE_PUNCH_IN_SUPPRESSED:0" in compiled.composition_plan.diagnostics
     rendered_timeline = json.loads(
         (tmp_path / "rich" / "production-render" / "video-timeline.json").read_text(encoding="utf-8")
     )

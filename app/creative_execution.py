@@ -46,7 +46,7 @@ from app.video_models import (
 )
 
 
-NATIVE_CREATIVE_EXECUTION_VERSION = "7G.1"
+NATIVE_CREATIVE_EXECUTION_VERSION = "7G.2.scene-family.1"
 
 
 def default_native_creative_intent(
@@ -469,7 +469,10 @@ def _native_crop_plan(
             confidence=1,
         ))
     return CropPlan(
-        strategy="manual_normalized_crop",
+        strategy=(
+            "facecam_gameplay_split"
+            if layout == LayoutFamily.SPLIT else "manual_normalized_crop"
+        ),
         source_width=source_width,
         source_height=source_height,
         display_rotation_degrees=rotation,

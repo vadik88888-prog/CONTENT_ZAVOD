@@ -1040,10 +1040,17 @@ def vision_prompt(pass_kind: str) -> str:
         if pass_kind == "pass1" else
         "Perform a deep candidate-window check for visible hook, action, reaction, and payoff evidence."
     )
+    composite_guidance = (
+        " For a GAMEPLAY frame with a visible facecam overlay, use scene_type GAMEPLAY, "
+        "primary_subject face, and coordinates at the facecam subject; do not report the "
+        "gameplay canvas as the primary subject in that composite frame."
+        if pass_kind == "pass2" else ""
+    )
     return (
         f"{purpose} Return exactly one observation for every supplied keyframe_id and timestamp. "
         "Use only visible evidence; never identify people or infer hidden facts. Use null coordinates and explicit "
         "missing_evidence when uncertain. Keep on_screen_text brief and verbatim only when clearly legible."
+        f"{composite_guidance}"
     )
 
 

@@ -70,7 +70,7 @@ class VisionConfig:
     enabled: bool = True
     cache_enabled: bool = True
     prompt_version: str = "6B.pass1.1"
-    pass2_prompt_version: str = "6B.pass2.1"
+    pass2_prompt_version: str = "6B.pass2.2"
     schema_version: str = "6B.1"
     pass1_batch_size: int = 3
     pass2_min_frames: int = 3

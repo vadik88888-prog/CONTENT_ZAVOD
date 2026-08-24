@@ -11,9 +11,6 @@ from app.composition_planning import (
 )
 from app.creative_contracts import (
     AttentionTarget,
-    CaptionPlan,
-    CanvasPlan,
-    CompositionPunchIn,
     CreativeIntent,
     CreativePolicy,
     EditMapSegment,
@@ -24,15 +21,12 @@ from app.creative_contracts import (
     LayoutFamily,
     MotionDomain,
     MotionPurpose,
-    MotionPlan,
     NormalizedRect,
     OutputInterval,
     ResolvedCompositionTarget,
     ResolvedMotionEvent,
     SourceInterval,
-    SourceBRollPlan,
     SourceOutputTimeMap,
-    compile_render_plan,
 )
 
 
@@ -172,16 +166,16 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
         AttentionTarget.SPEAKER, AttentionTarget.SCREEN, AttentionTarget.GROUP,
     ]
     assert [segment.layout for segment in plan.segments] == [
-        LayoutFamily.STABLE_SPEAKER, LayoutFamily.SCREEN_PRODUCT, LayoutFamily.WIDE_GROUP,
+        LayoutFamily.STABLE_SPEAKER, LayoutFamily.FIT_BACKGROUND, LayoutFamily.FIT_BACKGROUND,
     ]
     assert all(segment.geometry is not None for segment in plan.segments)
     assert all(segment.protected_regions for segment in plan.segments)
-    assert plan.quality_report.metrics.layout_switch_count == 2
-    assert plan.quality_report.metrics.layout_switches_per_minute == 12.0
+    assert plan.quality_report.metrics.layout_switch_count == 1
+    assert plan.quality_report.metrics.layout_switches_per_minute == 6.0
 
     strict = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
-        config=CompositionPlannerConfig(maximum_switches_per_minute=10.0),
+        config=CompositionPlannerConfig(maximum_switches_per_minute=5.0),
     )
     assert any(
         item.code == "COMPOSITION_LAYOUT_SWITCH_RATE_HIGH"
@@ -242,7 +236,7 @@ def test_story_short_fit_wide_fit_island_uses_safe_fit_without_dropping_evidence
     assert evidence_segment.geometry is not None
     assert plan.quality_report.metrics.clipped_target_count == 0
     assert plan.quality_report.metrics.layout_switch_count == 0
-    assert "SHORT_LAYOUT_ISLAND_REMOVED:120" in plan.diagnostics
+    assert "SCENE_FAMILY_FIT_FALLBACK:0" in plan.diagnostics
 
 
 def test_layout_edge_fragments_and_local_switch_bursts_are_calibrated() -> None:
@@ -320,8 +314,72 @@ def test_sparse_target_crop_is_held_without_extending_target_evidence() -> None:
     assert held.crop != NormalizedRect(x=0, y=0, width=1, height=1)
     assert held.geometry is not None
     assert held.geometry.target_regions == ()
-    assert released.fallback == "fit_background"
+    assert released.fallback == "stable_source"
+    assert released.layout == acquired.layout
     assert any(item == "STABLE_CROP_HELD:9" for item in plan.diagnostics)
+
+
+def test_sparse_podcast_observations_lock_one_vertical_family_per_scene() -> None:
+    targets = (
+        _target(
+            "speaker-glimpse", AttentionTarget.SPEAKER, 30, 31, "speaker-evidence",
+            target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER, LayoutFamily.SINGLE_SUBJECT),
+        ),
+        _target(
+            "group-glimpse", AttentionTarget.GROUP, 180, 181, "group-evidence",
+            target_ref=None, layouts=(LayoutFamily.WIDE_GROUP, LayoutFamily.FIT_BACKGROUND),
+        ),
+    )
+    observations = (
+        _observation(
+            "speaker-frame", 30, AttentionTarget.SPEAKER, "speaker-a",
+            "speaker-evidence", 0.32, width=0.14,
+        ),
+        _observation(
+            "group-frame", 180, AttentionTarget.GROUP, "group-a",
+            "group-evidence", 0.36, width=0.20,
+        ),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080,
+    )
+
+    assert {segment.layout for segment in plan.segments} == {LayoutFamily.WIDE_GROUP}
+    assert plan.quality_report.metrics.layout_switch_count == 0
+    assert any(
+        item == "SCENE_LAYOUT_FAMILY_LOCKED:0:wide_group" for item in plan.diagnostics
+    )
+    expected_ratio = (9 / 16) / (1920 / 1080)
+    assert all(abs(segment.crop.width / segment.crop.height - expected_ratio) < 1e-7 for segment in plan.segments)
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
+
+
+def test_gameplay_facecam_evidence_locks_stable_split_across_sparse_gaps() -> None:
+    target = _target(
+        "facecam-glimpse", AttentionTarget.SPEAKER, 90, 91, "facecam-evidence",
+        target_ref="facecam-a",
+        layouts=(LayoutFamily.SPLIT, LayoutFamily.SCREEN_PRIORITY, LayoutFamily.FIT_BACKGROUND),
+    )
+    observation = _observation(
+        "facecam-frame", 90, AttentionTarget.SPEAKER, "facecam-a",
+        "facecam-evidence", 0.05, width=0.18,
+    ).model_copy(update={
+        "bounds": NormalizedRect(x=0.05, y=0.55, width=0.18, height=0.28),
+    })
+
+    plan = build_composition_plan(
+        _intent((target,)), (observation,), source_width=1920, source_height=1080,
+    )
+
+    assert {segment.layout for segment in plan.segments} == {LayoutFamily.SPLIT}
+    assert plan.quality_report.metrics.layout_switch_count == 0
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
+    expected_facecam_ratio = ((9 / 16) / 0.35) / (1920 / 1080)
+    assert all(
+        abs(segment.crop.width / segment.crop.height - expected_facecam_ratio) < 1e-7
+        for segment in plan.segments
+    )
 
 
 def test_sparse_target_hold_stops_at_scene_cut() -> None:
@@ -391,7 +449,7 @@ def test_sparse_target_hold_stops_at_edit_map_boundary() -> None:
     assert "STABLE_CROP_HELD:9" not in plan.diagnostics
 
 
-def test_punch_in_exists_only_inside_confirmed_editorial_composition_event() -> None:
+def test_scene_family_lock_suppresses_observation_local_punch_in() -> None:
     target = _target(
         "product-target", AttentionTarget.PRODUCT, 0, 300, "product-evidence",
         target_ref="product-a", layouts=(LayoutFamily.SCREEN_PRODUCT,),
@@ -415,39 +473,12 @@ def test_punch_in_exists_only_inside_confirmed_editorial_composition_event() -> 
         _intent((target,), motion=(motion,)), observations, source_width=1920, source_height=1080,
     )
 
-    punch_segments = [segment for segment in plan.segments if segment.punch_in is not None]
-    assert len(punch_segments) == 1
-    assert punch_segments[0].output == motion.output
-    assert punch_segments[0].movement_reason == "editorial_punch_in"
+    assert not any(segment.punch_in is not None for segment in plan.segments)
     assert all(
-        segment.punch_in is not None or segment.movement_reason != "editorial_punch_in"
+        segment.movement_reason != "editorial_punch_in"
         for segment in plan.segments
     )
-
-    forged_segment = punch_segments[0].model_copy(update={
-        "punch_in": CompositionPunchIn(
-            event_id="forged-event",
-            output=punch_segments[0].output,
-            scale=1.04,
-            evidence_refs=("product-evidence",),
-        ),
-    })
-    forged = plan.model_copy(update={
-        "segments": tuple(
-            forged_segment if item.segment_id == punch_segments[0].segment_id else item
-            for item in plan.segments
-        ),
-    })
-    intent = _intent((target,), motion=(motion,))
-    with pytest.raises(ValueError, match="COMPOSITION_PUNCH_IN_EVIDENCE_MISMATCH"):
-        compile_render_plan(
-            intent,
-            CaptionPlan(intent_id=intent.intent_id),
-            forged,
-            MotionPlan(intent_id=intent.intent_id),
-            SourceBRollPlan(intent_id=intent.intent_id),
-            CanvasPlan(width=1080, height=1920),
-        )
+    assert "SCENE_PUNCH_IN_SUPPRESSED:0" in plan.diagnostics
 
 
 def test_low_confidence_and_untrusted_evidence_produce_calm_fit_blur_fallback() -> None:

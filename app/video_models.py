@@ -130,7 +130,10 @@ class ReframeKeyframe(BaseModel):
 class CropPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    strategy: Literal["center_crop", "fit_blur_background", "fit_solid_background", "top_crop", "manual_normalized_crop"]
+    strategy: Literal[
+        "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
+        "manual_normalized_crop", "facecam_gameplay_split",
+    ]
     source_width: int = Field(gt=0)
     source_height: int = Field(gt=0)
     display_rotation_degrees: Literal[0, 90, 180, 270] = 0
