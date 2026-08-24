@@ -55,6 +55,33 @@ def test_presets_resolve_to_distinct_real_pipeline_values() -> None:
     assert config.virality.semantic_ai_mode == "auto"
 
 
+@pytest.mark.parametrize("mode", ["standard", "maximum"])
+def test_semantic_terra_remains_admitted_when_vision_is_explicitly_off(mode: str) -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(processing_mode=mode, deep_analysis="off"),
+        _metadata(content_kind="podcast", visual_activity_score=0.1),
+    )
+    config = load_config()
+
+    apply_resolved_processing_config(config, resolved)
+
+    assert config.optional_visual_features is False
+    assert config.virality.semantic_ai_mode == "auto"
+    assert config.ai.model == "gpt-5.6-terra"
+
+
+def test_fast_mode_keeps_semantic_and_paid_vision_off() -> None:
+    resolved = resolve_processing_intent(
+        ProcessingIntent(processing_mode="fast", deep_analysis="on"), _metadata(),
+    )
+    config = load_config()
+
+    apply_resolved_processing_config(config, resolved)
+
+    assert config.virality.semantic_ai_mode == "off"
+    assert config.ai_reranking.enabled is False
+
+
 def test_editorial_intent_and_profile_override_resolve_into_existing_pipeline_config() -> None:
     intent = ProcessingIntent(
         editorial_intent="  Найти практические ошибки и сильный вывод  ",

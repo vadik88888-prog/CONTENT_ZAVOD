@@ -141,8 +141,20 @@ def map_error(error: object) -> UserFacingError:
         return UserFacingError("Файл недоступен", "Не удалось найти исходное видео.", "Проверьте путь к файлу и подключённые диски.", detail, "source_missing")
     if "ffmpeg" in lowered or "ffprobe" in lowered:
         return UserFacingError("Не готова среда", "Для создания ролика не хватает компонента обработки видео.", "Откройте «Настройки → Диагностика» и выполните проверку.", detail, "media_dependency")
-    if "api key" in lowered or "authentication" in lowered or "401" in lowered:
-        return UserFacingError("Не удалось подключиться к AI", "Проверьте настройку ключа API или используйте локальный тестовый режим.", "Добавьте ключ в .env и повторите попытку.", detail, "provider_auth")
+    if (
+        "api key" in lowered
+        or "authentication" in lowered
+        or "401" in lowered
+        or "403" in lowered
+        or "ai_credential_" in lowered
+    ):
+        return UserFacingError(
+            "Требуется настройка AI",
+            "Рабочий ключ API не подтверждён; production-анализ не запускался.",
+            "Откройте «Настройки → AI», сохраните рабочий ключ и повторите запуск либо явно включите локальный тестовый режим.",
+            detail,
+            "provider_auth",
+        )
     if "cancel" in lowered or "отмен" in lowered:
         return UserFacingError("Создание отменено", "Создание ролика было остановлено.", "Можно изменить настройки и запустить проект снова.", detail, "cancelled")
     if "permission" in lowered or "access is denied" in lowered or "доступ" in lowered:

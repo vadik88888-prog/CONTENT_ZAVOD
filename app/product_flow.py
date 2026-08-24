@@ -659,7 +659,10 @@ def apply_resolved_processing_config(config: Any, resolved: ResolvedProcessingCo
     # Goal 5B is active for the product flow while AppConfig remains backward
     # compatible for external programmatic callers that did not opt in.
     config.virality.enabled = True
-    config.virality.semantic_ai_mode = "off" if resolved.processing_mode == "fast" or resolved.deep_analysis.requested == "off" else "auto"
+    # Semantic scoring is a transcript/evidence capability, not a Vision
+    # feature.  Deep Analysis controls paid frame inspection only; Standard and
+    # Maximum keep Semantic Terra admitted even when Vision is explicitly off.
+    config.virality.semantic_ai_mode = "off" if resolved.processing_mode == "fast" else "auto"
     flow = config.product_flow
     flow.processing_mode = resolved.processing_mode
     flow.deep_analysis_requested = resolved.deep_analysis.requested

@@ -23,6 +23,10 @@ class StageError(ClipEngineError):
     """Критическая ошибка одного этапа конвейера."""
 
 
+class SemanticCredentialError(ClipEngineError):
+    """Semantic AI cannot run because its configured credential is unusable."""
+
+
 class TransformationConfigurationError(ClipEngineError):
     """Неподдерживаемая или небезопасная настройка transformation."""
 

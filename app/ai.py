@@ -110,6 +110,19 @@ def semantic_failure_kind(error: BaseException) -> str:
     """Classify retry-safe connection failures separately from response timeouts."""
 
     chain = _exception_chain(error)
+    for item in chain:
+        status = getattr(item, "status_code", None)
+        response = getattr(item, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        try:
+            status_code = int(status) if status is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code in {401, 403}:
+            return "auth_rejected"
+        if status_code in {408, 409, 425, 429} or (status_code is not None and status_code >= 500):
+            return "provider_unavailable"
     if any(isinstance(item, (httpx.ConnectError, httpx.ConnectTimeout)) for item in chain):
         return "connect_failure"
     if any(
@@ -549,13 +562,15 @@ class OpenAIProvider:
                 if failure_kind != "connect_failure" or attempt + 1 == connection_attempts:
                     break
         message = errors[-1] if errors else "Неизвестная ошибка OpenAI API."
-        return _reject_candidates(candidates, self.name, message), _usage(
+        usage = _usage(
             self.name,
             self.config.ai.model,
             retries=max(0, len(errors) - 1),
             api_errors=errors,
             started=started,
         )
+        usage["failure_kind"] = failure_kind
+        return _reject_candidates(candidates, self.name, message), usage
 
     def analyze_vision(
         self,
@@ -758,15 +773,18 @@ class GeminiProvider:
                     started=started,
                 )
             except Exception as error:
+                failure_kind = semantic_failure_kind(error)
                 errors.append(sanitize_api_error(error, self.api_key))
         message = errors[-1] if errors else "Неизвестная ошибка Gemini API."
-        return _reject_candidates(candidates, self.name, message), _usage(
+        usage = _usage(
             self.name,
             self.config.ai.model,
             retries=self.config.ai.max_retries,
             api_errors=errors,
             started=started,
         )
+        usage["failure_kind"] = failure_kind
+        return _reject_candidates(candidates, self.name, message), usage
 
     def analyze_vision(
         self,
@@ -898,7 +916,7 @@ def get_scorer(config: AppConfig, force_mock: bool = False) -> ClipScorer:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ClipEngineError(
-                "OPENAI_API_KEY не задан. Добавьте ключ в .env или запустите с --mock-ai."
+                "OPENAI API key не настроен. Добавьте ключ в Настройках или запустите локальный тестовый режим."
             )
         try:
             import openai  # noqa: F401
@@ -911,7 +929,7 @@ def get_scorer(config: AppConfig, force_mock: bool = False) -> ClipScorer:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ClipEngineError(
-                "GEMINI_API_KEY не задан. Добавьте ключ в .env или запустите с --mock-ai."
+                "Gemini API key не настроен. Добавьте ключ в Настройках или запустите локальный тестовый режим."
             )
         try:
             import google.genai  # noqa: F401

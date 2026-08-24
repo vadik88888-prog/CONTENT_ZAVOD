@@ -151,7 +151,7 @@ def test_draft_composition_pass2_is_candidate_cached_and_reused(
                     "provider": "mock",
                     "model": "gpt-5.6-terra",
                     "detail": "high",
-                    "prompt_version": "6B.pass2.1",
+                    "prompt_version": "6B.pass2.2",
                     "schema_version": "6B.1",
                     "frame_hash": "a" * 64,
                     "cache_key": "b" * 64,
@@ -206,10 +206,12 @@ def test_draft_composition_pass2_is_candidate_cached_and_reused(
     artifact = read_json(artifact_path, {})
     assert artifact["lineage"]["analysis_snapshot_mutated"] is False
     assert artifact["lineage"]["trigger"] == "draft_candidate_composition_evidence_gap"
+    assert artifact["lineage"]["prompt_version"] == "6B.pass2.2"
     assert analysis_path.read_bytes() == b'{"immutable":true}'
 
     config.production_render.subtitle_style = "minimal"
     config.production_render.crop_strategy = "center_crop"
+    config.product_flow.caption_preset_id = "word_pop"
     config.validate()
     second_candidate = _candidate()
     second = Pipeline(
@@ -229,6 +231,97 @@ def test_draft_composition_pass2_is_candidate_cached_and_reused(
     assert second[second_candidate.id]["artifact_ref"] == str(artifact_path)
     assert has_usable_composition_evidence(second_candidate.to_dict(), timeline)
     assert analysis_path.read_bytes() == b'{"immutable":true}'
+
+
+def test_auto_podcast_admits_candidate_only_pass2_without_enabling_full_source_vision(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import app.pipeline as pipeline_module
+
+    timeline = _sparse_timeline()
+    source_path = tmp_path / "podcast-auto.mp4"
+    source_path.write_bytes(b"source")
+    source = Source(timeline["source_id"], source_path, source_path.name, str(source_path))
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_bytes(b'{"immutable":true}')
+    analysis = SimpleNamespace(
+        analysis_id="analysis-auto",
+        verified_sha256=hashlib.sha256(analysis_path.read_bytes()).hexdigest(),
+    )
+    calls: list[dict] = []
+
+    class Gateway:
+        def __init__(self, *, config, **_kwargs) -> None:
+            assert config.optional_visual_features is True
+
+        def analyze_pass2(self, *, source: Path, timeline: dict, request: dict) -> dict:
+            calls.append(request)
+            return {
+                "schema_version": "6B.pass2-result.1",
+                "candidate_id": request["candidate_id"],
+                "analysis_run_id": timeline["analysis_run_id"],
+                "request": request,
+                "status": "completed",
+                "verification": {
+                    "hook_visible": True, "action_visible": True,
+                    "reaction_visible": True, "payoff_visible": True,
+                    "continuity_risk": "low", "confidence": 0.9,
+                },
+                "observations": [],
+                "diagnostics": {"frames_sent": len(request["frames"])},
+            }
+
+    monkeypatch.setattr(pipeline_module, "VisionGateway", Gateway)
+    monkeypatch.setattr(pipeline_module, "get_vision_provider", lambda *_args, **_kwargs: object())
+    config = AppConfig(optional_visual_features=False)
+    config.product_flow.deep_analysis_requested = "auto"
+    config.product_flow.deep_analysis_resolved = False
+    candidate = _candidate()
+
+    Pipeline(tmp_path, config, mock_ai=True, analysis_artifact_path=analysis_path)._ensure_draft_composition_evidence(
+        [SimpleNamespace(candidate=candidate)], source=source, timeline=timeline,
+        analysis=analysis, work_directory=tmp_path / "work-auto",
+        tracker=StageTracker(tmp_path / "auto-state.json"),
+    )
+
+    assert len(calls) == 1
+    assert config.optional_visual_features is False
+
+
+def test_explicit_vision_off_never_calls_candidate_pass2_provider(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import app.pipeline as pipeline_module
+
+    timeline = _sparse_timeline()
+    source_path = tmp_path / "podcast-off.mp4"
+    source_path.write_bytes(b"source")
+    source = Source(timeline["source_id"], source_path, source_path.name, str(source_path))
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_bytes(b'{"immutable":true}')
+    analysis = SimpleNamespace(
+        analysis_id="analysis-off",
+        verified_sha256=hashlib.sha256(analysis_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "get_vision_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Vision provider must not be called")),
+    )
+    config = AppConfig(optional_visual_features=False)
+    config.product_flow.deep_analysis_requested = "off"
+    candidate = _candidate()
+
+    outcome = Pipeline(
+        tmp_path, config, analysis_artifact_path=analysis_path,
+    )._ensure_draft_composition_evidence(
+        [SimpleNamespace(candidate=candidate)], source=source, timeline=timeline,
+        analysis=analysis, work_directory=tmp_path / "work-off",
+        tracker=StageTracker(tmp_path / "off-state.json"),
+    )
+
+    assert outcome[candidate.id]["status"] == "skipped"
+    assert outcome[candidate.id]["reason"] == "vision_explicitly_off"
+    assert not (tmp_path / "work-off" / "candidate-vision-pass2").exists()
 
 
 def test_draft_composition_pass2_failure_is_isolated_per_candidate(

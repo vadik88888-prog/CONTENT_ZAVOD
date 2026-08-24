@@ -474,6 +474,9 @@ def test_single_candidate_final_reuses_the_draft_override_constraints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     services, project = _services(tmp_path)
+    services.settings.local_test_mode = False
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     analysis_path = tmp_path / "analysis.json"
     analysis_path.write_text("{}", encoding="utf-8")
     project.analysis_artifact_path = str(analysis_path)
@@ -510,7 +513,7 @@ def test_single_candidate_final_reuses_the_draft_override_constraints(
         lambda *_args: tmp_path / "run" / "approved-draft.json",
     )
 
-    services.pipeline.prepare_selected_render(
+    prepared = services.pipeline.prepare_selected_render(
         project, SimpleNamespace(run_id="final-run"), services.settings, ["candidate-a"],
     )
 
@@ -520,6 +523,7 @@ def test_single_candidate_final_reuses_the_draft_override_constraints(
     assert effective.composition_strategy == "fit_blur_background"
     assert effective.same_source_broll_allowed is False
     assert effective.reduced_motion is True
+    assert "--mock-ai" not in prepared.arguments
 
 
 def test_project_open_and_incremental_cards_share_one_verified_analysis_load(

@@ -28,6 +28,7 @@ from app.product_flow import (
 )
 from app.quality_report import QUALITY_REPORT_SCHEMA_VERSION, aggregate_quality_status, read_quality_report
 from app.runtime import RuntimeLayout
+from app.secure_secrets import api_key_state
 from app.utils import read_json, safe_name, stable_file_hash
 
 
@@ -192,6 +193,7 @@ class PipelineFacade:
         config = load_config(self._base_config(settings))
         _intent, resolved, _estimate = self.plan_processing(project, settings)
         self._apply_project_options(config, project, settings, resolved)
+        self._require_provider_credential(config, resolved, settings)
 
         run_directory = Path(project.project_directory) / "runs" / run.run_id
         config_path = run_directory / "runtime-config.yaml"
@@ -227,6 +229,7 @@ class PipelineFacade:
         """Prepare the isolated analysis contract; it cannot start delivery."""
 
         source_path, config, resolved, config_path = self._prepare_mode_paths(project, run, settings)
+        self._require_provider_credential(config, resolved, settings)
         arguments = [
             "analyze", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id,
@@ -255,6 +258,14 @@ class PipelineFacade:
         self.load_verified_analysis(project, required=True)
         effective_project = self._project_with_candidate_options(project, candidate_ids)
         source_path, config, resolved, config_path = self._prepare_mode_paths(effective_project, run, settings)
+        self._require_provider_credential(
+            config,
+            resolved,
+            settings,
+            provider_required=(
+                config.vision.enabled and resolved.deep_analysis.requested != "off"
+            ),
+        )
         arguments = [
             "draft", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),
@@ -555,6 +566,43 @@ class PipelineFacade:
         return self._pending_prepared(
             arguments, source_path, config_path, run_id, project_id, runtime_flags,
             source_duration_seconds=source_duration_seconds,
+        )
+
+    def _require_provider_credential(
+        self,
+        config: Any,
+        resolved: ResolvedProcessingConfig,
+        settings: DesktopSettings,
+        *,
+        provider_required: bool = True,
+    ) -> None:
+        """Block only runs whose selected mode admits an AI provider call.
+
+        This is the canonical local readiness check for normal Desktop flow.
+        Remote rejection is also enforced by the Semantic engine call; a
+        transport outage remains a retryable degraded result rather than being
+        confused with an invalid credential.
+        """
+
+        if (
+            not provider_required
+            or settings.local_test_mode
+            or resolved.processing_mode == "fast"
+            or config.ai.provider == "mock"
+        ):
+            return
+        state = api_key_state(str(config.ai.provider), self.runtime.data)
+        if state == "configured":
+            return
+        reason = {
+            "missing": "не настроен",
+            "invalid": "не прошёл проверку формата",
+            "auth_rejected": "отклонён провайдером",
+            "unavailable": "сейчас нельзя подтвердить",
+        }.get(state, "не готов")
+        raise InputValidationError(
+            f"AI_CREDENTIAL_{state.upper()}: API key {reason}. "
+            "Откройте «Настройки → AI», сохраните рабочий ключ и повторите запуск."
         )
 
     def _pending_prepared(

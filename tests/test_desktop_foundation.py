@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import app.gui.services.pipeline_facade as facade_module
+from app.config import AppConfig
 from app.gui.models import DesktopSettings, ProjectStatus, RunStatus
 from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
 from app.gui.services.error_mapping import map_error, redact_secrets
@@ -16,6 +18,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.system_service import SystemService
+from app.product_flow import ProcessingIntent, resolve_processing_intent
 
 
 def _video(tmp_path: Path, name: str = "тестовое видео.mp4") -> Path:
@@ -169,6 +172,54 @@ def test_error_mapping_redacts_secrets() -> None:
     mapped = map_error(raw)
     assert value not in mapped.technical_details
     assert value not in redact_secrets(raw)
+
+
+@pytest.mark.parametrize("state", ["missing", "invalid", "auth_rejected"])
+def test_provider_required_desktop_run_uses_canonical_credential_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    facade = PipelineFacade(tmp_path)
+    settings = DesktopSettings.defaults(tmp_path)
+    config = AppConfig()
+    resolved = resolve_processing_intent(
+        ProcessingIntent(processing_mode="standard", deep_analysis="off"),
+    )
+    monkeypatch.setattr(facade_module, "api_key_state", lambda *_args, **_kwargs: state)
+
+    with pytest.raises(InputValidationError, match=f"AI_CREDENTIAL_{state.upper()}"):
+        facade._require_provider_credential(config, resolved, settings)
+
+
+def test_fast_and_local_test_modes_do_not_require_provider_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    facade = PipelineFacade(tmp_path)
+    config = AppConfig()
+    monkeypatch.setattr(
+        facade_module, "api_key_state",
+        lambda *_args, **_kwargs: pytest.fail("credential readiness must not be consulted"),
+    )
+
+    fast = resolve_processing_intent(ProcessingIntent(processing_mode="fast"))
+    facade._require_provider_credential(config, fast, DesktopSettings.defaults(tmp_path))
+
+    standard = resolve_processing_intent(ProcessingIntent(processing_mode="standard"))
+    local = DesktopSettings.defaults(tmp_path)
+    local.local_test_mode = True
+    facade._require_provider_credential(config, standard, local)
+
+    facade._require_provider_credential(
+        config, standard, DesktopSettings.defaults(tmp_path), provider_required=False,
+    )
+
+
+def test_provider_error_ux_routes_to_settings_and_never_dotenv() -> None:
+    mapped = map_error("SEMANTIC_CREDENTIAL_AUTH_REJECTED: AI API key rejected with 403")
+
+    assert mapped.error_code == "provider_auth"
+    assert "Настройки → AI" in mapped.suggested_action
+    assert ".env" not in mapped.user_message
+    assert ".env" not in mapped.suggested_action
 
 
 @pytest.mark.parametrize(

@@ -28,7 +28,7 @@ vision:
   enabled: true
   cache_enabled: true
   prompt_version: 6B.pass1.1
-  pass2_prompt_version: 6B.pass2.1
+  pass2_prompt_version: 6B.pass2.2
   schema_version: 6B.1
   pass1_batch_size: 3       # PASS 1 sends small low-detail batches (2..4)
   pass2_min_frames: 3

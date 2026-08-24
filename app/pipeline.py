@@ -78,6 +78,7 @@ from app.errors import (
     ClipEngineError,
     ProductionPlanError,
     ProductionRenderError,
+    SemanticCredentialError,
     StageError,
     TTSError,
     TransformationProviderError,
@@ -125,6 +126,7 @@ from app.production_feasibility import (
 )
 from app.product_flow import DeepAnalysisDecision, resolve_deep_analysis
 from app.scene_detection import detect_scene_boundaries
+from app.secure_secrets import validate_api_key
 from app.selection import select_clips
 from app.sources import Source, local_source, url_source, validate_source_arguments
 from app.subtitles import create_ass
@@ -965,7 +967,7 @@ class Pipeline:
                 "semantic_ai": {
                     "virality_enabled": self.config.virality.enabled,
                     "mode": self.config.virality.semantic_ai_mode,
-                    "admission_version": "semantic-auto.1",
+                    "admission_version": "semantic-auto.2",
                     "payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
                 },
                 "mock": self.mock_ai, "disabled": self.no_ai_rerank,
@@ -1930,9 +1932,19 @@ class Pipeline:
         """
 
         outcomes: dict[str, dict[str, Any]] = {}
+        candidate_pass2_admitted = (
+            self.config.vision.enabled
+            and self.config.product_flow.processing_mode != "fast"
+            and self.config.product_flow.deep_analysis_requested != "off"
+        )
         target_config = replace(
             self.config,
             ai=replace(self.config.ai, model=DRAFT_COMPOSITION_PASS2_MODEL),
+            # AUTO may intentionally skip full-source PASS 1, while a selected
+            # Draft still admits one candidate-bounded PASS 2.  This copied
+            # config is private to the candidate gateway and never enables the
+            # source-level Vision switch on ``self.config``.
+            optional_visual_features=candidate_pass2_admitted,
         )
         gateway: VisionGateway | None = None
         provider_label = "mock" if self.mock_ai else target_config.ai.provider
@@ -1954,6 +1966,28 @@ class Pipeline:
                     ),
                     "model": DRAFT_COMPOSITION_PASS2_MODEL,
                     "source_range": {"start_seconds": candidate.start, "end_seconds": candidate.end},
+                }
+                continue
+
+            if not candidate_pass2_admitted:
+                reason = (
+                    "vision_explicitly_off"
+                    if target_config.product_flow.deep_analysis_requested == "off"
+                    else "candidate_vision_not_admitted"
+                )
+                tracker.skip(stage_name, reason)
+                outcomes[candidate.id] = {
+                    "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                    "status": "skipped",
+                    "reason": reason,
+                    "cache_hit": False,
+                    "usable_composition_evidence": False,
+                    "artifact_ref": None,
+                    "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                    "source_range": {
+                        "start_seconds": candidate.start,
+                        "end_seconds": candidate.end,
+                    },
                 }
                 continue
 
@@ -2026,7 +2060,7 @@ class Pipeline:
             tracker.start(stage_name, cache_key, cache_hit=False)
             if gateway is None:
                 provider = None
-                if target_config.vision.enabled and target_config.optional_visual_features:
+                if candidate_pass2_admitted:
                     try:
                         provider = get_vision_provider(target_config, self.mock_ai)
                     except ClipEngineError as error:
@@ -3055,34 +3089,23 @@ class Pipeline:
             }
             write_json(path, data)
             return data
-        missing_credential = _missing_ai_credential(self.config, self.mock_ai)
-        if missing_credential:
-            usage = _local_ai_usage(
-                self.config.ai.provider,
-                ["Configured provider credential is not present in the engine environment."],
+        credential_issue = _ai_credential_issue(self.config, self.mock_ai)
+        if credential_issue is not None:
+            raise SemanticCredentialError(
+                f"SEMANTIC_CREDENTIAL_{credential_issue.upper()}: AI API key is {credential_issue}. "
+                "Откройте «Настройки», сохраните рабочий ключ и повторите анализ."
             )
-            usage.update({
-                "model": self.config.ai.model,
-                "execution_state": "not_called",
-                "reason": "missing_credentials",
-                "credential_presence": "missing",
-                "credential_source": "environment",
-            })
-            data = {
-                "candidates": [item.to_dict() for item in local_rank(candidates)],
-                "ai": usage,
-                "ai_reranking_used": False,
-                "ai_fallback_used": True,
-                "selection_mode": "local-fallback",
-            }
-            write_json(path, data)
-            return data
         try:
             scorer = get_scorer(self.config, self.mock_ai)
         except Exception as error:
             semantic: list[ScoredCandidate] = []
             usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
-            usage.update({"model": self.config.ai.model, "execution_state": "not_called", "reason": "provider_unavailable"})
+            usage.update({
+                "model": self.config.ai.model,
+                "execution_state": "degraded",
+                "reason": "provider_temporarily_unavailable",
+                "retryable": True,
+            })
             ai_ok = False
         else:
             try:
@@ -3091,12 +3114,27 @@ class Pipeline:
                 ai_ok = not usage.get("api_errors")
                 usage.setdefault("provider", self.config.ai.provider)
                 usage.setdefault("model", self.config.ai.model)
-                usage["execution_state"] = "completed" if ai_ok else "failed"
-                usage["reason"] = "semantic_ai_completed" if ai_ok else "provider_call_failed"
+                if not ai_ok and usage.get("failure_kind") == "auth_rejected":
+                    raise SemanticCredentialError(
+                        "SEMANTIC_CREDENTIAL_AUTH_REJECTED: AI provider rejected the API key. "
+                        "Откройте «Настройки», замените ключ и повторите анализ."
+                    )
+                usage["execution_state"] = "completed" if ai_ok else "degraded"
+                usage["reason"] = (
+                    "semantic_ai_completed" if ai_ok else "provider_temporarily_unavailable"
+                )
+                usage["retryable"] = not ai_ok
             except Exception as error:
+                if isinstance(error, SemanticCredentialError):
+                    raise
                 semantic = []
                 usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
-                usage.update({"model": self.config.ai.model, "execution_state": "failed", "reason": "provider_call_failed"})
+                usage.update({
+                    "model": self.config.ai.model,
+                    "execution_state": "degraded",
+                    "reason": "provider_temporarily_unavailable",
+                    "retryable": True,
+                })
                 ai_ok = False
         data = {
             "candidates": [item.to_dict() for item in merge_ai_ranking(candidates, semantic, ai_ok)],
@@ -3105,6 +3143,11 @@ class Pipeline:
             "ai_fallback_used": not ai_ok,
             "selection_mode": "ai-reranked" if ai_ok else "local-fallback",
         }
+        if not ai_ok:
+            self.warnings.append(
+                "Semantic AI временно недоступен. Локальные артефакты сохранены; "
+                "результат помечен как degraded и анализ можно повторить позже."
+            )
         write_json(path, data)
         return data
 
@@ -5495,11 +5538,16 @@ def _local_ai_usage(provider: str, errors: list[str] | None = None) -> dict[str,
     return {"provider": provider, "model": None, "input_tokens": 0, "output_tokens": 0, "retries": 0, "api_errors": errors or []}
 
 
-def _missing_ai_credential(config: AppConfig, force_mock: bool = False) -> str | None:
+def _ai_credential_issue(config: AppConfig, force_mock: bool = False) -> str | None:
     if force_mock or config.mock_ai or config.ai.provider == "mock":
         return None
     variable = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}.get(config.ai.provider)
-    return variable if variable and not os.getenv(variable) else None
+    if variable is None:
+        return "missing"
+    value = os.getenv(variable)
+    if not value:
+        return "missing"
+    return "invalid" if validate_api_key(config.ai.provider, value) else None
 
 
 def _audio_handoff_failure_details(error: AudioCompositionError) -> dict[str, Any]:

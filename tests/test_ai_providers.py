@@ -19,6 +19,7 @@ from app.ai import (
     SEMANTIC_READ_TIMEOUT_SECONDS,
     SEMANTIC_WRITE_TIMEOUT_SECONDS,
     get_scorer,
+    semantic_failure_kind,
 )
 from app.config import AIConfig, AppConfig, load_config
 from app.doctor import collect_checks
@@ -30,6 +31,24 @@ from app.vision_intelligence import VISION_RESPONSE_SCHEMA, VisionProviderCallEr
 
 def _candidate() -> Candidate:
     return Candidate("candidate-1", 10.0, 30.0, "Законченное высказывание для клипа.")
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (401, "auth_rejected"),
+        (403, "auth_rejected"),
+        (429, "provider_unavailable"),
+        (503, "provider_unavailable"),
+    ],
+)
+def test_semantic_failure_kind_distinguishes_rejected_credentials_from_outages(
+    status_code: int, expected: str,
+) -> None:
+    error = RuntimeError("provider response")
+    error.status_code = status_code  # type: ignore[attr-defined]
+
+    assert semantic_failure_kind(error) == expected
 
 
 def _structured_item(candidate: Candidate) -> dict[str, object]:
@@ -343,7 +362,7 @@ def test_mock_mode_never_selects_openai_provider(monkeypatch: pytest.MonkeyPatch
 def test_missing_openai_key_is_clear(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    with pytest.raises(ClipEngineError, match="OPENAI_API_KEY"):
+    with pytest.raises(ClipEngineError, match="API key"):
         get_scorer(AppConfig())
 
 

@@ -3,14 +3,16 @@ from __future__ import annotations
 import wave
 from pathlib import Path
 
+import pytest
+
 from app.audio_features import analyse_audio, window_audio_features
 from app.config import AppConfig, AudioAnalysisConfig
+from app.errors import SemanticCredentialError
 from app.intelligence import local_rank, merge_ai_ranking, shortlist
 from app.intelligence_candidates import generate_candidates
 from app.local_scoring import score_candidates
 from app.models import Candidate
 from app.pipeline import Pipeline
-from app.reporting import make_report
 from app.scene_detection import parse_scene_output
 from app.transcript_features import analyse_transcript, candidate_transcript_features
 
@@ -118,15 +120,19 @@ def test_pipeline_ai_error_uses_local_fallback(tmp_path: Path, monkeypatch) -> N
     def unavailable(*args, **kwargs):
         raise RuntimeError("service unavailable")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "test-placeholder")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "a" * 40)
     monkeypatch.setattr("app.pipeline.get_scorer", unavailable)
-    data = Pipeline(tmp_path, AppConfig())._ai_rerank([candidate], [candidate], {"segments": []}, tmp_path / "ai.json")
+    pipeline = Pipeline(tmp_path, AppConfig())
+    data = pipeline._ai_rerank([candidate], [candidate], {"segments": []}, tmp_path / "ai.json")
 
     assert data["ai_fallback_used"]
     assert data["selection_mode"] == "local-fallback"
     assert data["candidates"][0]["score"] == 72
     assert data["ai"]["provider"] == "openai"
-    assert data["ai"]["reason"] == "provider_unavailable"
+    assert data["ai"]["reason"] == "provider_temporarily_unavailable"
+    assert data["ai"]["execution_state"] == "degraded"
+    assert data["ai"]["retryable"] is True
+    assert any("degraded" in warning for warning in pipeline.warnings)
 
 
 def test_semantic_ai_auto_reaches_configured_provider_with_virality_enabled(tmp_path: Path, monkeypatch) -> None:
@@ -147,7 +153,7 @@ def test_semantic_ai_auto_reaches_configured_provider_with_virality_enabled(tmp_
     config = AppConfig()
     config.virality.enabled = True
     config.virality.semantic_ai_mode = "auto"
-    monkeypatch.setenv("OPENAI_API_KEY", "test-placeholder")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "b" * 40)
     monkeypatch.setattr("app.pipeline.get_scorer", lambda *_args, **_kwargs: Provider())
 
     data = Pipeline(tmp_path, config)._ai_rerank(
@@ -162,7 +168,13 @@ def test_semantic_ai_auto_reaches_configured_provider_with_virality_enabled(tmp_
     assert data["ai"]["reason"] == "semantic_ai_completed"
 
 
-def test_missing_semantic_credentials_are_explicit_in_report_without_provider_call(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("credential", "reason"),
+    [(None, "MISSING"), ("invalid-key-format", "INVALID")],
+)
+def test_unusable_semantic_credentials_block_analysis_before_provider_call(
+    tmp_path: Path, monkeypatch, credential: str | None, reason: str,
+) -> None:
     candidate = Candidate(
         "one", 0, 20, "Why this works?", local_quality_score=72,
         local_scores={"hook": 70, "completeness": 80, "clarity": 70, "context_independence": 70},
@@ -170,24 +182,49 @@ def test_missing_semantic_credentials_are_explicit_in_report_without_provider_ca
     config = AppConfig()
     config.virality.enabled = True
     config.virality.semantic_ai_mode = "auto"
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if credential is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", credential)
     monkeypatch.setattr(
         "app.pipeline.get_scorer",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider must not be constructed")),
     )
 
-    data = Pipeline(tmp_path, config)._ai_rerank(
-        [candidate], [candidate], {"segments": []}, tmp_path / "ai-missing.json",
-    )
-    report = make_report(
-        tmp_path / "report.json", {}, {}, config, {}, 0, 1, [], [], [], data["ai"], False, False,
+    path = tmp_path / "ai-unusable.json"
+    with pytest.raises(SemanticCredentialError, match=f"SEMANTIC_CREDENTIAL_{reason}"):
+        Pipeline(tmp_path, config)._ai_rerank(
+            [candidate], [candidate], {"segments": []}, path,
+        )
+
+    assert not path.exists()
+
+
+def test_provider_rejected_semantic_credential_blocks_without_local_success(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    candidate = Candidate(
+        "one", 0, 20, "Why this works?", local_quality_score=72,
+        local_scores={"hook": 70, "completeness": 80, "clarity": 70, "context_independence": 70},
     )
 
-    assert data["ai_reranking_used"] is False
-    assert data["ai_fallback_used"] is True
-    assert report["ai"]["provider"] == "openai"
-    assert report["ai"]["model"] == "gpt-5-mini"
-    assert report["ai"]["execution_state"] == "not_called"
-    assert report["ai"]["reason"] == "missing_credentials"
-    assert report["ai"]["credential_presence"] == "missing"
-    assert report["ai"]["credential_source"] == "environment"
+    class RejectedProvider:
+        @staticmethod
+        def score(candidates, _transcript):
+            return local_rank(candidates), {
+                "provider": "openai",
+                "model": "gpt-5.6-terra",
+                "api_errors": ["request_failure: rejected"],
+                "failure_kind": "auth_rejected",
+            }
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "r" * 40)
+    monkeypatch.setattr("app.pipeline.get_scorer", lambda *_args, **_kwargs: RejectedProvider())
+    path = tmp_path / "ai-rejected.json"
+
+    with pytest.raises(SemanticCredentialError, match="AUTH_REJECTED"):
+        Pipeline(tmp_path, AppConfig())._ai_rerank(
+            [candidate], [candidate], {"segments": []}, path,
+        )
+
+    assert not path.exists()
