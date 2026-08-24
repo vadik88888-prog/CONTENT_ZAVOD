@@ -299,9 +299,54 @@ def test_gameplay_facecam_observation_authorizes_split_layout_family() -> None:
             "timestamp": 1.35,
             "scene_type": "GAMEPLAY",
             "primary_subject": "face",
-            "normalized_center_x": 0.16,
-            "normalized_center_y": 0.68,
+            "normalized_center_x": 0.145,
+            "normalized_center_y": 0.555,
             "visible_face_count": 1,
+            "confidence": 0.94,
+            "origin": "provider",
+        }]},
+    }
+
+    handoff = build_native_evidence_handoff(
+        plan,
+        mapping,
+        AppConfig(),
+        candidate=candidate,
+        multimodal_timeline=timeline,
+        story_units=stories,
+        source_width=1920,
+        source_height=1080,
+    )
+
+    assert handoff.intent.composition_targets
+    assert handoff.intent.composition_targets[0].allowed_layouts[0] == LayoutFamily.SPLIT
+    assert handoff.target_observations[0].bounds.model_dump(mode="json") == {
+        "x": 0.0,
+        "y": 0.34785714,
+        "width": 0.25892857,
+        "height": 0.25892857,
+    }
+
+
+def test_multiface_primary_face_remains_speaker_not_group() -> None:
+    plan = _current_native_plan()
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="candidate-map",
+        source=SourceInterval.from_seconds(1.0, 2.0),
+        output=OutputInterval.from_seconds(0.0, 1.0),
+    ),))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    timeline["visual_event_map"] = []
+    candidate["vision_pass2_evidence"] = {
+        "status": "completed",
+        "result": {"observations": [{
+            "keyframe_id": "podcast-speaker-with-listener",
+            "timestamp": 1.35,
+            "scene_type": "INTERVIEW_MULTI",
+            "primary_subject": "face",
+            "normalized_center_x": 0.35,
+            "normalized_center_y": 0.29,
+            "visible_face_count": 2,
             "confidence": 0.94,
             "origin": "provider",
         }]},
@@ -316,8 +361,10 @@ def test_gameplay_facecam_observation_authorizes_split_layout_family() -> None:
         story_units=stories,
     )
 
-    assert handoff.intent.composition_targets
-    assert handoff.intent.composition_targets[0].allowed_layouts[0] == LayoutFamily.SPLIT
+    observation = handoff.target_observations[0]
+    assert observation.target.value == "speaker"
+    assert observation.bounds.width == 0.32
+    assert observation.protected is True
 
 
 def test_center_only_multiface_observation_protects_wide_group_extent() -> None:
@@ -328,6 +375,10 @@ def test_center_only_multiface_observation_protects_wide_group_extent() -> None:
         output=OutputInterval.from_seconds(0.0, 1.0),
     ),))
     candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    candidate["composition_intent"] = {
+        "evidence_status": "available",
+        "multiple_subjects": {"value": True},
+    }
     timeline["visual_event_map"] = []
     candidate["vision_pass2_evidence"] = {
         "status": "completed",
@@ -355,6 +406,44 @@ def test_center_only_multiface_observation_protects_wide_group_extent() -> None:
 
     assert handoff.target_observations[0].bounds.width == 0.82
     assert handoff.target_observations[0].bounds.height == 0.62
+    assert handoff.target_observations[0].protected is True
+
+
+def test_candidate_end_observation_maps_to_last_output_frame() -> None:
+    plan = _current_native_plan()
+    mapping = SourceOutputTimeMap(segments=(EditMapSegment(
+        map_id="candidate-map",
+        source=SourceInterval.from_seconds(1.0, 2.0),
+        output=OutputInterval.from_seconds(0.0, 1.0),
+    ),))
+    candidate, timeline, stories = _phase6_artifacts(plan.metadata.candidate_id)
+    timeline["visual_event_map"] = []
+    candidate["vision_pass2_evidence"] = {
+        "status": "completed",
+        "result": {"observations": [{
+            "keyframe_id": "candidate-end-speaker",
+            "timestamp": 2.0,
+            "scene_type": "PODCAST",
+            "primary_subject": "face",
+            "normalized_center_x": 0.35,
+            "normalized_center_y": 0.35,
+            "visible_face_count": 1,
+            "confidence": 0.94,
+            "origin": "provider",
+        }]},
+    }
+
+    handoff = build_native_evidence_handoff(
+        plan,
+        mapping,
+        AppConfig(),
+        candidate=candidate,
+        multimodal_timeline=timeline,
+        story_units=stories,
+    )
+
+    assert len(handoff.target_observations) == 1
+    assert handoff.target_observations[0].frame == 29
 
 
 def test_discontiguous_story_edges_follow_authoritative_boundary_ranges() -> None:

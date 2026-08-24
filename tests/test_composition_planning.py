@@ -319,7 +319,7 @@ def test_sparse_target_crop_is_held_without_extending_target_evidence() -> None:
     assert any(item == "STABLE_CROP_HELD:9" for item in plan.diagnostics)
 
 
-def test_sparse_podcast_observations_lock_one_vertical_family_per_scene() -> None:
+def test_sparse_podcast_observations_prefer_speaker_family_without_fit_background() -> None:
     targets = (
         _target(
             "speaker-glimpse", AttentionTarget.SPEAKER, 30, 31, "speaker-evidence",
@@ -345,10 +345,10 @@ def test_sparse_podcast_observations_lock_one_vertical_family_per_scene() -> Non
         _intent(targets), observations, source_width=1920, source_height=1080,
     )
 
-    assert {segment.layout for segment in plan.segments} == {LayoutFamily.WIDE_GROUP}
+    assert {segment.layout for segment in plan.segments} == {LayoutFamily.STABLE_SPEAKER}
     assert plan.quality_report.metrics.layout_switch_count == 0
     assert any(
-        item == "SCENE_LAYOUT_FAMILY_LOCKED:0:wide_group" for item in plan.diagnostics
+        item == "SCENE_LAYOUT_FAMILY_LOCKED:0:stable_speaker" for item in plan.diagnostics
     )
     expected_ratio = (9 / 16) / (1920 / 1080)
     assert all(abs(segment.crop.width / segment.crop.height - expected_ratio) < 1e-7 for segment in plan.segments)
@@ -382,7 +382,30 @@ def test_gameplay_facecam_evidence_locks_stable_split_across_sparse_gaps() -> No
     )
 
 
-def test_sparse_target_hold_stops_at_scene_cut() -> None:
+def test_gameplay_facecam_panel_region_is_used_without_source_bleed() -> None:
+    target = _target(
+        "facecam-panel", AttentionTarget.SPEAKER, 90, 91, "facecam-evidence",
+        target_ref="facecam-a",
+        layouts=(LayoutFamily.SPLIT, LayoutFamily.SCREEN_PRIORITY, LayoutFamily.FIT_BACKGROUND),
+    )
+    panel = NormalizedRect(
+        x=0.0, y=0.34785714, width=0.25892857, height=0.25892857,
+    )
+    observation = _observation(
+        "facecam-panel-frame", 90, AttentionTarget.SPEAKER, "facecam-a",
+        "facecam-evidence", 0.0,
+    ).model_copy(update={"bounds": panel})
+
+    plan = build_composition_plan(
+        _intent((target,)), (observation,), source_width=2560, source_height=1440,
+    )
+
+    assert {segment.layout for segment in plan.segments} == {LayoutFamily.SPLIT}
+    assert {segment.crop for segment in plan.segments} == {panel}
+    assert plan.quality_report.metrics.layout_switch_count == 0
+
+
+def test_sparse_target_hold_resets_tracking_but_keeps_conversation_family_at_scene_cut() -> None:
     target = _target(
         "speaker-glimpse", AttentionTarget.SPEAKER, 8, 9, "speaker-evidence",
         target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
@@ -401,15 +424,16 @@ def test_sparse_target_hold_stops_at_scene_cut() -> None:
 
     after_cut = next(item for item in plan.segments if item.output.start_frame == 9)
     assert after_cut.movement_reason == "scene_reset"
-    assert after_cut.fallback == "fit_background"
-    assert after_cut.crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.fallback == "stable_source"
+    assert after_cut.layout == LayoutFamily.STABLE_SPEAKER
+    assert after_cut.crop != NormalizedRect(x=0, y=0, width=1, height=1)
     assert after_cut.crop_keyframes[0].frame == 9
-    assert after_cut.crop_keyframes[0].crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].crop == after_cut.crop
     assert after_cut.crop_keyframes[0].reason == "scene_reset"
     assert "STABLE_CROP_HELD:9" not in plan.diagnostics
 
 
-def test_sparse_target_hold_stops_at_edit_map_boundary() -> None:
+def test_sparse_target_hold_keeps_conversation_family_at_edit_map_boundary() -> None:
     target = _target(
         "speaker-glimpse", AttentionTarget.SPEAKER, 8, 9, "speaker-evidence",
         target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
@@ -441,10 +465,11 @@ def test_sparse_target_hold_stops_at_edit_map_boundary() -> None:
 
     after_cut = next(item for item in plan.segments if item.output.start_frame == 9)
     assert after_cut.movement_reason == "scene_reset"
-    assert after_cut.fallback == "fit_background"
-    assert after_cut.crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.fallback == "stable_source"
+    assert after_cut.layout == LayoutFamily.STABLE_SPEAKER
+    assert after_cut.crop != NormalizedRect(x=0, y=0, width=1, height=1)
     assert after_cut.crop_keyframes[0].frame == 9
-    assert after_cut.crop_keyframes[0].crop == NormalizedRect(x=0, y=0, width=1, height=1)
+    assert after_cut.crop_keyframes[0].crop == after_cut.crop
     assert after_cut.crop_keyframes[0].reason == "scene_reset"
     assert "STABLE_CROP_HELD:9" not in plan.diagnostics
 

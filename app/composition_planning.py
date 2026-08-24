@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.2.scene-family.1"
+COMPOSITION_PLANNER_VERSION = "7J.2.scene-family.3"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -542,11 +542,17 @@ def _lock_scene_layout_families(
     if current:
         groups.append(current)
 
+    groups = _merge_continuous_scene_families(groups)
+
     result: list[_AtomicState] = []
     diagnostics: list[str] = []
     scene_groups: list[list[_AtomicState]] = []
     for scene in groups:
-        sustained = _split_sustained_family_runs(scene, config)
+        sustained = (
+            [scene]
+            if _continuity_family(scene) in {"conversation", "facecam_split"}
+            else _split_sustained_family_runs(scene, config)
+        )
         scene_groups.extend(sustained)
         for group in sustained[1:]:
             diagnostics.append(
@@ -558,12 +564,14 @@ def _lock_scene_layout_families(
             result.extend(scene)
             continue
         family = _scene_layout_family(evidence)
+        family_evidence = _family_anchor_evidence(evidence, family)
         if family == LayoutFamily.SPLIT:
             scene_crops = [
                 _split_facecam_crop(
-                    item.state.bounds, source_width, source_height, config,
+                    item.state, source_width, source_height, config,
                 )
-                for item in evidence if item.layout == LayoutFamily.SPLIT and item.state is not None
+                for item in family_evidence
+                if item.layout == LayoutFamily.SPLIT and item.state is not None
             ]
         else:
             # Pick the scene family from the protected target geometry, not
@@ -575,7 +583,7 @@ def _lock_scene_layout_families(
                 _target_crop(
                     item.state.bounds, source_width, source_height, config,
                 )[0]
-                for item in evidence if item.state is not None
+                for item in family_evidence if item.state is not None
             ]
         if not scene_crops:
             result.extend(scene)
@@ -605,25 +613,39 @@ def _lock_scene_layout_families(
                 continue
             anchor = (
                 item.state
-                if item.state is not None and (
-                    family != LayoutFamily.SPLIT or item.layout == LayoutFamily.SPLIT
-                )
+                if item.state is not None and _state_matches_family(item, family)
                 else _nearest_scene_state(
                     scene, index,
                     layout=LayoutFamily.SPLIT if family == LayoutFamily.SPLIT else None,
+                    targets=(
+                        frozenset({
+                            AttentionTarget.SPEAKER,
+                            AttentionTarget.SUBJECT,
+                            AttentionTarget.GROUP,
+                        })
+                        if family == LayoutFamily.STABLE_SPEAKER else None
+                    ),
                 )
             )
             assert anchor is not None
+            if family == LayoutFamily.STABLE_SPEAKER and anchor.decision.target == AttentionTarget.GROUP:
+                speaker_reference = _nearest_scene_state(
+                    scene,
+                    index,
+                    targets=frozenset({AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}),
+                )
+                if speaker_reference is not None:
+                    anchor = _speaker_anchor_within_group(anchor, speaker_reference)
             crop = (
                 _split_facecam_crop(
-                    anchor.bounds, source_width, source_height, config,
+                    anchor, source_width, source_height, config,
                 )
                 if family == LayoutFamily.SPLIT else
                 _centered_rect(anchor.bounds, width, height)
             )
             retained_state = (
                 item.state
-                if family != LayoutFamily.SPLIT or item.layout == LayoutFamily.SPLIT
+                if item.state is not None and _state_matches_family(item, family)
                 else None
             )
             family_items.append(replace(
@@ -719,10 +741,12 @@ def _scene_layout_family(evidence: Sequence[_AtomicState]) -> LayoutFamily:
         return LayoutFamily.SCREEN_PRIORITY
     if any(item.target == AttentionTarget.PRODUCT for item in evidence):
         return LayoutFamily.SCREEN_PRODUCT
-    if any(item.target == AttentionTarget.GROUP for item in evidence):
-        return LayoutFamily.WIDE_GROUP
     if any(item.target == AttentionTarget.SPEAKER for item in evidence):
         return LayoutFamily.STABLE_SPEAKER
+    if any(item.target == AttentionTarget.SUBJECT for item in evidence):
+        return LayoutFamily.SINGLE_SUBJECT
+    if any(item.target == AttentionTarget.GROUP for item in evidence):
+        return LayoutFamily.WIDE_GROUP
     return max(
         evidence,
         key=lambda item: (item.confidence, _crop_area(item.desired_crop)),
@@ -730,12 +754,18 @@ def _scene_layout_family(evidence: Sequence[_AtomicState]) -> LayoutFamily:
 
 
 def _nearest_scene_state(
-    scene: Sequence[_AtomicState], index: int, *, layout: LayoutFamily | None = None,
+    scene: Sequence[_AtomicState],
+    index: int,
+    *,
+    layout: LayoutFamily | None = None,
+    targets: frozenset[AttentionTarget] | None = None,
 ) -> _TargetState | None:
     candidates = [
         (abs(position - index), position, item.state)
         for position, item in enumerate(scene)
-        if item.state is not None and (layout is None or item.layout == layout)
+        if item.state is not None
+        and (layout is None or item.layout == layout)
+        and (targets is None or item.target in targets)
     ]
     return min(candidates, default=(0, 0, None))[2]
 
@@ -749,11 +779,24 @@ def _aspect_locked_size(
 
 
 def _split_facecam_crop(
-    bounds: NormalizedRect,
+    state: _TargetState,
     source_width: int,
     source_height: int,
     config: CompositionPlannerConfig,
 ) -> NormalizedRect:
+    bounds = state.bounds
+    bounds_aspect = (
+        bounds.width * source_width
+        / max(bounds.height * source_height, 1e-9)
+    )
+    if (
+        state.decision.target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}
+        and abs(bounds_aspect - 16 / 9) <= 0.03
+    ):
+        # Candidate-scoped handoff geometry identifies the webcam panel, not
+        # merely the face inside it. Preserve that exact source region; the
+        # renderer performs the final aspect-preserving pane fill.
+        return bounds
     source_aspect = source_width / source_height
     pane_aspect = (9 / 16) / SPLIT_FACE_CAM_RATIO
     normalized_ratio = pane_aspect / source_aspect
@@ -765,6 +808,108 @@ def _split_facecam_crop(
     )
     height = min(1.0, height, 1 / max(normalized_ratio, 1e-9))
     return _centered_rect(bounds, normalized_ratio * height, height)
+
+
+def _continuity_family(scene: Sequence[_AtomicState]) -> str | None:
+    evidence = [item for item in scene if item.state is not None]
+    if not evidence:
+        return None
+    if all(item.layout == LayoutFamily.SPLIT for item in evidence):
+        return "facecam_split"
+    if all(
+        item.target in {
+            AttentionTarget.SPEAKER,
+            AttentionTarget.SUBJECT,
+            AttentionTarget.GROUP,
+            AttentionTarget.REACTION,
+        }
+        for item in evidence
+    ):
+        return "conversation"
+    return None
+
+
+def _merge_continuous_scene_families(
+    groups: Sequence[Sequence[_AtomicState]],
+) -> list[list[_AtomicState]]:
+    """Carry a presentation family across ordinary camera cuts and gaps."""
+
+    merged: list[list[_AtomicState]] = []
+    for raw in groups:
+        scene = list(raw)
+        family = _continuity_family(scene)
+        if not merged:
+            merged.append(scene)
+            continue
+        previous_family = _continuity_family(merged[-1])
+        if (
+            family == previous_family
+            and family in {"conversation", "facecam_split"}
+        ) or (
+            family is None
+            and previous_family in {"conversation", "facecam_split"}
+        ) or (
+            previous_family is None
+            and family in {"conversation", "facecam_split"}
+        ):
+            merged[-1].extend(scene)
+        else:
+            merged.append(scene)
+    return merged
+
+
+def _family_anchor_evidence(
+    evidence: Sequence[_AtomicState], family: LayoutFamily,
+) -> list[_AtomicState]:
+    if family == LayoutFamily.STABLE_SPEAKER:
+        anchors = [
+            item for item in evidence
+            if item.target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}
+        ]
+        return anchors or list(evidence)
+    if family == LayoutFamily.SINGLE_SUBJECT:
+        anchors = [item for item in evidence if item.target == AttentionTarget.SUBJECT]
+        return anchors or list(evidence)
+    if family == LayoutFamily.SPLIT:
+        anchors = [item for item in evidence if item.layout == LayoutFamily.SPLIT]
+        return anchors or list(evidence)
+    return list(evidence)
+
+
+def _state_matches_family(item: _AtomicState, family: LayoutFamily) -> bool:
+    if item.state is None:
+        return False
+    if family == LayoutFamily.STABLE_SPEAKER:
+        return item.target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}
+    if family == LayoutFamily.SINGLE_SUBJECT:
+        return item.target == AttentionTarget.SUBJECT
+    if family == LayoutFamily.SPLIT:
+        return item.layout == LayoutFamily.SPLIT
+    return True
+
+
+def _speaker_anchor_within_group(
+    group: _TargetState,
+    speaker_reference: _TargetState,
+) -> _TargetState:
+    """Project the proven speaker side into a wide conversational camera shot."""
+
+    group_center_x = group.bounds.x + group.bounds.width / 2
+    group_center_y = group.bounds.y + group.bounds.height / 2
+    speaker_center_x = speaker_reference.bounds.x + speaker_reference.bounds.width / 2
+    side = -1 if speaker_center_x < group_center_x else 1
+    center_x = group_center_x + side * group.bounds.width * 0.30
+    width = speaker_reference.bounds.width
+    height = speaker_reference.bounds.height
+    x = _clamp(center_x - width / 2, 0, 1 - width)
+    y = _clamp(group_center_y - height / 2, 0, 1 - height)
+    return replace(
+        speaker_reference,
+        bounds=NormalizedRect(
+            x=round(x, 8), y=round(y, 8),
+            width=round(width, 8), height=round(height, 8),
+        ),
+    )
 
 
 def _adopt_layout_if_safe(item: _AtomicState, donor: _AtomicState) -> _AtomicState | None:

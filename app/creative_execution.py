@@ -46,7 +46,7 @@ from app.video_models import (
 )
 
 
-NATIVE_CREATIVE_EXECUTION_VERSION = "7G.2.scene-family.1"
+NATIVE_CREATIVE_EXECUTION_VERSION = "7G.2.scene-family.2"
 
 
 def default_native_creative_intent(

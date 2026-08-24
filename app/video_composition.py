@@ -225,6 +225,8 @@ class VideoCompositionService:
                         candidate=phase6_candidate,
                         multimodal_timeline=phase6_multimodal_timeline,
                         story_units=phase6_story_units,
+                        source_width=int(source_info["display_width"]),
+                        source_height=int(source_info["display_height"]),
                     )
                     intent = evidence_handoff.intent
                     target_observations = evidence_handoff.target_observations

@@ -8,6 +8,7 @@ bounded editorial/visual observations into the Phase 7 native contracts.
 """
 
 from dataclasses import dataclass
+from statistics import median
 from typing import Any, Iterable, Literal, Mapping
 
 from app.candidate_quality import MIN_EDITORIAL_MULTIMODAL_CONFIDENCE
@@ -40,8 +41,13 @@ from app.production_models import BoundaryDecision, ProductionPlan
 from app.source_broll_planning import SourceSceneEvidence
 
 
-NATIVE_EVIDENCE_HANDOFF_VERSION = "7G.3"
+NATIVE_EVIDENCE_HANDOFF_VERSION = "7G.4.framing.2"
 MAX_NATIVE_EMPHASIS_WORDS = 2
+GAMEPLAY_FACECAM_PANEL_ASPECT = 16 / 9
+GAMEPLAY_FACECAM_MIN_WIDTH = 0.18
+GAMEPLAY_FACECAM_MAX_WIDTH = 0.36
+GAMEPLAY_FACECAM_SUBJECT_X = 0.56
+GAMEPLAY_FACECAM_SUBJECT_Y = 0.80
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +72,8 @@ def build_native_evidence_handoff(
     candidate: Mapping[str, Any] | None,
     multimodal_timeline: Mapping[str, Any] | None,
     story_units: Mapping[str, Any] | None,
+    source_width: int | None = None,
+    source_height: int | None = None,
 ) -> NativeEvidenceHandoff:
     """Adapt persisted Phase 6 artifacts without invoking Brain or Vision."""
 
@@ -137,11 +145,20 @@ def build_native_evidence_handoff(
 
     visual_rows = _visual_rows(candidate, timeline)
     composition_intent = _composition_intent(candidate, plan)
+    facecam_region = _stable_gameplay_facecam_region(
+        visual_rows,
+        source_width=source_width,
+        source_height=source_height,
+    )
     seen_observations: set[tuple[int, str, str]] = set()
     for index, row in enumerate(visual_rows, start=1):
         timestamp = _timestamp(row)
         source = _source_interval_at(mapping, timestamp)
-        usable = _usable_composition_row(row, composition_intent)
+        usable = _usable_composition_row(
+            row,
+            composition_intent,
+            facecam_region=facecam_region,
+        )
         if source is None or usable is None:
             continue
         bounds, target, confidence = usable
@@ -173,6 +190,10 @@ def build_native_evidence_handoff(
             confidence=confidence,
             evidence_ref=evidence_ref,
             scene_id=scene_id,
+            protected=(
+                target != AttentionTarget.GROUP
+                or _group_framing_required(composition_intent)
+            ),
         ))
         composition.append(ResolvedCompositionTarget(
             decision_id=_id("composition", candidate_id, str(index)),
@@ -713,11 +734,18 @@ def has_usable_composition_evidence(
 
 
 def _usable_composition_row(
-    row: Mapping[str, Any], composition_intent: Mapping[str, Any],
+    row: Mapping[str, Any],
+    composition_intent: Mapping[str, Any],
+    *,
+    facecam_region: NormalizedRect | None = None,
 ) -> tuple[NormalizedRect, AttentionTarget, float] | None:
     if str(row.get("origin") or "") == "local_fallback":
         return None
-    bounds = _target_bounds(row)
+    bounds = (
+        facecam_region
+        if facecam_region is not None and _is_gameplay_facecam_row(row)
+        else _target_bounds(row)
+    )
     target = _attention_target(row, composition_intent)
     confidence = _confidence(row.get("confidence"), default=0.0)
     if (
@@ -775,6 +803,14 @@ def _source_interval_at(mapping: SourceOutputTimeMap, timestamp: float) -> Sourc
             if end <= start:
                 end = min(segment.source.end_tick, start + 1)
             return SourceInterval(start_tick=start, end_tick=end)
+    # The candidate payoff keyframe is intentionally sampled at the inclusive
+    # source end. Only use this path after normal half-open ownership has been
+    # checked, so an internal boundary still belongs to the following segment.
+    for segment in reversed(mapping.segments):
+        if tick == segment.source.end_tick:
+            radius = min(50_000, max(1, (segment.source.end_tick - segment.source.start_tick) // 60))
+            start = max(segment.source.start_tick, segment.source.end_tick - radius)
+            return SourceInterval(start_tick=start, end_tick=segment.source.end_tick)
     return None
 
 
@@ -806,19 +842,14 @@ def _target_bounds(row: Mapping[str, Any]) -> NormalizedRect | None:
         height = _float(row.get("normalized_height"))
     if center_x is None or center_y is None:
         return None
-    visible_faces = (
-        observation.get("faces", {}).get("visible_count")
-        if isinstance(observation, Mapping) and isinstance(observation.get("faces"), Mapping)
-        else row.get("visible_face_count")
-    )
     subject_type = str(
         active.get("target_type")
         if isinstance(active, Mapping)
         else row.get("primary_subject") or ""
     )
-    inferred_group = (
-        isinstance(visible_faces, int) and visible_faces > 1
-    ) or subject_type in {"subject_group", "group"}
+    # Visible bystanders/listeners do not make the active subject a group.
+    # Only an explicit group target authorizes synthetic group extent.
+    inferred_group = subject_type in {"subject_group", "group"}
     # Pass2 center-only observations do not prove the extent of a group.  A
     # narrow person-sized synthetic box can otherwise authorize a true 9:16
     # crop whose centre contains no participant.  Protect a conservative wide
@@ -837,10 +868,6 @@ def _attention_target(
     observation = row.get("observation") if isinstance(row.get("observation"), Mapping) else row
     active = observation.get("active_subject") if isinstance(observation, Mapping) else None
     raw = str(active.get("target_type") if isinstance(active, Mapping) else row.get("primary_subject") or "")
-    faces = observation.get("faces") if isinstance(observation, Mapping) else None
-    count = faces.get("visible_count") if isinstance(faces, Mapping) else row.get("visible_face_count")
-    if isinstance(count, int) and count > 1:
-        return AttentionTarget.GROUP
     resolved = {
         "primary_face": AttentionTarget.SPEAKER,
         "face": AttentionTarget.SPEAKER,
@@ -856,6 +883,10 @@ def _attention_target(
     }.get(raw)
     if resolved is not None:
         return resolved
+    faces = observation.get("faces") if isinstance(observation, Mapping) else None
+    count = faces.get("visible_count") if isinstance(faces, Mapping) else row.get("visible_face_count")
+    if isinstance(count, int) and count > 1:
+        return AttentionTarget.GROUP
     intent = composition_intent or {}
     explicit = {
         "screen": AttentionTarget.SCREEN,
@@ -879,6 +910,95 @@ def _attention_target(
 def _intent_value(intent: Mapping[str, Any], name: str) -> Any:
     raw = intent.get(name)
     return raw.get("value") if isinstance(raw, Mapping) else raw
+
+
+def _group_framing_required(composition_intent: Mapping[str, Any]) -> bool:
+    """Require an explicit editorial need before protecting the whole group."""
+
+    return _intent_value(composition_intent, "multiple_subjects") is True
+
+
+def _is_gameplay_facecam_row(row: Mapping[str, Any]) -> bool:
+    if str(row.get("scene_type") or "") != "GAMEPLAY":
+        return False
+    if _attention_target(row) not in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}:
+        return False
+    visible_faces = row.get("visible_face_count")
+    center_x = _float(row.get("normalized_center_x"))
+    return (
+        isinstance(visible_faces, int)
+        and visible_faces > 0
+        and center_x is not None
+        and min(center_x, 1 - center_x) <= 0.25
+    )
+
+
+def _estimated_gameplay_facecam_region(
+    row: Mapping[str, Any],
+    *,
+    source_aspect: float,
+) -> NormalizedRect | None:
+    """Recover the fixed facecam panel from a cached center-only observation.
+
+    The current Vision contract identifies the subject inside the overlay but
+    does not return panel edges. Gameplay facecams are edge-anchored 16:9
+    regions; the subject anchor converts that persisted center into bounded,
+    aspect-preserving source geometry. No provider call or image re-analysis is
+    performed here.
+    """
+
+    if not _is_gameplay_facecam_row(row):
+        return None
+    center_x = _float(row.get("normalized_center_x"))
+    center_y = _float(row.get("normalized_center_y"))
+    if center_x is None or center_y is None:
+        return None
+    left_anchored = center_x <= 0.5
+    width = (
+        center_x / GAMEPLAY_FACECAM_SUBJECT_X
+        if left_anchored else
+        (1 - center_x) / (1 - GAMEPLAY_FACECAM_SUBJECT_X)
+    )
+    width = max(GAMEPLAY_FACECAM_MIN_WIDTH, min(GAMEPLAY_FACECAM_MAX_WIDTH, width))
+    height = min(1.0, width * source_aspect / GAMEPLAY_FACECAM_PANEL_ASPECT)
+    x = 0.0 if left_anchored else 1 - width
+    y = min(1 - height, max(0.0, center_y - GAMEPLAY_FACECAM_SUBJECT_Y * height))
+    return NormalizedRect(
+        x=round(x, 8), y=round(y, 8),
+        width=round(width, 8), height=round(height, 8),
+    )
+
+
+def _stable_gameplay_facecam_region(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    source_width: int | None,
+    source_height: int | None,
+) -> NormalizedRect | None:
+    source_aspect = (
+        source_width / source_height
+        if source_width is not None and source_height is not None
+        and source_width > 0 and source_height > 0
+        else 16 / 9
+    )
+    estimates = tuple(
+        estimate
+        for row in rows
+        if (estimate := _estimated_gameplay_facecam_region(
+            row, source_aspect=source_aspect,
+        )) is not None
+    )
+    if not estimates:
+        return None
+    left_anchored = sum(item.x <= 1e-7 for item in estimates) >= len(estimates) / 2
+    width = min(item.width for item in estimates)
+    height = min(1.0, width * source_aspect / GAMEPLAY_FACECAM_PANEL_ASPECT)
+    x = 0.0 if left_anchored else 1 - width
+    y = min(1 - height, max(0.0, median(item.y for item in estimates)))
+    return NormalizedRect(
+        x=round(x, 8), y=round(y, 8),
+        width=round(width, 8), height=round(height, 8),
+    )
 
 
 def _semantic_kinds(row: Mapping[str, Any]) -> tuple[SourceBRollSemanticKind, ...]:
@@ -918,9 +1038,10 @@ def _target_layouts(
     visible_faces = (row or {}).get("visible_face_count")
     if (
         scene_type == "GAMEPLAY"
-        and target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT, AttentionTarget.GROUP}
+        and target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}
         and isinstance(visible_faces, int)
         and visible_faces > 0
+        and _is_gameplay_facecam_row(row or {})
     ):
         return (
             LayoutFamily.SPLIT,
