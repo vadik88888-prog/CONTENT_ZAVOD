@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version as distribution_version
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -93,6 +94,37 @@ def _verify_binaries(tools: Path, lock: dict) -> list[dict]:
     return verified
 
 
+def _verify_youtube_access_runtime(windows: Path) -> dict:
+    from prepare_youtube_access_runtime import _verify_runtime
+
+    lock = _read_json(windows / "youtube-access-runtime.lock.json")
+    _verify_runtime(windows / "youtube-access-runtime", lock)
+    return lock
+
+
+def _restore_deno_junctions(runtime: Path) -> None:
+    """Restore the staged Deno node_modules links inside a portable onedir."""
+
+    node_modules = runtime / "server" / "node_modules"
+    manifest = _read_json(runtime / "deno-junctions.json")
+    if manifest.get("schema_version") != 1 or not isinstance(manifest.get("links"), list):
+        raise RuntimeError("Invalid staged Deno junction manifest.")
+    for entry in manifest["links"]:
+        if not isinstance(entry, dict):
+            raise RuntimeError("Invalid Deno junction entry.")
+        link = (node_modules / str(entry.get("path", ""))).resolve(strict=False)
+        target = (node_modules / str(entry.get("target", ""))).resolve(strict=False)
+        if not link.is_relative_to(node_modules) or not target.is_relative_to(node_modules):
+            raise RuntimeError("Deno junction manifest escapes the portable runtime.")
+        if link.exists() or not target.is_dir():
+            raise RuntimeError(f"Cannot restore Deno junction: {link}")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except OSError as error:
+            raise RuntimeError(f"Could not restore Deno junction: {link}") from error
+
+
 def _zip_directory(source: Path, destination: Path) -> int:
     if destination.exists():
         destination.unlink()
@@ -129,10 +161,12 @@ def main() -> int:
     root = windows.parents[1]
     runtime_lock_path = windows / "runtime.lock.json"
     binary_lock_path = windows / "binaries.lock.json"
+    youtube_access_lock_path = windows / "youtube-access-runtime.lock.json"
     runtime_lock = _read_json(runtime_lock_path)
     binary_lock = _read_json(binary_lock_path)
     resolved_distributions = _verify_runtime(runtime_lock)
     verified_binaries = _verify_binaries(windows / "tools", binary_lock)
+    youtube_access_lock = _verify_youtube_access_runtime(windows)
 
     build_root = root / "build" / "windows-portable"
     work_path = build_root / "pyinstaller"
@@ -176,6 +210,7 @@ def main() -> int:
 
     collected = dist_path / "ContentFactory"
     executable = collected / "ContentFactory.exe"
+    _restore_deno_junctions(collected / "_internal" / "youtube-access-runtime")
     required = [
         executable,
         collected / "_internal" / "config.example.yaml",
@@ -191,7 +226,7 @@ def main() -> int:
     licenses = unpacked / "licenses"
     manifests.mkdir()
     licenses.mkdir()
-    for path in (runtime_lock_path, binary_lock_path):
+    for path in (runtime_lock_path, binary_lock_path, youtube_access_lock_path):
         shutil.copy2(path, manifests / path.name)
     shutil.copy2(windows / "THIRD_PARTY_NOTICES.md", unpacked / "THIRD_PARTY_NOTICES.md")
     for path in sorted((windows / "licenses").glob("*")):
@@ -203,8 +238,10 @@ def main() -> int:
         windows / "desktop_entrypoint.py",
         windows / "build_portable.py",
         windows / "smoke_portable.py",
+        windows / "prepare_youtube_access_runtime.py",
         runtime_lock_path,
         binary_lock_path,
+        youtube_access_lock_path,
         root / "app" / "runtime.py",
         root / "app" / "frozen_entrypoint.py",
         root / "app" / "source_download.py",
@@ -220,6 +257,7 @@ def main() -> int:
         "python": runtime_lock["python"],
         "distributions": resolved_distributions,
         "binaries": verified_binaries,
+        "youtube_access_runtime": youtube_access_lock,
         "inputs": {
             str(path.relative_to(root)).replace("\\", "/"): _sha256(path)
             for path in source_inputs

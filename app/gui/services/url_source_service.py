@@ -7,7 +7,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from app.source_download import (
     build_ytdlp_download_arguments,
@@ -140,6 +140,13 @@ class URLSourceService(QObject):
         self._process_id = 0
         self._release_process_job()
         self.process.setProgram(capabilities.executable)
+        # Keep the BGutil/Deno cache under Content Factory's writable runtime
+        # area.  The exact environment is also used by the non-Qt source
+        # adapter, so there is no second YouTube downloader contract.
+        environment = QProcessEnvironment.systemEnvironment()
+        for key, value in capabilities.process_environment().items():
+            environment.insert(key, value)
+        self.process.setProcessEnvironment(environment)
         self.busy_changed.emit(True)
         return safe_url
 

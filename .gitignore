@@ -29,3 +29,4 @@ models/
 !app/gui/models/*.py
 ContentFactoryData/
 .content-factory/
+packaging/windows/youtube-access-runtime/

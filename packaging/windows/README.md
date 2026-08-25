@@ -16,6 +16,7 @@ ContentFactory/
       ffprobe.exe
       yt-dlp.exe
       deno.exe
+    youtube-access-runtime/  # pinned BGutil plugin + Deno server/node_modules
 ```
 
 Writable settings, projects, engine work, and run metadata use
@@ -29,6 +30,7 @@ Install the pinned build toolchain, build, and smoke a fresh ZIP extraction:
 ```powershell
 python -m pip install -r packaging/windows/build-requirements.txt
 python packaging/windows/prepare_binaries.py
+python packaging/windows/prepare_youtube_access_runtime.py
 python packaging/windows/build_portable.py
 python packaging/windows/smoke_portable.py
 ```

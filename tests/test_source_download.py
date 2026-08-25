@@ -11,6 +11,7 @@ import app.source_download as download_module
 from app.gui.services import url_source_service
 from app.errors import SourceError
 from app.source_download import (
+    BGUTIL_PROVIDER_VERSION,
     build_ytdlp_download_arguments,
     build_ytdlp_inspect_arguments,
     classify_ytdlp_failure,
@@ -107,6 +108,37 @@ def test_engine_and_desktop_share_public_only_ytdlp_contract(tmp_path: Path) -> 
     assert inspect[-1] == download[-1] == url
 
 
+def test_youtube_mweb_provider_contract_is_pinned_and_never_uses_cookies(tmp_path: Path) -> None:
+    plugin_directory = tmp_path
+    server_home = tmp_path / "server"
+    capabilities = YtDlpCapabilities(
+        "yt-dlp.exe",
+        "C:/portable/tools/deno.exe",
+        po_token_provider=True,
+        plugin_directory=str(plugin_directory),
+        po_token_server_home=str(server_home),
+        runtime_cache_directory=str(tmp_path / "cache"),
+    )
+
+    arguments = build_ytdlp_download_arguments(
+        capabilities, "https://www.youtube.com/watch?v=_PCWk_GD9c4", tmp_path,
+    )
+    environment = capabilities.process_environment({"PATH": "C:/portable/tools"})
+
+    assert BGUTIL_PROVIDER_VERSION == "1.3.2"
+    assert [
+        "--plugin-dirs", str(plugin_directory),
+        "--remote-components", "ejs:github",
+        "--extractor-args", "youtube:player_client=mweb",
+        "--extractor-args", f"youtubepot-bgutilscript:server_home={server_home}",
+    ] == arguments[4:12]
+    assert environment["XDG_CACHE_HOME"] == str((tmp_path / "cache").resolve())
+    assert environment["DENO_DIR"] == str((tmp_path / "cache" / "deno").resolve())
+    assert (tmp_path / "cache" / "bgutil-ytdlp-pot-provider").is_dir()
+    assert not any("cookie" in argument.casefold() for argument in arguments)
+    assert not any(argument in {"-f", "--format", "--remux-video", "--merge-output-format"} for argument in arguments)
+
+
 def test_inspect_parses_only_stdout_and_retains_stderr_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     received: dict[str, object] = {}
 
@@ -184,6 +216,7 @@ def test_ytdlp_is_found_beside_active_virtual_environment_python(
     executable = tmp_path / "yt-dlp.exe"
     executable.write_bytes(b"yt-dlp")
     monkeypatch.setattr(download_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(download_module, "_managed_tools_directory", lambda: tmp_path / "missing-tools")
     monkeypatch.setattr(download_module.sys, "executable", str(python))
     monkeypatch.setattr(download_module.sys, "platform", "win32")
 

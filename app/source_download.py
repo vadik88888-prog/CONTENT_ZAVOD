@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ import threading
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, Mapping, TextIO
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from app.errors import DependencyError, SourceError
@@ -59,6 +60,10 @@ YTDLP_DOWNLOAD_PROGRESS_TEMPLATE = (
     "%(progress._speed_str)s|%(progress._eta_str)s"
 )
 YTDLP_OUTPUT_TEMPLATE = "%(title).120B-%(id)s.%(ext)s"
+YTDLP_MWEB_CLIENT = "mweb"
+YTDLP_REMOTE_EJS = "ejs:github"
+BGUTIL_PROVIDER_VERSION = "1.3.2"
+YOUTUBE_ACCESS_RUNTIME_DIRECTORY = "youtube-access-runtime"
 
 
 class YtDlpFailureReason(str, Enum):
@@ -86,8 +91,8 @@ _FAILURE_MESSAGES = {
         "Переустановите или обновите portable-сборку Content Factory."
     ),
     YtDlpFailureReason.PO_TOKEN_REQUIRED: (
-        "YouTube требует PO Token для этого видео. Friend Beta пока не поддерживает такой способ доступа; "
-        "нужна отдельная совместимая интеграция."
+        "YouTube требует PO Token, но встроенный безопасный provider не смог его получить. "
+        "Проверьте публичную доступность видео и повторите попытку позже."
     ),
     YtDlpFailureReason.UNAVAILABLE: (
         "Видео по этой ссылке недоступно или удалено. Проверьте ссылку и доступность ролика без входа."
@@ -112,6 +117,9 @@ class YtDlpCapabilities:
     deno_executable: str | None
     reads_browser_cookies: bool = False
     po_token_provider: bool = False
+    plugin_directory: str | None = None
+    po_token_server_home: str | None = None
+    runtime_cache_directory: str | None = None
 
     @property
     def available(self) -> bool:
@@ -128,7 +136,37 @@ class YtDlpCapabilities:
         arguments = ["--ignore-config", "--no-playlist"]
         if self.deno_executable:
             arguments.extend(["--js-runtimes", f"deno:{self.deno_executable}"])
+        if self.po_token_provider and self.plugin_directory and self.po_token_server_home:
+            # The provider is bundled and pinned with the application.  It
+            # mints public-session PO Tokens through Deno; it never receives
+            # browser cookies or a user-supplied token.
+            arguments.extend([
+                "--plugin-dirs", self.plugin_directory,
+                "--remote-components", YTDLP_REMOTE_EJS,
+                "--extractor-args", f"youtube:player_client={YTDLP_MWEB_CLIENT}",
+                "--extractor-args",
+                f"youtubepot-bgutilscript:server_home={self.po_token_server_home}",
+            ])
         return arguments
+
+    def process_environment(
+        self, environ: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Return the child-only cache environment for the bundled provider."""
+
+        values = dict(os.environ if environ is None else environ)
+        if not (self.po_token_provider and self.runtime_cache_directory):
+            return values
+        cache_root = Path(self.runtime_cache_directory).expanduser().resolve()
+        # BGutil grants Deno write access only to this exact child path.  It
+        # must exist before its version probe and token generator are started.
+        (cache_root / "bgutil-ytdlp-pot-provider").mkdir(parents=True, exist_ok=True)
+        (cache_root / "deno").mkdir(parents=True, exist_ok=True)
+        values["XDG_CACHE_HOME"] = str(cache_root)
+        values["DENO_DIR"] = str(cache_root / "deno")
+        values["DENO_NO_PROMPT"] = "1"
+        values["DENO_NO_UPDATE_CHECK"] = "1"
+        return values
 
 
 class YtDlpSourceError(SourceError):
@@ -140,18 +178,50 @@ class YtDlpSourceError(SourceError):
         super().__init__(_FAILURE_MESSAGES[reason])
 
 
-def find_ytdlp_executable() -> str | None:
-    """Find yt-dlp from PATH or beside the active virtual-environment Python."""
+def _runtime_resource_directory() -> Path:
+    """Resolve the source or frozen resource root without relying on cwd."""
 
-    from_path = shutil.which("yt-dlp")
-    if from_path:
-        return from_path
-    scripts = Path(sys.executable).resolve().parent
+    if bool(getattr(sys, "frozen", False)):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)).resolve()
+    return Path(__file__).resolve().parents[1]
+
+
+def _managed_tools_directory() -> Path:
+    resources = _runtime_resource_directory()
+    if bool(getattr(sys, "frozen", False)):
+        return resources / "tools"
+    return resources / "packaging" / "windows" / "tools"
+
+
+def _youtube_access_runtime_directory() -> Path:
+    return _runtime_resource_directory() / YOUTUBE_ACCESS_RUNTIME_DIRECTORY if bool(
+        getattr(sys, "frozen", False),
+    ) else _runtime_resource_directory() / "packaging" / "windows" / YOUTUBE_ACCESS_RUNTIME_DIRECTORY
+
+
+def _default_provider_cache_directory() -> Path:
+    root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    data_root = Path(root) / "ContentFactoryData" if root else Path.home() / ".content-factory"
+    return data_root / "runtime" / "youtube-access"
+
+
+def find_ytdlp_executable() -> str | None:
+    """Prefer the pinned managed tool, then virtual-env and PATH fallbacks."""
+
     names = ("yt-dlp.exe", "yt-dlp") if sys.platform == "win32" else ("yt-dlp", "yt-dlp.exe")
+    for name in names:
+        candidate = _managed_tools_directory() / name
+        if candidate.is_file():
+            return str(candidate)
+    scripts = Path(sys.executable).resolve().parent
     for name in names:
         candidate = scripts / name
         if candidate.is_file():
             return str(candidate)
+
+    from_path = shutil.which("yt-dlp")
+    if from_path:
+        return from_path
     return None
 
 
@@ -179,9 +249,24 @@ def find_deno_executable(ytdlp_executable: str | None = None) -> str | None:
 
 def detect_ytdlp_capabilities(executable: str | None = None) -> YtDlpCapabilities:
     resolved = executable or find_ytdlp_executable()
+    access_runtime = _youtube_access_runtime_directory()
+    # yt-dlp scans the *children* of --plugin-dirs.  The bundled provider is
+    # therefore kept in ``yt-dlp-plugins/yt_dlp_plugins`` below this root.
+    plugin_directory = access_runtime
+    server_home = access_runtime / "server"
+    provider_available = (
+        plugin_directory.is_dir()
+        and (plugin_directory / "yt-dlp-plugins" / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_script.py").is_file()
+        and (server_home / "src" / "generate_once.ts").is_file()
+        and (server_home / "node_modules").is_dir()
+    )
     return YtDlpCapabilities(
         executable=resolved,
         deno_executable=find_deno_executable(resolved),
+        po_token_provider=provider_available,
+        plugin_directory=str(plugin_directory) if provider_available else None,
+        po_token_server_home=str(server_home) if provider_available else None,
+        runtime_cache_directory=str(_default_provider_cache_directory()) if provider_available else None,
     )
 
 
@@ -345,7 +430,14 @@ class YtDlpSource:
         command = [executable, *build_ytdlp_inspect_arguments(self.capabilities, safe_url)]
         self.last_diagnostics = ""
         try:
-            result = subprocess.run(command, capture_output=True, timeout=90, check=False, **UTF8_REPLACE_TEXT)
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=90,
+                check=False,
+                env=self.capabilities.process_environment(),
+                **UTF8_REPLACE_TEXT,
+            )
             stdout = str(getattr(result, "stdout", "") or "")
             stderr = str(getattr(result, "stderr", "") or "")
             self.last_diagnostics = normalize_ytdlp_diagnostics(stderr)
@@ -383,7 +475,11 @@ class YtDlpSource:
         self.last_diagnostics = ""
         try:
             process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **UTF8_REPLACE_TEXT,
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self.capabilities.process_environment(),
+                **UTF8_REPLACE_TEXT,
             )
         except OSError as error:
             raise DependencyError("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.") from error

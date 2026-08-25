@@ -27,6 +27,26 @@ def test_windows_portable_pins_supported_deno_with_notice_and_license() -> None:
     assert "MIT License" in license_text
 
 
+def test_windows_portable_pins_mweb_bgutil_runtime_and_stages_it_with_deno() -> None:
+    lock = json.loads((WINDOWS / "youtube-access-runtime.lock.json").read_text(encoding="utf-8"))
+    spec = (WINDOWS / "ContentFactory.spec").read_text(encoding="utf-8")
+    preparation = (WINDOWS / "prepare_youtube_access_runtime.py").read_text(encoding="utf-8")
+
+    assert lock["provider"]["version"] == lock["server"]["version"] == "1.3.2"
+    assert lock["runtime"] == {
+        "yt_dlp": "2026.08.19",
+        "deno": "2.9.5",
+        "player_client": "mweb",
+        "remote_component": "ejs:github",
+    }
+    assert "--allow-scripts=npm:canvas" in preparation
+    assert "_write_deno_junction_manifest" in preparation
+    assert "FILE_ATTRIBUTE_REPARSE_POINT" in preparation
+    build = (WINDOWS / "build_portable.py").read_text(encoding="utf-8")
+    assert "_restore_deno_junctions" in build
+    assert '"youtube-access-runtime"' in spec
+
+
 def test_fresh_zip_smoke_requires_deno_runtime_and_doctor_capability() -> None:
     smoke = (WINDOWS / "smoke_portable.py").read_text(encoding="utf-8")
 
