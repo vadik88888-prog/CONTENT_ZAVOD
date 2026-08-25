@@ -527,7 +527,11 @@ class ProjectViewModel(QObject):
             return
         self._elapsed_timer.stop()
         self._launching = False
-        self.services.fail_url_download(self._job_project, message)
+        self.services.fail_url_download(
+            self._job_project,
+            message,
+            diagnostics=self.source_downloader.last_failure,
+        )
         self._job_snapshot = ProcessingSnapshot(ProcessingPhase.FAILED, message="Не удалось загрузить видео")
         self._emit_owner_project()
         self._emit_owner_processing()

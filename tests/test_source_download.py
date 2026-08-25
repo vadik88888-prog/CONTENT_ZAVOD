@@ -24,6 +24,8 @@ from app.source_download import (
     find_ytdlp_executable,
     parse_download_progress,
     parse_url_metadata,
+    normalize_ytdlp_diagnostics,
+    sanitize_public_url_for_diagnostics,
     validate_public_video_url,
 )
 from app.source_models import SourceSpec
@@ -70,6 +72,18 @@ def test_ytdlp_failure_categories_keep_diagnostics_but_expose_safe_text(
     assert error.diagnostics == raw
     assert "ERROR:" not in str(error)
     assert "WARNING:" not in str(error)
+
+
+def test_ytdlp_diagnostic_redaction_removes_cookie_and_url_query_secrets() -> None:
+    diagnostics = normalize_ytdlp_diagnostics(
+        "Cookie: session=never-persist; csrf=also-secret\n"
+        "ERROR: https://example.test/video?api_key=never-persist&signature=also-secret\n",
+    )
+
+    assert diagnostics == "Cookie: [redacted]\nERROR: https://example.test/video"
+    assert sanitize_public_url_for_diagnostics(
+        "https://user:never-persist@example.test/video?token=also-secret",
+    ) == "https://example.test/video"
 
 
 def test_engine_and_desktop_share_public_only_ytdlp_contract(tmp_path: Path) -> None:
@@ -326,6 +340,26 @@ def test_qt_metadata_keeps_warnings_out_of_json() -> None:
 
     assert received[0]["title"] == "Public video"
     assert service.last_diagnostics == "WARNING: useful extractor diagnostic"
+
+
+def test_qt_download_failure_keeps_safe_exit_evidence() -> None:
+    QCoreApplication.instance() or QCoreApplication([])
+    service = URLSourceService()
+    received: list[str] = []
+    service.failed.connect(received.append)
+    service._mode = "download"
+    service._url = "https://example.test/video?token=never-persist"
+    service._stderr_chunks = ["ERROR: This client requires a PO Token token=never-persist\n"]
+
+    service._finished(1, QProcess.ExitStatus.NormalExit)
+
+    assert received and "PO Token" in received[0]
+    assert service.last_failure is not None
+    assert service.last_failure.exit_code == 1
+    assert service.last_failure.reason == YtDlpFailureReason.PO_TOKEN_REQUIRED.value
+    assert service.last_failure.url == "https://example.test/video"
+    assert "never-persist" not in service.last_failure.last_diagnostics
+    assert "token=[redacted]" in service.last_failure.last_diagnostics
 
 
 def test_qt_service_uses_shared_contract(monkeypatch: pytest.MonkeyPatch) -> None:

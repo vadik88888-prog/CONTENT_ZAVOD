@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
@@ -17,15 +18,31 @@ from app.source_download import (
     normalize_ytdlp_diagnostics,
     parse_download_progress,
     parse_url_metadata,
+    sanitize_public_url_for_diagnostics,
     validate_public_video_url,
     YtDlpCapabilities,
 )
 from app.subprocess_utils import UTF8_REPLACE_TEXT
+from app.utils import utc_now
 from app.gui.services.windows_process_job import (
     attach_windows_process_job,
     close_windows_process_job,
     terminate_windows_process_job,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class URLDownloadFailure:
+    """Safe terminal yt-dlp evidence retained for project-local diagnostics."""
+
+    url: str
+    exit_code: int | None
+    reason: str
+    last_diagnostics: str
+    occurred_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 class URLSourceService(QObject):
@@ -56,6 +73,7 @@ class URLSourceService(QObject):
         self._stdout_pending = ""
         self._capabilities: YtDlpCapabilities | None = None
         self.last_diagnostics = ""
+        self.last_failure: URLDownloadFailure | None = None
         self._cancel_requested = False
         self._reported_process_error = False
         self._process_id = 0
@@ -102,8 +120,10 @@ class URLSourceService(QObject):
         except Exception as error:
             self.failed.emit(str(error))
             return None
+        self.last_failure = None
         capabilities = detect_ytdlp_capabilities()
         if not capabilities.executable:
+            self._record_failure(safe_url, None, "unknown", "yt-dlp executable is unavailable")
             self.failed.emit("Для загрузки по ссылке требуется дополнительный компонент yt-dlp.")
             return None
         self._mode = mode
@@ -157,6 +177,12 @@ class URLSourceService(QObject):
             return
         self._reported_process_error = True
         if _error == QProcess.ProcessError.FailedToStart:
+            mode, url, directory = self._mode, self._url, self._target_directory
+            self.last_diagnostics = normalize_ytdlp_diagnostics(self.process.errorString())
+            if mode == "download" and url:
+                self._record_failure(url, None, "unknown", self.last_diagnostics)
+            if directory:
+                cleanup_partial_downloads(directory)
             self._release_process_job()
             self._mode = self._url = None
             self.busy_changed.emit(False)
@@ -195,7 +221,10 @@ class URLSourceService(QObject):
         if exit_code != 0 or self._reported_process_error:
             if directory:
                 cleanup_partial_downloads(directory)
-            self.failed.emit(str(classify_ytdlp_failure(self.last_diagnostics or stdout)))
+            failure = classify_ytdlp_failure(self.last_diagnostics or stdout)
+            if mode == "download" and url:
+                self._record_failure(url, exit_code, failure.reason.value, self.last_diagnostics)
+            self.failed.emit(str(failure))
             return
         try:
             if mode == "metadata" and url:
@@ -222,6 +251,17 @@ class URLSourceService(QObject):
             raise ValueError("Неподдерживаемое состояние загрузки.")
         except Exception as error:
             self.failed.emit(str(error))
+
+    def _record_failure(
+        self, url: str, exit_code: int | None, reason: str, diagnostics: str,
+    ) -> None:
+        self.last_failure = URLDownloadFailure(
+            url=sanitize_public_url_for_diagnostics(url),
+            exit_code=exit_code,
+            reason=reason,
+            last_diagnostics=normalize_ytdlp_diagnostics(diagnostics),
+            occurred_at=utc_now(),
+        )
 
     def _kill_if_cancelling(self) -> None:
         if not self._cancel_requested or self.process.state() == QProcess.ProcessState.NotRunning:

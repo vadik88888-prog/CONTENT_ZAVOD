@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from app.analysis_artifact import AnalysisArtifactError
 from app.candidate_review import validate_boundary_override
@@ -33,8 +33,16 @@ from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.runtime import RuntimeLayout
 from app.secure_secrets import load_runtime_secrets
-from app.source_download import cleanup_partial_downloads, validate_public_video_url
-from app.utils import read_json, stable_text_hash, utc_now
+from app.source_download import (
+    cleanup_partial_downloads,
+    normalize_ytdlp_diagnostics,
+    sanitize_public_url_for_diagnostics,
+    validate_public_video_url,
+)
+from app.utils import read_json, stable_text_hash, utc_now, write_json
+
+if TYPE_CHECKING:
+    from app.gui.services.url_source_service import URLDownloadFailure
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,11 +176,27 @@ class DesktopServices:
 
         return validate_video_path(path)
 
-    def fail_url_download(self, project: DesktopProject, message: str, *, cancelled: bool = False) -> None:
+    def fail_url_download(
+        self,
+        project: DesktopProject,
+        message: str,
+        *,
+        cancelled: bool = False,
+        diagnostics: "URLDownloadFailure | None" = None,
+    ) -> None:
         if project.source_spec.kind != "url":
             return
         project.source_spec.download_state = "cancelled" if cancelled else "failed"
         project.source_spec.error_message = redact_secrets(message)
+        if diagnostics is not None and not cancelled:
+            record = diagnostics.to_dict()
+            record["schema_version"] = 1
+            record["event"] = "url_download_failed"
+            record["url"] = sanitize_public_url_for_diagnostics(str(record.get("url") or ""))
+            record["last_diagnostics"] = normalize_ytdlp_diagnostics(
+                str(record.get("last_diagnostics") or ""),
+            )
+            write_json(project.directory / "runtime-diagnostics" / "url-download-failure.json", record)
         self.projects.save(project)
 
     def recover_interrupted_downloads(self) -> int:

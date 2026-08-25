@@ -18,6 +18,7 @@ from app.gui.services.run_history_store import RunHistoryStore
 from app.gui.services.settings_store import SettingsStore
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.system_service import SystemService
+from app.gui.services.url_source_service import URLDownloadFailure
 from app.product_flow import ProcessingIntent, resolve_processing_intent
 
 
@@ -107,6 +108,48 @@ def test_interrupted_url_download_becomes_repeatable_after_restart(tmp_path: Pat
     assert restored.source_spec.download_state == "cancelled"
     assert "начать снова" in (restored.source_spec.error_message or "")
     assert not partial.exists()
+
+
+def test_failed_url_download_persists_safe_runtime_diagnostics(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    store = DesktopProjectStore(data)
+    project = store.create_url("https://example.test/video?token=never-persist", {"title": "Видео"})
+    services = DesktopServices(
+        engine_root=Path(__file__).resolve().parents[1],
+        settings_store=SettingsStore(data),
+        settings=DesktopSettings.defaults(data),
+        projects=store,
+        runs=RunHistoryStore(store),
+        pipeline=PipelineFacade(Path(__file__).resolve().parents[1]),
+        system=SystemService(Path(__file__).resolve().parents[1]),
+    )
+
+    services.fail_url_download(
+        project,
+        "Не удалось получить видео по этой ссылке.",
+        diagnostics=URLDownloadFailure(
+            url=project.source_spec.original_url,
+            exit_code=1,
+            reason="po_token_required",
+            last_diagnostics="ERROR: This client requires a PO Token token=never-persist",
+            occurred_at="2026-08-25T12:34:56+00:00",
+        ),
+    )
+
+    path = project.directory / "runtime-diagnostics" / "url-download-failure.json"
+    raw = path.read_text(encoding="utf-8")
+    persisted = json.loads(raw)
+    assert store.load(project.project_id).source_spec.download_state == "failed"
+    assert persisted == {
+        "url": "https://example.test/video",
+        "exit_code": 1,
+        "reason": "po_token_required",
+        "last_diagnostics": "ERROR: This client requires a PO Token token=[redacted]",
+        "occurred_at": "2026-08-25T12:34:56+00:00",
+        "schema_version": 1,
+        "event": "url_download_failed",
+    }
+    assert "never-persist" not in raw
 
 
 def test_settings_atomic_save_load_and_corrupt_fallback(tmp_path: Path) -> None:

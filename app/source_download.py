@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable, TextIO
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from app.errors import DependencyError, SourceError
 from app.subprocess_utils import UTF8_REPLACE_TEXT
@@ -236,10 +236,29 @@ def validate_public_video_url(value: str) -> str:
     return parsed.geturl()
 
 
+def sanitize_public_url_for_diagnostics(value: str) -> str:
+    """Keep an identifiable public URL without persisting query secrets."""
+
+    parsed = urlsplit(str(value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _DIAGNOSTIC_SECRET = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+|cookie\s*:\s*|(?:api[_-]?key|token)\s*[=:]\s*)[^\s;]+"
 )
+_DIAGNOSTIC_COOKIE = re.compile(r"(?i)((?:set-)?cookie\s*:\s*).*$")
+_DIAGNOSTIC_URL_QUERY = re.compile(r"(?i)(https?://[^\s?#]+(?:/[^\s?#]*)?)\?[^\s#]+")
 
 
 def normalize_ytdlp_diagnostics(*outputs: str, limit: int = 16_000) -> str:
@@ -250,6 +269,8 @@ def normalize_ytdlp_diagnostics(*outputs: str, limit: int = 16_000) -> str:
         for raw_line in str(output or "").splitlines():
             line = _ANSI_ESCAPE.sub("", raw_line).strip()
             if line:
+                line = _DIAGNOSTIC_COOKIE.sub(r"\1[redacted]", line)
+                line = _DIAGNOSTIC_URL_QUERY.sub(r"\1", line)
                 lines.append(_DIAGNOSTIC_SECRET.sub(r"\1[redacted]", line))
     return "\n".join(lines)[-limit:]
 
