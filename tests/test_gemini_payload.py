@@ -16,4 +16,4 @@ def test_gemini_payload_contains_timestamped_transcript_not_video_path() -> None
         {"start": 1.0, "end": 16.0, "text": "Самостоятельный фрагмент."}
     ]
     assert "source_path" not in payload
-    assert payload["candidates"][0]["id"] == "one"
+    assert payload["candidates"][0]["candidate_id"] == "one"
