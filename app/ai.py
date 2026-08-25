@@ -112,6 +112,8 @@ def semantic_failure_kind(error: BaseException) -> str:
     chain = _exception_chain(error)
     for item in chain:
         status = getattr(item, "status_code", None)
+        if status is None:
+            status = getattr(item, "code", None)
         response = getattr(item, "response", None)
         if status is None and response is not None:
             status = getattr(response, "status_code", None)
@@ -120,6 +122,11 @@ def semantic_failure_kind(error: BaseException) -> str:
         except (TypeError, ValueError):
             status_code = None
         if status_code in {401, 403}:
+            return "auth_rejected"
+        message = str(item).lower()
+        if status_code == 400 and any(marker in message for marker in (
+            "api key not valid", "invalid api key", "api_key_invalid",
+        )):
             return "auth_rejected"
         if status_code in {408, 409, 425, 429} or (status_code is not None and status_code >= 500):
             return "provider_unavailable"

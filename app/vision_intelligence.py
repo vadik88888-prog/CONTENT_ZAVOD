@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
 
+from app.ai import sanitize_api_error, semantic_failure_kind
 from app.config import AppConfig, VisionConfig
+from app.errors import VisionCredentialError
 from app.multimodal_evidence import validate_multimodal_timeline
 from app.utils import read_json, stable_text_hash, write_json
 
@@ -789,9 +791,11 @@ class VisionGateway:
             except Exception as error:
                 if isinstance(error, VisionProviderCallError):
                     controller.record_usage(error.usage)
-                from app.ai import sanitize_api_error
-
                 secret = getattr(self.provider, "api_key", None)
+                if semantic_failure_kind(error) == "auth_rejected":
+                    raise VisionCredentialError(
+                        "VISION_CREDENTIAL_AUTH_REJECTED: Vision provider rejected the API key."
+                    ) from error
                 diagnostics["failure_reason"] = f"provider_failure:{sanitize_api_error(error, secret)}"
                 diagnostics["analysis_stop_reason"] = "provider_failure"
                 for frame in batch:

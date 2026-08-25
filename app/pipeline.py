@@ -79,9 +79,11 @@ from app.errors import (
     ProductionPlanError,
     ProductionRenderError,
     SemanticCredentialError,
+    SemanticProviderUnavailableError,
     StageError,
     TTSError,
     TransformationProviderError,
+    VisionCredentialError,
 )
 from app.intelligence import intelligence_summary, local_rank, merge_ai_ranking, shortlist
 from app.local_scoring import score_candidates
@@ -959,22 +961,39 @@ class Pipeline:
         candidates = [candidate_from_dict(item) for item in multimodal_scoring_data.get("candidates", [])]
         rescored_by_id = {candidate.id: candidate for candidate in candidates}
         short_candidates = [rescored_by_id[item.id] for item in short_candidates if item.id in rescored_by_id]
-        ai_data = self._cached(
-            tracker, "ai_ranking", work_directory / "ai_ranking.json",
-            {
-                "shortlist": _hash(pass2_data), "multimodal_scoring": _hash(multimodal_scoring_data),
-                "ai": self.config.ai, "reranking": self.config.ai_reranking,
-                "semantic_ai": {
-                    "virality_enabled": self.config.virality.enabled,
-                    "mode": self.config.virality.semantic_ai_mode,
-                    "admission_version": "semantic-auto.2",
-                    "payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
+        try:
+            ai_data = self._cached(
+                tracker, "ai_ranking", work_directory / "ai_ranking.json",
+                {
+                    "shortlist": _hash(pass2_data), "multimodal_scoring": _hash(multimodal_scoring_data),
+                    "ai": self.config.ai, "reranking": self.config.ai_reranking,
+                    "semantic_ai": {
+                        "virality_enabled": self.config.virality.enabled,
+                        "mode": self.config.virality.semantic_ai_mode,
+                        "admission_version": "semantic-auto.2",
+                        "payload_version": SEMANTIC_AI_PAYLOAD_VERSION,
+                    },
+                    "mock": self.mock_ai, "disabled": self.no_ai_rerank,
                 },
-                "mock": self.mock_ai, "disabled": self.no_ai_rerank,
-            },
-            lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
-            cache_tracker=source_cache,
-        )
+                lambda: self._ai_rerank(candidates, short_candidates, transcript, work_directory / "ai_ranking.json"),
+                cache_tracker=source_cache,
+            )
+        except (SemanticCredentialError, SemanticProviderUnavailableError) as error:
+            if not self.analysis_only:
+                raise
+            return self._complete_run(self._finish_incomplete_analysis(
+                tracker=tracker,
+                source=source,
+                source_data=source_data,
+                metadata=metadata,
+                transcript=transcript,
+                candidates=candidates,
+                vision_analysis=vision_analysis,
+                vision_pass2=pass2_data,
+                error=error,
+                work_directory=work_directory,
+                output_directory=output_directory,
+            ))
         virality_profiles: dict[str, Any] = {}
         virality_ranking: dict[str, Any] = {}
         ranked_data = ai_data
@@ -1472,6 +1491,122 @@ class Pipeline:
                 run["artifact_paths"] = dict(metadata["paths"])
                 write_json(result.report_path, report)
 
+    def _finish_incomplete_analysis(
+        self,
+        *,
+        tracker: StageTracker,
+        source: Source,
+        source_data: dict[str, Any],
+        metadata: dict[str, Any],
+        transcript: dict[str, Any],
+        candidates: list[Candidate],
+        vision_analysis: dict[str, Any],
+        vision_pass2: dict[str, Any],
+        error: SemanticCredentialError | SemanticProviderUnavailableError,
+        work_directory: Path,
+        output_directory: Path,
+    ) -> PipelineResult:
+        """Record an incomplete Analysis without discarding reusable local stages."""
+
+        waiting_stages = (
+            "virality_profiles", "virality_ranking", "production_feasibility",
+            "final_selection", "coverage_map", "clip_count_recommendation",
+            "analysis_artifact", *TRANSFORMATION_STAGES, *PRODUCTION_PLAN_STAGES,
+            *TTS_STAGES, *AUDIO_COMPOSITION_STAGES, *PRODUCTION_RENDER_STAGES,
+        )
+        for stage in waiting_stages:
+            if stage not in tracker.data.get("stages", {}):
+                tracker.skip(stage, "Awaiting Semantic Analysis retry.")
+
+        if isinstance(error, SemanticProviderUnavailableError):
+            error_code = "SEMANTIC_PROVIDER_TEMPORARILY_UNAVAILABLE"
+            execution_state = "degraded"
+            usage = dict(error.usage)
+            message = (
+                "Semantic AI is temporarily unavailable. Completed local Analysis artifacts "
+                "were preserved and will be reused on retry."
+            )
+        else:
+            error_code = str(error).split(":", 1)[0] or "SEMANTIC_CREDENTIAL_UNUSABLE"
+            execution_state = "credential_required"
+            reason = error_code.removeprefix("SEMANTIC_CREDENTIAL_").lower()
+            usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
+            usage.update({
+                "model": self.config.ai.model,
+                "execution_state": execution_state,
+                "reason": reason,
+                "retryable": True,
+            })
+            message = (
+                "Semantic AI credential is unusable. Completed local Analysis artifacts "
+                "were preserved and will be reused after the credential is fixed."
+            )
+
+        preserved_names = (
+            "source.json", "metadata.json", "audio.wav", "transcript.json", "transcript.txt",
+            "transcript_features.json",
+            "audio_features.json", "scene_boundaries.json", "visual_analysis.json",
+            "multimodal_timeline.json", "vision-observations.json",
+            "pre_vision_content_profile.json", "video_content_profile.json", "content_map.json",
+            "story_units.json", "semantic_boundaries.json",
+            "shortlist.json", "shortlist.vision.json", "candidates.multimodal.json",
+        )
+        preserved = [
+            str(work_directory / name)
+            for name in preserved_names
+            if (work_directory / name).is_file()
+        ]
+        terminal = {
+            "status": "failed",
+            "error_code": error_code,
+            "message": message,
+            "stage": "ai_ranking",
+            "execution_state": execution_state,
+            "retryable": True,
+        }
+        tracker.start("terminal")
+        tracker.finish("terminal", "failed", message)
+        tracker.start("report", _hash({"terminal": terminal, "preserved": preserved}))
+        tracker.finish("report")
+        report_path = output_directory / "report.json"
+        make_report(
+            report_path, source_data, metadata, self.config, tracker.data, 0, len(candidates),
+            [], self.warnings, [f"{error_code}: {message}"], usage,
+            gpu_used=transcript.get("runtime", {}).get("device") == "cuda",
+            nvenc_used=False,
+            content_understanding={
+                "enabled": self.config.content_understanding.enabled,
+                "status": "incomplete",
+                "preserved_local_artifacts": preserved,
+                "vision": vision_analysis,
+                "vision_pass2_ref": (
+                    str(work_directory / "shortlist.vision.json") if vision_pass2 else None
+                ),
+            },
+            terminal=terminal,
+            vision_ai_usage=collect_vision_usage(vision_analysis, vision_pass2),
+            run={
+                "run_id": self.run_id,
+                "project_id": self.project_id,
+                "source_id": source.id,
+                "run_directory": str(output_directory),
+                "started_at": self.started_at,
+                "terminal_status": "failed",
+                "retryable": True,
+                "preserved_work_directory": str(work_directory),
+            },
+        )
+        return PipelineResult(
+            work_directory=work_directory,
+            output_directory=output_directory,
+            report_path=report_path,
+            selected_clips=0,
+            output_files=[],
+            warnings=self.warnings,
+            terminal_status="failed",
+            error_code=error_code,
+        )
+
     def _finish_analysis_only(
         self,
         *,
@@ -1789,6 +1924,12 @@ class Pipeline:
             work_directory=work_directory,
             tracker=tracker,
         )
+        composition_failures = {
+            candidate_id: str(outcome.get("reason") or "Vision credential is required for this candidate.")
+            for candidate_id, outcome in composition_vision.items()
+            if outcome.get("status") == "failed"
+        }
+        candidate_failures.update(composition_failures)
         self._write_draft_progress(
             output_directory=output_directory,
             analysis=analysis,
@@ -1808,8 +1949,8 @@ class Pipeline:
         if candidate_failures:
             # ``_finish_draft_preview`` owns the item-level draft report.  Give
             # it an ordinary failed transformation outcome for every rejected
-            # boundary so it writes the same retryable record/progress shape as
-            # any other candidate failure.
+            # candidate so it writes the same retryable record/progress shape
+            # as any other candidate failure.
             by_candidate = {
                 str(item.get("candidate_id") or ""): item
                 for item in transformation.get("items", []) if isinstance(item, dict)
@@ -1825,7 +1966,11 @@ class Pipeline:
                         "stage": (
                             f"boundary_override:{candidate_id}"
                             if candidate_id in boundary_failures
-                            else f"candidate_preflight:{candidate_id}"
+                            else (
+                                f"draft_composition_vision:{candidate_id}"
+                                if candidate_id in composition_failures
+                                else f"candidate_preflight:{candidate_id}"
+                            )
                         ),
                     })
                 elif candidate_id in by_candidate:
@@ -1893,6 +2038,29 @@ class Pipeline:
                     work_directory=work_directory,
                     tracker=tracker,
                 ))
+            except VisionCredentialError as error:
+                safe = sanitize_api_error(error)
+                error_code = str(error).split(":", 1)[0] or "VISION_CREDENTIAL_UNUSABLE"
+                tracker.finish(stage_name, "failed", safe)
+                self.warnings.append(
+                    f"Candidate composition Vision credential failure for {candidate.id}: {safe}"
+                )
+                outcomes[candidate.id] = {
+                    "schema_version": DRAFT_COMPOSITION_PASS2_SCHEMA_VERSION,
+                    "status": "failed",
+                    "reason": safe,
+                    "error_code": error_code,
+                    "execution_state": "credential_required",
+                    "retryable": True,
+                    "cache_hit": False,
+                    "usable_composition_evidence": False,
+                    "artifact_ref": None,
+                    "model": DRAFT_COMPOSITION_PASS2_MODEL,
+                    "source_range": {
+                        "start_seconds": candidate.start,
+                        "end_seconds": candidate.end,
+                    },
+                }
             except Exception as error:
                 safe = sanitize_api_error(error)
                 tracker.finish(stage_name, "warning", safe)
@@ -2061,13 +2229,12 @@ class Pipeline:
             if gateway is None:
                 provider = None
                 if candidate_pass2_admitted:
-                    try:
-                        provider = get_vision_provider(target_config, self.mock_ai)
-                    except ClipEngineError as error:
-                        self.warnings.append(
-                            "Candidate composition Vision uses local fallback: "
-                            f"{sanitize_api_error(error)}"
+                    credential_issue = _ai_credential_issue(target_config, self.mock_ai)
+                    if credential_issue is not None:
+                        raise VisionCredentialError(
+                            f"VISION_CREDENTIAL_{credential_issue.upper()}: Vision AI credential is {credential_issue}."
                         )
+                    provider = get_vision_provider(target_config, self.mock_ai)
                 gateway = VisionGateway(
                     config=target_config,
                     cache_directory=self.root / "work" / "vision-cache",
@@ -2083,6 +2250,8 @@ class Pipeline:
                     "reason": None,
                     "result": result,
                 }
+            except VisionCredentialError:
+                raise
             except Exception as error:
                 evidence = {
                     "schema_version": PASS2_EVIDENCE_SCHEMA_VERSION,
@@ -3098,7 +3267,6 @@ class Pipeline:
         try:
             scorer = get_scorer(self.config, self.mock_ai)
         except Exception as error:
-            semantic: list[ScoredCandidate] = []
             usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
             usage.update({
                 "model": self.config.ai.model,
@@ -3106,7 +3274,10 @@ class Pipeline:
                 "reason": "provider_temporarily_unavailable",
                 "retryable": True,
             })
-            ai_ok = False
+            raise SemanticProviderUnavailableError(
+                "SEMANTIC_PROVIDER_TEMPORARILY_UNAVAILABLE: Semantic AI is temporarily unavailable.",
+                usage,
+            ) from error
         else:
             try:
                 semantic, usage = scorer.score(short_candidates, transcript)
@@ -3124,10 +3295,14 @@ class Pipeline:
                     "semantic_ai_completed" if ai_ok else "provider_temporarily_unavailable"
                 )
                 usage["retryable"] = not ai_ok
+                if not ai_ok:
+                    raise SemanticProviderUnavailableError(
+                        "SEMANTIC_PROVIDER_TEMPORARILY_UNAVAILABLE: Semantic AI is temporarily unavailable.",
+                        usage,
+                    )
             except Exception as error:
-                if isinstance(error, SemanticCredentialError):
+                if isinstance(error, (SemanticCredentialError, SemanticProviderUnavailableError)):
                     raise
-                semantic = []
                 usage = _local_ai_usage(self.config.ai.provider, [sanitize_api_error(error)])
                 usage.update({
                     "model": self.config.ai.model,
@@ -3135,7 +3310,10 @@ class Pipeline:
                     "reason": "provider_temporarily_unavailable",
                     "retryable": True,
                 })
-                ai_ok = False
+                raise SemanticProviderUnavailableError(
+                    "SEMANTIC_PROVIDER_TEMPORARILY_UNAVAILABLE: Semantic AI is temporarily unavailable.",
+                    usage,
+                ) from error
         data = {
             "candidates": [item.to_dict() for item in merge_ai_ranking(candidates, semantic, ai_ok)],
             "ai": usage,

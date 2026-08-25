@@ -8,8 +8,9 @@ import wave
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from app.ai import sanitize_api_error
+from app.ai import sanitize_api_error, semantic_failure_kind
 from app.config import AppConfig
+from app.errors import TTSCredentialError
 from app.tts_models import (
     TTSAudioArtifact,
     TTSError as TTSErrorRecord,
@@ -124,6 +125,10 @@ class OpenAITTSProvider:
                     created_at=utc_now(),
                 )
             except Exception as error:
+                if semantic_failure_kind(error) == "auth_rejected":
+                    raise TTSCredentialError(
+                        "TTS_CREDENTIAL_AUTH_REJECTED: OpenAI rejected the TTS credential."
+                    ) from error
                 last_error = error
                 if attempt < self.max_retries:
                     time.sleep(min(0.25 * (2 ** attempt), 1.0))
@@ -232,7 +237,7 @@ def get_tts_provider(config: AppConfig) -> TTSProvider:
         return LocalFallbackTTSProvider()
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured")
+        raise TTSCredentialError("TTS_CREDENTIAL_MISSING: OPENAI_API_KEY is not configured")
     return OpenAITTSProvider(api_key, config.tts.timeout_seconds, config.tts.max_retries)
 
 

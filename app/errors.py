@@ -27,6 +27,18 @@ class SemanticCredentialError(ClipEngineError):
     """Semantic AI cannot run because its configured credential is unusable."""
 
 
+class SemanticProviderUnavailableError(ClipEngineError):
+    """Semantic AI is temporarily unavailable; completed local work is reusable."""
+
+    def __init__(self, message: str, usage: dict[str, object]) -> None:
+        self.usage = usage
+        super().__init__(message)
+
+
+class VisionCredentialError(ClipEngineError):
+    """Vision AI cannot run because its configured credential is unusable."""
+
+
 class TransformationConfigurationError(ClipEngineError):
     """Неподдерживаемая или небезопасная настройка transformation."""
 
@@ -65,6 +77,10 @@ class ProductionPlanError(ClipEngineError):
 
 class TTSError(ClipEngineError):
     """TTS provider or generated-audio validation failed without changing the Production Plan."""
+
+
+class TTSCredentialError(TTSError):
+    """A cloud TTS request cannot run because its credential is unusable."""
 
 
 class AudioCompositionError(ClipEngineError):

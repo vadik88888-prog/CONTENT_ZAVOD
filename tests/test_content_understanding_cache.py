@@ -7,6 +7,7 @@ import pytest
 from app.cli import main
 from app.config import AppConfig
 from app.errors import ClipEngineError
+from app.intelligence import local_rank
 from app.pipeline import INTELLIGENCE_ENGINE_VERSION, Pipeline, PipelineResult, StageTracker, _hash
 from app.run_artifacts import run_metadata_path
 from app.utils import read_json, write_json
@@ -312,6 +313,54 @@ def test_analysis_only_writes_versioned_review_artifact_without_delivery(tmp_pat
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "analysis_ready"
     assert report["production_render"]["status"] == "skipped"
+
+
+def test_transient_semantic_outage_preserves_local_work_and_retry_reuses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    calls = {"profile": 0, "map": 0, "boundaries": 0}
+    _wire_pipeline(monkeypatch, calls)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "a" * 40)
+    monkeypatch.setattr(
+        "app.pipeline.get_scorer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("temporary outage")),
+    )
+
+    failed = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), analysis_only=True, run_id="outage-run",
+    ).run(input_path=str(source))
+    failed_report = read_json(failed.report_path, {})
+
+    assert failed.terminal_status == "failed"
+    assert failed.analysis_path is None
+    assert not (failed.output_directory / "analysis.json").exists()
+    assert failed_report["terminal"]["execution_state"] == "degraded"
+    assert failed_report["terminal"]["retryable"] is True
+    assert failed_report["ai"]["retryable"] is True
+    assert Path(failed.work_directory / "transcript.json").is_file()
+    assert failed_report["content_understanding"]["preserved_local_artifacts"]
+
+    class RecoveredProvider:
+        @staticmethod
+        def score(candidates, _transcript):
+            return local_rank(candidates), {
+                "provider": "openai", "model": "gpt-5-mini",
+                "input_tokens": 1, "output_tokens": 1, "retries": 0, "api_errors": [],
+            }
+
+    monkeypatch.setattr("app.pipeline.get_scorer", lambda *_args, **_kwargs: RecoveredProvider())
+    recovered = Pipeline(
+        tmp_path, AppConfig(score_threshold=0), analysis_only=True, run_id="recovered-run",
+    ).run(input_path=str(source))
+    recovered_report = read_json(recovered.report_path, {})
+
+    assert recovered.terminal_status == "analysis_ready"
+    assert recovered.analysis_path and recovered.analysis_path.is_file()
+    assert recovered_report["stages"]["transcription"]["cache_hit"] is True
+    assert recovered_report["stages"]["audio_features"]["cache_hit"] is True
+    assert recovered_report["stages"]["ai_ranking"]["cache_hit"] is False
 
 
 def test_repeated_analysis_reuses_source_intelligence_cache(tmp_path: Path, monkeypatch) -> None:

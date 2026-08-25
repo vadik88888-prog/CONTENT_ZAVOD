@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -10,7 +11,9 @@ from typing import Any, Callable
 from app.ai import sanitize_api_error
 from app.audio_modes import tts_eligibility
 from app.config import AppConfig
+from app.errors import TTSCredentialError
 from app.production_models import NarrationSegment, ProductionPlan
+from app.secure_secrets import validate_api_key
 from app.subprocess_utils import UTF8_REPLACE_TEXT
 from app.tts_models import (
     TTS_SCHEMA_VERSION,
@@ -124,13 +127,15 @@ class TTSService:
             else:
                 resolved_provider = provider
                 if supported and resolved_provider is None:
-                    try:
-                        resolved_provider = self.provider_factory(self.config)
-                    except Exception as error:
-                        reason = "missing_api_key" if "OPENAI_API_KEY" in str(error) else "provider_failure"
-                        message = sanitize_api_error(error)
-                        results.extend(self._fallback(request, reason, message) for request in supported)
-                        resolved_provider = None
+                    if provider_config.provider == "openai":
+                        credential = os.getenv("OPENAI_API_KEY", "")
+                        validation_error = validate_api_key("openai", credential)
+                        if validation_error is not None:
+                            credential_state = "missing" if not credential.strip() else "invalid"
+                            raise TTSCredentialError(
+                                f"TTS_CREDENTIAL_{credential_state.upper()}: OpenAI TTS credential is {credential_state}."
+                            )
+                    resolved_provider = self.provider_factory(self.config)
                 if resolved_provider is not None:
                     for request in supported:
                         generated = resolved_provider.synthesize(request)

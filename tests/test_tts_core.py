@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from app.cli import build_parser
 from app.config import AppConfig
 from app.content_transformation import run_content_transformation
-from app.errors import TTSError as TTSRuntimeError
+from app.errors import TTSCredentialError, TTSError as TTSRuntimeError
 from app.models import Candidate
 from app.pipeline import Pipeline, StageTracker
 from app.production_models import NarrationSegment, ProductionPlan
@@ -141,6 +141,21 @@ def test_source_audio_mode_skips_tts_without_provider_call_or_artifacts(tmp_path
     assert report["tts_invoked"] is False and report["estimated_cost"] == 0
 
 
+def test_source_audio_mode_does_not_require_cloud_tts_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = _tts_config()
+    config.tts.provider = "openai"
+
+    result = TTSService(tmp_path, config).generate(
+        _plan("original"), tmp_path / "run", tmp_path / "out",
+    )
+
+    assert result.status == "skipped"
+    assert result.skip_reason == "source_audio_mode"
+
+
 def test_pipeline_source_audio_mode_has_no_tts_stage_artifacts(tmp_path: Path) -> None:
     plan = _plan("original")
     pipeline = Pipeline(tmp_path, _tts_config())
@@ -154,6 +169,38 @@ def test_pipeline_source_audio_mode_has_no_tts_stage_artifacts(tmp_path: Path) -
     assert result["tts_invoked"] is False
     assert result["items"][0]["reason"] == "source_audio_mode"
     assert not (tmp_path / "out" / "tts").exists()
+
+
+def test_final_tts_admission_is_per_candidate_and_only_when_cloud_audio_is_needed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = _tts_config()
+    config.tts.provider = "openai"
+    original = _plan("original").model_copy(update={"plan_id": "plan-original"})
+    voiceover = _plan("voiceover").model_copy(update={"plan_id": "plan-voiceover"})
+    pipeline = Pipeline(tmp_path, config)
+
+    result = pipeline._run_tts(
+        StageTracker(tmp_path / "state.json"),
+        {"items": [
+            {
+                "candidate_id": "original-candidate", "requested_index": 1,
+                "status": "completed", "plan": original.model_dump(mode="json"),
+            },
+            {
+                "candidate_id": "voiceover-candidate", "requested_index": 2,
+                "status": "completed", "plan": voiceover.model_dump(mode="json"),
+            },
+        ]},
+        tmp_path / "run", tmp_path / "out",
+    )
+    by_candidate = {item["candidate_id"]: item for item in result["items"]}
+
+    assert by_candidate["original-candidate"]["status"] == "skipped"
+    assert by_candidate["original-candidate"]["reason"] == "source_audio_mode"
+    assert by_candidate["voiceover-candidate"]["status"] == "failed"
+    assert "TTS_CREDENTIAL_MISSING" in by_candidate["voiceover-candidate"]["error"]
 
 
 def test_tts_cache_is_segment_based_and_force_recompute_bypasses_it(tmp_path: Path) -> None:
@@ -259,14 +306,42 @@ def test_mock_tts_reports_no_paid_cost(tmp_path: Path) -> None:
     assert result.actual_cost is None
 
 
-def test_missing_openai_key_is_a_safe_zero_call_fallback(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+@pytest.mark.parametrize(
+    ("credential", "error_code"),
+    [(None, "MISSING"), ("invalid-key", "INVALID")],
+)
+def test_unusable_openai_key_blocks_an_uncached_cloud_tts_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    credential: str | None, error_code: str,
+) -> None:
+    if credential is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", credential)
     config = _tts_config()
     config.tts.provider = "openai"
-    result = TTSService(tmp_path, config).generate(_plan(), tmp_path / "run", tmp_path / "out")
-    assert result.api_call_count == 0
-    assert {item.fallback_reason for item in result.segments} == {"missing_api_key"}
-    assert "sk-" not in result.model_dump_json()
+    with pytest.raises(TTSCredentialError, match=f"TTS_CREDENTIAL_{error_code}"):
+        TTSService(tmp_path, config).generate(_plan(), tmp_path / "run", tmp_path / "out")
+
+    assert not (tmp_path / "out" / "tts").exists()
+
+
+def test_complete_cloud_tts_cache_hit_does_not_require_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _tts_config()
+    config.tts.provider = "openai"
+    plan = _plan()
+    service = TTSService(tmp_path, config)
+    seeded = service.generate(
+        plan, tmp_path / "seed-run", tmp_path / "seed-out", provider=MockTTSProvider(),
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    cached = service.generate(plan, tmp_path / "retry-run", tmp_path / "retry-out")
+
+    assert cached.cache_hit_count == len(seeded.segments)
+    assert cached.api_call_count == 0
 
 
 @pytest.mark.parametrize("mode", ["provider_error", "timeout", "empty_audio", "malformed_response"])
@@ -319,6 +394,24 @@ def test_openai_provider_redacts_secret_from_exception(tmp_path: Path) -> None:
     assert result.status == "failed"
     assert secret not in result.model_dump_json()
     assert "[REDACTED]" in result.error.message
+
+
+def test_openai_provider_auth_rejection_is_a_credential_error(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+
+    def reject(**_kwargs):
+        error = RuntimeError("unauthorized")
+        error.status_code = 401  # type: ignore[attr-defined]
+        raise error
+
+    broken = SimpleNamespace(audio=SimpleNamespace(speech=SimpleNamespace(
+        with_streaming_response=SimpleNamespace(create=reject),
+    )))
+
+    with pytest.raises(TTSCredentialError, match="TTS_CREDENTIAL_AUTH_REJECTED"):
+        OpenAITTSProvider(
+            "sk-fake", 5, 3, client_factory=lambda **_kwargs: broken,
+        ).synthesize(request)
 
 
 def test_tts_only_preserves_existing_mp4_and_cli_flags(tmp_path: Path) -> None:

@@ -91,7 +91,7 @@ def make_report(
         "retries": int(usage.get("retries", 0) or 0),
         "api_errors": sanitized_errors,
     }
-    for key in ("execution_state", "reason", "credential_presence", "credential_source"):
+    for key in ("execution_state", "reason", "retryable", "credential_presence", "credential_source"):
         if usage.get(key) is not None:
             ai[key] = usage[key]
     report = {

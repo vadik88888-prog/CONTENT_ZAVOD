@@ -7,7 +7,7 @@ import pytest
 
 from app.audio_features import analyse_audio, window_audio_features
 from app.config import AppConfig, AudioAnalysisConfig
-from app.errors import SemanticCredentialError
+from app.errors import SemanticCredentialError, SemanticProviderUnavailableError
 from app.intelligence import local_rank, merge_ai_ranking, shortlist
 from app.intelligence_candidates import generate_candidates
 from app.local_scoring import score_candidates
@@ -111,7 +111,7 @@ def test_scoring_weights_must_sum_to_one() -> None:
         raise AssertionError("Invalid scoring weights must be rejected")
 
 
-def test_pipeline_ai_error_uses_local_fallback(tmp_path: Path, monkeypatch) -> None:
+def test_pipeline_ai_error_is_retryable_without_success_artifact(tmp_path: Path, monkeypatch) -> None:
     candidate = Candidate(
         "one", 0, 20, "Why this works?", local_quality_score=72,
         local_scores={"hook": 70, "completeness": 80, "clarity": 70, "context_independence": 70},
@@ -123,16 +123,16 @@ def test_pipeline_ai_error_uses_local_fallback(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "a" * 40)
     monkeypatch.setattr("app.pipeline.get_scorer", unavailable)
     pipeline = Pipeline(tmp_path, AppConfig())
-    data = pipeline._ai_rerank([candidate], [candidate], {"segments": []}, tmp_path / "ai.json")
+    path = tmp_path / "ai.json"
 
-    assert data["ai_fallback_used"]
-    assert data["selection_mode"] == "local-fallback"
-    assert data["candidates"][0]["score"] == 72
-    assert data["ai"]["provider"] == "openai"
-    assert data["ai"]["reason"] == "provider_temporarily_unavailable"
-    assert data["ai"]["execution_state"] == "degraded"
-    assert data["ai"]["retryable"] is True
-    assert any("degraded" in warning for warning in pipeline.warnings)
+    with pytest.raises(SemanticProviderUnavailableError) as raised:
+        pipeline._ai_rerank([candidate], [candidate], {"segments": []}, path)
+
+    assert raised.value.usage["provider"] == "openai"
+    assert raised.value.usage["reason"] == "provider_temporarily_unavailable"
+    assert raised.value.usage["execution_state"] == "degraded"
+    assert raised.value.usage["retryable"] is True
+    assert not path.exists()
 
 
 def test_semantic_ai_auto_reaches_configured_provider_with_virality_enabled(tmp_path: Path, monkeypatch) -> None:

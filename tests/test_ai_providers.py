@@ -51,6 +51,13 @@ def test_semantic_failure_kind_distinguishes_rejected_credentials_from_outages(
     assert semantic_failure_kind(error) == expected
 
 
+def test_semantic_failure_kind_recognizes_gemini_error_code_and_invalid_key_message() -> None:
+    rejected = RuntimeError("API key not valid. Please pass a valid API key.")
+    rejected.code = 400  # type: ignore[attr-defined]
+
+    assert semantic_failure_kind(rejected) == "auth_rejected"
+
+
 def _structured_item(candidate: Candidate) -> dict[str, object]:
     return {
         "candidate_id": candidate.id,

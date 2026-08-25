@@ -218,6 +218,11 @@ def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> 
         except ClipEngineError as error:
             print(f"Error: {error}", file=sys.stderr)
             return 2
+        report = read_json(result.report_path, {})
+        terminal = report.get("terminal", {}) if isinstance(report, dict) else {}
+        if isinstance(terminal, dict) and terminal.get("status") == "failed":
+            print(f"Error: {terminal.get('message') or 'Analysis is incomplete.'}", file=sys.stderr)
+            return 2
         print("Analysis is ready; no render was started.")
         print(f"Recommended candidates: {result.selected_clips}")
         print(f"Analysis ID: {result.analysis_id}")

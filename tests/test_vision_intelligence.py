@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from app.config import AppConfig
+from app.errors import VisionCredentialError
 from app.multimodal_evidence import build_multimodal_timeline
 from app.vision_intelligence import (
     CostController,
@@ -260,6 +261,22 @@ def test_provider_or_schema_failure_falls_back_without_breaking_pipeline(tmp_pat
     ).analyze_pass1(source=tmp_path / "source.mp4", timeline=_timeline(), content_type="podcast")
     assert billed_failure["diagnostics"]["usage"]["input_tokens"] == 444
     assert billed_failure["diagnostics"]["usage"]["output_tokens"] == 222
+
+
+def test_provider_auth_rejection_does_not_become_local_vision_success(tmp_path: Path) -> None:
+    class RejectedProvider(_Provider):
+        def analyze_vision(self, *args, **kwargs):
+            error = RuntimeError("forbidden")
+            error.status_code = 403  # type: ignore[attr-defined]
+            raise error
+
+    with pytest.raises(VisionCredentialError, match="VISION_CREDENTIAL_AUTH_REJECTED"):
+        VisionGateway(
+            config=_config(), cache_directory=tmp_path / "rejected",
+            provider=RejectedProvider(), frame_loader=_loader,
+        ).analyze_pass1(
+            source=tmp_path / "source.mp4", timeline=_timeline(), content_type="podcast",
+        )
 
 
 def test_strict_response_rejects_unknown_fields_and_wrong_frame_identity() -> None:

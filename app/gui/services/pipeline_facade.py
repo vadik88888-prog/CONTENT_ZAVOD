@@ -258,14 +258,6 @@ class PipelineFacade:
         self.load_verified_analysis(project, required=True)
         effective_project = self._project_with_candidate_options(project, candidate_ids)
         source_path, config, resolved, config_path = self._prepare_mode_paths(effective_project, run, settings)
-        self._require_provider_credential(
-            config,
-            resolved,
-            settings,
-            provider_required=(
-                config.vision.enabled and resolved.deep_analysis.requested != "off"
-            ),
-        )
         arguments = [
             "draft", "--input", str(source_path), "--config", str(config_path),
             "--run-id", run.run_id, "--project-id", project.project_id, "--analysis", str(analysis_path),

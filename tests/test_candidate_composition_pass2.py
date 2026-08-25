@@ -4,8 +4,11 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import AppConfig
 from app.creative_evidence import has_usable_composition_evidence
+from app.errors import VisionCredentialError
 from app.models import Candidate
 from app.multimodal_evidence import build_multimodal_timeline
 from app.pipeline import Pipeline, StageTracker
@@ -209,6 +212,25 @@ def test_draft_composition_pass2_is_candidate_cached_and_reused(
     assert artifact["lineage"]["prompt_version"] == "6B.pass2.2"
     assert analysis_path.read_bytes() == b'{"immutable":true}'
 
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        pipeline_module, "get_vision_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider must not be constructed")),
+    )
+    already_ready = Pipeline(
+        tmp_path, config, analysis_artifact_path=analysis_path,
+    )._ensure_draft_composition_evidence(
+        [SimpleNamespace(candidate=first_candidate)],
+        source=source,
+        timeline=timeline,
+        analysis=analysis,
+        work_directory=tmp_path / "source-work",
+        tracker=StageTracker(tmp_path / "ready-state.json"),
+    )
+    assert already_ready[first_candidate.id]["status"] == "not_required"
+
+    monkeypatch.setattr(pipeline_module, "get_vision_provider", lambda *_args, **_kwargs: object())
+
     config.production_render.subtitle_style = "minimal"
     config.production_render.crop_strategy = "center_crop"
     config.product_flow.caption_preset_id = "word_pop"
@@ -231,6 +253,103 @@ def test_draft_composition_pass2_is_candidate_cached_and_reused(
     assert second[second_candidate.id]["artifact_ref"] == str(artifact_path)
     assert has_usable_composition_evidence(second_candidate.to_dict(), timeline)
     assert analysis_path.read_bytes() == b'{"immutable":true}'
+
+
+def test_uncached_draft_composition_vision_requires_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeline = _sparse_timeline()
+    source_path = tmp_path / "podcast.mp4"
+    source_path.write_bytes(b"source")
+    source = Source(timeline["source_id"], source_path, source_path.name, str(source_path))
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_bytes(b'{"immutable":true}')
+    analysis = SimpleNamespace(
+        analysis_id="analysis-missing-key",
+        verified_sha256=hashlib.sha256(analysis_path.read_bytes()).hexdigest(),
+    )
+    config = AppConfig(optional_visual_features=True)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    outcome = Pipeline(
+        tmp_path, config, analysis_artifact_path=analysis_path,
+    )._ensure_draft_composition_evidence_isolated(
+        [SimpleNamespace(candidate=_candidate())],
+        source=source,
+        timeline=timeline,
+        analysis=analysis,
+        work_directory=tmp_path / "source-work",
+        tracker=StageTracker(tmp_path / "state.json"),
+    )[_candidate().id]
+
+    assert outcome["status"] == "failed"
+    assert outcome["error_code"] == "VISION_CREDENTIAL_MISSING"
+    assert outcome["execution_state"] == "credential_required"
+    assert outcome["retryable"] is True
+
+
+def test_candidate_vision_auth_failure_preserves_two_ready_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.pipeline as pipeline_module
+
+    timeline = _sparse_timeline()
+    source_path = tmp_path / "podcast.mp4"
+    source_path.write_bytes(b"source")
+    source = Source(timeline["source_id"], source_path, source_path.name, str(source_path))
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_bytes(b'{"immutable":true}')
+    analysis = SimpleNamespace(
+        analysis_id="analysis-rejected-key",
+        verified_sha256=hashlib.sha256(analysis_path.read_bytes()).hexdigest(),
+    )
+    ready_one = _candidate()
+    ready_one.id = "ready-one"
+    ready_two = _candidate()
+    ready_two.id = "ready-two"
+    uncached = _candidate()
+    uncached.id = "uncached"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "r" * 40)
+    monkeypatch.setattr(
+        pipeline_module, "has_usable_composition_evidence",
+        lambda candidate, _timeline: str(candidate.get("id") or "").startswith("ready-"),
+    )
+    monkeypatch.setattr(pipeline_module, "get_vision_provider", lambda *_args, **_kwargs: object())
+    gateway_calls: list[str] = []
+
+    class RejectedGateway:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def analyze_pass2(self, **_kwargs):
+            gateway_calls.append("uncached")
+            raise VisionCredentialError(
+                "VISION_CREDENTIAL_AUTH_REJECTED: Vision provider rejected the API key."
+            )
+
+    monkeypatch.setattr(pipeline_module, "VisionGateway", RejectedGateway)
+
+    outcomes = Pipeline(
+        tmp_path, AppConfig(optional_visual_features=True), analysis_artifact_path=analysis_path,
+    )._ensure_draft_composition_evidence_isolated(
+        [
+            SimpleNamespace(candidate=ready_one),
+            SimpleNamespace(candidate=ready_two),
+            SimpleNamespace(candidate=uncached),
+        ],
+        source=source,
+        timeline=timeline,
+        analysis=analysis,
+        work_directory=tmp_path / "source-work",
+        tracker=StageTracker(tmp_path / "state.json"),
+    )
+
+    assert outcomes["ready-one"]["status"] == "not_required"
+    assert outcomes["ready-two"]["status"] == "not_required"
+    assert outcomes["uncached"]["status"] == "failed"
+    assert outcomes["uncached"]["error_code"] == "VISION_CREDENTIAL_AUTH_REJECTED"
+    assert outcomes["uncached"]["retryable"] is True
+    assert gateway_calls == ["uncached"]
 
 
 def test_auto_podcast_admits_candidate_only_pass2_without_enabling_full_source_vision(
