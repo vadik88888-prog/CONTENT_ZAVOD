@@ -316,6 +316,37 @@ def test_av1_rapid_range_switch_reuses_one_inflight_source_proxy(tmp_path: Path,
         app.processEvents()
 
 
+def test_av1_preload_is_promoted_by_the_first_moment_without_a_second_transcode(tmp_path: Path, monkeypatch) -> None:
+    app = _application()
+    source = tmp_path / "source-av1.webm"
+    source.write_bytes(b"av1")
+    preview = VideoPreview()
+    started: list[_ProxyRequest] = []
+
+    def capture_start(request: _ProxyRequest) -> None:
+        started.append(request)
+        preview._active_proxy = request
+
+    monkeypatch.setattr(preview, "_start_proxy", capture_start)
+    monkeypatch.setattr(preview, "_request_poster", lambda *_args, **_kwargs: None)
+
+    try:
+        assert preview.preload_compatible_proxy(source, cache_directory=tmp_path / "cache", source_codec="av1")
+        assert len(started) == 1
+        assert started[0].activate_on_success is False
+
+        preview.set_range(source, 42.0, 54.0, cache_directory=tmp_path / "cache", source_codec="av1")
+
+        assert len(started) == 1
+        assert preview._active_proxy is not None
+        assert preview._active_proxy.activate_on_success is True
+        assert (preview._active_proxy.start_seconds, preview._active_proxy.end_seconds) == (42.0, 54.0)
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
 def test_direct_range_load_timeout_falls_back_to_proxy_instead_of_spinning(tmp_path: Path, monkeypatch) -> None:
     app = _application()
     source = tmp_path / "source.mp4"

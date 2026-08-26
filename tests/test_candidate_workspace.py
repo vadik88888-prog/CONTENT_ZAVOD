@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QGridLayout, QLa
 from app.analysis_artifact import new_analysis_artifact
 from app.gui.components import VideoPreview
 from app.gui.main_window import MainWindow
-from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectStatus, RunKind, RunStatus
+from app.gui.models import DesktopSettings, ProcessingPhase, ProcessingSnapshot, ProjectRun, ProjectStatus, RunKind, RunStatus
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.styles import load_theme
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -115,6 +115,7 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
     services.projects.save(project)
     viewmodel = ProjectViewModel(services)
     preview_ranges: list[tuple[Path, float, float, Path | None, str | None, str | None]] = []
+    proxy_preloads: list[tuple[Path, Path | None, str | None]] = []
 
     def capture_preview_range(
         _preview, path, start_seconds, end_seconds, *, autoplay=True, cache_directory=None, candidate_title=None,
@@ -130,6 +131,13 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         ))
 
     monkeypatch.setattr(VideoPreview, "set_range", capture_preview_range)
+    monkeypatch.setattr(
+        VideoPreview,
+        "preload_compatible_proxy",
+        lambda _preview, path, *, cache_directory=None, source_codec=None: proxy_preloads.append(
+            (Path(path), cache_directory, source_codec)
+        ) or True,
+    )
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
 
@@ -151,6 +159,9 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.setup_card.isHidden()
         assert screen.run_button.isHidden()
         assert screen.candidate_review.focusPolicy() == Qt.FocusPolicy.StrongFocus
+        assert proxy_preloads == [
+            (project.source, project.directory / "preview-proxies", "av1")
+        ]
 
         # Candidate selection is bound to the source player, including the
         # exact range and the project-local proxy cache destination.
@@ -187,7 +198,8 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
 
         screen._change_candidate_filter("unselected")
         select_other = screen._candidate_selection_buttons["candidate-other"]
-        assert select_other.text() == "Добавить к черновикам"
+        assert select_other.text() == "Добавить"
+        assert select_other.toolTip() == "Добавить к черновикам"
         QTest.mouseClick(select_other, Qt.MouseButton.LeftButton)
 
         assert viewmodel.project.review_selected_candidate_ids == ["candidate-recommended", "candidate-other"]
@@ -202,6 +214,57 @@ def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(
         assert screen.candidate_review.isVisible()
     finally:
         screen.close()
+
+
+def test_av1_review_proxy_preloads_when_analysis_starts(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.source_metadata["video_codec"] = "av1"
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    preloads: list[tuple[Path, Path | None, str | None]] = []
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        VideoPreview,
+        "preload_compatible_proxy",
+        lambda _preview, path, *, cache_directory=None, source_codec=None: preloads.append(
+            (Path(path), cache_directory, source_codec)
+        ) or True,
+    )
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        preloads.clear()
+        viewmodel.run = ProjectRun(
+            run_id="analysis-run",
+            project_id=project.project_id,
+            started_at="2026-08-26T12:00:00Z",
+            finished_at=None,
+            status=RunStatus.RUNNING,
+            settings_snapshot={},
+            source_snapshot={},
+            pipeline_version="test",
+            run_kind=RunKind.ANALYSIS,
+        )
+
+        screen._processing_changed(ProcessingSnapshot(
+            phase=ProcessingPhase.RUNNING,
+            stage="transcription",
+            message="Распознаём речь",
+        ))
+
+        assert preloads == [
+            (project.source, project.directory / "preview-proxies", "av1")
+        ]
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
 
 
 def test_top_n_primary_cta_selects_only_recommended_and_starts_drafts_without_analysis(
@@ -1125,6 +1188,16 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert card.width() <= screen.review_list_scroll.viewport().width()
         for button in card.findChildren(QPushButton):
             assert button.width() >= button.minimumSizeHint().width()
+        select = screen.findChild(QPushButton, "select-candidate-candidate-recommended")
+        assert select is not None
+        assert select.text() == "Добавить"
+        assert select.toolTip() == "Добавить к черновикам"
+        assert isinstance(select.parentWidget().layout(), QBoxLayout)
+        assert select.parentWidget().layout().direction() == QBoxLayout.Direction.TopToBottom
+        QTest.mouseClick(select, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert select.text() == "Убрать"
+        assert select.toolTip() == "Убрать из черновиков"
 
         preview = screen.findChild(QPushButton, "preview-candidate-candidate-recommended")
         assert preview is not None
@@ -1148,6 +1221,11 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
         assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
         assert screen.content_scroll.horizontalScrollBar().maximum() == 0
+        wide_select = screen.findChild(QPushButton, "select-candidate-candidate-recommended")
+        assert wide_select is not None
+        assert wide_select.text() == "Убрать"
+        assert isinstance(wide_select.parentWidget().layout(), QBoxLayout)
+        assert wide_select.parentWidget().layout().direction() == QBoxLayout.Direction.LeftToRight
         controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
         assert controls is not None
         detail_layout = screen.candidate_detail.layout()

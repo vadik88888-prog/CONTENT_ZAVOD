@@ -1559,6 +1559,8 @@ class ProjectScreen(QWidget):
         self._update_setup_card(project)
         self._update_stage_context(project)
         self._ensure_project_thumbnail(project)
+        if preview_step in {"candidates", "drafts"}:
+            self._preload_moments_proxy(project)
         self._update_candidate_review(project)
         self._update_final_results(project)
         self._update_next_step(project)
@@ -1570,6 +1572,22 @@ class ProjectScreen(QWidget):
             # selected workspace so its reference composition starts at the
             # global stepper while sticky actions remain reachable below.
             QTimer.singleShot(0, lambda: self.content_scroll.verticalScrollBar().setValue(0))
+
+    def _preload_moments_proxy(self, project: DesktopProject) -> None:
+        """Begin the existing compatible source proxy before a Moment is clicked.
+
+        The proxy is a local review cache only.  It shares the source revision
+        identity and FFmpeg lifecycle with ``VideoPreview.set_range`` and never
+        changes analysis, candidate selection, boundaries or render artifacts.
+        """
+
+        if not project.source_spec.is_ready:
+            return
+        self.preview.preload_compatible_proxy(
+            project.source,
+            cache_directory=project.directory / "preview-proxies",
+            source_codec=str(project.source_metadata.get("video_codec") or ""),
+        )
 
     def _set_advanced_visible(self, visible: bool) -> None:
         if self._flow_step != "settings":
@@ -2561,9 +2579,9 @@ class ProjectScreen(QWidget):
             actions_host.setMinimumWidth(0)
             actions_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             actions = QBoxLayout(
-                QBoxLayout.Direction.LeftToRight
-                if workflow_step == "candidates"
-                else QBoxLayout.Direction.TopToBottom,
+                QBoxLayout.Direction.TopToBottom
+                if workflow_step != "candidates" or self._compact_action_layout
+                else QBoxLayout.Direction.LeftToRight,
                 actions_host,
             )
             actions.setContentsMargins(0, 0, 0, 0)
@@ -2650,8 +2668,11 @@ class ProjectScreen(QWidget):
             elif workflow_step == "candidates" and state not in {"draft_planning", "production_rendering"}:
                 if candidate_draftable:
                     selected_for_draft = candidate_id in project.review_selected_candidate_ids
-                    select = QPushButton("Убрать из черновиков" if selected_for_draft else "Добавить к черновикам")
+                    select = QPushButton("Убрать" if selected_for_draft else "Добавить")
                     select.setObjectName(f"select-candidate-{candidate_id}")
+                    select.setToolTip(
+                        "Убрать из черновиков" if selected_for_draft else "Добавить к черновикам"
+                    )
                     select.clicked.connect(lambda _checked=False, value=candidate_id: self._toggle_candidate_selection(value))
                     self._candidate_selection_buttons[candidate_id] = select
                     actions.addWidget(select)
@@ -3247,6 +3268,9 @@ class ProjectScreen(QWidget):
         selected = set(self.project.review_selected_candidate_ids)
         for candidate_id, button in self._candidate_selection_buttons.items():
             button.setText(
+                "Убрать" if candidate_id in selected else "Добавить"
+            )
+            button.setToolTip(
                 "Убрать из черновиков" if candidate_id in selected else "Добавить к черновикам"
             )
         recommended_count = sum(
@@ -4208,6 +4232,11 @@ class ProjectScreen(QWidget):
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         blocked = self.viewmodel.blocked_by_other_project
+        if active and self.project:
+            latest = self._latest_run(self.project)
+            run_kind = self.viewmodel.run.run_kind if self.viewmodel.run else (latest.run_kind if latest else RunKind.FULL)
+            if run_kind in {RunKind.ANALYSIS, RunKind.FULL}:
+                self._preload_moments_proxy(self.project)
         if active:
             detail = self._processing_detail(snapshot)
             self.progress.set_running(

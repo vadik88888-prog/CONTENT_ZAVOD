@@ -34,6 +34,10 @@ class _ProxyRequest:
     end_seconds: float
     destination: Path
     temporary: Path
+    # A preload shares the exact proxy/cache contract with an interactive
+    # Moment request, but must not replace the hidden/current player when it
+    # completes.  A later card selection promotes the in-flight request.
+    activate_on_success: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,21 +330,66 @@ class VideoPreview(QFrame):
         next ``show_*`` call restores that exact path rather than guessing.
         """
 
+        preload_active = bool(self._active_proxy and not self._active_proxy.activate_on_success)
         if (
             self._path is None
-            and self._proxy_process.state() == QProcess.ProcessState.NotRunning
+            and (preload_active or self._proxy_process.state() == QProcess.ProcessState.NotRunning)
             and self._poster_process.state() == QProcess.ProcessState.NotRunning
         ):
             return
         self._selection_token += 1
-        self._cancel_proxy()
+        # A source-level review preload is intentionally allowed to continue
+        # while the Moments workspace is hidden during Analysis.  It owns no
+        # player source, so it cannot leave a stale native frame behind.
+        if not preload_active:
+            self._cancel_proxy()
         self._cancel_poster()
-        self._active_proxy = None
+        if not preload_active:
+            self._active_proxy = None
         self._active_poster = None
         self._clear_media()
         self._source_path = None
         self._source_range_seconds = None
         self._active_candidate_title = None
+
+    def preload_compatible_proxy(
+        self,
+        source_path: str | Path | None,
+        *,
+        cache_directory: Path | None = None,
+        source_codec: str | None = None,
+    ) -> bool:
+        """Warm the existing AV1 review proxy without changing the player.
+
+        This is deliberately a UI-only background task: it uses the same
+        source-revision key, FFmpeg command, atomic promotion and QProcess as
+        Moment playback.  If a card is opened before completion, ``set_range``
+        retargets this exact request instead of starting a second transcode.
+        """
+
+        source = Path(source_path) if source_path else None
+        if source is None or not source.is_file() or self._normalise_source_codec(source_codec) not in {"av1", "av01"}:
+            return False
+        cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
+        destination = preview_proxy_path(cache, source)
+        if self.usable_media_path(destination):
+            return True
+        active = self._active_proxy
+        if active is not None:
+            if active.source_path == source and active.destination == destination:
+                return True
+            self._cancel_proxy()
+        request = _ProxyRequest(
+            token=self._selection_token,
+            source_path=source,
+            start_seconds=0.0,
+            end_seconds=0.0,
+            destination=destination,
+            temporary=preview_proxy_temporary_path(destination),
+            activate_on_success=False,
+        )
+        self._start_proxy(request)
+        return True
 
     def set_vertical_frame_size(self, width: int, height: int) -> None:
         """Set a compact 9:16 stage without changing the media contract."""
@@ -620,6 +669,7 @@ class VideoPreview(QFrame):
                 token=self._selection_token,
                 start_seconds=start,
                 end_seconds=end,
+                activate_on_success=True,
             )
             self._proxy_timed_out_request = None
         else:
@@ -1038,6 +1088,7 @@ class VideoPreview(QFrame):
             end_seconds=end,
             destination=destination,
             temporary=preview_proxy_temporary_path(destination),
+            activate_on_success=True,
         )
         self._stop_media_load_watchdog()
         self._release_player_source()
@@ -1074,7 +1125,10 @@ class VideoPreview(QFrame):
     def _start_proxy(self, request: _ProxyRequest) -> None:
         executable = shutil.which("ffmpeg")
         if not executable:
-            self._show_error("Не хватает компонента обработки видео для совместимого предпросмотра.")
+            if request.activate_on_success:
+                self._show_error("Не хватает компонента обработки видео для совместимого предпросмотра.")
+            else:
+                logger.error("compatible preview preload skipped: ffmpeg is unavailable")
             return
         request.destination.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1143,6 +1197,10 @@ class VideoPreview(QFrame):
         if pending is not None:
             self._start_proxy(pending)
             return
+        if not request.activate_on_success:
+            if not success and details:
+                logger.error("compatible preview preload failed: %s", details[-1200:])
+            return
         if request.token != self._selection_token:
             return
         if success:
@@ -1164,7 +1222,8 @@ class VideoPreview(QFrame):
             return
         self._proxy_timed_out_request = request
         logger.error("compatible preview timed out source=%s", request.source_path)
-        self._show_status("Создание совместимого preview заняло слишком много времени; останавливаем его.")
+        if request.activate_on_success:
+            self._show_status("Создание совместимого preview заняло слишком много времени; останавливаем его.")
         if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
             self._proxy_process.kill()
             return
