@@ -169,7 +169,7 @@ def test_evidence_backed_truncation_remains_blocked(boundary: dict) -> None:
     assert "SEMANTIC_INCOMPLETE" in decision.hard_blockers
 
 
-def test_moments_projection_keeps_production_hard_blocker_out_of_draft() -> None:
+def test_moments_projection_keeps_production_hard_blocker_as_draft_warning() -> None:
     source_candidate = {
         "id": "candidate-blocked",
         "start": 1.0,
@@ -196,7 +196,7 @@ def test_moments_projection_keeps_production_hard_blocker_out_of_draft() -> None
     assert set(review_payload["production_editorial_decision"]["hard_blockers"]) == {
         "SEMANTIC_INCOMPLETE", "AUDIO_UNINTELLIGIBLE",
     }
-    assert candidate_is_draftable(review_payload) is False
+    assert candidate_is_draftable(review_payload) is True
 
 
 def test_auto_preserves_detected_effective_and_manual_provenance() -> None:
@@ -327,7 +327,7 @@ def test_current_gameplay_moments_keeps_all_quality_and_feasibility_risks_select
         if item["surfacing_state"] == "RECOMMENDED"
     ] == ["candidate-chapter-011-story-001"]
     assert candidate_is_draftable(projected[0]) is True
-    assert candidate_is_draftable(projected[1]) is False
+    assert candidate_is_draftable(projected[1]) is True
 
     boundary_risk = projected[1]
     assert "SENTENCE_BOUNDARY_UNRECOVERABLE" in boundary_risk["editorial_decision"]["soft_issues"]

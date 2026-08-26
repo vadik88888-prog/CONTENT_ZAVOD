@@ -400,8 +400,9 @@ def candidate_review_payload(
             "features": compact_features,
         },
         # Keep the production-facing decision separate from the Moments
-        # projection.  The latter may surface a weak candidate for source
-        # review, but it must never grant permission to start a Draft.
+        # projection.  Moments may surface a valid source interval despite
+        # editorial/ASR risk; Draft preparation still owns its later, exact
+        # production checks.
         "eligibility_decision": eligibility_decision.to_dict(),
         "production_editorial_decision": ranking_decision.to_dict(),
         "editorial_decision": editorial_decision.to_dict(),
@@ -447,7 +448,15 @@ def candidate_review_payload(
 
 
 def candidate_is_draftable(candidate: object) -> bool:
-    """Return whether a review candidate can safely enter the Draft workflow."""
+    """Return whether a valid Moments item may enter Draft preparation.
+
+    Moments is a review surface, not the Final Quality Gate.  Its persisted
+    projection intentionally turns AI/ASR and editorial concerns into warnings
+    so people can inspect and try every valid source interval.  Broken identity
+    or interval mapping remains non-selectable here; missing/corrupt source and
+    artifact integrity are separately verified by ``prepare_draft`` before a
+    run is created.
+    """
 
     if not isinstance(candidate, dict):
         return False
@@ -467,24 +476,29 @@ def candidate_is_draftable(candidate: object) -> bool:
         return False
     if not (math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start):
         return False
-    production_decision = _production_editorial_decision(candidate)
+    moments_decision = _moments_editorial_decision(candidate)
     return bool(
-        production_decision
-        and production_decision.selectable
-        and not production_decision.hard_blockers
+        moments_decision
+        and moments_decision.selectable
+        and not moments_decision.hard_blockers
     )
 
 
-def _production_editorial_decision(candidate: dict[str, Any]) -> CandidateEditorialDecision | None:
-    """Read the persisted production decision, deriving it for legacy reviews."""
+def _moments_editorial_decision(candidate: dict[str, Any]) -> CandidateEditorialDecision | None:
+    """Read the persisted Moments decision, deriving the same safe projection.
 
-    persisted = candidate.get("production_editorial_decision")
+    Pre-projection artifacts are kept reviewable: passing an explicit boolean
+    selects the Moments policy path even when the old candidate was not
+    recommended.
+    """
+
+    persisted = candidate.get("editorial_decision")
     if isinstance(persisted, dict):
         try:
             return CandidateEditorialDecision.from_dict(persisted)
         except (TypeError, ValueError):
             return None
-    return evaluate_editorial_candidate(candidate, None)
+    return evaluate_editorial_candidate(candidate, None, recommended=False)
 
 
 def _moments_review_candidate(candidate: dict[str, Any]) -> dict[str, Any]:

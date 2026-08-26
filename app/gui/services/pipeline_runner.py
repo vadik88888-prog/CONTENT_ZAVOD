@@ -50,6 +50,13 @@ class QtPipelineRunner(QObject):
         # existing persisted state files.
         "candidates_v2", "local_scoring", "shortlist", "ai_ranking", "final_selection",
         "video_content_profile", "global_content_map",
+        # These are active stage names in the current engine.  Keep the
+        # desktop whitelist in sync so a live Analysis never appears frozen on
+        # the previous preparation label while semantic/vision work proceeds.
+        "multimodal_seed_timeline", "pre_vision_content_profile", "vision_pass1",
+        "global_content_map_base", "candidate_seed_basis", "audio_semantics",
+        "multimodal_timeline", "multimodal_scoring", "vision_pass2",
+        "production_feasibility",
     })
     DRAFT_STAGE_PREFIXES = frozenset({
         "analysis_handoff", "content_transformation", "production_plan", "draft_preview",
@@ -65,8 +72,20 @@ class QtPipelineRunner(QObject):
     DELIVERY_STAGE_PREFIXES = DRAFT_STAGE_PREFIXES | FINAL_STAGE_PREFIXES
     STAGE_LABEL_OVERRIDES = {
         "video_content_profile": "Анализируем содержание",
+        "pre_vision_content_profile": "Анализируем содержание",
         "global_content_map": "Анализируем содержание",
+        "global_content_map_base": "Анализируем содержание",
         "story_units": "Анализируем содержание",
+        "multimodal_seed_timeline": "Анализируем сцены",
+        "vision_pass1": "Анализируем сцены",
+        "vision_pass2": "Анализируем сцены",
+        "scene_detection": "Анализируем сцены",
+        "visual_analysis": "Анализируем сцены",
+        "audio_semantics": "Распознаём речь",
+        "multimodal_timeline": "Анализируем содержание",
+        "candidate_seed_basis": "Анализируем содержание",
+        "multimodal_scoring": "Анализируем содержание",
+        "production_feasibility": "Проверяем найденные моменты",
         "semantic_boundaries": "Ищем сильные моменты",
         "candidates_v2": "Ищем сильные моменты",
         "local_scoring": "Ищем сильные моменты",
@@ -272,7 +291,10 @@ class QtPipelineRunner(QObject):
         self._resolve_engine_paths()
         self._poll_activity_sources()
         prepared = self._prepared
-        if prepared is None or not prepared.state_path.is_file():
+        if prepared is None:
+            return
+        if not prepared.state_path.is_file():
+            self._poll_heartbeat_stage(prepared)
             return
         try:
             stat = prepared.state_path.stat()
@@ -280,6 +302,7 @@ class QtPipelineRunner(QObject):
             # Ignore a state file from a previous run until the current engine has
             # touched it.  Reused work directories must not resurrect stale stages.
             if stat.st_mtime < self._launch_wall_time - 2:
+                self._poll_heartbeat_stage(prepared)
                 return
             if fingerprint != self._state_fingerprint:
                 self._state_fingerprint = fingerprint
@@ -295,6 +318,7 @@ class QtPipelineRunner(QObject):
                 if isinstance(value, dict) and value.get("status") == "running"
             ]
         except (OSError, ValueError, TypeError):
+            self._poll_heartbeat_stage(prepared)
             return
         presentations = [
             (name, value, self._present_stage(prepared, name))
@@ -311,6 +335,7 @@ class QtPipelineRunner(QObject):
                     )
             else:
                 self._last_ignored_engine_stage = None
+            self._poll_heartbeat_stage(prepared)
             return
 
         engine_stage, _value, presentation = max(
@@ -319,6 +344,37 @@ class QtPipelineRunner(QObject):
         assert presentation is not None
         stage, label = presentation
         self._last_ignored_engine_stage = None
+        self._emit_stage_change(engine_stage, stage, label)
+
+    def _poll_heartbeat_stage(self, prepared: PreparedPipelineRun) -> None:
+        """Use the engine-owned heartbeat when state has no visible live row.
+
+        The heartbeat is intentionally a stage/liveness signal only.  It does
+        not invent a fraction or drive lifecycle state, and stale files from a
+        previous run are rejected by the same launch-time boundary as state.
+        """
+
+        heartbeat = prepared.heartbeat_path or prepared.state_path.with_name("heartbeat.json")
+        try:
+            stat = heartbeat.stat()
+            if stat.st_mtime < self._launch_wall_time - 2:
+                return
+            with heartbeat.open("r", encoding="utf-8") as file:
+                raw = json.load(file)
+        except (OSError, ValueError, TypeError):
+            return
+        engine_stage = str(raw.get("stage") or "").strip() if isinstance(raw, dict) else ""
+        if not engine_stage:
+            return
+        presentation = self._present_stage(prepared, engine_stage)
+        if presentation is None:
+            return
+        stage, label = presentation
+        self._emit_stage_change(engine_stage, stage, label)
+
+    def _emit_stage_change(self, engine_stage: str, stage: str, label: str) -> None:
+        """Publish a real engine-stage transition exactly once."""
+
         if stage != self._last_stage:
             self._last_stage = stage
             self._stage_started_monotonic = time.monotonic()

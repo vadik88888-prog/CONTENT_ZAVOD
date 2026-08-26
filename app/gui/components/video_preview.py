@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
 import shutil
@@ -19,10 +19,10 @@ from app.gui.responsive import make_label_shrinkable, set_responsive_text
 from app.utils import safe_name, stable_text_hash
 
 
-# v3 changes proxy writes to an atomic temporary path.  Keeping the cache key
-# versioned ensures that a non-empty partial v2 file is never treated as a
-# usable preview after an interrupted FFmpeg process.
-PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-v3"
+# v4 changes the cache unit from a candidate interval to one immutable source
+# revision.  Atomic temporary promotion still prevents a partial MP4 from
+# becoming playable after an interrupted FFmpeg process.
+PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-source-v4"
 logger = logging.getLogger(__name__)
 
 
@@ -62,19 +62,19 @@ class _BoundedVideoWidget(QVideoWidget):
         return QSize(0, 0)
 
 
-def preview_proxy_path(
-    cache_directory: Path, source_path: Path, start_seconds: float, end_seconds: float,
-) -> Path:
-    """Return an immutable cache path for one source interval preview."""
+def preview_proxy_path(cache_directory: Path, source_path: Path) -> Path:
+    """Return the compatible preview cache path for one source revision.
+
+    Candidate intervals never participate in this key: they reuse the single
+    compatible source through normal seek/start/end range control.
+    """
 
     try:
         stat = source_path.stat()
         revision = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     except OSError:
         revision = str(source_path)
-    digest = stable_text_hash(
-        f"{PREVIEW_PROXY_FORMAT_VERSION}:{revision}:{start_seconds:.3f}:{end_seconds:.3f}"
-    )[:20]
+    digest = stable_text_hash(f"{PREVIEW_PROXY_FORMAT_VERSION}:{revision}")[:20]
     return cache_directory / f"{safe_name(source_path.stem, 'source')}-{digest}.mp4"
 
 
@@ -110,7 +110,10 @@ class VideoPreview(QFrame):
     """Bounded candidate preview with a compatible local-proxy fallback."""
 
     MEDIA_LOAD_TIMEOUT_MS = 15_000
-    PROXY_RENDER_TIMEOUT_MS = 120_000
+    # A source-level 4K AV1 transcode is deliberately bounded but can be much
+    # longer than the former short-interval preview.  This remains a background
+    # QProcess and never blocks the review UI.
+    PROXY_RENDER_TIMEOUT_MS = 30 * 60 * 1000
 
     preview_error = Signal(str)
     geometry_requirement_changed = Signal()
@@ -593,19 +596,38 @@ class VideoPreview(QFrame):
     ) -> None:
         """Bind the player to one candidate's source interval.
 
-        AV1/WebM candidate intervals are played from a small H.264/AAC proxy.
-        This keeps seeking reliable on Windows without starting a production
-        render or converting the original source.
+        AV1/WebM candidate intervals are played from one cached H.264/AAC
+        source proxy.  This keeps seek reliable on Windows without starting a
+        production render or transcoding again for every candidate.
         """
 
         start = max(0.0, float(start_seconds))
         end = max(start, float(end_seconds))
+        cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
+        source_path = Path(path)
         self._selection_token += 1
-        self._cancel_proxy()
+        active = self._active_proxy
+        sharing_active_proxy = bool(
+            active
+            and active.source_path == source_path
+            and active.destination == preview_proxy_path(cache, source_path)
+        )
+        if sharing_active_proxy and active is not None:
+            # Retarget the in-flight source proxy to the most recent card
+            # instead of killing it and creating a second AV1 transcode.
+            self._active_proxy = replace(
+                active,
+                token=self._selection_token,
+                start_seconds=start,
+                end_seconds=end,
+            )
+            self._proxy_timed_out_request = None
+        else:
+            self._cancel_proxy()
         self._cancel_poster()
         self._stop_media_load_watchdog()
         self._source_range_seconds = (start, end)
-        self._source_path = Path(path)
+        self._source_path = source_path
         self._source_codec = self._normalise_source_codec(source_codec)
         self._force_compatible_proxy = force_compatible_proxy
         self._set_presentation("source")
@@ -626,7 +648,6 @@ class VideoPreview(QFrame):
             self._show_error("Не удалось открыть исходный файл для предпросмотра.")
             self._clear_media()
             return
-        cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
         self._proxy_cache_directory = cache
         # Posters share the same source-revision identity as proxies, but are
         # durable project artifacts rather than temporary OS-cache entries.
@@ -1009,7 +1030,7 @@ class VideoPreview(QFrame):
     def _request_proxy(self, cache_directory: Path, reason: str) -> None:
         assert self._source_path is not None and self._source_range_seconds is not None
         start, end = self._source_range_seconds
-        destination = preview_proxy_path(cache_directory, self._source_path, start, end)
+        destination = preview_proxy_path(cache_directory, self._source_path)
         request = _ProxyRequest(
             token=self._selection_token,
             source_path=self._source_path,
@@ -1035,6 +1056,15 @@ class VideoPreview(QFrame):
             self._activate_proxy(request)
             return
         if self._active_proxy is not None:
+            if (
+                self._active_proxy.source_path == request.source_path
+                and self._active_proxy.destination == request.destination
+            ):
+                # The compatible source is already being created.  The active
+                # request carries the newest selection token/range, so its
+                # completion cannot resurrect an earlier moment.
+                self._active_proxy = request
+                return
             self._pending_proxy = request
             if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
                 self._proxy_process.kill()
@@ -1053,16 +1083,14 @@ class VideoPreview(QFrame):
             logger.warning("could not remove stale preview temporary %s: %s", request.temporary, error)
         self._active_proxy = request
         self._proxy_timed_out_request = None
-        duration = max(0.05, request.end_seconds - request.start_seconds)
         self._proxy_process.setProgram(executable)
         self._proxy_process.setArguments([
             "-y", "-hide_banner", "-loglevel", "error",
-            # Input seek avoids decoding the full source before a late PUBG
-            # candidate.  Transcoding keeps FFmpeg's accurate-seek discard.
             # This is UI-only work, so do not let a 4K AV1 source consume all
-            # host cores while the production pipeline remains available.
-            "-threads", "2", "-ss", f"{request.start_seconds:.3f}", "-i", str(request.source_path),
-            "-t", f"{duration:.3f}",
+            # host cores while the production pipeline remains available.  The
+            # whole source is encoded once; every Moment then uses its original
+            # source timestamps to seek this compatible media.
+            "-threads", "2", "-i", str(request.source_path),
             "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", "scale=-2:480,fps=30,setsar=1", "-c:v", "libx264", "-threads", "2",
             "-preset", "ultrafast", "-crf", "28",
@@ -1149,8 +1177,8 @@ class VideoPreview(QFrame):
             return
         self._path = request.destination
         self._using_proxy = True
-        self._range_start_ms = 0
-        self._range_end_ms = int(round((request.end_seconds - request.start_seconds) * 1000))
+        self._range_start_ms = int(round(request.start_seconds * 1000))
+        self._range_end_ms = int(round(request.end_seconds * 1000))
         self._range_media_ready = False
         self._range_ready_token = None
         self._range_seek_pending_token = None
@@ -1164,7 +1192,7 @@ class VideoPreview(QFrame):
         self._show_placeholder("Загружаем совместимый предпросмотр…")
         self._queue_source_load()
         self._show_status(
-            f"Совместимый preview готов: {request.start_seconds:.1f}–{request.end_seconds:.1f} с исходного видео."
+            f"Совместимый preview источника готов; показываем {request.start_seconds:.1f}–{request.end_seconds:.1f} с."
         )
         self.preview_ready.emit(str(request.destination))
 

@@ -278,10 +278,38 @@ def test_proxy_limits_both_av1_decode_and_h264_encode_threads(tmp_path: Path, mo
 
         assert process.started and process.program == "ffmpeg"
         assert process.arguments.count("-threads") == 2
+        assert "-ss" not in process.arguments
+        assert "-t" not in process.arguments
         input_threads = process.arguments.index("-threads")
         assert process.arguments[input_threads + 1] == "2"
         encoder = process.arguments.index("-c:v")
         assert process.arguments[encoder + 2:encoder + 4] == ["-threads", "2"]
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
+def test_av1_rapid_range_switch_reuses_one_inflight_source_proxy(tmp_path: Path, monkeypatch) -> None:
+    app = _application()
+    source = tmp_path / "source-av1.webm"
+    source.write_bytes(b"av1")
+    preview = VideoPreview()
+    started: list[_ProxyRequest] = []
+    monkeypatch.setattr(preview, "_request_poster", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preview, "_start_proxy", started.append)
+
+    try:
+        preview.set_range(source, 12.0, 20.0, source_codec="av1")
+        assert len(started) == 1
+        preview._active_proxy = started[0]
+
+        preview.set_range(source, 42.0, 54.0, source_codec="av1")
+
+        assert len(started) == 1
+        assert preview._active_proxy is not None
+        assert preview._active_proxy.destination == started[0].destination
+        assert (preview._active_proxy.start_seconds, preview._active_proxy.end_seconds) == (42.0, 54.0)
     finally:
         preview.close()
         preview.deleteLater()

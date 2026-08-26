@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,30 @@ def test_runner_recognises_the_current_engine_stage_names_for_each_focused_job(t
     assert QtPipelineRunner._present_stage(final, "audio_composition:plan-1") == (
         "production_render:audio_composition:plan-1", "Собираем звук",
     )
+    assert QtPipelineRunner._present_stage(analysis, "vision_pass1") == (
+        "vision_pass1", "Анализируем сцены",
+    )
+    assert QtPipelineRunner._present_stage(analysis, "multimodal_timeline") == (
+        "multimodal_timeline", "Анализируем содержание",
+    )
+
+
+def test_analysis_uses_engine_heartbeat_when_state_has_no_running_stage(tmp_path: Path) -> None:
+    runner = QtPipelineRunner()
+    prepared = _prepared(tmp_path, mode="analysis")
+    prepared = replace(prepared, heartbeat_path=tmp_path / "heartbeat.json")
+    runner._prepared = prepared
+    runner._launch_wall_time = time.time() - 1
+    changed: list[tuple[str, str]] = []
+    runner.stage_changed.connect(lambda stage, label: changed.append((stage, label)))
+    prepared.heartbeat_path.write_text(
+        json.dumps({"stage": "transcription", "updated_at": "2026-08-26T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    runner._poll_stage()
+
+    assert changed == [("transcription", "Распознаём речь")]
 
 
 def test_desktop_run_reuses_one_shell_instead_of_opening_a_second_window(monkeypatch) -> None:
