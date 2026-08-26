@@ -233,7 +233,7 @@ def test_top_n_primary_cta_selects_only_recommended_and_starts_drafts_without_an
         screen.close()
 
 
-def test_moments_keep_generated_quality_risks_selectable_in_bulk_and_individually(
+def test_moments_keep_soft_risks_selectable_but_block_production_hard_failures(
     tmp_path: Path, monkeypatch,
 ) -> None:
     existing = QCoreApplication.instance()
@@ -261,7 +261,7 @@ def test_moments_keep_generated_quality_risks_selectable_in_bulk_and_individuall
             "candidate_id": ineligible_id, "title": "Ineligible", "start_seconds": 20.0,
             "end_seconds": 30.0, "potential": "high", "confidence": 0.99,
             "recommended": True, "eligibility_decision": {
-                **_eligibility(False), "reason_codes": ["SOURCE_INTERVAL_INVALID"],
+                **_eligibility(False), "reason_codes": ["AUDIO_UNINTELLIGIBLE"],
             },
         },
         {
@@ -287,32 +287,37 @@ def test_moments_keep_generated_quality_risks_selectable_in_bulk_and_individuall
         app.processEvents()
         screen._toggle_candidate_selection(ineligible_id)
         assert viewmodel.project is not None
-        assert viewmodel.project.review_selected_candidate_ids == [ineligible_id]
+        assert viewmodel.project.review_selected_candidate_ids == []
         screen._view_all_candidates()
         app.processEvents()
 
         assert set(screen._all_candidates_by_id) == {*candidate_ids, ineligible_id, legacy_id}
-        all_candidate_ids = [*candidate_ids, ineligible_id, legacy_id]
-        assert set(screen._draftable_candidates_by_id) == set(all_candidate_ids)
+        assert set(screen._draftable_candidates_by_id) == set(candidate_ids)
         assert set(screen._candidate_cards) == {*candidate_ids, ineligible_id, legacy_id}
-        assert set(screen._candidate_selection_buttons) == set(all_candidate_ids)
-        assert screen._candidate_cards[ineligible_id].property("candidateBlocked") is False
-        assert screen._candidate_cards[legacy_id].property("candidateBlocked") is False
-        assert screen.findChild(QPushButton, f"blocked-candidate-{ineligible_id}") is None
-        assert screen.findChild(QPushButton, f"blocked-candidate-{legacy_id}") is None
-        assert not any(
-            label.objectName() == "candidateBlockedReason"
+        assert set(screen._candidate_selection_buttons) == set(candidate_ids)
+        assert screen._candidate_cards[ineligible_id].property("candidateBlocked") is True
+        assert screen._candidate_cards[legacy_id].property("candidateBlocked") is True
+        assert screen.findChild(QPushButton, f"blocked-candidate-{ineligible_id}") is not None
+        assert screen.findChild(QPushButton, f"blocked-candidate-{legacy_id}") is not None
+        assert any(
+            "Речь недостаточно разборчива" in label.text()
             for label in screen.findChildren(QLabel)
+            if label.objectName() == "candidateBlockedReason"
         )
         recommended_ids = screen._recommended_candidate_ids()
-        assert recommended_ids == [*candidate_ids[:3], ineligible_id, legacy_id]
-        assert set(recommended_ids) < set(all_candidate_ids)
+        assert recommended_ids == candidate_ids[:3]
 
         screen._select_all_candidates()
         app.processEvents()
 
         assert viewmodel.project is not None
-        assert viewmodel.project.review_selected_candidate_ids == all_candidate_ids
+        assert viewmodel.project.review_selected_candidate_ids == candidate_ids
+
+        retries: list[list[str]] = []
+        monkeypatch.setattr(viewmodel, "build_drafts", lambda ids: retries.append(list(ids)))
+        viewmodel.project.review_selected_candidate_ids = [ineligible_id]
+        screen._retry_draft(ineligible_id)
+        assert retries == []
     finally:
         screen.close()
 
@@ -1536,7 +1541,7 @@ def test_review_action_bar_releases_medium_width_minimum_during_resize_history(
         app.processEvents()
 
 
-def test_moments_keep_all_generated_candidates_selectable_despite_quality_diagnostics(
+def test_moments_keep_soft_risks_selectable_and_block_hard_production_failures(
     tmp_path: Path, monkeypatch,
 ) -> None:
     existing = QCoreApplication.instance()
@@ -1546,12 +1551,12 @@ def test_moments_keep_all_generated_candidates_selectable_despite_quality_diagno
     services, project = _workspace(tmp_path)
     analysis_path = Path(project.analysis_artifact_path or "")
     analysis = read_json(analysis_path, {})
-    blocked_ids = [f"blocked-{index:03d}" for index in range(95)]
+    candidate_ids = [f"candidate-{index:03d}" for index in range(95)]
     analysis["candidates"] = []
-    for index, candidate_id in enumerate(blocked_ids):
+    for index, candidate_id in enumerate(candidate_ids):
         eligibility = _eligibility(False)
         if index >= 89:
-            eligibility = {**eligibility, "reason_codes": ["SOURCE_INTERVAL_INVALID"]}
+            eligibility = {**eligibility, "reason_codes": ["AUDIO_UNINTELLIGIBLE"]}
         analysis["candidates"].append({
             "candidate_id": candidate_id,
             "title": f"Момент {index + 1}",
@@ -1563,7 +1568,7 @@ def test_moments_keep_all_generated_candidates_selectable_despite_quality_diagno
             "eligibility_decision": eligibility,
         })
     _rewrite_analysis(analysis_path, analysis)
-    project.candidate_states = {candidate_id: "analyzed" for candidate_id in blocked_ids}
+    project.candidate_states = {candidate_id: "analyzed" for candidate_id in candidate_ids}
     services.projects.save(project)
     viewmodel = ProjectViewModel(services)
     screen = ProjectScreen(viewmodel)
@@ -1576,7 +1581,7 @@ def test_moments_keep_all_generated_candidates_selectable_despite_quality_diagno
         app.processEvents()
 
         assert len(screen._all_candidates_by_id) == 95
-        assert len(screen._draftable_candidates_by_id) == 95
+        assert len(screen._draftable_candidates_by_id) == 89
         assert len(screen._review_candidates_by_id) == 95
         quality_notice = screen.findChild(QLabel, "candidateQualityNotice")
         assert quality_notice is None
@@ -1584,21 +1589,21 @@ def test_moments_keep_all_generated_candidates_selectable_despite_quality_diagno
         assert screen.findChild(QPushButton, "selectAllCandidates").isEnabled() is True
         assert not screen.draft_button.isHidden()
 
-        screen._toggle_candidate_selection(blocked_ids[0])
+        screen._toggle_candidate_selection(candidate_ids[0])
         assert viewmodel.project is not None
-        assert viewmodel.project.review_selected_candidate_ids == [blocked_ids[0]]
+        assert viewmodel.project.review_selected_candidate_ids == [candidate_ids[0]]
 
         screen._view_all_candidates()
         app.processEvents()
-        assert set(screen._candidate_cards) == set(blocked_ids)
-        assert len(screen._candidate_selection_buttons) == 95
+        assert set(screen._candidate_cards) == set(candidate_ids)
+        assert len(screen._candidate_selection_buttons) == 89
         assert all(
-            screen.findChild(QPushButton, f"blocked-candidate-{candidate_id}") is None
-            for candidate_id in blocked_ids[89:]
+            screen.findChild(QPushButton, f"blocked-candidate-{candidate_id}") is not None
+            for candidate_id in candidate_ids[89:]
         )
-        screen._preview_candidate(screen._all_candidates_by_id[blocked_ids[89]])
+        screen._preview_candidate(screen._all_candidates_by_id[candidate_ids[89]])
         app.processEvents()
-        assert screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls") is not None
+        assert screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls") is None
     finally:
         screen.close()
 

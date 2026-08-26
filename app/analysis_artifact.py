@@ -16,6 +16,7 @@ from typing import Any
 
 from app.candidate_quality import EligibilityDecision, legacy_eligibility_decision
 from app.editorial_profile_policy import (
+    CandidateEditorialDecision,
     evaluate_editorial_candidate,
 )
 from app.utils import read_json, stable_file_hash, utc_now, write_json
@@ -398,9 +399,11 @@ def candidate_review_payload(
             "weakest_factors": list(viral.get("weakest_factors") or []),
             "features": compact_features,
         },
-        # Preserve the legacy Phase 6 evidence for diagnostics. Editorial
-        # surfacing below owns recommendation/selectability.
+        # Keep the production-facing decision separate from the Moments
+        # projection.  The latter may surface a weak candidate for source
+        # review, but it must never grant permission to start a Draft.
         "eligibility_decision": eligibility_decision.to_dict(),
+        "production_editorial_decision": ranking_decision.to_dict(),
         "editorial_decision": editorial_decision.to_dict(),
         "surfacing_state": editorial_decision.surfacing_state.value,
         "selectable": editorial_decision.selectable,
@@ -444,11 +447,7 @@ def candidate_review_payload(
 
 
 def candidate_is_draftable(candidate: object) -> bool:
-    """Return whether a generated review candidate has a usable source identity.
-
-    Moments quality and feasibility assessments are advisory.  Draft and Final
-    retain their independent integrity checks after the user's selection.
-    """
+    """Return whether a review candidate can safely enter the Draft workflow."""
 
     if not isinstance(candidate, dict):
         return False
@@ -466,7 +465,26 @@ def candidate_is_draftable(candidate: object) -> bool:
         )
     except (TypeError, ValueError):
         return False
-    return math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start
+    if not (math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start):
+        return False
+    production_decision = _production_editorial_decision(candidate)
+    return bool(
+        production_decision
+        and production_decision.selectable
+        and not production_decision.hard_blockers
+    )
+
+
+def _production_editorial_decision(candidate: dict[str, Any]) -> CandidateEditorialDecision | None:
+    """Read the persisted production decision, deriving it for legacy reviews."""
+
+    persisted = candidate.get("production_editorial_decision")
+    if isinstance(persisted, dict):
+        try:
+            return CandidateEditorialDecision.from_dict(persisted)
+        except (TypeError, ValueError):
+            return None
+    return evaluate_editorial_candidate(candidate, None)
 
 
 def _moments_review_candidate(candidate: dict[str, Any]) -> dict[str, Any]:

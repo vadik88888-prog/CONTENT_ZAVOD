@@ -169,6 +169,36 @@ def test_evidence_backed_truncation_remains_blocked(boundary: dict) -> None:
     assert "SEMANTIC_INCOMPLETE" in decision.hard_blockers
 
 
+def test_moments_projection_keeps_production_hard_blocker_out_of_draft() -> None:
+    source_candidate = {
+        "id": "candidate-blocked",
+        "start": 1.0,
+        "end": 31.0,
+        "score": 60.0,
+        "confidence": 0.8,
+        "eligibility_decision": _eligibility(
+            "SEMANTIC_INCOMPLETE",
+            "AUDIO_UNINTELLIGIBLE",
+            boundary={
+                "eligible": False,
+                "word_integrity": True,
+                "sentence_integrity": True,
+                "semantic_completion": 0.2,
+            },
+        ),
+    }
+
+    review_payload = candidate_review_payload(source_candidate, set(), _profile("movie_series"))
+
+    assert review_payload["surfacing_state"] == "AVAILABLE"
+    assert review_payload["selectable"] is True
+    assert review_payload["production_editorial_decision"]["selectable"] is False
+    assert set(review_payload["production_editorial_decision"]["hard_blockers"]) == {
+        "SEMANTIC_INCOMPLETE", "AUDIO_UNINTELLIGIBLE",
+    }
+    assert candidate_is_draftable(review_payload) is False
+
+
 def test_auto_preserves_detected_effective_and_manual_provenance() -> None:
     profile = {
         "detected_content_type": "gameplay",
@@ -296,7 +326,8 @@ def test_current_gameplay_moments_keeps_all_quality_and_feasibility_risks_select
         item["candidate_id"] for item in projected
         if item["surfacing_state"] == "RECOMMENDED"
     ] == ["candidate-chapter-011-story-001"]
-    assert all(candidate_is_draftable(item) for item in projected)
+    assert candidate_is_draftable(projected[0]) is True
+    assert candidate_is_draftable(projected[1]) is False
 
     boundary_risk = projected[1]
     assert "SENTENCE_BOUNDARY_UNRECOVERABLE" in boundary_risk["editorial_decision"]["soft_issues"]
@@ -331,6 +362,8 @@ def test_current_gameplay_moments_keeps_all_quality_and_feasibility_risks_select
     review_payload = candidate_review_payload(source_candidate, set(), profile)
     assert review_payload["surfacing_state"] == "RECOMMENDED"
     assert review_payload["selectable"] is True
+    assert review_payload["production_editorial_decision"]["selectable"] is True
+    assert review_payload["production_editorial_decision"]["hard_blockers"] == []
     assert review_payload["selected_by_recommendation"] is True
     assert review_payload["production_feasibility"]["status"] == "ADVISORY"
     assert review_payload["production_feasibility"]["diagnostic_status"] == "GUARANTEED_BLOCKED"

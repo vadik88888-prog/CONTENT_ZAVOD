@@ -2247,6 +2247,20 @@ class ProjectScreen(QWidget):
                 ),
                 source=source if isinstance(source, dict) else {},
             )
+            production_decision = item.get("production_editorial_decision")
+            if not isinstance(production_decision, dict):
+                production_decision = evaluate_editorial_candidate(
+                    item,
+                    profile if isinstance(profile, dict) else {},
+                    score=float(item.get("score") or 0),
+                    confidence=float(item.get("confidence") or 0),
+                    production_feasibility=(
+                        item.get("production_feasibility")
+                        if isinstance(item.get("production_feasibility"), dict) else None
+                    ),
+                    source=source if isinstance(source, dict) else {},
+                ).to_dict()
+            item["production_editorial_decision"] = production_decision
             item["editorial_decision"] = decision.to_dict()
             feasibility = item.get("production_feasibility")
             production_blocked = (
@@ -2604,11 +2618,12 @@ class ProjectScreen(QWidget):
                 actions.addWidget(reject)
             elif state == "draft_failed" and workflow_step == "drafts":
                 if candidate_id in project.review_selected_candidate_ids:
-                    retry = QPushButton("Повторить черновик")
-                    retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
-                    retry.setDisabled(self.viewmodel.blocked_by_other_project)
-                    retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
-                    actions.addWidget(retry)
+                    if candidate_id in self._draftable_candidates_by_id:
+                        retry = QPushButton("Повторить черновик")
+                        retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
+                        retry.setDisabled(self.viewmodel.blocked_by_other_project)
+                        retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
+                        actions.addWidget(retry)
                     skip = QPushButton("Продолжить без этого")
                     skip.setObjectName(f"skip-candidate-{candidate_id}")
                     skip.setToolTip("Уберёт этот неготовый черновик из текущего набора, не затрагивая готовые ролики.")
@@ -3132,7 +3147,11 @@ class ProjectScreen(QWidget):
     def _retry_draft(self, candidate_id: str) -> None:
         """Retry one failed draft without broadening the existing selection."""
 
-        if not self.project or candidate_id not in self.project.review_selected_candidate_ids:
+        if (
+            not self.project
+            or candidate_id not in self.project.review_selected_candidate_ids
+            or candidate_id not in self._draftable_candidates_by_id
+        ):
             return
         if self.project.candidate_states.get(candidate_id) == "draft_failed":
             self.viewmodel.build_drafts([candidate_id])
@@ -3308,7 +3327,9 @@ class ProjectScreen(QWidget):
     def _candidate_block_reason(candidate: dict) -> str:
         """Translate the first structural/technical policy blocker into concise UI copy."""
 
-        decision = candidate.get("editorial_decision")
+        decision = candidate.get("production_editorial_decision")
+        if not isinstance(decision, dict):
+            decision = candidate.get("editorial_decision")
         if not isinstance(decision, dict):
             return "Для этого момента нет актуальной проверки качества."
         labels = {
