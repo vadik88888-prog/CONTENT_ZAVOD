@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import logging
 from pathlib import Path
 import shutil
@@ -16,13 +17,22 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.responsive import make_label_shrinkable, set_responsive_text
+from app.gui.services.preview_proxy_cache import (
+    PreviewProxyLease,
+    acquire_preview_proxy_lease,
+    owns_preview_proxy_lease,
+    preview_proxy_lock_path,
+    preview_proxy_path,
+    preview_proxy_temporary_path,
+    reclaim_stale_preview_proxy_lease,
+    refresh_preview_proxy_lease,
+    release_preview_proxy_lease,
+    validated_preview_proxy,
+    write_preview_proxy_manifest,
+)
 from app.utils import safe_name, stable_text_hash
 
 
-# v4 changes the cache unit from a candidate interval to one immutable source
-# revision.  Atomic temporary promotion still prevents a partial MP4 from
-# becoming playable after an interrupted FFmpeg process.
-PREVIEW_PROXY_FORMAT_VERSION = "h264-30fps-source-v4"
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +48,7 @@ class _ProxyRequest:
     # Moment request, but must not replace the hidden/current player when it
     # completes.  A later card selection promotes the in-flight request.
     activate_on_success: bool = True
+    lease: PreviewProxyLease | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,34 +75,6 @@ class _BoundedVideoWidget(QVideoWidget):
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API name
         return QSize(0, 0)
-
-
-def preview_proxy_path(cache_directory: Path, source_path: Path) -> Path:
-    """Return the compatible preview cache path for one source revision.
-
-    Candidate intervals never participate in this key: they reuse the single
-    compatible source through normal seek/start/end range control.
-    """
-
-    try:
-        stat = source_path.stat()
-        revision = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
-    except OSError:
-        revision = str(source_path)
-    digest = stable_text_hash(f"{PREVIEW_PROXY_FORMAT_VERSION}:{revision}")[:20]
-    return cache_directory / f"{safe_name(source_path.stem, 'source')}-{digest}.mp4"
-
-
-def preview_proxy_temporary_path(destination: Path) -> Path:
-    """Return the same-directory FFmpeg temporary output for one proxy.
-
-    FFmpeg infers the muxer from the final suffix, therefore ``.part`` must
-    precede ``.mp4`` rather than replace it.  The output is promoted only when
-    FFmpeg exits successfully, so a killed preview process cannot poison the
-    durable cache with a non-empty truncated MP4.
-    """
-
-    return destination.with_name(f"{destination.stem}.part{destination.suffix}")
 
 
 def preview_poster_path(
@@ -147,6 +130,7 @@ class VideoPreview(QFrame):
         self._range_ready_token: int | None = None
         self._range_seek_pending_token: int | None = None
         self._range_seek_target_ms: int | None = None
+        self._range_play_pending_token: int | None = None
         # A freshly loaded source naturally starts at frame zero.  Retargeting
         # an already-loaded source does not, so only the latter needs an
         # explicit zero seek when the next candidate begins at 0:00.
@@ -169,10 +153,20 @@ class VideoPreview(QFrame):
         self._proxy_process = QProcess(self)
         self._proxy_process.finished.connect(self._proxy_finished)
         self._proxy_process.errorOccurred.connect(self._proxy_process_error)
+        self._proxy_verify_process = QProcess(self)
+        self._proxy_verify_process.finished.connect(self._proxy_verification_finished)
+        self._proxy_verify_process.errorOccurred.connect(self._proxy_verification_error)
+        self._proxy_backend = ""
         self._proxy_timeout_timer = QTimer(self)
         self._proxy_timeout_timer.setSingleShot(True)
         self._proxy_timeout_timer.timeout.connect(self._proxy_timed_out)
         self._proxy_timed_out_request: _ProxyRequest | None = None
+        self._proxy_wait_timer = QTimer(self)
+        self._proxy_wait_timer.setInterval(1000)
+        self._proxy_wait_timer.timeout.connect(self._poll_external_proxy)
+        self._proxy_lease_timer = QTimer(self)
+        self._proxy_lease_timer.setInterval(5000)
+        self._proxy_lease_timer.timeout.connect(self._refresh_proxy_lease)
         self._poster_process = QProcess(self)
         self._poster_process.finished.connect(self._poster_finished)
         self._poster_process.errorOccurred.connect(self._poster_process_error)
@@ -372,7 +366,7 @@ class VideoPreview(QFrame):
             return False
         cache = cache_directory or (Path(tempfile.gettempdir()) / "content-factory-preview-proxies")
         destination = preview_proxy_path(cache, source)
-        if self.usable_media_path(destination):
+        if validated_preview_proxy(destination, source):
             return True
         active = self._active_proxy
         if active is not None:
@@ -590,6 +584,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._range_requires_seek = False
         self._media_ready = False
         self._using_proxy = False
@@ -614,14 +609,14 @@ class VideoPreview(QFrame):
             if self._requires_compatible_proxy():
                 # Never ask the Windows Qt/FFmpeg backend to initialise a
                 # full-size AV1 decoder when the one-time source probe has
-                # already classified it as a compatibility-only source.  A
-                # selected range will make a tiny H.264 proxy instead.
+                # already classified it as a compatibility-only source.  The
+                # source-level H.264 proxy is prepared once and then reused.
                 self._release_player_source()
                 self._show_placeholder(
-                    "Для AV1-исходника выберите момент: его короткий preview будет подготовлен отдельно."
+                    "Для AV1-исходника используется совместимый локальный preview."
                 )
                 self._show_status(
-                    "Исходник AV1 не открываем во встроенном плеере, чтобы не запускать неподдерживаемый декодер."
+                    "Исходник AV1 не открываем напрямую; ожидаем совместимый preview источника."
                 )
                 self._set_available(False)
             else:
@@ -692,6 +687,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._media_ready = False
         self._clear_status()
         if not self.usable_media_path(self._source_path):
@@ -729,6 +725,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._range_requires_seek = False
         self._media_ready = False
         self._expected_source = QUrl.fromLocalFile(str(self._path))
@@ -1102,7 +1099,10 @@ class VideoPreview(QFrame):
         self._sync_stage_overlays()
         self.placeholder.raise_()
         self._show_status(reason)
-        if self.usable_media_path(request.destination):
+        if validated_preview_proxy(
+            request.destination, request.source_path,
+            required_end_seconds=request.end_seconds,
+        ):
             self._cancel_proxy()
             self._activate_proxy(request)
             return
@@ -1114,7 +1114,13 @@ class VideoPreview(QFrame):
                 # The compatible source is already being created.  The active
                 # request carries the newest selection token/range, so its
                 # completion cannot resurrect an earlier moment.
-                self._active_proxy = request
+                self._active_proxy = replace(
+                    self._active_proxy,
+                    token=request.token,
+                    start_seconds=request.start_seconds,
+                    end_seconds=request.end_seconds,
+                    activate_on_success=True,
+                )
                 return
             self._pending_proxy = request
             if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
@@ -1123,54 +1129,176 @@ class VideoPreview(QFrame):
         self._start_proxy(request)
 
     def _start_proxy(self, request: _ProxyRequest) -> None:
-        executable = shutil.which("ffmpeg")
-        if not executable:
-            if request.activate_on_success:
-                self._show_error("Не хватает компонента обработки видео для совместимого предпросмотра.")
-            else:
-                logger.error("compatible preview preload skipped: ffmpeg is unavailable")
+        if not shutil.which("ffmpeg"):
+            self._active_proxy = request
+            self._complete_proxy(request, False, "FFmpeg is unavailable")
             return
-        request.destination.parent.mkdir(parents=True, exist_ok=True)
+        if validated_preview_proxy(
+            request.destination, request.source_path,
+            required_end_seconds=request.end_seconds,
+        ):
+            self._active_proxy = request
+            self._complete_proxy(request, True, "")
+            return
+        lease = request.lease
+        if lease is None:
+            try:
+                lease = acquire_preview_proxy_lease(request.destination, request.source_path)
+            except OSError as error:
+                self._active_proxy = request
+                self._complete_proxy(request, False, f"Could not acquire preview cache lease: {error}")
+                return
+            if lease is None:
+                self._active_proxy = request
+                self._proxy_wait_timer.start()
+                if request.activate_on_success:
+                    self._show_status("Совместимый preview уже готовится в другом окне…")
+                return
+            request = replace(request, temporary=lease.temporary, lease=lease)
         try:
             request.temporary.unlink(missing_ok=True)
         except OSError as error:
-            logger.warning("could not remove stale preview temporary %s: %s", request.temporary, error)
+            self._active_proxy = request
+            self._complete_proxy(request, False, f"Could not prepare owned proxy temporary: {error}")
+            return
         self._active_proxy = request
         self._proxy_timed_out_request = None
-        self._proxy_process.setProgram(executable)
-        self._proxy_process.setArguments([
-            "-y", "-hide_banner", "-loglevel", "error",
-            # This is UI-only work, so do not let a 4K AV1 source consume all
-            # host cores while the production pipeline remains available.  The
-            # whole source is encoded once; every Moment then uses its original
-            # source timestamps to seek this compatible media.
-            "-threads", "2", "-i", str(request.source_path),
+        self._proxy_wait_timer.stop()
+        self._proxy_lease_timer.start()
+        self._launch_proxy_ffmpeg(request, backend="cuda")
+
+    def _launch_proxy_ffmpeg(self, request: _ProxyRequest, *, backend: str) -> None:
+        executable = shutil.which("ffmpeg")
+        if not executable:
+            self._complete_proxy(request, False, "FFmpeg is unavailable")
+            return
+        self._proxy_backend = backend
+        common_output = [
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "scale=-2:480,fps=30,setsar=1", "-c:v", "libx264", "-threads", "2",
-            "-preset", "ultrafast", "-crf", "28",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(request.temporary),
-        ])
+            "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-crf", "28",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
+            "-movflags", "+faststart", str(request.temporary),
+        ]
+        if backend == "cuda":
+            arguments = [
+                "-y", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-c:v", "av1_cuvid",
+                "-i", str(request.source_path),
+                "-vf", "scale_cuda=-2:480,hwdownload,format=nv12,fps=30,setsar=1,format=yuv420p",
+                *common_output,
+            ]
+        else:
+            arguments = [
+                "-y", "-hide_banner", "-loglevel", "error", "-threads", "2",
+                "-i", str(request.source_path),
+                "-vf", "scale=-2:480,fps=30,setsar=1", *common_output,
+            ]
+        self._proxy_process.setProgram(executable)
+        self._proxy_process.setArguments(arguments)
         self._proxy_process.start()
         self._proxy_timeout_timer.start(self.PROXY_RENDER_TIMEOUT_MS)
 
     def _proxy_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         request = self._active_proxy
-        if request is None:
+        if request is None or request.lease is None:
             return
         self._proxy_timeout_timer.stop()
         details = self._ffmpeg_error_text()
-        success = False
-        if exit_code == 0 and self.usable_media_path(request.temporary):
-            try:
-                request.temporary.replace(request.destination)
-                success = self.usable_media_path(request.destination)
-            except OSError as error:
-                details = f"Could not finalise compatible preview: {error}"
         if self._proxy_timed_out_request is request:
-            success = False
-            details = details or "Compatible preview exceeded its time limit and was stopped."
-        self._complete_proxy(request, success, details)
+            self._complete_proxy(request, False, details or "Compatible preview timed out")
+            return
+        if exit_code != 0 or not self.usable_media_path(request.temporary):
+            if self._proxy_backend == "cuda" and owns_preview_proxy_lease(request.lease):
+                logger.info("CUDA preview unavailable; using software fallback: %s", details[-600:])
+                try:
+                    request.temporary.unlink(missing_ok=True)
+                except OSError:
+                    # FFmpeg owns this unique path and ``-y`` truncates it on
+                    # the fallback launch if Windows still has a late handle.
+                    pass
+                self._launch_proxy_ffmpeg(request, backend="software")
+                return
+            self._complete_proxy(request, False, details or "FFmpeg did not create a proxy")
+            return
+        if not owns_preview_proxy_lease(request.lease):
+            self._become_proxy_follower(request)
+            return
+        self._start_proxy_verification(request)
+
+    def _start_proxy_verification(self, request: _ProxyRequest) -> None:
+        executable = shutil.which("ffprobe")
+        if not executable:
+            self._complete_proxy(request, False, "FFprobe is unavailable")
+            return
+        self._proxy_verify_process.setProgram(executable)
+        self._proxy_verify_process.setArguments([
+            "-v", "error", "-show_entries",
+            "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate",
+            "-of", "json", str(request.temporary),
+        ])
+        self._proxy_verify_process.start()
+
+    def _proxy_verification_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        request = self._active_proxy
+        if request is None or request.lease is None:
+            return
+        stderr = bytes(self._proxy_verify_process.readAllStandardError()).decode("utf-8", errors="replace").strip()
+        stdout = bytes(self._proxy_verify_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        probe = self._parse_proxy_probe(stdout) if exit_code == 0 and not stderr else None
+        if probe is None:
+            details = stderr or "FFprobe rejected compatible preview metadata"
+            if self._proxy_backend == "cuda" and owns_preview_proxy_lease(request.lease):
+                logger.warning("CUDA proxy verification failed; using software fallback: %s", details[-600:])
+                try:
+                    request.temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._launch_proxy_ffmpeg(request, backend="software")
+                return
+            self._complete_proxy(request, False, details)
+            return
+        if float(probe["duration_seconds"]) + 0.25 < request.end_seconds:
+            self._complete_proxy(request, False, "Compatible preview is shorter than requested range")
+            return
+        if not owns_preview_proxy_lease(request.lease):
+            self._become_proxy_follower(request)
+            return
+        try:
+            request.temporary.replace(request.destination)
+            write_preview_proxy_manifest(request.destination, request.source_path, probe)
+        except OSError as error:
+            self._complete_proxy(request, False, f"Could not finalise compatible preview: {error}")
+            return
+        success = validated_preview_proxy(
+            request.destination, request.source_path,
+            required_end_seconds=request.end_seconds,
+        )
+        self._complete_proxy(request, success, "Post-promotion proxy validation failed")
+
+    def _proxy_verification_error(self, _error: QProcess.ProcessError) -> None:
+        request = self._active_proxy
+        if request is not None:
+            QTimer.singleShot(0, lambda req=request: self._complete_proxy_error(req))
+
+    @staticmethod
+    def _parse_proxy_probe(raw: str) -> dict[str, object] | None:
+        try:
+            payload = json.loads(raw)
+            streams = payload.get("streams", [])
+            video = next(item for item in streams if item.get("codec_type") == "video")
+            duration = float(payload.get("format", {}).get("duration") or 0.0)
+            width = int(video.get("width") or 0)
+            height = int(video.get("height") or 0)
+        except (ValueError, TypeError, StopIteration, AttributeError):
+            return None
+        if video.get("codec_name") != "h264" or width <= 0 or height != 480 or duration <= 0:
+            return None
+        return {
+            "video_codec": "h264", "width": width, "height": height,
+            "fps": str(video.get("avg_frame_rate") or ""),
+            "duration_seconds": duration,
+            "has_audio": any(item.get("codec_type") == "audio" for item in streams),
+        }
 
     def _proxy_process_error(self, _error: QProcess.ProcessError) -> None:
         request = self._active_proxy
@@ -1178,19 +1306,27 @@ class VideoPreview(QFrame):
             QTimer.singleShot(0, lambda req=request: self._complete_proxy_error(req))
 
     def _complete_proxy_error(self, request: _ProxyRequest) -> None:
-        if self._active_proxy is request and self._proxy_process.state() == QProcess.ProcessState.NotRunning:
+        if (
+            self._active_proxy is request
+            and self._proxy_process.state() == QProcess.ProcessState.NotRunning
+            and self._proxy_verify_process.state() == QProcess.ProcessState.NotRunning
+        ):
             self._complete_proxy(request, False, self._ffmpeg_error_text() or "Не удалось подготовить совместимый предпросмотр.")
 
     def _complete_proxy(self, request: _ProxyRequest, success: bool, details: str) -> None:
         if self._active_proxy is not request:
             return
         self._proxy_timeout_timer.stop()
+        self._proxy_wait_timer.stop()
+        self._proxy_lease_timer.stop()
         if self._proxy_timed_out_request is request:
             self._proxy_timed_out_request = None
         try:
             request.temporary.unlink(missing_ok=True)
         except OSError as error:
             logger.warning("could not clean preview temporary %s: %s", request.temporary, error)
+        if request.lease is not None:
+            release_preview_proxy_lease(request.lease)
         self._active_proxy = None
         pending = self._pending_proxy
         self._pending_proxy = None
@@ -1207,14 +1343,56 @@ class VideoPreview(QFrame):
             self._activate_proxy(request)
             return
         if details:
-            # FFmpeg's stderr can contain codec internals and local paths.  It
-            # is useful in the application log, but is not recovery guidance
-            # for the person reviewing a moment.
             logger.error("compatible preview proxy failed: %s", details[-1200:])
         self._show_error(
             "Предпросмотр недоступен: не удалось создать совместимую локальную копию. "
             "Проверьте исходное видео или откройте журнал проекта."
         )
+
+    def _poll_external_proxy(self) -> None:
+        request = self._active_proxy
+        if request is None or request.lease is not None:
+            self._proxy_wait_timer.stop()
+            return
+        if validated_preview_proxy(
+            request.destination, request.source_path,
+            required_end_seconds=request.end_seconds,
+        ):
+            self._complete_proxy(request, True, "")
+            return
+        lock_path = preview_proxy_lock_path(request.destination)
+        if lock_path.exists() and not reclaim_stale_preview_proxy_lease(request.destination):
+            return
+        self._start_proxy(request)
+
+    def _refresh_proxy_lease(self) -> None:
+        request = self._active_proxy
+        if request is None or request.lease is None:
+            self._proxy_lease_timer.stop()
+            return
+        if not refresh_preview_proxy_lease(request.lease):
+            self._become_proxy_follower(request)
+
+    def _become_proxy_follower(self, request: _ProxyRequest) -> None:
+        self._proxy_timeout_timer.stop()
+        self._proxy_lease_timer.stop()
+        self._proxy_backend = ""
+        self._active_proxy = replace(
+            request,
+            temporary=preview_proxy_temporary_path(request.destination),
+            lease=None,
+        )
+        if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
+            self._proxy_process.kill()
+        if self._proxy_verify_process.state() != QProcess.ProcessState.NotRunning:
+            self._proxy_verify_process.kill()
+        try:
+            request.temporary.unlink(missing_ok=True)
+        except OSError:
+            # The old owner's unique temp is never cache-visible and can be
+            # left for later housekeeping if Windows still has it open.
+            pass
+        self._proxy_wait_timer.start()
 
     def _proxy_timed_out(self) -> None:
         request = self._active_proxy
@@ -1227,9 +1405,10 @@ class VideoPreview(QFrame):
         if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
             self._proxy_process.kill()
             return
-        self._complete_proxy(
-            request, False, "Compatible preview exceeded its time limit and was stopped.",
-        )
+        if self._proxy_verify_process.state() != QProcess.ProcessState.NotRunning:
+            self._proxy_verify_process.kill()
+            return
+        self._complete_proxy(request, False, "Compatible preview timed out")
 
     def _activate_proxy(self, request: _ProxyRequest) -> None:
         if request.token != self._selection_token:
@@ -1242,6 +1421,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._range_requires_seek = False
         self._media_ready = False
         self._expected_source = QUrl.fromLocalFile(str(self._path))
@@ -1309,6 +1489,11 @@ class VideoPreview(QFrame):
                     return
                 self._range_seek_pending_token = None
                 self._range_seek_target_ms = None
+                if self._range_play_pending_token == self._selection_token:
+                    self._range_play_pending_token = None
+                    QTimer.singleShot(
+                        0, lambda value=self._selection_token: self._play_if_current(value)
+                    )
         self._update_timeline(position)
         if not self._range_media_ready or self._range_end_ms is None:
             return
@@ -1338,7 +1523,9 @@ class VideoPreview(QFrame):
     def _update_timeline(self, position: int) -> None:
         if self._range_start_ms is not None and self._range_end_ms is not None:
             duration = max(0, self._range_end_ms - self._range_start_ms)
-            shown_position = position if self._using_proxy else position - self._range_start_ms
+            # The compatible proxy covers the whole source and retains source
+            # timestamps, so range UI is absolute for both source and proxy.
+            shown_position = position - self._range_start_ms
         else:
             duration = max(0, self.player.duration())
             shown_position = position
@@ -1363,7 +1550,7 @@ class VideoPreview(QFrame):
         if duration <= 0:
             return
         relative = round(duration * self.seek_slider.value() / 1000)
-        if self._range_start_ms is not None and not self._using_proxy:
+        if self._range_start_ms is not None:
             target = self._range_start_ms + relative
         else:
             target = relative
@@ -1386,6 +1573,7 @@ class VideoPreview(QFrame):
     def _stop_at_range_end(self) -> None:
         if self._range_end_ms is None:
             return
+        self._range_play_pending_token = None
         self.player.pause()
         # Seeking to an exact file duration is normalized to zero by Windows
         # Windows Qt backend. The final millisecond is the same visible end
@@ -1428,8 +1616,12 @@ class VideoPreview(QFrame):
         if self._range_start_ms is None:
             return
         token = self._selection_token
-        self._seek_range_start(token)
-        QTimer.singleShot(0, lambda value=token: self._play_if_current(value))
+        self._range_play_pending_token = token
+        if abs(self.player.position() - self._range_start_ms) <= 500:
+            self._range_play_pending_token = None
+            QTimer.singleShot(0, lambda value=token: self._play_if_current(value))
+        else:
+            self._seek_range_start(token)
         self._show_status("Воспроизведение выбранного фрагмента…")
 
     def _play_if_current(self, token: int) -> None:
@@ -1536,9 +1728,26 @@ class VideoPreview(QFrame):
     def _cancel_proxy(self) -> None:
         self._pending_proxy = None
         self._proxy_timeout_timer.stop()
+        self._proxy_wait_timer.stop()
         self._proxy_timed_out_request = None
-        if self._active_proxy is not None and self._proxy_process.state() != QProcess.ProcessState.NotRunning:
+        if self._proxy_process.state() != QProcess.ProcessState.NotRunning:
             self._proxy_process.kill()
+            return
+        if self._proxy_verify_process.state() != QProcess.ProcessState.NotRunning:
+            self._proxy_verify_process.kill()
+            return
+        request = self._active_proxy
+        if request is None:
+            return
+        self._proxy_lease_timer.stop()
+        self._proxy_backend = ""
+        try:
+            request.temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if request.lease is not None:
+            release_preview_proxy_lease(request.lease)
+        self._active_proxy = None
 
     def _cancel_poster(self) -> None:
         self._pending_poster = None
@@ -1554,6 +1763,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._media_ready = False
         self.poster.hide()
         self.video.show()
@@ -1584,6 +1794,7 @@ class VideoPreview(QFrame):
         self._range_ready_token = None
         self._range_seek_pending_token = None
         self._range_seek_target_ms = None
+        self._range_play_pending_token = None
         self._media_ready = False
         self.poster.hide()
         set_responsive_text(self.placeholder, message)

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.gui.components import video_preview as video_preview_module
 from app.gui.components.video_preview import VideoPreview, _ProxyRequest
+from app.gui.services.preview_proxy_cache import preview_proxy_lock_path
 
 
 def _application() -> QApplication:
@@ -117,8 +118,14 @@ def test_same_source_stale_position_is_ignored_until_current_range_seek(tmp_path
     preview = VideoPreview()
 
     class FakePlayer:
+        def __init__(self) -> None:
+            self.play_calls = 0
+
         def source(self) -> QUrl:
             return QUrl.fromLocalFile(str(source))
+
+        def play(self) -> None:
+            self.play_calls += 1
 
     preview.player = FakePlayer()  # type: ignore[assignment]
     preview._path = source
@@ -130,6 +137,7 @@ def test_same_source_stale_position_is_ignored_until_current_range_seek(tmp_path
     preview._range_ready_token = 2
     preview._range_seek_pending_token = 2
     preview._range_seek_target_ms = 30_000
+    preview._range_play_pending_token = 2
     timeline_positions: list[int] = []
     monkeypatch.setattr(preview, "_update_timeline", timeline_positions.append)
 
@@ -138,11 +146,47 @@ def test_same_source_stale_position_is_ignored_until_current_range_seek(tmp_path
         preview._position_changed(18_000)
         assert timeline_positions == []
         assert preview._range_seek_pending_token == 2
+        assert preview.player.play_calls == 0
 
         # Range B's own seek acknowledgement now makes callbacks trustworthy.
         preview._position_changed(30_000)
+        app.processEvents()
         assert timeline_positions == [30_000]
         assert preview._range_seek_pending_token is None
+        assert preview.player.play_calls == 1
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
+def test_source_level_proxy_timeline_and_seek_keep_absolute_source_range(tmp_path: Path) -> None:
+    app = _application()
+    proxy_path = tmp_path / "source-proxy.mp4"
+    proxy_path.write_bytes(b"proxy")
+    preview = VideoPreview()
+
+    class FakePlayer:
+        def __init__(self) -> None:
+            self.positions: list[int] = []
+
+        def setPosition(self, value: int) -> None:
+            self.positions.append(value)
+
+    preview.player = FakePlayer()  # type: ignore[assignment]
+    preview._path = proxy_path
+    preview._using_proxy = True
+    preview._range_start_ms = 30_000
+    preview._range_end_ms = 40_000
+    preview._media_loading = False
+
+    try:
+        preview._update_timeline(32_000)
+        assert preview.time_label.text() == "00:02 / 00:10"
+
+        preview.seek_slider.setValue(500)
+        preview._seek_released()
+        assert preview.player.positions == [35_000]
     finally:
         preview.close()
         preview.deleteLater()
@@ -235,7 +279,7 @@ def test_av1_candidate_range_starts_compatible_proxy_without_direct_decoder(tmp_
         app.processEvents()
 
 
-def test_proxy_limits_both_av1_decode_and_h264_encode_threads(tmp_path: Path, monkeypatch) -> None:
+def test_proxy_prefers_cuda_then_falls_back_with_bounded_software_threads(tmp_path: Path, monkeypatch) -> None:
     app = _application()
     source = tmp_path / "source-av1.webm"
     source.write_bytes(b"av1")
@@ -254,7 +298,7 @@ def test_proxy_limits_both_av1_decode_and_h264_encode_threads(tmp_path: Path, mo
         def __init__(self) -> None:
             self.program = ""
             self.arguments: list[str] = []
-            self.started = False
+            self.start_count = 0
 
         def setProgram(self, value: str) -> None:
             self.program = value
@@ -263,7 +307,11 @@ def test_proxy_limits_both_av1_decode_and_h264_encode_threads(tmp_path: Path, mo
             self.arguments = list(value)
 
         def start(self) -> None:
-            self.started = True
+            self.start_count += 1
+
+        @staticmethod
+        def readAllStandardError() -> bytes:
+            return b"CUDA decode is unavailable"
 
         @staticmethod
         def state() -> QProcess.ProcessState:
@@ -276,14 +324,23 @@ def test_proxy_limits_both_av1_decode_and_h264_encode_threads(tmp_path: Path, mo
     try:
         preview._start_proxy(request)
 
-        assert process.started and process.program == "ffmpeg"
-        assert process.arguments.count("-threads") == 2
-        assert "-ss" not in process.arguments
-        assert "-t" not in process.arguments
-        input_threads = process.arguments.index("-threads")
-        assert process.arguments[input_threads + 1] == "2"
+        assert process.start_count == 1 and process.program == "ffmpeg"
+        assert process.arguments.count("-threads") == 1
+        assert process.arguments[process.arguments.index("-hwaccel") + 1] == "cuda"
+        assert "av1_cuvid" in process.arguments
+        assert "scale_cuda=-2:480,hwdownload,format=nv12,fps=30,setsar=1,format=yuv420p" in process.arguments
         encoder = process.arguments.index("-c:v")
+        encoder = process.arguments.index("-c:v", encoder + 1)
         assert process.arguments[encoder + 2:encoder + 4] == ["-threads", "2"]
+        assert preview_proxy_lock_path(destination).is_file()
+
+        preview._proxy_finished(1, QProcess.ExitStatus.NormalExit)
+        assert process.start_count == 2
+        assert "-hwaccel" not in process.arguments
+        assert process.arguments.count("-threads") == 2
+
+        preview._cancel_proxy()
+        assert not preview_proxy_lock_path(destination).exists()
     finally:
         preview.close()
         preview.deleteLater()
