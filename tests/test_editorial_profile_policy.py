@@ -436,3 +436,126 @@ def test_movie_editorial_weakness_passes_draft_preflight_without_brain_or_vision
     assert candidate.eligibility_decision is not None and candidate.eligibility_decision.eligible is False
     assert candidate.editorial_decision is not None and candidate.editorial_decision.selectable is True
     assert "NO_PAYOFF" in candidate.editorial_decision.soft_issues
+
+
+def test_draft_preflight_uses_moments_permission_for_quality_risks(tmp_path: Path) -> None:
+    candidate = Candidate(
+        "candidate-warning",
+        0.0,
+        30.0,
+        "Фрагмент с сомнительной расшифровкой и незавершённой фразой.",
+        feature_vector={"transcript_confidence": 0.2, "completeness_score": 20.0},
+        semantic_evidence={"completeness_score": 20.0},
+        boundary_diagnostics={
+            "schema_version": "5A.1",
+            "eligible": False,
+            "word_integrity": True,
+            "sentence_integrity": False,
+            "semantic_completion": 0.2,
+            "payoff_preserved": False,
+            "requested_range": {"start": 0.0, "end": 30.0},
+            "resolved_range": {"start": 0.0, "end": 30.0},
+            "start_boundary": {
+                "timestamp": 0.2,
+                "transcript_segment_id": 1,
+                "reason": "first audible word",
+                "silence_before": 0.2,
+            },
+            "end_boundary": {
+                "timestamp": 29.8,
+                "transcript_segment_id": 2,
+                "reason": "last audible word",
+                "silence_after": 0.2,
+            },
+            "head_padding_seconds": 0.2,
+            "tail_padding_seconds": 0.2,
+            "continuation_risk": 0.9,
+            "overall_boundary_score": 0.2,
+        },
+    )
+    scored = ScoredCandidate(
+        candidate, "Warning", "", "", 50, 40, 20, 20, 20, 80, None, False,
+    )
+    pipeline = Pipeline(tmp_path, AppConfig())
+
+    selected, failures = pipeline._preflight_selected_candidates(
+        [scored],
+        {"status": "completed", "subject_keyframes": [{"timestamp": 1.0}]},
+        StageTracker(tmp_path / "state.json"),
+        content_profile=_profile("movie_series"),
+        source={"filename": "source.mp4"},
+        source_duration=60.0,
+    )
+
+    assert selected == [scored]
+    assert failures == {}
+    assert candidate.editorial_decision is not None
+    assert candidate.editorial_decision.selectable is False
+    assert {
+        "AUDIO_UNINTELLIGIBLE",
+        "SEMANTIC_INCOMPLETE",
+        "SENTENCE_BOUNDARY_UNRECOVERABLE",
+    } <= set(candidate.editorial_decision.hard_blockers)
+    review = candidate_review_payload(
+        scored.to_dict(), {candidate.id}, _profile("movie_series"), {"filename": "source.mp4"},
+    )
+    assert candidate_is_draftable(review) is True
+    assert {
+        "AUDIO_UNINTELLIGIBLE",
+        "SEMANTIC_INCOMPLETE",
+        "SENTENCE_BOUNDARY_UNRECOVERABLE",
+    } <= set(review["editorial_decision"]["soft_issues"])
+    draft_contract = candidate.composition_intent["draft_review_contract"]
+    assert draft_contract["permission"] == "quality_warning_preview"
+    assert draft_contract["selectable"] is True
+    assert draft_contract["policy_version"]
+    assert set(candidate.editorial_decision.hard_blockers) <= set(
+        draft_contract["warning_codes"]
+    )
+
+
+def test_draft_preflight_still_blocks_range_outside_source(tmp_path: Path) -> None:
+    candidate = Candidate(
+        "candidate-invalid-range",
+        100.0,
+        130.0,
+        "Формально положительный диапазон выходит за физический конец source.",
+        feature_vector={"transcript_confidence": 0.9},
+        boundary_diagnostics={
+            "eligible": True,
+            "word_integrity": True,
+            "sentence_integrity": True,
+            "semantic_completion": 1.0,
+            "payoff_preserved": True,
+            "requested_range": {"start": 100.0, "end": 130.0},
+            "resolved_range": {"start": 100.0, "end": 130.0},
+            "start_boundary": {
+                "timestamp": 100.0,
+                "transcript_segment_id": 1,
+                "reason": "start",
+            },
+            "end_boundary": {
+                "timestamp": 130.0,
+                "transcript_segment_id": 2,
+                "reason": "end",
+            },
+            "continuation_risk": 0.0,
+            "overall_boundary_score": 1.0,
+        },
+    )
+    scored = ScoredCandidate(
+        candidate, "Invalid", "", "", 70, 70, 70, 70, 70, 0, None, True,
+    )
+
+    _selected, failures = Pipeline(tmp_path, AppConfig())._preflight_selected_candidates(
+        [scored],
+        {"status": "completed", "subject_keyframes": [{"timestamp": 110.0}]},
+        StageTracker(tmp_path / "state.json"),
+        content_profile=_profile("movie_series"),
+        source={"filename": "source.mp4"},
+        source_duration=120.0,
+    )
+
+    assert failures == {
+        candidate.id: "CANDIDATE_NOT_DRAFTABLE: INVALID_SOURCE_MAPPING."
+    }

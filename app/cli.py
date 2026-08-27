@@ -486,10 +486,16 @@ def _apply_render_command_arguments(config, arguments: argparse.Namespace) -> No
 
 
 def _apply_draft_command_arguments(config) -> None:
-    """A draft always needs its FinalScript and ProductionPlan, never delivery services."""
+    """Enable the candidate-owned Creative Preview chain for Draft review."""
 
     config.transformation.enabled = True
     config.production.enabled = True
+    # Draft uses the existing renderer with the bounded ``creative_preview``
+    # profile. These stages assemble review media only; the separate render
+    # command remains the sole entry point for Final delivery.
+    config.tts.enabled = True
+    config.audio_composition.enabled = True
+    config.production_render.enabled = True
     config.validate()
 
 

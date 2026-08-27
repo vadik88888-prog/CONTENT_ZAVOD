@@ -933,20 +933,33 @@ def _boundary_handoff_errors(plan: ProductionPlan) -> list[str]:
     decision = plan.boundary_decision
     assert decision is not None
     errors: list[str] = []
+    review_contract = plan.composition_intent.get("draft_review_contract")
+    quality_warning_preview = bool(
+        isinstance(review_contract, dict)
+        and review_contract.get("permission") == "quality_warning_preview"
+        and review_contract.get("selectable") is True
+        and str(review_contract.get("policy_version") or "")
+    )
+    # The canonical Draft permission never rewrites Boundary evidence. It only
+    # lets Creative Preview carry known editorial/ASR risks. Identity, source
+    # containment, exact mapping references and required-span coverage below
+    # remain strict, and Final Quality Gate still receives the original false
+    # boundary flags plus the production editorial blockers.
     if decision.candidate_id != plan.metadata.candidate_id:
         errors.append("BOUNDARY_CANDIDATE_MISMATCH")
-    if not decision.word_integrity:
-        errors.append("BOUNDARY_WORD_CUT")
-    if not decision.sentence_integrity or not decision.semantic_completion:
-        errors.append("BOUNDARY_INCOMPLETE_THOUGHT")
-    if decision.continuation_risk > decision.continuation_risk_threshold + BOUNDARY_EPSILON_SECONDS:
-        errors.append("BOUNDARY_CONTINUATION_RISK")
-    if bool(decision.question_context.get("end_is_question")) and not bool(
-        decision.question_context.get("answer_or_completion_included")
-    ):
-        errors.append("BOUNDARY_QUESTION_CONTEXT_MISSING")
-    if not decision.payoff_preserved:
-        errors.append("BOUNDARY_PAYOFF_MISSING")
+    if not quality_warning_preview:
+        if not decision.word_integrity:
+            errors.append("BOUNDARY_WORD_CUT")
+        if not decision.sentence_integrity or not decision.semantic_completion:
+            errors.append("BOUNDARY_INCOMPLETE_THOUGHT")
+        if decision.continuation_risk > decision.continuation_risk_threshold + BOUNDARY_EPSILON_SECONDS:
+            errors.append("BOUNDARY_CONTINUATION_RISK")
+        if bool(decision.question_context.get("end_is_question")) and not bool(
+            decision.question_context.get("answer_or_completion_included")
+        ):
+            errors.append("BOUNDARY_QUESTION_CONTEXT_MISSING")
+        if not decision.payoff_preserved:
+            errors.append("BOUNDARY_PAYOFF_MISSING")
 
     allowed = decision.allowed_source_range
     source_ranges = [

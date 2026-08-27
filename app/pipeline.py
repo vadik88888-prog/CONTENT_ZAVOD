@@ -18,7 +18,14 @@ from app.ai import (
     sanitize_api_error,
 )
 from app.ai_cost import collect_vision_usage
-from app.analysis_artifact import AnalysisArtifact, AnalysisArtifactError, candidate_review_payload, new_analysis_artifact, potential_counts
+from app.analysis_artifact import (
+    AnalysisArtifact,
+    AnalysisArtifactError,
+    candidate_is_draftable,
+    candidate_review_payload,
+    new_analysis_artifact,
+    potential_counts,
+)
 from app.candidate_review import validate_boundary_override
 from app.draft_artifact import DraftArtifact, DraftArtifactError, new_draft_artifact
 from app.audio_modes import tts_eligibility
@@ -1913,7 +1920,12 @@ class Pipeline:
             selected, metadata, transcript_features, scenes, tracker,
         )
         selected, preflight_failures = self._preflight_selected_candidates(
-            selected, visual_analysis, tracker, content_profile=content_profile, source=source_data,
+            selected,
+            visual_analysis,
+            tracker,
+            content_profile=content_profile,
+            source=source_data,
+            source_duration=float(metadata["duration"]) if metadata.get("duration") is not None else None,
         )
         candidate_failures = {**boundary_failures, **preflight_failures}
         composition_vision = self._ensure_draft_composition_evidence_isolated(
@@ -2293,8 +2305,15 @@ class Pipeline:
         *,
         content_profile: dict[str, Any],
         source: dict[str, Any],
+        source_duration: float | None = None,
     ) -> tuple[list[Any], dict[str, str]]:
-        """Recheck production eligibility and BoundaryDecision before transform."""
+        """Recheck Draft permission and BoundaryDecision before transform.
+
+        Strict eligibility/editorial decisions remain attached to the
+        candidate as production evidence for Final. Permission to enter Draft
+        comes from the canonical Moments projection, where quality concerns
+        are warnings and only an invalid source mapping is blocked.
+        """
 
         failures: dict[str, str] = {}
         for scored in selected:
@@ -2325,12 +2344,49 @@ class Pipeline:
                 source=source,
             )
             candidate.editorial_decision = editorial
-            if not editorial.selectable:
-                codes = ",".join(editorial.hard_blockers) or "UNKNOWN"
-                message = f"CANDIDATE_NOT_PRODUCTION_ELIGIBLE: {codes}."
+            draft_review = candidate_review_payload(
+                scored.to_dict(),
+                {candidate.id},
+                content_profile,
+                source,
+            )
+            source_mapping_valid = not (
+                source_duration is not None
+                and candidate.end > source_duration + 0.02
+            )
+            if not candidate_is_draftable(draft_review) or not source_mapping_valid:
+                moments_decision = draft_review.get("editorial_decision", {})
+                blockers = (
+                    list(moments_decision.get("hard_blockers") or [])
+                    if isinstance(moments_decision, dict)
+                    else []
+                )
+                codes = ",".join(blockers or ["INVALID_SOURCE_MAPPING"])
+                message = f"CANDIDATE_NOT_DRAFTABLE: {codes}."
                 failures[candidate.id] = message
                 tracker.finish(stage_name, "failed", message)
                 continue
+            moments_decision = draft_review.get("editorial_decision", {})
+            moments_provenance = (
+                moments_decision.get("profile_provenance", {})
+                if isinstance(moments_decision, dict)
+                else {}
+            )
+            projection = (
+                moments_provenance.get("moments_projection", {})
+                if isinstance(moments_provenance, dict)
+                else {}
+            )
+            candidate.composition_intent = {
+                **dict(candidate.composition_intent or {}),
+                "draft_review_contract": {
+                    "permission": "quality_warning_preview",
+                    "policy_version": str(projection.get("policy_version") or ""),
+                    "selectable": True,
+                    "warning_codes": list(moments_decision.get("soft_issues") or []),
+                    "production_hard_blockers": list(editorial.hard_blockers),
+                },
+            }
             boundary = ensure_candidate_boundary_decision(candidate)
             if boundary is None:
                 message = "BOUNDARY_DECISION_REQUIRED: complete validated boundary evidence is unavailable."
@@ -2441,7 +2497,11 @@ class Pipeline:
     ) -> PipelineResult:
         """Create candidate-owned Creative Previews from the approved plan graph."""
 
-        production = self._preflight_semantic_content(tracker, production)
+        production = self._preflight_semantic_content(
+            tracker,
+            production,
+            allow_quality_warnings=True,
+        )
         transformations = {
             str(item.get("candidate_id") or ""): item
             for item in transformation.get("items", []) if isinstance(item, dict)
@@ -2481,6 +2541,34 @@ class Pipeline:
             plan_item = plans.get(candidate_id, {})
             final_script_path = output_directory / f"transformed-script-{suffix}.json"
             production_plan_path = output_directory / f"production-plan-{suffix}.json"
+            draft_review = candidate_review_payload(
+                selected_by_id[candidate_id].to_dict(),
+                {candidate_id},
+                content_profile,
+                source_data,
+            )
+            moments_decision = draft_review.get("editorial_decision", {})
+            warning_codes = list(dict.fromkeys(
+                str(code)
+                for code in (
+                    moments_decision.get("soft_issues", [])
+                    if isinstance(moments_decision, dict)
+                    else []
+                )
+                if str(code)
+            ))
+            draft_warnings = list(dict.fromkeys(
+                str(warning)
+                for warning in [
+                    *list(draft_review.get("warnings") or []),
+                    *list(draft_review.get("risks") or []),
+                ]
+                if str(warning).strip()
+            ))
+            if warning_codes:
+                summary = f"Draft candidate {candidate_id} quality warnings: {', '.join(warning_codes)}."
+                if summary not in self.warnings:
+                    self.warnings.append(summary)
             base = {
                 "candidate_id": candidate_id,
                 "state": "draft_planning",
@@ -2489,6 +2577,8 @@ class Pipeline:
                 "source_end_seconds": selected_ranges[candidate_id][1],
                 "eligibility_decision": selected_by_id[candidate_id].candidate.eligibility_decision.to_dict(),
                 "editorial_decision": selected_by_id[candidate_id].candidate.editorial_decision.to_dict(),
+                "draft_warning_codes": warning_codes,
+                "draft_warnings": draft_warnings,
                 "output_file": None,
                 "final_script_ref": str(final_script_path) if final_script_path.is_file() else None,
                 "production_plan_ref": str(production_plan_path) if production_plan_path.is_file() else None,
@@ -3697,13 +3787,16 @@ class Pipeline:
         self,
         tracker: StageTracker,
         production: dict[str, Any],
+        *,
+        allow_quality_warnings: bool = False,
     ) -> dict[str, Any]:
-        """Block unsafe exact dialogue mappings before any delivery work.
+        """Evaluate exact dialogue mappings before preview or delivery work.
 
         This is a candidate fan-out stage: a blocked plan remains in the stage
         report with a typed reason while valid sibling plans stay renderable.
-        Final Quality Gate calls the same policy function after render as a
-        defence-in-depth check.
+        Draft review may retain the same finding as a warning; the Final path
+        keeps the strict default and Quality Gate still consumes the persisted
+        evidence as a defence-in-depth check.
         """
 
         raw_items = production.get("items") if isinstance(production, dict) else None
@@ -3741,6 +3834,17 @@ class Pipeline:
                 f"{blocker['code']}: materially low-confidence exact dialogue "
                 f"({blocker['measured_value']} below {blocker['threshold']}; {segment_ids})."
             )
+            if allow_quality_warnings:
+                tracker.finish(stage_name, "warning", message)
+                warning = f"Draft candidate {candidate_id} quality warning: {message}"
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                outcomes.append({
+                    **item,
+                    "warnings": [*list(item.get("warnings") or []), message],
+                    "semantic_warning": blocker,
+                })
+                continue
             tracker.finish(stage_name, "failed", message)
             outcomes.append({
                 **item,

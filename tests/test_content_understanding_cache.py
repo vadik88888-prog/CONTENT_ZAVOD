@@ -467,6 +467,8 @@ def test_draft_preview_uses_analysis_artifact_and_preserves_exact_requested_orde
     assert first_draft["production_plan_fingerprint"]
     assert first_draft["eligibility_decision"]["state"] == "assessed"
     assert first_draft["eligibility_decision"]["eligible"] is True
+    assert isinstance(first_draft["draft_warning_codes"], list)
+    assert isinstance(first_draft["draft_warnings"], list)
     report = read_json(result.report_path, {})
     assert report["terminal"]["status"] == "draft_ready"
     assert [item["candidate_id"] for item in report["candidate_flow"]["draft_candidates"]] == requested_ids

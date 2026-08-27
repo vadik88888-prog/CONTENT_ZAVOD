@@ -243,6 +243,29 @@ def test_low_confidence_exact_mapping_blocks_only_its_creative_preview(
     assert not (output_directory / "creative-preview" / "creative-preview.mp4").exists()
 
 
+def test_draft_semantic_preflight_preserves_low_confidence_as_warning(tmp_path: Path) -> None:
+    pipeline = Pipeline(tmp_path, AppConfig(), run_id="draft-warning-preflight")
+    tracker = StageTracker(tmp_path / "state.json")
+    production = _production_with_two_plans()
+    production["items"][0]["plan"]["dialogue_mappings"][0]["confidence"] = 0.21
+    production["items"][0]["plan"]["segments"][1]["confidence"] = 0.21
+
+    preflighted = pipeline._preflight_semantic_content(
+        tracker,
+        production,
+        allow_quality_warnings=True,
+    )
+
+    warning, safe = preflighted["items"]
+    assert preflighted["status"] == "completed"
+    assert warning["status"] == "completed"
+    assert warning["semantic_warning"]["code"] == "AUDIO_UNINTELLIGIBLE"
+    assert any("AUDIO_UNINTELLIGIBLE" in item for item in warning["warnings"])
+    assert safe["status"] == "completed"
+    assert tracker.data["stages"]["semantic_content_preflight:clip-one"]["status"] == "warning"
+    assert tracker.data["stages"]["semantic_content_preflight:clip-two"]["status"] == "completed"
+
+
 def test_post_render_fingerprint_failure_does_not_stop_later_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

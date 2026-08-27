@@ -519,6 +519,28 @@ def test_production_plan_blocks_incomplete_boundary_decision() -> None:
         build_production_plan(outcome, AppConfig().production)
 
 
+def test_draft_review_contract_keeps_incomplete_boundary_as_preview_warning() -> None:
+    outcome = _outcome_with_boundary()
+    outcome["source_context"]["boundary_decision"] = _boundary_decision(semantic_completion=False)
+    outcome["source_context"]["composition_intent"] = {
+        "draft_review_contract": {
+            "permission": "quality_warning_preview",
+            "policy_version": "moments-surfacing-policy.test",
+            "selectable": True,
+            "warning_codes": ["SEMANTIC_INCOMPLETE"],
+            "production_hard_blockers": ["SEMANTIC_INCOMPLETE"],
+        }
+    }
+
+    plan = build_production_plan(outcome, AppConfig().production)
+
+    assert plan.boundary_decision is not None
+    assert plan.boundary_decision.semantic_completion is False
+    assert plan.composition_intent["draft_review_contract"]["warning_codes"] == [
+        "SEMANTIC_INCOMPLETE"
+    ]
+
+
 def test_production_plan_blocks_question_without_answer_context() -> None:
     outcome = _outcome_with_boundary()
     outcome["source_context"]["boundary_decision"]["question_context"] = {

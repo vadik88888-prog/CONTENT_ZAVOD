@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.analysis_artifact import new_analysis_artifact
-from app.cli import _apply_render_command_arguments
+from app.cli import _apply_draft_command_arguments, _apply_render_command_arguments
 from app.config import AppConfig, load_config
 from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
@@ -200,6 +200,18 @@ def test_approved_render_enables_the_required_delivery_stages() -> None:
         video_encoder=None,
     ))
 
+    assert config.production.enabled is True
+    assert config.tts.enabled is True
+    assert config.audio_composition.enabled is True
+    assert config.production_render.enabled is True
+
+
+def test_draft_command_enables_real_creative_preview_stages() -> None:
+    config = AppConfig()
+
+    _apply_draft_command_arguments(config)
+
+    assert config.transformation.enabled is True
     assert config.production.enabled is True
     assert config.tts.enabled is True
     assert config.audio_composition.enabled is True
