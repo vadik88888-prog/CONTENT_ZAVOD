@@ -9,6 +9,12 @@ Before changing code, audit the current implementation and read [the editing-sys
 
 For UI detail, use the [creative UX spec](docs/CREATIVE_UX_SPEC.md) and [approved visual references](docs/CONTENT_FACTORY_VISUAL_REFERENCES.md). For creative rendering, use [Phase 7](docs/PHASE_7_CREATIVE_SYSTEM.md) and its [rendering architecture](docs/CREATIVE_RENDERING_ARCHITECTURE.md); use the [roadmap](docs/roadmap/EDITING_QUALITY_ROADMAP.md) for execution order. Discovery and historical documents guide design but do not authorize extra scope.
 
+## Friend Beta closure baseline
+
+- Current milestone: **Friend Beta Desktop Product Closure**, before a separate packaging pass. Current local `HEAD` and every commit in `origin/main..HEAD` are the implementation baseline. Work from that local tree; never switch to an older remote revision, clean checkout, or packaged executable to judge or replace it.
+- For the same Friend Beta screens, `referrens/00_REFERENCE_INDEX.md` and its six approved screens are the UI authority and supersede older references. If that approved pack is unavailable, request its restoration; do not substitute a prior visual reference by inference.
+- Stage permissions are deliberate: valid Moments remain selectable and draftable; quality, ASR, and semantic warnings do not by themselves block Draft. Block Draft only for an actual source, mapping, integrity, or safety impossibility. Preserve strict evidence enforcement for the Final Quality Gate.
+
 ## Non-negotiable invariants
 
 - **AI proposes; code decides.** AI output is evidence-grounded, schema-validated input. Deterministic code owns executable parameters, identities, validation, lifecycle transitions, readiness, filesystem writes, and renderer commands. Raw AI output never reaches FFmpeg or the shell.
@@ -22,6 +28,7 @@ For UI detail, use the [creative UX spec](docs/CREATIVE_UX_SPEC.md) and [approve
 ## Working protocol
 
 - Ordinary Codex work is the default. Use a Goal only for systemic verification that genuinely needs a persistent, cross-layer audit or real-media benchmark; never for routine implementation or focused tests.
+- For Friend Beta responsiveness, measure first with the existing probes and fix only a demonstrated stall. Keep heavy work off the GUI thread; do not redesign responsiveness speculatively.
 - Parallel work may use 2–3 lanes only when they have no file, contract, or dependency overlap. Otherwise work sequentially; one lane owns integration.
 - Follow: implementation → focused tests (then broader tests as risk requires) → inspect the complete diff → stage explicit target paths → isolated commit → **NO PUSH** → post-commit audit.
 - Check `git status` before and after work. Dirty and untracked files are user-owned: do not edit, delete, reset, overwrite, stage, or include them. Never use `git add .`. Without explicit user permission, never use `reset`, `clean`, `--force`/force-push, `rebase`, `commit --amend`, or `stash`. Push only when the user explicitly asks.
@@ -33,4 +40,4 @@ Do not create a parallel pipeline, plan store, renderer, quality gate, or projec
 
 ## Final report
 
-Keep it short: outcome/root cause; changed files; tests and real QA evidence; commit SHA; remaining warnings or genuine blockers; final git status; explicit `NO PUSH`.
+For a systemic Goal, provide a structured evidence report. For an ordinary fix, keep the report short: outcome/root cause; changed files; tests and real QA evidence; commit SHA; remaining warnings or genuine blockers; final git status; explicit `NO PUSH`.
