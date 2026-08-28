@@ -898,6 +898,44 @@ class DesktopServices:
         self.projects.save(project)
         return project
 
+    def exclude_draft_candidate(
+        self, project: DesktopProject, candidate_id: str,
+    ) -> DesktopProject:
+        """Exclude exactly one candidate from Draft review and Final hand-off.
+
+        This is the persisted owner for both ``Отклонить`` and
+        ``Продолжить без этого``.  It intentionally does not infer a target
+        from card order, active preview, or the current aggregate selection.
+        A failed item keeps its failure state so it can be restored/retried;
+        ready items keep their immutable Draft artifact for later restore.
+        """
+
+        if candidate_id not in project.candidate_states:
+            raise InputValidationError("Черновик отсутствует в сохранённом анализе.")
+        self._ensure_candidate_lifecycle(project, candidate_id)
+        project.selected_candidate_ids = [
+            item for item in project.selected_candidate_ids if item != candidate_id
+        ]
+        project.review_selected_candidate_ids = [
+            item for item in project.review_selected_candidate_ids if item != candidate_id
+        ]
+        if project.candidate_draft_statuses.get(candidate_id) != "failed":
+            self._set_candidate_lifecycle(
+                project, candidate_id, approval="rejected", export="pending",
+            )
+        project.status = ProjectStatus.REVIEWING_CANDIDATES
+        self.projects.save(project)
+        return project
+
+    @staticmethod
+    def _run_candidate_ids(run: ProjectRun) -> list[str]:
+        """Return the durable candidate allow-list for one candidate-scoped run."""
+
+        raw = run.settings_snapshot.get("candidate_ids", [])
+        if not isinstance(raw, list):
+            return []
+        return list(dict.fromkeys(str(candidate_id) for candidate_id in raw if str(candidate_id)))
+
     def update_project_thumbnail(
         self, project: DesktopProject, thumbnail_path: Path,
     ) -> DesktopProject:
@@ -1508,7 +1546,7 @@ class DesktopServices:
         run.technical_details = redact_secrets(technical_details or message)
         self.append_log(run, run.technical_details)
         if run.run_kind == RunKind.SELECTED_RENDER:
-            for candidate_id in project.selected_candidate_ids:
+            for candidate_id in self._run_candidate_ids(run):
                 if project.candidate_states.get(candidate_id) == "production_rendering":
                     self._set_candidate_lifecycle(
                         project, candidate_id, draft="ready", approval="approved", export="failed",
@@ -1520,8 +1558,8 @@ class DesktopServices:
                 str(key): str(value)
                 for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
             }
-            for candidate_id, state in list(project.candidate_states.items()):
-                if state == "draft_planning":
+            for candidate_id in self._run_candidate_ids(run):
+                if project.candidate_states.get(candidate_id) == "draft_planning":
                     previous = previous_artifacts.get(candidate_id)
                     if previous and Path(previous).is_file():
                         self._set_candidate_lifecycle(
@@ -1550,7 +1588,7 @@ class DesktopServices:
         run.finished_at = utc_now()
         run.error_summary = "Создание ролика отменено пользователем."
         if run.run_kind == RunKind.SELECTED_RENDER:
-            for candidate_id in project.selected_candidate_ids:
+            for candidate_id in self._run_candidate_ids(run):
                 if project.candidate_states.get(candidate_id) == "production_rendering":
                     self._set_candidate_lifecycle(
                         project, candidate_id, draft="ready", approval="approved", export="pending",
@@ -1561,8 +1599,8 @@ class DesktopServices:
                 str(key): str(value)
                 for key, value in dict(run.settings_snapshot.get("previous_draft_artifacts") or {}).items()
             }
-            for candidate_id, state in list(project.candidate_states.items()):
-                if state == "draft_planning":
+            for candidate_id in self._run_candidate_ids(run):
+                if project.candidate_states.get(candidate_id) == "draft_planning":
                     previous = previous_artifacts.get(candidate_id)
                     if previous and Path(previous).is_file():
                         self._set_candidate_lifecycle(

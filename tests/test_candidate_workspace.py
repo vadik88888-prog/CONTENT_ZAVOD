@@ -993,6 +993,71 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         app.processEvents()
 
 
+def test_persisted_drafts_override_stale_moments_route_and_final_cta_wins(tmp_path: Path, monkeypatch) -> None:
+    """A failed sibling never routes an approved Draft back through Moments."""
+
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    approved_id = "candidate-recommended"
+    failed_id = "candidate-other"
+    preview = tmp_path / "approved-preview.mp4"
+    preview.write_bytes(b"preview")
+    artifact = tmp_path / "approved-draft.json"
+    write_json(artifact, {"candidates": [{
+        "candidate_id": approved_id,
+        "preview": {"output_file": str(preview)},
+    }]})
+    project.review_selected_candidate_ids = [approved_id, failed_id]
+    project.selected_candidate_ids = [approved_id]
+    project.candidate_states.update({approved_id: "selected", failed_id: "draft_failed"})
+    project.candidate_draft_artifacts[approved_id] = str(artifact)
+    project.candidate_draft_statuses.update({approved_id: "ready", failed_id: "failed"})
+    project.candidate_approval_states.update({approved_id: "approved", failed_id: "pending"})
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    launches: list[list[str]] = []
+    monkeypatch.setattr(VideoPreview, "show_draft", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda ids: launches.append(list(ids)))
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        screen._results_subflow_override = "candidates"
+        screen._project_changed(project)
+        app.processEvents()
+
+        assert screen._flow_step == "drafts"
+        assert screen.production_button.isVisible() and screen.production_button.isEnabled()
+        assert screen.production_button.property("responsiveFullText") == "Создать готовые ролики (1)"
+        assert screen.production_button.text().endswith("(1)")
+        assert screen.draft_button.isHidden()
+
+        # The failed card's action carries its own persisted identity.  It
+        # cannot dispatch a retry for either the approved sibling or itself.
+        screen._reject_draft(failed_id)
+        app.processEvents()
+        assert launches == []
+        assert viewmodel.project is not None
+        assert viewmodel.project.review_selected_candidate_ids == [approved_id]
+        assert viewmodel.project.selected_candidate_ids == [approved_id]
+        assert viewmodel.project.candidate_states[approved_id] == "selected"
+        assert viewmodel.project.candidate_states[failed_id] == "draft_failed"
+
+        restored = services.projects.load(project.project_id)
+        assert restored.review_selected_candidate_ids == [approved_id]
+        assert restored.selected_candidate_ids == [approved_id]
+        assert screen._derive_flow_step(restored) == "drafts"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
 def test_final_export_cta_uses_approved_project_state_not_clicked_bool(tmp_path: Path, monkeypatch) -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
@@ -1997,34 +2062,27 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
             actions_origin = screen.stage_actions.mapTo(screen, QPoint(0, 0))
             assert scroll_origin.y() + screen.content_scroll.height() <= actions_origin.y()
 
-        # At the final desktop-sized client, Moments returns to its bounded
-        # catalogue and inspector panes while Drafts keeps one outer owner.
+        # A stale session-only Moments route cannot replace persisted Draft
+        # work.  The same one-owner Draft layout remains active at the wide
+        # breakpoint until the candidate lifecycle returns to Results-final.
         assert screen.project is not None
         screen._results_subflow_override = "candidates"
         screen._project_changed(screen.project)
         for _ in range(8):
             app.processEvents()
-        assert screen._flow_step == "candidates"
+        assert screen._flow_step == "drafts"
         assert screen._compact_stage_layout is False
-        assert screen._drafts_single_scroll_layout is False
-        assert screen.review_list_scroll.widget() is screen.candidate_review
-        assert screen.review_inspector_scroll.widget() is screen.candidate_detail
+        assert screen._drafts_single_scroll_layout is True
+        assert screen.review_list_scroll.isHidden()
+        assert screen.review_inspector_scroll.isHidden()
 
-        # The approved wide reference is still a bounded three-column
-        # workspace.  At that breakpoint the catalogue and inspector regain
-        # their independent pane scrollers.
         window.resize(1920, 1080)
         for _ in range(8):
             app.processEvents()
         assert screen._compact_stage_layout is False
-        assert screen._drafts_single_scroll_layout is False
-        assert screen.review_list_scroll.widget() is screen.candidate_review
-        assert screen.review_inspector_scroll.widget() is screen.candidate_detail
-        assert not screen.review_list_scroll.isHidden()
-        assert not screen.review_inspector_scroll.isHidden()
-        assert screen.review_list_panel.minimumHeight() == 0
-        assert screen.review_preview_panel.minimumHeight() == 0
-        assert screen.review_inspector_panel.minimumHeight() == 0
+        assert screen._drafts_single_scroll_layout is True
+        assert screen.review_list_scroll.isHidden()
+        assert screen.review_inspector_scroll.isHidden()
     finally:
         window.close()
         window.deleteLater()

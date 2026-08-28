@@ -232,6 +232,17 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
+    def exclude_draft_candidate(self, candidate_id: str) -> None:
+        """Persist a candidate-scoped Draft skip/reject decision."""
+
+        if not self.project or self.owns_active_job:
+            return
+        try:
+            self.project = self.services.exclude_draft_candidate(self.project, candidate_id)
+            self.project_changed.emit(self.project)
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+
     def revise_draft(self, candidate_id: str, **values: object) -> None:
         """Persist one candidate-scoped pending visual revision."""
 

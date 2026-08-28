@@ -1933,14 +1933,24 @@ class ProjectScreen(QWidget):
         *,
         presentation: ProjectPresentation | None = None,
     ) -> str:
-        if self._results_subflow_override in {"candidates", "drafts"} and project.analysis_artifact_path:
-            return self._results_subflow_override
         if presentation is None:
             presentation = self.viewmodel.services.presentation(
                 project,
                 snapshot=self.viewmodel.snapshot,
                 runs=self._runs_for_project(project),
             )
+        # ``create more`` and ``back to drafts`` are session-only navigation
+        # affordances from an otherwise completed Results workspace.  They
+        # must never win over a persisted Draft lifecycle transition: doing so
+        # left a newly ready Preview on Moments and exposed its draft CTA.
+        # The durable projection therefore remains canonical as soon as any
+        # candidate has Draft work to review/retry/approve.
+        if (
+            presentation.flow_step == "finished"
+            and self._results_subflow_override in {"candidates", "drafts"}
+            and project.analysis_artifact_path
+        ):
+            return self._results_subflow_override
         return presentation.flow_step
 
     def _flow_hint_for(self, step: str, project: DesktopProject) -> str:
@@ -2719,7 +2729,8 @@ class ProjectScreen(QWidget):
         if project.status in {"analyzing", "processing", "rendering_selected"} or processing_count:
             self._set_workflow_hint("Сейчас идёт работа. Прогресс и оставшееся время показаны на отдельном экране.")
             return
-        if self._derive_flow_step(project) == "candidates":
+        workflow_step = self._derive_flow_step(project)
+        if workflow_step == "candidates":
             recommended_ids = self._recommended_candidate_ids()
             selected_ids = [
                 candidate_id for candidate_id in project.review_selected_candidate_ids
@@ -2757,9 +2768,25 @@ class ProjectScreen(QWidget):
                 self.draft_button.setEnabled(True)
                 self.draft_button.show()
                 return
+        # An explicit approval is the durable hand-off to Final.  It wins over
+        # failed/pending siblings: those candidates retain their own card-level
+        # retry/skip actions and must not hold successful drafts hostage.
+        if workflow_step == "drafts" and project.selected_candidate_ids:
+            count = len(project.selected_candidate_ids)
+            self._set_workflow_hint(
+                f"Подтверждено: {count}. Черновики проверены — теперь можно создать готовые ролики."
+            )
+            self._set_review_action_text(
+                self.production_button,
+                f"Создать готовые ролики ({count})",
+                f"Создать ролики ({count})",
+            )
+            self.production_button.setEnabled(True)
+            self.production_button.show()
+            return
         if draftable_ids:
             count = len(draftable_ids)
-            is_drafts = self._derive_flow_step(project) == "drafts"
+            is_drafts = workflow_step == "drafts"
             changed_count = sum(
                 candidate_id in project.candidate_draft_artifacts
                 for candidate_id in draftable_ids
@@ -3205,12 +3232,10 @@ class ProjectScreen(QWidget):
         self.viewmodel.set_draft_approval(candidate_id, approved)
 
     def _reject_draft(self, candidate_id: str) -> None:
-        if not self.project:
-            return
-        if candidate_id in self.project.selected_candidate_ids:
-            self.viewmodel.set_draft_approval(candidate_id, False)
-        selected = [item for item in self.project.review_selected_candidate_ids if item != candidate_id]
-        self.viewmodel.set_review_selection(selected)
+        # One persisted candidate identity owns this action.  Do not compose
+        # two UI-side mutations from a potentially refreshed card list: that
+        # was prone to routing a skip through a sibling's pending selection.
+        self.viewmodel.exclude_draft_candidate(candidate_id)
 
     def _restore_draft(self, candidate_id: str) -> None:
         if not self.project or candidate_id in self.project.review_selected_candidate_ids:

@@ -1,0 +1,25 @@
+{
+  "project_id": "88a7f25e3b874b76861bc6334df4312e",
+  "project_name": "Karrigan_avg_3",
+  "metadata_store": "isolated-copy-of-persisted-project",
+  "execution_mode": "real-final-from-native-Desktop-CTA",
+  "analysis_id": "analysis-47a3857f47db6fb1",
+  "analysis_unchanged": true,
+  "run_id": "4ecc8adfead24787835eccd8db6cfc28",
+  "run_kind": "selected_render",
+  "run_status": "failed",
+  "candidate_ids": [
+    "candidate-chapter-004-story-001"
+  ],
+  "other_candidate_started": false,
+  "terminal_error_code": "NO_RENDERABLE_CLIPS",
+  "quality_gate_status": "BLOCKED",
+  "quality_report_count": 0,
+  "output_files": [],
+  "first_blocker": {
+    "stage": "semantic_content_preflight:candidate-chapter-004-story-001",
+    "code": "AUDIO_UNINTELLIGIBLE",
+    "message": "materially low-confidence exact dialogue (0.014 below >=0.5)"
+  },
+  "report_path": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\output\\kyousuke_26-12_w_Karrigan_avg_3-e45e8e98a3b1\\runs\\4ecc8adfead24787835eccd8db6cfc28\\report.json"
+}

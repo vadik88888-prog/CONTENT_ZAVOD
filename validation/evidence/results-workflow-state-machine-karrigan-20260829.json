@@ -1,0 +1,28 @@
+{
+  "project_id": "88a7f25e3b874b76861bc6334df4312e",
+  "flow_step": "drafts",
+  "draft_cta_hidden": true,
+  "final_cta": "Создать готовые ролики (1)",
+  "final_dispatch_candidate_ids": [
+    "candidate-chapter-004-story-001"
+  ],
+  "selected_candidate_ids": [
+    "candidate-chapter-004-story-001"
+  ],
+  "review_selected_candidate_ids": [
+    "candidate-chapter-004-story-001",
+    "candidate-chapter-008-story-001",
+    "candidate-chapter-001-story-001",
+    "candidate-chapter-009-story-001",
+    "candidate-chapter-006-story-001",
+    "candidate-chapter-011-story-001",
+    "candidate-chapter-005-story-001",
+    "candidate-chapter-012-story-001"
+  ],
+  "analysis_id": "analysis-47a3857f47db6fb1",
+  "analysis_unchanged": true,
+  "metadata_store": "isolated-copy-of-persisted-project",
+  "execution_mode": "dispatch-only",
+  "final_run": null,
+  "screenshot": "C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\validation\\evidence\\results-workflow-state-machine-karrigan-20260829.png"
+}

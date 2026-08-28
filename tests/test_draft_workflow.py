@@ -471,6 +471,31 @@ def test_reported_failure_requires_current_run_and_project_identity(tmp_path: Pa
     assert PipelineFacade(tmp_path).reported_failure(prepared, "2026-01-01T00:00:00+00:00") is None
 
 
+def test_cancelled_draft_retry_reconciles_only_its_persisted_candidate_ids(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    project.analysis_artifact_path = str(tmp_path / "analysis.json")
+    project.review_selected_candidate_ids = ["candidate-a", "candidate-b"]
+    project.candidate_states = {
+        "candidate-a": "draft_planning",
+        "candidate-b": "draft_planning",
+    }
+    project.candidate_draft_statuses = {
+        "candidate-a": "running",
+        "candidate-b": "running",
+    }
+    services.projects.save(project)
+    retry = services.runs.create(
+        project, {"candidate_ids": ["candidate-a"]}, {}, "test", run_kind=RunKind.DRAFT,
+    )
+
+    services.finish_cancelled(project, retry)
+
+    assert project.candidate_states["candidate-a"] == "analyzed"
+    assert project.candidate_draft_statuses["candidate-a"] == "pending"
+    assert project.candidate_states["candidate-b"] == "draft_planning"
+    assert project.candidate_draft_statuses["candidate-b"] == "running"
+
+
 def test_terminal_selected_render_failure_returns_only_invalid_drafts_to_retry(tmp_path: Path) -> None:
     services, project, _source = _services(tmp_path)
     project.selected_candidate_ids = ["candidate-a", "candidate-b"]
