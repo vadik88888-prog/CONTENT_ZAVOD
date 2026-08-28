@@ -12,7 +12,7 @@ For UI detail, use the [creative UX spec](docs/CREATIVE_UX_SPEC.md) and [approve
 ## Friend Beta closure baseline
 
 - Current milestone: **Friend Beta Desktop Product Closure**, before a separate packaging pass. Current local `HEAD` and every commit in `origin/main..HEAD` are the implementation baseline. Work from that local tree; never switch to an older remote revision, clean checkout, or packaged executable to judge or replace it.
-- For the same Friend Beta screens, `referrens/00_REFERENCE_INDEX.md` and its six approved screens are the UI authority and supersede older references. If that approved pack is unavailable, request its restoration; do not substitute a prior visual reference by inference.
+- For the same Friend Beta screens, the six approved PNG in `docs/ui-references/` are the visual authority and supersede older UI references. They set composition and hierarchy, not a requirement for pixel-perfect copying; use OpusClip only as a UX/product benchmark, never as a visual clone.
 - Stage permissions are deliberate: valid Moments remain selectable and draftable; quality, ASR, and semantic warnings do not by themselves block Draft. Block Draft only for an actual source, mapping, integrity, or safety impossibility. Preserve strict evidence enforcement for the Final Quality Gate.
 
 ## Non-negotiable invariants
