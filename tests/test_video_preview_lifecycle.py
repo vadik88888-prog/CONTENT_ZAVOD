@@ -54,6 +54,93 @@ def test_rapid_file_selection_is_deferred_and_coalesced(tmp_path: Path, monkeypa
         app.processEvents()
 
 
+@pytest.mark.parametrize(
+    ("show_method", "expected_title"),
+    [
+        ("show_draft", "Черновик · Тестовый момент"),
+        ("show_final", "Готовый ролик · Тестовый момент"),
+    ],
+)
+def test_loaded_draft_or_final_is_reused_without_reload_or_timeline_reset(
+    tmp_path: Path, monkeypatch, show_method: str, expected_title: str,
+) -> None:
+    app = _application()
+    media = tmp_path / "creative-preview.mp4"
+    media.write_bytes(b"preview")
+    expected_source = QUrl.fromLocalFile(str(media))
+    preview = VideoPreview()
+
+    class FakePlayer:
+        def __init__(self) -> None:
+            self.sources: list[QUrl] = []
+            self.stop_calls = 0
+
+        @staticmethod
+        def playbackState() -> QMediaPlayer.PlaybackState:
+            return QMediaPlayer.PlaybackState.StoppedState
+
+        @staticmethod
+        def mediaStatus() -> QMediaPlayer.MediaStatus:
+            return QMediaPlayer.MediaStatus.LoadedMedia
+
+        @staticmethod
+        def duration() -> int:
+            return 111_866
+
+        @staticmethod
+        def position() -> int:
+            return 37_000
+
+        def source(self) -> QUrl:
+            return expected_source
+
+        def videoOutput(self):
+            return preview.video
+
+        def setVideoOutput(self, _output) -> None:
+            raise AssertionError("the persistent video output must stay attached")
+
+        def setSource(self, value: QUrl) -> None:
+            self.sources.append(value)
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    player = FakePlayer()
+    preview.player = player  # type: ignore[assignment]
+    preview._path = media
+    preview._source_path = media
+    preview._expected_source = expected_source
+    preview._media_ready = True
+    preview.time_label.setText("00:37 / 01:51")
+    queued_loads: list[bool] = []
+    timeline_resets: list[bool] = []
+    poster_requests: list[Path] = []
+    monkeypatch.setattr(preview, "_queue_source_load", lambda: queued_loads.append(True))
+    monkeypatch.setattr(preview, "_reset_timeline", lambda: timeline_resets.append(True))
+    monkeypatch.setattr(preview, "_request_poster", poster_requests.append)
+
+    try:
+        getattr(preview, show_method)(media, "Тестовый момент")
+
+        assert player.sources == []
+        assert player.stop_calls == 0
+        assert queued_loads == []
+        assert timeline_resets == []
+        assert poster_requests == []
+        assert preview.active_media_path == media
+        assert preview._media_ready is True
+        assert preview._media_loading is False
+        assert preview._media_load_timer.isActive() is False
+        assert preview.time_label.text() == "00:37 / 01:51"
+        assert preview.play_button.isEnabled()
+        assert preview.active_candidate.text() == expected_title
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
 def test_volume_and_mute_restore_the_last_audible_level() -> None:
     app = _application()
     preview = VideoPreview()

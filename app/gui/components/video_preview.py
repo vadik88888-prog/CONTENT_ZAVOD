@@ -567,6 +567,16 @@ class VideoPreview(QFrame):
         source_codec: str | None = None,
         poster_cache_directory: Path | None = None,
     ) -> None:
+        candidate = Path(path) if path else None
+        usable_candidate = candidate if self.usable_media_path(candidate) else None
+        requested_source = (
+            QUrl.fromLocalFile(str(usable_candidate)) if usable_candidate is not None else QUrl()
+        )
+        reuse_loaded_source = bool(
+            presentation == "vertical"
+            and requested_source.isValid()
+            and self._player_has_loaded_source(requested_source)
+        )
         self._selection_token += 1
         self._cancel_proxy()
         self._cancel_poster()
@@ -586,9 +596,8 @@ class VideoPreview(QFrame):
         self._range_seek_target_ms = None
         self._range_play_pending_token = None
         self._range_requires_seek = False
-        self._media_ready = False
+        self._media_ready = reuse_loaded_source
         self._using_proxy = False
-        candidate = Path(path) if path else None
         self._set_presentation(self._file_presentation(candidate, presentation))
         if title:
             set_responsive_text(self.active_candidate, title)
@@ -597,11 +606,21 @@ class VideoPreview(QFrame):
             self.active_candidate.clear()
             self.active_candidate.setToolTip("")
             self.active_candidate.hide()
-        self._source_path = candidate if self.usable_media_path(candidate) else None
+        self._source_path = usable_candidate
         self._path = self._source_path
         self._clear_status()
         if self._path:
-            self._expected_source = QUrl.fromLocalFile(str(self._path))
+            self._expected_source = requested_source
+            if reuse_loaded_source:
+                # Windows Qt emits no new media events for setSource(the_same_url).
+                # Keep the live Draft/Final binding and its timeline instead of
+                # arming a watchdog that can only end in a false timeout.
+                self._media_loading = False
+                self._ensure_video_output()
+                self._set_available(True)
+                self._show_video()
+                self._update_timeline(self.player.position())
+                return
             self._stop_current_playback()
             self._reset_timeline()
             self._show_placeholder("Готовим первый кадр…")
