@@ -8,6 +8,7 @@ from app.composition_planning import (
     _AtomicState,
     _calibrate_layout_timeline,
     _containment,
+    _safe_area_containment,
     build_composition_plan,
 )
 from app.creative_contracts import (
@@ -237,6 +238,30 @@ def test_target_handoff_resets_only_when_smooth_track_would_clip_new_target() ->
     )
     assert "TARGET_SWITCH_TIMELY:60" in plan.diagnostics
     assert "CROP_RESET_FOR_TARGET_TRACK_SAFETY:60" in plan.diagnostics
+
+
+def test_target_handoff_resets_when_raw_crop_would_leave_person_at_safe_area_edge() -> None:
+    targets = (
+        _target("speaker-left", AttentionTarget.SPEAKER, 0, 60, "evidence-left", target_ref="speaker-left"),
+        _target("speaker-right", AttentionTarget.SPEAKER, 60, 120, "evidence-right", target_ref="speaker-right"),
+    )
+    observations = (
+        _observation("left", 30, AttentionTarget.SPEAKER, "speaker-left", "evidence-left", 0.28),
+        _observation("right", 90, AttentionTarget.SPEAKER, "speaker-right", "evidence-right", 0.34),
+    )
+    config = CompositionPlannerConfig(minimum_hold_frames=120, switch_cooldown_frames=120)
+
+    plan = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080, config=config,
+    )
+
+    handoff = next(item for item in plan.segments if item.output.start_frame == 60)
+    assert handoff.target_ref == "speaker-right"
+    assert handoff.movement_reason == "target_switch"
+    assert len(handoff.crop_keyframes) == 1
+    assert _containment(observations[1].bounds, handoff.crop) == pytest.approx(1)
+    assert _safe_area_containment(observations[1].bounds, handoff.crop, config) >= 0.82
+    assert "CROP_FALLBACK_TARGET:60" in plan.diagnostics
 
 
 def test_story_short_uses_actual_crop_and_blocks_an_uncontainable_group() -> None:

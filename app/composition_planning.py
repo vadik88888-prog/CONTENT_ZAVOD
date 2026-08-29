@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.4.target-handoff.1"
+COMPOSITION_PLANNER_VERSION = "7J.5.safe-track-fallback.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -485,25 +485,52 @@ class CompositionPlanner:
             )
             fallback = item.fallback
             layout = item.layout
-            track_containment = _track_minimum_containment(keyframes, item.state.bounds) if item.state else 1.0
-            if track_containment < self.config.minimum_target_containment and item.state is not None:
+            track_requires_recovery = (
+                _track_requires_safety_recovery(keyframes, item.state.bounds, self.config)
+                if item.state else False
+            )
+            if track_requires_recovery and item.state is not None:
                 # A bounded pan can finish on the new target while leaving it
-                # clipped at the beginning of a target handoff. Final-crop
-                # containment alone therefore is not enough. Reset only this
-                # transition to the evidence-resolved crop when the complete
-                # interpolated track cannot preserve the protected target.
-                # Normal in-frame motion keeps the bounded, smooth controller.
-                crop = item.desired_crop
-                layout = item.layout
-                fallback = "wider_crop" if item.fallback == "none" else item.fallback
-                keyframes, motion = _crop_track(
-                    _reset_atomic_crop(item, crop), incoming_motion, True, self.config,
-                )
-                crop = keyframes[-1].crop
-                geometry, protected, containment = _geometry_for(
-                    item, crop, observations, source_width, source_height,
-                )
-                diagnostics.append(f"CROP_RESET_FOR_TARGET_TRACK_SAFETY:{item.output.start_frame}")
+                # clipped at the beginning of a target handoff. Checking the
+                # final crop (or merely the raw crop rectangle) misses that
+                # failure: a face can technically be visible while sitting on
+                # the frame edge for several rendered keyframes. Resolve the
+                # declared safe hierarchy as static, evidence-backed crops;
+                # never escape to a candidate-wide blurred presentation.
+                resolved = False
+                for fallback_kind, fallback_crop in _track_safety_fallbacks(
+                    item, observations, result, source_width, source_height, self.config,
+                ):
+                    candidate_keyframes, candidate_motion = _crop_track(
+                        _reset_atomic_crop(item, fallback_crop), incoming_motion, True, self.config,
+                    )
+                    if (
+                        _track_minimum_safe_containment(
+                            candidate_keyframes, item.state.bounds, self.config,
+                        )
+                        < self.config.minimum_target_containment
+                    ):
+                        continue
+                    keyframes, motion = candidate_keyframes, candidate_motion
+                    crop = keyframes[-1].crop
+                    geometry, protected, containment = _geometry_for(
+                        item, crop, observations, source_width, source_height,
+                    )
+                    fallback = "stable_source" if fallback_kind == "last_safe" else "wider_crop"
+                    diagnostics.append(f"CROP_FALLBACK_{fallback_kind.upper()}:{item.output.start_frame}")
+                    if fallback_kind == "target":
+                        # Retain the existing diagnostic name for persisted
+                        # audit tooling while making its safe-area meaning
+                        # explicit above.
+                        diagnostics.append(f"CROP_RESET_FOR_TARGET_TRACK_SAFETY:{item.output.start_frame}")
+                    resolved = True
+                    break
+                if not resolved:
+                    # Preserve the target crop and let the existing assessed
+                    # composition quality report expose the real impossible
+                    # geometry. A fit/blur frame would hide the failure and
+                    # make the candidate look falsely usable.
+                    diagnostics.append(f"TARGET_TRACK_SAFE_AREA_UNRESOLVED:{item.output.start_frame}")
             punch = None
             if item.punch_event is not None:
                 punch = CompositionPunchIn(
@@ -1287,6 +1314,76 @@ def _vertical_fill_crop(source_width: int, source_height: int) -> NormalizedRect
     )
 
 
+def _track_safety_fallbacks(
+    item: _AtomicState,
+    observations: Sequence[TargetObservation],
+    completed: Sequence[CompositionSegmentPlan],
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> tuple[tuple[str, NormalizedRect], ...]:
+    """Return the allowed short-form recovery crops in strict priority order.
+
+    Each option remains an actual 9:16 source crop.  ``last_safe`` is only
+    admitted when it already contains the newly selected target in its safe
+    area, so it cannot resurrect the old on-screen character after a cut.
+    """
+
+    if item.state is None:
+        return ()
+    options: list[tuple[str, NormalizedRect]] = [("target", item.desired_crop)]
+    fill = _vertical_fill_crop(source_width, source_height)
+    human_targets = {
+        AttentionTarget.SPEAKER,
+        AttentionTarget.SUBJECT,
+        AttentionTarget.REACTION,
+        AttentionTarget.GROUP,
+    }
+    if item.target in human_targets:
+        options.append((
+            "wider_person",
+            _centered_rect(item.state.bounds, fill.width, fill.height),
+        ))
+        group_bounds = _visible_human_group_bounds(item, observations)
+        if group_bounds is not None:
+            options.append((
+                "group",
+                _centered_rect(group_bounds, fill.width, fill.height),
+            ))
+    last_safe = next((
+        segment.crop for segment in reversed(completed)
+        if segment.target_ref == item.target_ref
+        and _safe_area_containment(item.state.bounds, segment.crop, config) > 0
+    ), None)
+    if last_safe is not None:
+        options.append(("last_safe", last_safe))
+    unique: list[tuple[str, NormalizedRect]] = []
+    for option in options:
+        if option[1] not in {crop for _, crop in unique}:
+            unique.append(option)
+    return tuple(unique)
+
+
+def _visible_human_group_bounds(
+    item: _AtomicState,
+    observations: Sequence[TargetObservation],
+) -> NormalizedRect | None:
+    human_targets = {
+        AttentionTarget.SPEAKER,
+        AttentionTarget.SUBJECT,
+        AttentionTarget.REACTION,
+        AttentionTarget.GROUP,
+    }
+    members = [
+        observation.bounds for observation in observations
+        if item.output.start_frame <= observation.frame < item.output.end_frame
+        and observation.protected
+        and observation.effective_confidence >= 0.48
+        and observation.target in human_targets
+    ]
+    return _union_rect(tuple(members)) if members else None
+
+
 def _layout_for(
     state: _TargetState,
     fallback: Literal["none", "wider_crop"],
@@ -1670,13 +1767,62 @@ def _containment(bounds: NormalizedRect, crop: NormalizedRect) -> float:
     return intersection / (bounds.width * bounds.height)
 
 
-def _track_minimum_containment(
+def _safe_crop_area(
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect:
+    """Return the subject-safe inset of an actual source crop."""
+
+    inset_x = min(crop.width * config.target_margin_ratio, crop.width / 2 - 0.0000005)
+    inset_y = min(crop.height * config.target_margin_ratio, crop.height / 2 - 0.0000005)
+    return NormalizedRect(
+        x=round(crop.x + inset_x, 8),
+        y=round(crop.y + inset_y, 8),
+        width=round(crop.width - 2 * inset_x, 8),
+        height=round(crop.height - 2 * inset_y, 8),
+    )
+
+
+def _safe_area_containment(
+    bounds: NormalizedRect,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> float:
+    return _containment(bounds, _safe_crop_area(crop, config))
+
+
+def _track_minimum_safe_containment(
     keyframes: Sequence[CompositionCropKeyframe],
     bounds: NormalizedRect,
+    config: CompositionPlannerConfig,
 ) -> float:
-    """Return the weakest protected-target containment across a crop track."""
+    """Return the weakest safe-area containment across every crop keyframe."""
 
-    return min((_containment(bounds, item.crop) for item in keyframes), default=1.0)
+    return min((
+        _safe_area_containment(bounds, item.crop, config) for item in keyframes
+    ), default=1.0)
+
+
+def _track_requires_safety_recovery(
+    keyframes: Sequence[CompositionCropKeyframe],
+    bounds: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> bool:
+    """Protect every moving keyframe while retaining feasible static crops.
+
+    A static evidence-resolved crop is already the best geometry available at
+    a source edge or for an unusually wide observation. A moving crop has no
+    such exemption: it must keep the protected target inside the safe inset at
+    every emitted keyframe, in addition to the existing containment floor.
+    """
+
+    raw = min((_containment(bounds, item.crop) for item in keyframes), default=1.0)
+    if raw < config.minimum_target_containment:
+        return True
+    return len(keyframes) > 1 and (
+        _track_minimum_safe_containment(keyframes, bounds, config)
+        < config.minimum_target_containment
+    )
 
 
 def _rect_values(rect: NormalizedRect) -> tuple[float, float, float, float]:
