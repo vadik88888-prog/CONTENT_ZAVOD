@@ -678,7 +678,9 @@ def test_video_preview_frames_drafts_and_final_outputs_as_a_phone(tmp_path: Path
         assert preview.video.size().height() == 480
         assert preview.media_stage.size().width() == 270
         assert preview.media_stage.size().height() == 480
-        assert preview.active_candidate.text() == "Черновик · Тестовый момент"
+        assert preview.active_candidate.text() == "Creative Preview · Тестовый момент"
+        assert preview.context_badge.objectName() == "creativePreviewStatus"
+        assert preview.context_badge.text() == "●  Актуален"
 
         preview.show_final(vertical, "Тестовый момент")
         assert preview.presentation == "vertical"
@@ -829,8 +831,11 @@ def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(
 
         button_texts = [button.text() for button in screen.findChildren(QPushButton)]
         assert "Повторить черновик" in button_texts
-        assert "Продолжить без этого" in button_texts
+        assert "Пропустить" in button_texts
         assert "Открыть журнал" in button_texts
+        assert screen.findChild(
+            QPushButton, f"retry-candidate-{candidate_id}",
+        ) is not None
         visible_copy = "\n".join(label.text() for label in screen.findChildren(QLabel))
         assert raw_error not in visible_copy
 
@@ -962,9 +967,44 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         assert viewmodel.project is not None
         assert viewmodel.project.selected_candidate_ids == []
         assert screen.production_button.isHidden()
+        screen.resize(980, 720)
+        app.processEvents()
+        change_buttons = [
+            button for button in screen.findChildren(QPushButton)
+            if button.objectName().startswith("draftChange-")
+        ]
+        assert len(change_buttons) == 3
+        assert all(
+            button.contentsRect().width()
+            >= button.fontMetrics().horizontalAdvance(button.text())
+            for button in change_buttons
+        )
+        inspector_values = screen.findChildren(QLabel, "draftInspectorValue")
+        assert len(inspector_values) == 3
+        assert all(label.wordWrap() for label in inspector_values)
+        inspector_fields = [
+            label for label in screen.findChildren(QLabel)
+            if label.property("draftInspectorField")
+        ]
+        assert [label.text() for label in inspector_fields] == [
+            "Стиль", "Субтитры", "Кадрирование",
+        ]
+        assert all(
+            label.contentsRect().width()
+            >= label.fontMetrics().horizontalAdvance(label.text())
+            for label in inspector_fields
+        )
+        assert screen.content_scroll.horizontalScrollBar().maximum() == 0
         assert "Посмотрите каждый" in screen.workflow_hint.text()
+        assert screen.findChild(
+            QPushButton,
+            "draftChange-creative_style-candidate-recommended",
+        ) is not None
 
-        watch = next(button for button in screen.findChildren(QPushButton) if button.text() == "Смотреть черновик")
+        watch = screen.findChild(
+            QPushButton, "draft-preview-candidate-candidate-recommended",
+        )
+        assert watch is not None
         watch.click()
         app.processEvents()
         assert watched and watched[0][0] == draft_preview
@@ -974,14 +1014,20 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         range_updates: list[object] = []
         monkeypatch.setattr(VideoPreview, "set_range", lambda *_args, **_kwargs: range_updates.append(True))
 
-        approve = next(button for button in screen.findChildren(QPushButton) if button.text() == "Подтвердить")
+        approve = screen.findChild(
+            QPushButton, "approve-candidate-candidate-recommended",
+        )
+        assert approve is not None
         approve.click()
         app.processEvents()
         assert viewmodel.project.selected_candidate_ids == ["candidate-recommended"]
         assert screen.production_button.isVisible() and screen.production_button.isEnabled()
         assert range_updates == []
 
-        reject = next(button for button in screen.findChildren(QPushButton) if button.text() == "Отклонить")
+        reject = screen.findChild(
+            QPushButton, "reject-candidate-candidate-recommended",
+        )
+        assert reject is not None
         reject.click()
         app.processEvents()
         assert viewmodel.project.selected_candidate_ids == []
@@ -1052,6 +1098,91 @@ def test_persisted_drafts_override_stale_moments_route_and_final_cta_wins(tmp_pa
         assert restored.review_selected_candidate_ids == [approved_id]
         assert restored.selected_candidate_ids == [approved_id]
         assert screen._derive_flow_step(restored) == "drafts"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_preserved_previous_preview_stays_stale_for_its_exact_candidate(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    candidate_id = "candidate-recommended"
+    draft_preview = tmp_path / "previous-preview.mp4"
+    draft_preview.write_bytes(b"preview")
+    draft_artifact = tmp_path / "previous-draft.json"
+    write_json(draft_artifact, {"candidates": [{
+        "candidate_id": candidate_id,
+        "preview": {"output_file": str(draft_preview)},
+    }]})
+    project.review_selected_candidate_ids = [candidate_id]
+    project.active_preview_candidate_id = candidate_id
+    project.candidate_states[candidate_id] = "draft_ready"
+    project.candidate_draft_statuses[candidate_id] = "ready"
+    project.candidate_draft_artifacts[candidate_id] = str(draft_artifact)
+    # A sibling's recovery marker must never leak into this candidate's
+    # Preview projection.
+    project.candidate_errors["candidate-other"] = (
+        "Не удалось обновить предпросмотр. Предыдущая готовая версия сохранена."
+    )
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    monkeypatch.setattr(VideoPreview, "show_draft", lambda *_args, **_kwargs: None)
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(
+        screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"),
+    )
+
+    def inspector_state() -> QLabel:
+        labels = [
+            label for label in screen.candidate_detail.findChildren(QLabel)
+            if label.property("draftPreviewFreshness") is not None
+        ]
+        assert len(labels) == 1
+        return labels[0]
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        assert screen.preview.context_badge.text() == "●  Актуален"
+        assert inspector_state().text() == "Creative Preview готов"
+
+        project.candidate_errors[candidate_id] = (
+            "Не удалось обновить предпросмотр. "
+            "Предыдущая готовая версия сохранена; можно повторить обновление."
+        )
+        services.projects.save(project)
+        screen._project_changed(project)
+        app.processEvents()
+
+        assert screen.preview.context_badge.text() == "●  Preview устарел"
+        assert screen.preview.context_badge.property("badgeState") == "warning"
+        assert inspector_state().property("draftPreviewFreshness") == "stale"
+        assert inspector_state().text() == (
+            "Обновление не удалось · показана предыдущая версия"
+        )
+        assert not any(
+            label.text() == "Creative Preview готов"
+            for label in screen.candidate_detail.findChildren(QLabel)
+        )
+
+        project.candidate_errors.pop(candidate_id)
+        project.candidate_draft_statuses[candidate_id] = "pending"
+        services.projects.save(project)
+        screen._project_changed(project)
+        app.processEvents()
+
+        assert screen.preview.context_badge.text() == "●  Preview устарел"
+        assert inspector_state().text() == (
+            "Изменения ожидают · показана предыдущая версия"
+        )
     finally:
         screen.close()
         screen.deleteLater()
@@ -1245,7 +1376,8 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert screen._review_action_layout.direction() == QBoxLayout.Direction.LeftToRight
         assert [
             name for name, label in screen._global_step_labels.items() if label.isVisible()
-        ] == ["results"]
+        ] == ["source", "settings", "processing", "results"]
+        assert screen._global_step_labels["settings"].text() == "2  Настр."
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
         assert screen.review_inspector_scroll.horizontalScrollBar().maximum() == 0
         assert screen.content_scroll.horizontalScrollBar().maximum() == 0
@@ -1257,8 +1389,7 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         assert select is not None
         assert select.text() == "Добавить"
         assert select.toolTip() == "Добавить к черновикам"
-        assert isinstance(select.parentWidget().layout(), QBoxLayout)
-        assert select.parentWidget().layout().direction() == QBoxLayout.Direction.TopToBottom
+        assert isinstance(select.parentWidget().layout(), QGridLayout)
         QTest.mouseClick(select, Qt.MouseButton.LeftButton)
         app.processEvents()
         assert select.text() == "Убрать"
@@ -1289,10 +1420,11 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         wide_select = screen.findChild(QPushButton, "select-candidate-candidate-recommended")
         assert wide_select is not None
         assert wide_select.text() == "Убрать"
-        assert isinstance(wide_select.parentWidget().layout(), QBoxLayout)
-        assert wide_select.parentWidget().layout().direction() == QBoxLayout.Direction.LeftToRight
+        assert isinstance(wide_select.parentWidget().layout(), QGridLayout)
         controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
         assert controls is not None
+        assert isinstance(controls.layout(), QGridLayout)
+        assert controls.layout().columnCount() == 4
         detail_layout = screen.candidate_detail.layout()
         controls_index = next(
             index for index in range(detail_layout.count())
@@ -1557,9 +1689,14 @@ def test_real_shell_client_matrix_keeps_project_ctas_and_persisted_text_responsi
             if screen._compact_action_layout:
                 assert screen.stage_actions.height() <= 100
                 assert screen.content_scroll.viewport().height() >= 140
-                assert [
+                visible_steps = [
                     name for name, label in screen._global_step_labels.items() if label.isVisible()
-                ] == ["results"]
+                ]
+                if screen.width() < screen._COMPLETE_STEPPER_MINIMUM_WIDTH:
+                    assert visible_steps == ["results"]
+                else:
+                    assert visible_steps == ["source", "settings", "processing", "results"]
+                    assert screen._global_step_labels["settings"].text() == "2  Настр."
             else:
                 assert screen.workflow_hint.isVisible()
                 assert screen.workflow_hint.width() > 0
@@ -1853,7 +1990,9 @@ def test_drafts_hide_moment_selection_toolbar_and_filters(tmp_path: Path, monkey
         assert not any(button.text() == "Выбрать рекомендованные" for button in screen.findChildren(QPushButton))
         assert not any(button.text() == "Снять выбор" for button in screen.findChildren(QPushButton))
         assert not screen.findChildren(QFrame, "reviewFilters")
-        assert any(button.text() == "Исходный фрагмент" for button in screen.findChildren(QPushButton))
+        assert screen.findChild(
+            QPushButton, "preview-candidate-candidate-recommended",
+        ) is not None
     finally:
         screen.close()
         screen.deleteLater()

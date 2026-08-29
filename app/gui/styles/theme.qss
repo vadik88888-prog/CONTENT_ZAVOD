@@ -50,6 +50,7 @@ QFrame#dropZone,
 QFrame#preview,
 QFrame#settingsProductionPreview,
 QFrame#setup-card,
+QFrame#setupSourceSummary,
 QFrame#setupSummary,
 QFrame#processingSummary,
 QFrame#processingStages,
@@ -138,8 +139,10 @@ QPushButton#primary:hover { background: @PRIMARY_HOVER@; border-color: @PRIMARY_
 QPushButton#primary:pressed { background: @PRIMARY@; }
 QPushButton#primary:disabled { color: @MUTED@; background: @ACCENT@; border-color: @BORDER@; }
 
-QPushButton#secondaryAction { background: @MAIN@; border-color: @BORDER@; }
-QPushButton#secondaryAction:hover { background: @ACCENT@; border-color: @PRIMARY_HOVER@; }
+QPushButton#secondaryAction,
+QPushButton[secondaryAction="true"] { background: @MAIN@; border-color: @BORDER@; }
+QPushButton#secondaryAction:hover,
+QPushButton[secondaryAction="true"]:hover { background: @ACCENT@; border-color: @PRIMARY_HOVER@; }
 QPushButton#danger { color: @ERROR@; background: @MAIN@; border-color: @ERROR@; }
 QPushButton#danger:hover { color: @PRIMARY_TEXT@; background: @ACCENT@; border-color: @ERROR@; }
 
@@ -154,12 +157,12 @@ QPushButton#nav {
 QPushButton#nav:hover { background: @ELEVATED@; color: @PRIMARY_TEXT@; }
 QPushButton#nav:checked { color: @PRIMARY_TEXT@; background: @ACCENT@; border-color: @PRIMARY@; }
 QPushButton#navNewProject {
-  color: @PRIMARY@;
-  background: @MAIN@;
+  color: @APP_BG@;
+  background: @PRIMARY@;
   border: 1px solid @PRIMARY@;
   font-weight: 700;
 }
-QPushButton#navNewProject:hover { color: @PRIMARY_TEXT@; background: @ACCENT@; }
+QPushButton#navNewProject:hover { color: @APP_BG@; background: @PRIMARY_HOVER@; border-color: @PRIMARY_HOVER@; }
 
 QLineEdit,
 QComboBox,
@@ -219,7 +222,7 @@ QPushButton#setupChoice {
   background: @SIDEBAR@;
   border: 1px solid @BORDER@;
   text-align: left;
-  padding: 7px 9px;
+  padding: 6px 8px;
 }
 QPushButton#setupChoice:hover { border-color: @PRIMARY@; background: @ACCENT@; }
 QPushButton#setupChoice:checked,
@@ -275,6 +278,10 @@ QLabel#momentState[surfacingState="RECOMMENDED"] { color: @PRIMARY@; border-colo
 QLabel#momentState[surfacingState="AVAILABLE"] { color: @SUCCESS@; border-color: @SUCCESS@; }
 QLabel#momentState[surfacingState="BLOCKED"] { color: @MUTED@; }
 QLabel#candidateBlockedReason { color: @MUTED@; font-size: 12px; }
+QPushButton[candidateAction="true"] {
+  min-height: 18px;
+  padding: 6px 8px;
+}
 QFrame#draftInspector {
   background: @MAIN@;
   border: 1px solid @BORDER@;
@@ -283,6 +290,24 @@ QFrame#draftInspector {
 
 QWidget#phoneStage { background: @APP_BG@; border: 1px solid @BORDER@; border-radius: 16px; }
 QLabel#active-candidate { color: @PRIMARY_TEXT@; }
+QLabel#previewBadge,
+QLabel#creativePreviewStatus,
+QLabel#finalPreviewStatus {
+  color: @SUCCESS@;
+  background: @MAIN@;
+  border: 1px solid @SUCCESS@;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+QLabel#previewBadge[badgeState="warning"],
+QLabel#creativePreviewStatus[badgeState="warning"],
+QLabel#finalPreviewStatus[badgeState="warning"] {
+  color: @WARNING@;
+  border-color: @WARNING@;
+}
+QPushButton[finalAction="true"] { padding: 7px 9px; }
 QLabel#candidateThumbnail,
 QLabel#finalThumbnail,
 QLabel#projectPoster,

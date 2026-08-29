@@ -9,10 +9,10 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QPoint
-from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QLabel, QPushButton
 
 from app.gui.main_window import MainWindow
-from app.gui.models import DesktopSettings
+from app.gui.models import DesktopSettings, RunStatus
 from app.gui.screens.onboarding_screen import OnboardingDialog
 from app.gui.screens.projects_screen import ProjectsScreen
 from app.gui.screens.settings_screen import SettingsScreen
@@ -141,7 +141,16 @@ def test_projects_source_workspace_reflows_without_hidden_horizontal_clip(
             if compact else QBoxLayout.Direction.LeftToRight
         )
         assert screen._top_layout.direction() == expected_direction
+        assert screen._source_methods_layout.direction() == expected_direction
         assert screen._url_row_layout.direction() == expected_direction
+        assert screen._source_divider_layout.direction() == (
+            QBoxLayout.Direction.LeftToRight
+            if compact
+            else QBoxLayout.Direction.TopToBottom
+        )
+        expected_divider = QFrame.Shape.HLine if compact else QFrame.Shape.VLine
+        assert screen.source_divider_before.frameShape() == expected_divider
+        assert screen.source_divider_after.frameShape() == expected_divider
 
         # A disabled horizontal scrollbar is not sufficient: every visible
         # source/recent-project action must actually fit in the viewport.
@@ -185,7 +194,12 @@ def test_hostile_persisted_project_cards_reflow_across_logical_client_widths(tmp
                 host.minimumSizeHint().width(),
             )
             assert host.width() <= viewport.width()
-            expected_columns = 3 if viewport.width() >= 1_198 else 2 if viewport.width() >= 798 else 1
+            expected_columns = (
+                4 if viewport.width() >= 1_120
+                else 3 if viewport.width() >= 840
+                else 2 if viewport.width() >= 600
+                else 1
+            )
             assert screen._rendered_columns == expected_columns
 
             for index in range(screen.list_layout.count()):
@@ -214,6 +228,68 @@ def test_hostile_persisted_project_cards_reflow_across_logical_client_widths(tmp
         screen.url_input.setText("https://example.test/" + "very-long-url-token-" * 30)
         application.processEvents()
         assert screen.content_scroll.widget().width() <= screen.content_scroll.viewport().width()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        application.processEvents()
+
+
+def test_unchanged_projects_refresh_reuses_exact_cards_and_presentations(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    application = _application()
+    services = _services(tmp_path, project_count=6)
+    screen = ProjectsScreen(ProjectsViewModel(services))
+
+    try:
+        screen.resize(1280, 720)
+        screen.refresh()
+        cards = [
+            screen.list_layout.itemAt(index).widget()
+            for index in range(screen.list_layout.count())
+        ]
+        rebuilds = 0
+        run_reads = 0
+        original_render_cards = screen._render_cards
+        original_runs_for = type(services).runs_for
+
+        def tracked_render_cards() -> None:
+            nonlocal rebuilds
+            rebuilds += 1
+            original_render_cards()
+
+        def tracked_runs_for(self, project):
+            nonlocal run_reads
+            run_reads += 1
+            return original_runs_for(self, project)
+
+        monkeypatch.setattr(screen, "_render_cards", tracked_render_cards)
+        monkeypatch.setattr(type(services), "runs_for", tracked_runs_for)
+
+        screen.refresh()
+
+        assert rebuilds == 0
+        assert run_reads == 0
+        assert [
+            screen.list_layout.itemAt(index).widget()
+            for index in range(screen.list_layout.count())
+        ] == cards
+
+        # A run can transition without rewriting project.json. Its exact
+        # persisted identity/revision must still invalidate the card cache.
+        project = services.list_projects()[0]
+        run = services.runs.create(project, {}, {}, "test")
+        screen.refresh()
+        assert rebuilds == 1
+        assert run_reads == 6
+        assert screen._active_project_id == project.project_id
+
+        run.status = RunStatus.CANCELLED
+        services.runs.save(run)
+        screen.refresh()
+        assert rebuilds == 2
+        assert run_reads == 12
+        assert screen._active_project_id is None
     finally:
         screen.close()
         screen.deleteLater()

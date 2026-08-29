@@ -231,7 +231,18 @@ class VideoPreview(QFrame):
         make_label_shrinkable(self.active_candidate)
         self.active_candidate.setStyleSheet("font-weight: 600;")
         self.active_candidate.hide()
-        layout.addWidget(self.active_candidate)
+        self.context_badge = QLabel()
+        self.context_badge.setObjectName("previewBadge")
+        self.context_badge.setProperty("badgeState", "ready")
+        self.context_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.context_badge.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.context_badge.hide()
+        preview_header = QHBoxLayout()
+        preview_header.setContentsMargins(0, 0, 0, 0)
+        preview_header.setSpacing(8)
+        preview_header.addWidget(self.active_candidate, 1)
+        preview_header.addWidget(self.context_badge)
+        layout.addLayout(preview_header)
         layout.addWidget(self.media_stage, 0, Qt.AlignmentFlag.AlignHCenter)
         self.preview_status = QLabel()
         self.preview_status.setObjectName("muted")
@@ -533,6 +544,7 @@ class VideoPreview(QFrame):
             path, presentation="source", title="Исходное видео", source_codec=source_codec,
             poster_cache_directory=poster_cache_directory,
         )
+        self.set_context_badge("", object_name="previewBadge")
 
     def show_draft(
         self, path: str | Path | None, candidate_title: str | None = None, *,
@@ -542,8 +554,11 @@ class VideoPreview(QFrame):
 
         suffix = f" · {candidate_title}" if candidate_title else ""
         self.set_file(
-            path, presentation="vertical", title=f"Черновик{suffix}",
+            path, presentation="vertical", title=f"Creative Preview{suffix}",
             poster_cache_directory=poster_cache_directory,
+        )
+        self.set_context_badge(
+            "●  Актуален", state="ready", object_name="creativePreviewStatus",
         )
 
     def show_final(
@@ -557,6 +572,26 @@ class VideoPreview(QFrame):
             path, presentation="vertical", title=f"Готовый ролик{suffix}",
             poster_cache_directory=poster_cache_directory,
         )
+        self.set_context_badge(
+            "●  Готово", state="ready", object_name="finalPreviewStatus",
+        )
+
+    def set_context_badge(
+        self,
+        text: str,
+        *,
+        state: str = "ready",
+        object_name: str = "previewBadge",
+    ) -> None:
+        """Label the durable media state without competing with load errors."""
+
+        self.context_badge.setObjectName(object_name)
+        self.context_badge.setText(text)
+        self.context_badge.setProperty("badgeState", state)
+        self.context_badge.style().unpolish(self.context_badge)
+        self.context_badge.style().polish(self.context_badge)
+        self.context_badge.setVisible(bool(text))
+        self._refresh_layout_geometry()
 
     def set_file(
         self,
@@ -695,6 +730,7 @@ class VideoPreview(QFrame):
         self._source_codec = self._normalise_source_codec(source_codec)
         self._force_compatible_proxy = force_compatible_proxy
         self._set_presentation("source")
+        self.set_context_badge("", object_name="previewBadge")
         self._active_candidate_title = candidate_title or "Выбранный кандидат"
         set_responsive_text(
             self.active_candidate,

@@ -252,7 +252,6 @@ class FinalResultsWorkspace(QWidget):
         self._info_content_layout.addWidget(self.warning_box)
         self._info_content_layout.addStretch()
         self.info_scroll.setWidget(self._info_host)
-        self._info_layout.addWidget(self.info_scroll, 1)
         self._actions_heading = QLabel("Действия")
         self._actions_heading.setStyleSheet("font-weight: 600;")
         self._info_layout.addWidget(self._actions_heading)
@@ -260,16 +259,24 @@ class FinalResultsWorkspace(QWidget):
         # Opening the selected, metadata-bound output is the focused final
         # action.  Folder navigation and returning to projects stay quiet.
         self.open_video_button.setObjectName("secondaryAction")
+        self.open_video_button.setProperty("finalAction", True)
         self.open_video_button.clicked.connect(self._open_active_video)
         self.show_folder_button = QPushButton("▢  Показать в папке")
+        self.show_folder_button.setObjectName("showFinalFolder")
+        self.show_folder_button.setProperty("finalAction", True)
         self.show_folder_button.clicked.connect(self._show_active_folder)
         self.rerender_button = QPushButton("↻  Собрать заново")
         self.rerender_button.setObjectName("secondaryAction")
+        self.rerender_button.setProperty("finalAction", True)
         self.rerender_button.setToolTip("Повторная сборка с текущим оформлением без нового поиска моментов.")
         self.rerender_button.clicked.connect(self._request_rerender)
         self._info_layout.addWidget(self.open_video_button)
         self._info_layout.addWidget(self.show_folder_button)
         self._info_layout.addWidget(self.rerender_button)
+        # Keep the selected-output actions in the initial viewport.  Metadata
+        # and potentially long quality warnings remain independently scrollable
+        # below, so a warning can never push the primary actions off-screen.
+        self._info_layout.addWidget(self.info_scroll, 1)
         self._place_body_panels("standard")
         self._root_layout.addWidget(self._body_host)
 
@@ -388,25 +395,25 @@ class FinalResultsWorkspace(QWidget):
         if profile == "dense":
             list_width = (260, 300)
             info_width = (250, 285)
-            frame_size = (204, 363)
-            body_height = 900 if body_mode == "stacked" else 465
+            frame_size = (220, 391)
+            body_height = 930 if body_mode == "stacked" else 500
             thumbnail_size = (52, 92)
             spacing = 8
             panel_margins = 9
             summary_margins = (10, 8)
-            warning_height = 68
+            warning_height = 56
             self.heading.setStyleSheet("font-size: 22px; font-weight: 700;")
             summary_value_style = "font-size: 17px; font-weight: 700;"
         elif profile == "compact":
             list_width = (280, 320)
             info_width = (270, 320)
-            frame_size = (220, 391)
-            body_height = 492
+            frame_size = (252, 448)
+            body_height = 560
             thumbnail_size = (60, 106)
             spacing = 10
             panel_margins = 11
             summary_margins = (14, 10)
-            warning_height = 82
+            warning_height = 68
             self.heading.setStyleSheet("font-size: 24px; font-weight: 700;")
             summary_value_style = "font-size: 19px; font-weight: 700;"
         else:
@@ -417,13 +424,13 @@ class FinalResultsWorkspace(QWidget):
             # viewport.  The old 420 px cap left a five-pixel hidden range at
             # full-HD once the scroll frame and its vertical bar were present.
             info_width = (300, 350)
-            frame_size = (236, 420)
-            body_height = 520
+            frame_size = (288, 512)
+            body_height = 624
             thumbnail_size = (72, 128)
             spacing = 14
             panel_margins = 16
             summary_margins = (18, 12)
-            warning_height = 108
+            warning_height = 84
             self.heading.setStyleSheet("")
             summary_value_style = ""
 

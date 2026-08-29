@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -85,6 +86,23 @@ _CREATIVE_STYLE_CHOICES = (
     ("Educational", "documentary"),
     ("Minimal Premium", "minimal"),
 )
+_GLOBAL_FLOW_COMPACT_LABELS = {
+    "source": "1  Источник",
+    "settings": "2  Настр.",
+    "processing": "3  Обработка",
+    "results": "4  Результаты",
+}
+
+
+@dataclass(frozen=True)
+class _DraftPreviewProjection:
+    """One candidate-owned projection of the visible Preview state."""
+
+    stale: bool
+    badge_text: str
+    badge_state: str
+    inspector_text: str
+    inspector_state: str
 
 
 def _populate_creative_styles(combo: QComboBox) -> None:
@@ -147,6 +165,10 @@ class ProjectScreen(QWidget):
     # 1,000 logical pixels after page margins with the shipped Windows font.
     # Required scaled-laptop clients around 911–937px must retain short labels.
     _COMPACT_ACTION_BREAKPOINT = 1100
+    # Four abbreviated steps remain readable inside the shell at scaled
+    # desktop widths.  Below this genuinely narrow client only the current
+    # step stays visible so the row never creates horizontal overflow.
+    _COMPLETE_STEPPER_MINIMUM_WIDTH = 620
 
     _SAME_SOURCE_BROLL_TEXT = "Использовать дополнительные кадры из этого видео"
     _SAME_SOURCE_BROLL_COMPACT_TEXT = "Использовать дополнительные кадры\nиз этого видео"
@@ -722,6 +744,11 @@ class ProjectScreen(QWidget):
             # above 1,100 px, then collapse again as the same medium layout is
             # widened.  Returning without releasing that cached minimum kept
             # the sticky bar tall until the next breakpoint was crossed.
+            show_complete_stepper = self.width() >= self._COMPLETE_STEPPER_MINIMUM_WIDTH
+            for divider in self._global_step_dividers:
+                divider.setVisible(not compact_actions or show_complete_stepper)
+            self._apply_compact_chrome()
+            self._reflow_candidate_boundary_controls()
             self._refresh_stage_action_geometry()
             QTimer.singleShot(0, self._refresh_stage_action_geometry)
             self._queue_drafts_workspace_geometry()
@@ -760,8 +787,9 @@ class ProjectScreen(QWidget):
         self._header_layout.setSpacing(6 if compact_actions else 8)
         self._stepper_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._stepper_layout.setSpacing(0)
+        show_complete_stepper = self.width() >= self._COMPLETE_STEPPER_MINIMUM_WIDTH
         for divider in self._global_step_dividers:
-            divider.setVisible(not compact_actions)
+            divider.setVisible(not compact_actions or show_complete_stepper)
         self._setup_action_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._processing_actions_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self._review_header_layout.setDirection(action_direction)
@@ -787,7 +815,14 @@ class ProjectScreen(QWidget):
             self.setup_summary.setMinimumWidth(250)
             self.setup_summary.setMaximumWidth(330)
         self.processing_summary.setMaximumWidth(16_777_215)
+        # Give Creative Preview visual priority at ordinary desktop widths,
+        # while keeping a bounded phone stage when the three panels stack.
+        self.preview.set_vertical_frame_size(
+            252 if compact else 288,
+            448 if compact else 512,
+        )
         self._apply_compact_chrome()
+        self._reflow_candidate_boundary_controls()
         self._review_body_layout.invalidate()
         self._review_body_layout.activate()
         self._refresh_stage_action_geometry()
@@ -806,6 +841,7 @@ class ProjectScreen(QWidget):
         """Keep the current route and actions readable without tall chrome."""
 
         compact = bool(self._compact_action_layout)
+        ultra_compact = self.width() < self._COMPLETE_STEPPER_MINIMUM_WIDTH
         current_step = global_step or _GLOBAL_STEP_FOR_FLOW.get(self._flow_step, "settings")
         self.back_button.setText("←" if compact else "← Проекты")
         self.folder.setText("Папка" if compact else "Открыть папку")
@@ -820,8 +856,14 @@ class ProjectScreen(QWidget):
             button.setText(compact_text if compact else full_text)
             button.setToolTip(full_text)
         self.status.setVisible(not compact)
-        for name, label in self._global_step_labels.items():
-            label.setVisible(not compact or name == current_step)
+        for index, (name, full_label) in enumerate(_GLOBAL_FLOW_STEPS, start=1):
+            label = self._global_step_labels[name]
+            label.setText(
+                _GLOBAL_FLOW_COMPACT_LABELS[name]
+                if compact and not ultra_compact
+                else f"{index}  {full_label}"
+            )
+            label.setVisible(not ultra_compact or name == current_step)
         self.same_source_broll.setText(
             self._SAME_SOURCE_BROLL_COMPACT_TEXT if compact else self._SAME_SOURCE_BROLL_TEXT
         )
@@ -912,6 +954,11 @@ class ProjectScreen(QWidget):
             inspector_height = self._set_widget_layout_natural_height(
                 self.candidate_detail
             )
+            # The wide Draft workspace deliberately equalises the three panel
+            # shells to the dominant phone preview.  Keep the inspector itself
+            # at its measured height and aligned to the top of that shell so
+            # the first editable option never drifts downward.
+            self.candidate_detail.setMaximumHeight(inspector_height)
             # Two pixels account for the themed panel frame.  Pin the current
             # natural extent in both directions: a Preferred child otherwise
             # retains its former narrow-column height after wide→narrow and
@@ -940,6 +987,7 @@ class ProjectScreen(QWidget):
                 QSizePolicy.Policy.Preferred,
             )
         else:
+            self.candidate_detail.setMaximumHeight(16_777_215)
             for panel in (
                 self.review_list_panel,
                 self.review_preview_panel,
@@ -1003,7 +1051,9 @@ class ProjectScreen(QWidget):
                 scroll.verticalScrollBar().setRange(0, 0)
                 scroll.hide()
                 content.setParent(panel)
-                panel_layout.addWidget(content)
+                panel_layout.addWidget(
+                    content, 0, Qt.AlignmentFlag.AlignTop,
+                )
                 # Once the inner viewport no longer owns width negotiation,
                 # ignore its historic wide-column size hint.  Wrapped labels
                 # and button rails then recompute height-for-width against the
@@ -1132,20 +1182,31 @@ class ProjectScreen(QWidget):
         setup_main_layout.addWidget(setup_heading)
         setup_main_layout.addWidget(setup_copy)
         setup_copy.hide()
-        self.setup_source_summary = self._card("Ваше видео")
+        self.setup_source_summary = QFrame()
+        self.setup_source_summary.setObjectName("setupSourceSummary")
+        setup_source_layout = QHBoxLayout(self.setup_source_summary)
+        setup_source_layout.setContentsMargins(12, 10, 12, 10)
+        setup_source_layout.setSpacing(12)
         self.setup_source_summary_text = QLabel()
         self.setup_source_summary_text.setObjectName("muted")
         make_label_shrinkable(self.setup_source_summary_text)
         self.setup_source_poster = QLabel("Готовим кадр…")
         self.setup_source_poster.setObjectName("projectPoster")
         self.setup_source_poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setup_source_poster.setFixedHeight(92)
+        self.setup_source_poster.setFixedSize(154, 76)
         self.setup_source_poster.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed,
         )
         self._project_thumbnail_labels.append(self.setup_source_poster)
-        self.setup_source_summary.layout().addWidget(self.setup_source_poster)
-        self.setup_source_summary.layout().addWidget(self.setup_source_summary_text)
+        source_copy_layout = QVBoxLayout()
+        source_copy_layout.setContentsMargins(0, 0, 0, 0)
+        source_copy_layout.setSpacing(4)
+        setup_source_heading = QLabel("Ваше видео")
+        setup_source_heading.setObjectName("setupSectionTitle")
+        source_copy_layout.addWidget(setup_source_heading)
+        source_copy_layout.addWidget(self.setup_source_summary_text)
+        setup_source_layout.addWidget(self.setup_source_poster)
+        setup_source_layout.addLayout(source_copy_layout, 1)
         self.recommendation_banner = QFrame()
         self.recommendation_banner.setObjectName("recommendationBanner")
         recommendation_layout = QHBoxLayout(self.recommendation_banner)
@@ -1186,7 +1247,7 @@ class ProjectScreen(QWidget):
         make_label_shrinkable(self.setup_summary_text)
         self.setup_demo_preview = VideoPreview()
         self.setup_demo_preview.setObjectName("settingsProductionPreview")
-        self.setup_demo_preview.set_vertical_frame_size(180, 320)
+        self.setup_demo_preview.set_vertical_frame_size(210, 373)
         self.setup_demo_preview.set_frame_sink_output(True)
         self.setup_demo_preview.controls_host.hide()
         self.setup_demo_preview.player.setLoops(QMediaPlayer.Loops.Infinite)
@@ -1885,7 +1946,9 @@ class ProjectScreen(QWidget):
             launch = f"{kind} · {self._run_status_text(latest.status)}"
         set_responsive_text(
             self.processing_summary_text,
-            f"{launch}\nРежим: {mode}\nРезультаты сохраняются в проекте по мере готовности."
+            f"{launch}\n{style_label} · {caption.label if caption else 'Editorial'} · {platform}\n"
+            f"Режим: {mode} · цель: {count} роликов\n"
+            "Результаты сохраняются в проекте по мере готовности."
         )
 
     @staticmethod
@@ -2223,6 +2286,82 @@ class ProjectScreen(QWidget):
                 signature.append((str(name), str(raw_path), "missing"))
         return tuple(signature)
 
+    @staticmethod
+    def _draft_preview_projection(
+        project: DesktopProject | None,
+        candidate_id: str,
+        *,
+        has_preview: bool,
+    ) -> _DraftPreviewProjection:
+        """Project current/stale copy from one exact persisted candidate.
+
+        A pending or running revision deliberately keeps its previous immutable
+        Preview visible.  A failed targeted rebuild does the same after the
+        service restores the candidate to ``ready``; that recovery boundary is
+        recorded in the candidate-owned error message rather than the combined
+        lifecycle state.  Both cases must therefore remain visibly stale.
+        """
+
+        if project is None:
+            return _DraftPreviewProjection(
+                stale=False,
+                badge_text="●  Актуален" if has_preview else "",
+                badge_state="ready" if has_preview else "warning",
+                inspector_text=(
+                    "Creative Preview готов" if has_preview else "Ожидает Creative Preview"
+                ),
+                inspector_state="finalReady" if has_preview else "warning",
+            )
+        draft_status = str(project.candidate_draft_statuses.get(candidate_id) or "")
+        candidate_state = str(project.candidate_states.get(candidate_id) or "")
+        candidate_error = str(project.candidate_errors.get(candidate_id) or "")
+        preserved_previous = (
+            has_preview
+            and "предыдущая готовая версия сохранена" in candidate_error.casefold()
+        )
+        if preserved_previous:
+            return _DraftPreviewProjection(
+                stale=True,
+                badge_text="●  Preview устарел",
+                badge_state="warning",
+                inspector_text="Обновление не удалось · показана предыдущая версия",
+                inspector_state="warning",
+            )
+        if has_preview and draft_status in {"pending", "running"}:
+            detail = (
+                "Preview обновляется · показана предыдущая версия"
+                if draft_status == "running"
+                else "Изменения ожидают · показана предыдущая версия"
+            )
+            return _DraftPreviewProjection(
+                stale=True,
+                badge_text="●  Preview устарел",
+                badge_state="warning",
+                inspector_text=detail,
+                inspector_state="warning",
+            )
+        if has_preview:
+            return _DraftPreviewProjection(
+                stale=False,
+                badge_text="●  Актуален",
+                badge_state="ready",
+                inspector_text="Creative Preview готов",
+                inspector_state="finalReady",
+            )
+        if candidate_state == "draft_failed" or draft_status == "failed":
+            detail = "Нужен повтор черновика"
+        elif candidate_state == "draft_planning" or draft_status == "running":
+            detail = "Creative Preview обновляется"
+        else:
+            detail = "Ожидает Creative Preview"
+        return _DraftPreviewProjection(
+            stale=False,
+            badge_text="",
+            badge_state="warning",
+            inspector_text=detail,
+            inspector_state="warning",
+        )
+
     def _update_candidate_review(self, project: DesktopProject) -> None:
         layout = self.candidate_review_layout
         self._thumbnail_loader.replace_pending()
@@ -2401,8 +2540,9 @@ class ProjectScreen(QWidget):
         else:
             set_responsive_text(
                 self.review_metrics_text,
-                f"Найдено {len(all_candidates)} · RECOMMENDED {recommended_count} · "
-                f"AVAILABLE {available_count} · BLOCKED {unavailable_count}"
+                f"Найдено {len(all_candidates)} · выбрано {selected_moment_count} · "
+                f"рекомендуем {recommended_count} · доступны {available_count} · "
+                f"недоступны {unavailable_count}"
             )
         if workflow_step == "candidates":
             # Moment selection belongs to the source-moment phase.  Drafts
@@ -2449,15 +2589,15 @@ class ProjectScreen(QWidget):
             filters_layout.setContentsMargins(0, 0, 0, 0)
             filters_layout.setSpacing(6)
             filter_combo = QComboBox()
-            filter_combo.addItem("Рекомендованные", "recommended")
-            filter_combo.addItem("Все моменты", "all")
+            filter_combo.addItem("Рекомендуем" if compact_actions else "Рекомендованные", "recommended")
+            filter_combo.addItem("Все" if compact_actions else "Все моменты", "all")
             filter_combo.addItem("Не выбраны", "unselected")
-            filter_combo.addItem("Высокий потенциал", "high")
-            filter_combo.addItem("Средний потенциал", "medium")
+            filter_combo.addItem("Высокий" if compact_actions else "Высокий потенциал", "high")
+            filter_combo.addItem("Средний" if compact_actions else "Средний потенциал", "medium")
             self._set_combo_data(filter_combo, self._candidate_filter)
             filter_combo.currentIndexChanged.connect(lambda _index: self._change_candidate_filter(str(filter_combo.currentData())))
             sort_combo = QComboBox()
-            sort_combo.addItem("Сначала сильные", "recommendation")
+            sort_combo.addItem("Сильные" if compact_actions else "Сначала сильные", "recommendation")
             sort_combo.addItem("По времени", "time")
             sort_combo.addItem("По потенциалу", "potential")
             self._set_combo_data(sort_combo, self._candidate_sort)
@@ -2499,10 +2639,15 @@ class ProjectScreen(QWidget):
             start, end = format_seconds(start_value), format_seconds(end_value)
             draft_status = project.candidate_draft_statuses.get(candidate_id)
             export_status = project.candidate_export_statuses.get(candidate_id)
+            preview_projection = self._draft_preview_projection(
+                project,
+                candidate_id,
+                has_preview=candidate_id in self._draft_preview_paths,
+            )
             status_label = {
-                "analyzed": "можно посмотреть и добавить к черновикам", "draft_planning": "готовим черновик",
-                "draft_ready": "черновик готов к проверке", "draft_failed": "черновик не готов",
-                "selected": "подтверждён", "production_rendering": "создаём готовый ролик", "rendered": "готово",
+                "analyzed": "Можно добавить к черновикам", "draft_planning": "Готовим черновик",
+                "draft_ready": "Черновик готов к проверке", "draft_failed": "Черновик не готов",
+                "selected": "Подтверждён", "production_rendering": "Создаём готовый ролик", "rendered": "Готово",
             }.get(state, "можно посмотреть")
             if state == "draft_ready" and candidate_id not in project.review_selected_candidate_ids:
                 status_label = "черновик не выбран для готового ролика"
@@ -2510,12 +2655,8 @@ class ProjectScreen(QWidget):
                 status_label = "Черновик не создан. Его можно повторить отдельно."
             elif export_status == "failed":
                 status_label = "Готовый ролик не создан. Черновик сохранён и остаётся подтверждённым."
-            elif (
-                workflow_step == "drafts"
-                and candidate_id in project.candidate_draft_artifacts
-                and draft_status in {"pending", "running"}
-            ):
-                status_label = "Обновляем предпросмотр. Предыдущая готовая версия остаётся доступной."
+            elif workflow_step == "drafts" and preview_projection.stale:
+                status_label = preview_projection.inspector_text
             if workflow_step == "candidates" and not candidate_draftable:
                 status_label = "Не прошёл проверку качества · только просмотр"
             frame = QFrame(); frame.setObjectName("card")
@@ -2529,7 +2670,10 @@ class ProjectScreen(QWidget):
             thumbnail = QLabel("Кадр\nзагружается")
             thumbnail.setObjectName("candidateThumbnail")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            thumbnail.setFixedSize(112, 64)
+            thumbnail.setFixedSize(
+                88 if self._compact_action_layout else 104,
+                52 if self._compact_action_layout else 60,
+            )
             self._candidate_thumbnail_labels.setdefault(candidate_id, []).append(thumbnail)
             try:
                 start_seconds = float(start_value)
@@ -2564,7 +2708,11 @@ class ProjectScreen(QWidget):
             title.setStyleSheet("font-weight: 600;")
             information.addWidget(title)
             editorial_state = str(item.get("surfacing_state") or "AVAILABLE")
-            state_badge = QLabel(editorial_state)
+            state_badge = QLabel({
+                "RECOMMENDED": "Рекомендуем",
+                "AVAILABLE": "Доступен",
+                "BLOCKED": "Недоступен",
+            }.get(editorial_state, "Доступен"))
             state_badge.setObjectName("momentState")
             state_badge.setProperty("surfacingState", editorial_state)
             information.addWidget(state_badge, 0, Qt.AlignmentFlag.AlignLeft)
@@ -2588,14 +2736,24 @@ class ProjectScreen(QWidget):
             actions_host = QWidget()
             actions_host.setMinimumWidth(0)
             actions_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            actions = QBoxLayout(
-                QBoxLayout.Direction.TopToBottom
-                if workflow_step != "candidates" or self._compact_action_layout
-                else QBoxLayout.Direction.LeftToRight,
-                actions_host,
-            )
+            actions = QGridLayout(actions_host)
             actions.setContentsMargins(0, 0, 0, 0)
             actions.setSpacing(6)
+            actions.setColumnStretch(0, 1)
+            actions.setColumnStretch(1, 1)
+            action_index = 0
+
+            def add_candidate_action(button: QPushButton, *, span: int = 1) -> None:
+                nonlocal action_index
+                button.setProperty("candidateAction", True)
+                row_index = action_index // 2
+                column_index = action_index % 2
+                if span == 2 and column_index:
+                    action_index += 1
+                    row_index = action_index // 2
+                    column_index = 0
+                actions.addWidget(button, row_index, column_index, 1, span)
+                action_index += span
             status = QLabel(status_label)
             status.setObjectName("muted")
             status.setMaximumWidth(16_777_215)
@@ -2609,72 +2767,84 @@ class ProjectScreen(QWidget):
                 status.setToolTip("Подробности сохранены в журнале проекта.")
             make_label_shrinkable(status)
             row.addWidget(status)
-            source_preview = QPushButton("Исходный фрагмент" if workflow_step == "drafts" else "Просмотреть")
+            source_preview = QPushButton("Источник" if workflow_step == "drafts" else "Смотреть")
             source_preview.setObjectName(f"preview-candidate-{candidate_id}")
+            source_preview.setToolTip("Посмотреть исходный фрагмент")
             source_preview.clicked.connect(lambda _checked=False, value=dict(item): self._preview_candidate(value))
-            actions.addWidget(source_preview)
+            add_candidate_action(source_preview)
             if preview_file and preview_file.is_file():
-                button = QPushButton("Смотреть черновик")
+                button = QPushButton("Creative Preview")
+                button.setObjectName(f"draft-preview-candidate-{candidate_id}")
+                button.setToolTip("Посмотреть Creative Preview этого черновика")
                 button.clicked.connect(
                     lambda _checked=False, path=preview_file, title=str(item.get("title") or item.get("core_idea") or "момент"), value=candidate_id:
                     self._show_draft_preview(path, title, value)
                 )
-                actions.addWidget(button)
+                add_candidate_action(button)
             if state == "draft_ready":
                 if candidate_id in project.review_selected_candidate_ids:
                     approve = QPushButton("Подтвердить")
+                    approve.setObjectName(f"approve-candidate-{candidate_id}")
                     approve.clicked.connect(
                         lambda _checked=False, value=candidate_id: self._set_draft_approval(value, True)
                     )
                     reject = QPushButton("Отклонить")
+                    reject.setObjectName(f"reject-candidate-{candidate_id}")
                     reject.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
-                    actions.addWidget(approve)
-                    actions.addWidget(reject)
+                    add_candidate_action(approve)
+                    add_candidate_action(reject)
                 else:
-                    restore = QPushButton("Вернуть к проверке")
+                    restore = QPushButton("Вернуть")
+                    restore.setObjectName(f"restore-candidate-{candidate_id}")
+                    restore.setToolTip("Вернуть черновик к проверке")
                     restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
-                    actions.addWidget(restore)
+                    add_candidate_action(restore)
             elif state == "selected":
                 if export_status == "failed":
                     retry_export = QPushButton("Повторить экспорт")
+                    retry_export.setObjectName(f"retry-final-candidate-{candidate_id}")
                     retry_export.setToolTip("Повторно создаст готовый ролик из сохранённого черновика; анализ и предпросмотр не повторяются.")
                     retry_export.setDisabled(self.viewmodel.blocked_by_other_project)
                     retry_export.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_final_export(value))
-                    actions.addWidget(retry_export)
+                    add_candidate_action(retry_export)
                 reject = QPushButton("Отклонить")
+                reject.setObjectName(f"reject-candidate-{candidate_id}")
                 reject.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
-                actions.addWidget(reject)
+                add_candidate_action(reject)
             elif state == "draft_failed" and workflow_step == "drafts":
                 if candidate_id in project.review_selected_candidate_ids:
                     if candidate_id in self._draftable_candidates_by_id:
                         retry = QPushButton("Повторить черновик")
+                        retry.setObjectName(f"retry-candidate-{candidate_id}")
                         retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
                         retry.setDisabled(self.viewmodel.blocked_by_other_project)
                         retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
-                        actions.addWidget(retry)
-                    skip = QPushButton("Продолжить без этого")
+                        add_candidate_action(retry)
+                    skip = QPushButton("Пропустить")
                     skip.setObjectName(f"skip-candidate-{candidate_id}")
                     skip.setToolTip("Уберёт этот неготовый черновик из текущего набора, не затрагивая готовые ролики.")
                     skip.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
-                    actions.addWidget(skip)
+                    add_candidate_action(skip)
                 else:
                     restore = QPushButton("Вернуть в набор")
                     restore.setObjectName(f"restore-candidate-{candidate_id}")
                     restore.setToolTip("Вернёт этот черновик в текущий набор, после чего его можно повторить отдельно.")
                     restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
-                    actions.addWidget(restore)
+                    add_candidate_action(restore)
             elif state == "rendered":
                 final_file = final_outputs.get(candidate_id)
                 if final_file:
                     watch_final = QPushButton("Смотреть готовый ролик")
+                    watch_final.setObjectName(f"watch-final-candidate-{candidate_id}")
                     watch_final.clicked.connect(
                         lambda _checked=False, path=final_file, title=str(item.get("title") or item.get("core_idea") or "момент"), value=candidate_id:
                         self._show_final_preview(path, title, value)
                     )
-                    actions.addWidget(watch_final)
+                    add_candidate_action(watch_final)
                     open_final = QPushButton("Открыть готовый ролик")
+                    open_final.setObjectName(f"open-final-candidate-{candidate_id}")
                     open_final.clicked.connect(lambda _checked=False, path=final_file: self._open_file(path))
-                    actions.addWidget(open_final)
+                    add_candidate_action(open_final)
             elif workflow_step == "candidates" and state not in {"draft_planning", "production_rendering"}:
                 if candidate_draftable:
                     selected_for_draft = candidate_id in project.review_selected_candidate_ids
@@ -2685,17 +2855,17 @@ class ProjectScreen(QWidget):
                     )
                     select.clicked.connect(lambda _checked=False, value=candidate_id: self._toggle_candidate_selection(value))
                     self._candidate_selection_buttons[candidate_id] = select
-                    actions.addWidget(select)
+                    add_candidate_action(select)
                 else:
                     blocked = QPushButton("Черновик недоступен")
                     blocked.setObjectName(f"blocked-candidate-{candidate_id}")
                     blocked.setEnabled(False)
-                    actions.addWidget(blocked)
+                    add_candidate_action(blocked, span=2)
             if candidate_error:
                 open_log = QPushButton("Открыть журнал")
                 open_log.setObjectName(f"candidate-log-{candidate_id}")
                 open_log.clicked.connect(self._open_latest_run_log_folder)
-                actions.addWidget(open_log)
+                add_candidate_action(open_log)
             for button in actions_host.findChildren(QPushButton):
                 button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             row.addWidget(actions_host)
@@ -3309,8 +3479,8 @@ class ProjectScreen(QWidget):
         set_responsive_text(
             self.review_metrics_text,
             f"Найдено {len(self._all_candidates_by_id)} · выбрано {len(selected)} · "
-            f"RECOMMENDED {recommended_count} · AVAILABLE {available_count} · "
-            f"BLOCKED {len(self._all_candidates_by_id) - len(self._draftable_candidates_by_id)}",
+            f"рекомендуем {recommended_count} · доступны {available_count} · "
+            f"недоступны {len(self._all_candidates_by_id) - len(self._draftable_candidates_by_id)}",
         )
         draftable_ids = [
             candidate_id for candidate_id in self.project.review_selected_candidate_ids
@@ -3543,7 +3713,22 @@ class ProjectScreen(QWidget):
                     self.project.directory / "preview-posters" if self.project else None
                 ),
             )
+        self._update_draft_preview_badge(candidate_id)
         self._persist_active_preview_candidate(candidate_id)
+
+    def _update_draft_preview_badge(self, candidate_id: str) -> None:
+        """Apply the shared candidate projection to the visible phone player."""
+
+        projection = self._draft_preview_projection(
+            self.project,
+            candidate_id,
+            has_preview=True,
+        )
+        self.preview.set_context_badge(
+            projection.badge_text,
+            state=projection.badge_state,
+            object_name="creativePreviewStatus",
+        )
 
     def _mark_active_candidate(self) -> None:
         for candidate_id, card in self._candidate_cards.items():
@@ -3590,6 +3775,18 @@ class ProjectScreen(QWidget):
             state_copy,
         ]
         candidate_id = str(candidate.get("candidate_id") or "")
+        preview_projection = self._draft_preview_projection(
+            self.project,
+            candidate_id,
+            has_preview=candidate_id in self._draft_preview_paths,
+        )
+        if (
+            workflow_step == "drafts"
+            and candidate_id
+            and candidate_id == self._active_candidate_id
+            and self._active_preview_kind == "draft"
+        ):
+            self._update_draft_preview_badge(candidate_id)
         candidate_draftable = (
             self._flow_step != "candidates"
             or candidate_id in self._draftable_candidates_by_id
@@ -3601,6 +3798,11 @@ class ProjectScreen(QWidget):
         if candidate_id and self.project.candidate_errors.get(candidate_id):
             if self.project.candidate_export_statuses.get(candidate_id) == "failed":
                 lines.append("Готовый ролик для этого момента не создан. Сохранённый черновик остаётся подтверждённым: повторите только экспорт или снимите подтверждение.")
+            elif preview_projection.stale:
+                lines.append(
+                    f"{preview_projection.inspector_text}. "
+                    "Подробности сохранены в журнале проекта."
+                )
             else:
                 lines.append("Черновик для этого момента не создан. Его можно повторить отдельно; подробности сохранены в журнале проекта.")
         self._replace_card_text(self.candidate_detail, lines)
@@ -3625,15 +3827,24 @@ class ProjectScreen(QWidget):
         grid.setContentsMargins(0, 4, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(6)
-        columns = 2
-        for index, (text, boundary, delta) in enumerate((
-            ("Начало −1 с", "start", -1.0), ("Начало −0.5 с", "start", -0.5),
-            ("Начало +0.5 с", "start", 0.5), ("Начало +1 с", "start", 1.0),
-            ("Конец −1 с", "end", -1.0), ("Конец −0.5 с", "end", -0.5),
-            ("Конец +0.5 с", "end", 0.5), ("Конец +1 с", "end", 1.0),
+        columns = 2 if self._compact_stage_layout else 4
+        for index, (full_text, compact_text, boundary, delta) in enumerate((
+            ("Начало −1 с", "Нач −1 с", "start", -1.0),
+            ("Начало −0.5 с", "Нач −0.5 с", "start", -0.5),
+            ("Начало +0.5 с", "Нач +0.5 с", "start", 0.5),
+            ("Начало +1 с", "Нач +1 с", "start", 1.0),
+            ("Конец −1 с", "Кон −1 с", "end", -1.0),
+            ("Конец −0.5 с", "Кон −0.5 с", "end", -0.5),
+            ("Конец +0.5 с", "Кон +0.5 с", "end", 0.5),
+            ("Конец +1 с", "Кон +1 с", "end", 1.0),
         )):
-            button = QPushButton(text)
-            button.setToolTip("Проверит только сохранённые границы речи и сцены; повторный анализ не нужен.")
+            button = QPushButton(full_text if columns == 2 else compact_text)
+            button.setProperty("boundaryOrder", index)
+            button.setProperty("boundaryFullText", full_text)
+            button.setProperty("boundaryCompactText", compact_text)
+            button.setToolTip(
+                f"{full_text}. Проверит только сохранённые границы речи и сцены; повторный анализ не нужен."
+            )
             button.clicked.connect(
                 lambda _checked=False, cid=candidate_id, name=boundary, value=delta: self._adjust_candidate_boundary(cid, name, value)
             )
@@ -3643,6 +3854,10 @@ class ProjectScreen(QWidget):
             grid.setColumnStretch(column, 1)
         self.candidate_detail.layout().addWidget(controls)
         self._refresh_candidate_detail_geometry()
+        self.review_inspector_scroll.verticalScrollBar().setValue(0)
+        QTimer.singleShot(
+            0, lambda: self.review_inspector_scroll.verticalScrollBar().setValue(0),
+        )
 
     def _refresh_candidate_detail_geometry(self) -> None:
         """Keep inspector copy above its controls and scroll when necessary."""
@@ -3661,6 +3876,36 @@ class ProjectScreen(QWidget):
         )
         self.candidate_detail.updateGeometry()
         self._queue_drafts_workspace_geometry()
+
+    def _reflow_candidate_boundary_controls(self) -> None:
+        """Keep the same inspector controls compact across review breakpoints."""
+
+        if not hasattr(self, "candidate_detail"):
+            return
+        controls = self.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
+        if controls is None or not isinstance(controls.layout(), QGridLayout):
+            return
+        grid = controls.layout()
+        buttons = sorted(
+            controls.findChildren(QPushButton),
+            key=lambda button: int(button.property("boundaryOrder") or 0),
+        )
+        if not buttons:
+            return
+        columns = 2 if self._compact_stage_layout else 4
+        for button in buttons:
+            grid.removeWidget(button)
+        for index, button in enumerate(buttons):
+            button.setText(str(
+                button.property("boundaryFullText")
+                if columns == 2
+                else button.property("boundaryCompactText")
+            ))
+            grid.addWidget(button, index // columns, index % columns)
+        for column in range(4):
+            grid.setColumnStretch(column, 1 if column < columns else 0)
+        controls.updateGeometry()
+        self._refresh_candidate_detail_geometry()
 
     @staticmethod
     def _score_text(value: object) -> str:
@@ -3705,35 +3950,42 @@ class ProjectScreen(QWidget):
         grid.setVerticalSpacing(7)
         panel_heading = QLabel("Вид этого черновика")
         panel_heading.setObjectName("inspectorSectionTitle")
-        grid.addWidget(panel_heading, 0, 0, 1, 3)
+        grid.addWidget(panel_heading, 0, 0, 1, 2)
         candidate_note = QLabel(
-            "Изменения сохраняются для этого черновика. Создание начнётся только по кнопке внизу."
+            "Изменения относятся только к этому черновику и не запускают анализ."
         )
         candidate_note.setObjectName("muted")
         candidate_note.setWordWrap(True)
-        grid.addWidget(candidate_note, 1, 0, 1, 3)
+        grid.addWidget(candidate_note, 1, 0, 1, 2)
         rows = (
-            ("Стиль оформления", style_labels.get(style_id, style_id), "creative_style"),
+            ("Стиль", style_labels.get(style_id, style_id), "creative_style"),
             ("Субтитры", caption.label if caption else caption_id, "caption_preset_id"),
             ("Кадрирование", crop_labels.get(crop_id, crop_id), "composition_strategy"),
         )
         for row, (label, value, option) in enumerate(rows):
             name = QLabel(label)
             name.setObjectName("muted")
+            name.setProperty("draftInspectorField", True)
+            name.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
             current = QLabel(value)
-            make_label_shrinkable(current)
+            current.setObjectName("draftInspectorValue")
+            current.setWordWrap(True)
+            current.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             change = QPushButton("Изменить")
-            change.setObjectName("secondaryAction")
+            change.setObjectName(f"draftChange-{option}-{candidate_id}")
+            change.setProperty("secondaryAction", True)
+            change.setMinimumWidth(88)
             change.setToolTip(
                 "Сохранит pending-изменение только для этого черновика; render не начнётся автоматически."
             )
             change.clicked.connect(
                 lambda _checked=False, cid=candidate_id, key=option: self._edit_draft_option(cid, key)
             )
-            grid.addWidget(name, row + 2, 0)
-            grid.addWidget(current, row + 2, 1)
-            grid.addWidget(change, row + 2, 2)
-        broll_row = len(rows) + 2
+            label_row = 2 + row * 2
+            grid.addWidget(name, label_row, 0)
+            grid.addWidget(change, label_row, 1)
+            grid.addWidget(current, label_row + 1, 0, 1, 2)
+        broll_row = 2 + len(rows) * 2
         broll_toggle = QCheckBox("Дополнительные кадры из этого видео")
         broll_toggle.setObjectName("draftExtraShots")
         broll_toggle.setChecked(broll)
@@ -3743,33 +3995,26 @@ class ProjectScreen(QWidget):
         broll_toggle.toggled.connect(
             lambda value, cid=candidate_id: self._set_draft_broll(cid, value)
         )
-        grid.addWidget(broll_toggle, broll_row, 0, 1, 3)
+        grid.addWidget(broll_toggle, broll_row, 0, 1, 2)
         fragment_row = broll_row + 1
         grid.addWidget(QLabel("Фрагмент"), fragment_row, 0)
-        grid.addWidget(QLabel(f"{format_seconds(start)}–{format_seconds(end)}"), fragment_row, 1, 1, 2)
-        state = self.project.candidate_states.get(candidate_id, "")
-        pending_revision = (
-            self.project.candidate_draft_statuses.get(candidate_id) == "pending"
-            and candidate_id in self.project.candidate_draft_artifacts
+        grid.addWidget(QLabel(f"{format_seconds(start)}–{format_seconds(end)}"), fragment_row, 1)
+        preview_projection = self._draft_preview_projection(
+            self.project,
+            candidate_id,
+            has_preview=candidate_id in self._draft_preview_paths,
         )
-        if pending_revision:
-            quality = "Изменения ожидают · показана предыдущая версия"
-        elif state == "draft_failed":
-            quality = "Нужен повтор черновика"
-        elif candidate_id in self._draft_preview_paths:
-            quality = "Creative Preview готов"
-        elif state == "draft_planning":
-            quality = "Creative Preview обновляется"
-        else:
-            quality = "Ожидает Creative Preview"
         grid.addWidget(QLabel("Качество"), fragment_row + 1, 0)
-        quality_value = QLabel(quality)
-        quality_value.setObjectName(
-            "warning" if pending_revision else
-            "finalReady" if candidate_id in self._draft_preview_paths else "warning"
+        quality_value = QLabel(preview_projection.inspector_text)
+        quality_value.setWordWrap(True)
+        quality_value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        quality_value.setObjectName(preview_projection.inspector_state)
+        quality_value.setProperty(
+            "draftPreviewFreshness", "stale" if preview_projection.stale else "current",
         )
-        grid.addWidget(quality_value, fragment_row + 1, 1, 1, 2)
-        grid.setColumnStretch(1, 1)
+        grid.addWidget(quality_value, fragment_row + 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnMinimumWidth(1, 88)
         self.candidate_detail.layout().addWidget(panel)
 
     def _set_draft_broll(self, candidate_id: str, enabled: bool) -> None:

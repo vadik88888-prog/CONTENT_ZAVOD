@@ -31,7 +31,10 @@ class ProcessingProgress(QFrame):
     # Ordinary progress fits beside the source summary and stage list on a
     # normal desktop. Hostile wrapped warnings still grow this dynamically
     # from the real layout height in ``_refresh_geometry``.
-    _BASE_MINIMUM_HEIGHT = 260
+    # Keep the running surface compact enough that the real stage list remains
+    # visible in the initial desktop viewport.  Wrapped recovery/warning copy
+    # still grows the card from its measured layout height below.
+    _BASE_MINIMUM_HEIGHT = 208
     # A persisted terminal error can contain an entire subprocess diagnostic.
     # Keep the recovery action near the top of the page while preserving the
     # complete message in the tooltip and project log.

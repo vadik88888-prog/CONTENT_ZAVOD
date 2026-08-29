@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, QUrl, Signal
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from app.gui.components import ProjectPosterLoader, VideoDropZone
 from app.gui.components.project_poster import project_poster_has_input, project_poster_path
-from app.gui.models import DesktopProject, ProjectPresentation
+from app.gui.models import DesktopProject, ProjectPresentation, RunStatus
 from app.gui.responsive import set_responsive_text
 from app.gui.services.error_mapping import dialog_message, map_error
 from app.gui.viewmodels import ProjectsViewModel
@@ -41,12 +43,17 @@ class ProjectsScreen(QWidget):
         self._presentations: dict[str, ProjectPresentation] = {}
         self._active_project_id: str | None = None
         self._rendered_columns = 0
+        self._render_signature: tuple[object, ...] | None = None
         self._reflow_pending = False
         self._refresh_pending = False
         self._dirty = True
         self._compact_source_layout: bool | None = None
         self._thumbnail_labels: dict[str, list[QLabel]] = {}
         self._thumbnail_paths: dict[str, Path] = {}
+        self._thumbnail_apply_queue: list[tuple[str, Path]] = []
+        self._thumbnail_apply_timer = QTimer(self)
+        self._thumbnail_apply_timer.setSingleShot(True)
+        self._thumbnail_apply_timer.timeout.connect(self._flush_thumbnail_applies)
         self._thumbnail_loader = ProjectPosterLoader(self)
         self._thumbnail_loader.poster_ready.connect(self._thumbnail_ready)
         self._thumbnail_loader.poster_unavailable.connect(self._thumbnail_unavailable)
@@ -105,7 +112,15 @@ class ProjectsScreen(QWidget):
         self.drop_zone = VideoDropZone()
         self.drop_zone.file_dropped.connect(self.viewmodel.create)
         self.drop_zone.setMinimumHeight(126)
-        source_layout.addWidget(self.drop_zone)
+        source_methods = QHBoxLayout()
+        self._source_methods_layout = source_methods
+        source_methods.setSpacing(20)
+
+        file_panel = QWidget()
+        file_layout = QVBoxLayout(file_panel)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.setSpacing(8)
+        file_layout.addWidget(self.drop_zone)
         self.file_button = QPushButton("Выбрать видео")
         self.file_button.setObjectName("primary")
         self.file_button.setMinimumHeight(38)
@@ -113,26 +128,36 @@ class ProjectsScreen(QWidget):
         # Compatibility with the original screen and any integrations that use
         # its button directly.
         self.new_button = self.file_button
-        source_layout.addWidget(self.file_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        file_layout.addWidget(self.file_button, 0, Qt.AlignmentFlag.AlignHCenter)
         formats = QLabel("MP4, MOV, MKV, AVI, WebM и M4V")
         formats.setObjectName("muted")
         formats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        source_layout.addWidget(formats)
+        file_layout.addWidget(formats)
 
-        divider = QHBoxLayout()
-        divider.setSpacing(9)
-        left_line = QFrame()
-        left_line.setObjectName("sourceDivider")
-        left_line.setFrameShape(QFrame.Shape.HLine)
-        divider_label = QLabel("или вставьте публичную ссылку")
-        divider_label.setObjectName("muted")
-        right_line = QFrame()
-        right_line.setObjectName("sourceDivider")
-        right_line.setFrameShape(QFrame.Shape.HLine)
-        divider.addWidget(left_line, 1)
-        divider.addWidget(divider_label)
-        divider.addWidget(right_line, 1)
-        source_layout.addLayout(divider)
+        self.source_divider = QWidget()
+        source_divider_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom, self.source_divider)
+        self._source_divider_layout = source_divider_layout
+        source_divider_layout.setContentsMargins(0, 8, 0, 8)
+        source_divider_layout.setSpacing(8)
+        self.source_divider_before = QFrame()
+        self.source_divider_before.setObjectName("sourceDivider")
+        self.source_divider_after = QFrame()
+        self.source_divider_after.setObjectName("sourceDivider")
+        self.source_divider_label = QLabel("или")
+        self.source_divider_label.setObjectName("muted")
+        self.source_divider_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        source_divider_layout.addWidget(self.source_divider_before, 1)
+        source_divider_layout.addWidget(self.source_divider_label)
+        source_divider_layout.addWidget(self.source_divider_after, 1)
+
+        self.url_panel = QWidget()
+        url_panel_layout = QVBoxLayout(self.url_panel)
+        url_panel_layout.setContentsMargins(12, 8, 0, 8)
+        url_panel_layout.setSpacing(10)
+        url_panel_layout.addStretch()
+        url_heading = QLabel("Вставьте ссылку на видео")
+        url_heading.setStyleSheet("font-size: 15px; font-weight: 600;")
+        url_panel_layout.addWidget(url_heading)
 
         url_row = QHBoxLayout()
         self._url_row_layout = url_row
@@ -144,11 +169,17 @@ class ProjectsScreen(QWidget):
         self.url_button.clicked.connect(self._create_url)
         url_row.addWidget(self.url_input, 1)
         url_row.addWidget(self.url_button)
-        source_layout.addLayout(url_row)
+        url_panel_layout.addLayout(url_row)
         public_note = QLabel("Подойдут только видео, доступные без входа, оплаты и других ограничений.")
         public_note.setObjectName("muted")
         public_note.setWordWrap(True)
-        source_layout.addWidget(public_note)
+        url_panel_layout.addWidget(public_note)
+        url_panel_layout.addStretch()
+
+        source_methods.addWidget(file_panel, 1)
+        source_methods.addWidget(self.source_divider)
+        source_methods.addWidget(self.url_panel, 1)
+        source_layout.addLayout(source_methods)
         content.addWidget(source_card)
 
         recent_header = QHBoxLayout()
@@ -168,8 +199,8 @@ class ProjectsScreen(QWidget):
         self.list_host = QWidget()
         self.list_layout = QGridLayout(self.list_host)
         self.list_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_layout.setHorizontalSpacing(12)
-        self.list_layout.setVerticalSpacing(12)
+        self.list_layout.setHorizontalSpacing(10)
+        self.list_layout.setVerticalSpacing(10)
         content.addWidget(self.list_host)
         content.addStretch()
 
@@ -243,21 +274,85 @@ class ProjectsScreen(QWidget):
         self.file_button.setText("Проверяем видео…" if busy else "Выбрать видео")
 
     def _render(self, projects: list[DesktopProject]) -> None:
+        signature = self._projection_signature(projects)
+        if signature == self._render_signature:
+            return
         self._thumbnail_loader.replace_pending()
+        self._thumbnail_apply_timer.stop()
+        self._thumbnail_apply_queue.clear()
         self._projects = list(projects)
         self._presentations = {}
+        active_project_id: str | None = None
         for project in self._projects:
             runs = self.viewmodel.services.runs_for(project)
             self._presentations[project.project_id] = self.viewmodel.services.presentation(
                 project, runs=runs,
             )
-        active = self.viewmodel.services.active_job()
-        self._active_project_id = active[0] if active else None
+            if active_project_id is None and (
+                project.source_spec.download_state == "downloading"
+                or any(run.status in RunStatus.ACTIVE for run in runs)
+            ):
+                active_project_id = project.project_id
+        self._active_project_id = active_project_id
         self.recent_count.setText(f"{len(projects)}" if projects else "")
         self.empty.setVisible(not projects)
         self._render_cards()
+        self._render_signature = signature
+
+    def _projection_signature(self, projects: list[DesktopProject]) -> tuple[object, ...]:
+        """Cheaply identify the exact persisted card projection.
+
+        ``updated_at`` changes on every project save.  Run records have their
+        own lifecycle, so include their file revisions without parsing every
+        JSON payload.  This keeps an unchanged Projects refresh cheap while a
+        status transition, recovery update, or restart still invalidates the
+        presentation and active-job projection.
+        """
+
+        revisions: list[tuple[object, ...]] = []
+        for project in projects:
+            run_revisions: list[tuple[str, int, int]] = []
+            runs_directory = project.directory / "runs"
+            try:
+                with os.scandir(runs_directory) as entries:
+                    for run_directory in entries:
+                        if not run_directory.is_dir(follow_symlinks=False):
+                            continue
+                        run_path = Path(run_directory.path) / "run.json"
+                        try:
+                            run_stat = run_path.stat()
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            run_revisions.append((run_directory.name, -1, -1))
+                            continue
+                        if not stat.S_ISREG(run_stat.st_mode):
+                            continue
+                        run_revisions.append((
+                            run_directory.name,
+                            run_stat.st_size,
+                            run_stat.st_mtime_ns,
+                        ))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # Preserve a distinct revision for an inaccessible run store;
+                # a later successful stat cannot reuse this projection.
+                run_revisions.append(("unavailable", -1, -1))
+            revisions.append((
+                project.project_id,
+                project.updated_at,
+                project.status,
+                project.latest_run_id,
+                project.thumbnail_path,
+                project.source_spec.download_state,
+                tuple(sorted(run_revisions)),
+            ))
+        return (self._recent_columns(), tuple(revisions))
 
     def _render_cards(self) -> None:
+        self._thumbnail_apply_timer.stop()
+        self._thumbnail_apply_queue.clear()
         # QGridLayout retains stretch factors after its widgets are removed.
         # Reset them so a wide -> compact resize cannot leave empty historical
         # columns consuming part of the new one-column workspace.
@@ -309,13 +404,14 @@ class ProjectsScreen(QWidget):
         # scrollbar made the resulting clipping look like a successful fit.
         viewport_width = self.content_scroll.viewport().width()
         available = viewport_width if viewport_width > 0 else max(0, self.width() - 52)
-        # The populated card grid needs 1,188 px for three columns and 788 px
-        # for two with the current action rail.  Keep another scrollbar-sized
-        # margin because a refresh can introduce the vertical scrollbar after
-        # the column count has already been chosen.
-        if available >= 1_198:
+        # Dense recent cards mirror the approved Source composition: four on a
+        # wide desktop, then 3/2/1 without hiding an action rail.  Thresholds
+        # retain a scrollbar-sized margin for a refresh that grows vertically.
+        if available >= 1_120:
+            return 4
+        if available >= 840:
             return 3
-        if available >= 798:
+        if available >= 600:
             return 2
         return 1
 
@@ -323,14 +419,14 @@ class ProjectsScreen(QWidget):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 13, 14, 13)
-        layout.setSpacing(7)
+        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setSpacing(6)
 
         poster = QLabel("Готовим кадр…")
         poster.setObjectName("projectPoster")
         poster.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        poster.setMinimumHeight(112)
-        poster.setMaximumHeight(148)
+        poster.setMinimumHeight(92)
+        poster.setMaximumHeight(124)
         # Ignore the pixmap's native size hint; card width owns the crop.
         poster.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(poster)
@@ -338,8 +434,8 @@ class ProjectsScreen(QWidget):
         expected = project_poster_path(project).resolve(strict=False)
         persisted = Path(project.thumbnail_path).resolve(strict=False) if project.thumbnail_path else None
         if persisted == expected and expected.is_file():
-            self._apply_thumbnail(project.project_id, expected)
             self._thumbnail_paths[project.project_id] = expected
+            self._queue_thumbnail_apply(project.project_id, expected)
         elif project_poster_has_input(project):
             destination = self._thumbnail_loader.request(project)
             self._thumbnail_paths[project.project_id] = destination.resolve(strict=False)
@@ -362,6 +458,7 @@ class ProjectsScreen(QWidget):
         # the flexible width. Ignored + zero stretch collapses this label to
         # zero even though the card itself fits.
         status.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        status.setMaximumWidth(156)
         set_responsive_text(status, presentation.status_label)
         top.addWidget(name, 1)
         top.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
@@ -378,11 +475,15 @@ class ProjectsScreen(QWidget):
         set_responsive_text(source, source_name)
         updated = QLabel(f"Изменён {project.updated_at[:16].replace('T', ' ')}")
         updated.setObjectName("muted")
+        updated.setWordWrap(True)
+        updated.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(source)
         layout.addWidget(updated)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(7)
+        actions = QGridLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setHorizontalSpacing(7)
+        actions.setVerticalSpacing(6)
         open_button = QPushButton("Открыть")
         open_button.clicked.connect(lambda _checked=False, value=project: self.project_opened.emit(value))
         folder_button = QPushButton("Папка")
@@ -397,10 +498,15 @@ class ProjectsScreen(QWidget):
         if active:
             delete_button.setToolTip("Проект нельзя удалить, пока его обработка не завершена или не остановлена.")
         delete_button.clicked.connect(lambda _checked=False, value=project: self._delete(value))
-        actions.addWidget(open_button)
-        actions.addWidget(folder_button)
-        actions.addStretch()
-        actions.addWidget(delete_button)
+        # Keep every existing action directly available, but avoid making
+        # three padded buttons the minimum width of the whole recent card.
+        # The approved dense grid gives the primary open action its own row;
+        # filesystem and destructive utilities share the compact second row.
+        actions.addWidget(open_button, 0, 0, 1, 2)
+        actions.addWidget(folder_button, 1, 0)
+        actions.addWidget(delete_button, 1, 1)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         layout.addLayout(actions)
         return card
 
@@ -418,6 +524,22 @@ class ProjectsScreen(QWidget):
                 # The real cached frame is already visible. Persistence can be
                 # retried by the next normal project refresh.
                 pass
+
+    def _queue_thumbnail_apply(self, project_id: str, path: Path) -> None:
+        """Decode cached posters in small GUI batches instead of one stall."""
+
+        self._thumbnail_apply_queue.append((project_id, path))
+        if not self._thumbnail_apply_timer.isActive():
+            self._thumbnail_apply_timer.start(0)
+
+    def _flush_thumbnail_applies(self) -> None:
+        batch = self._thumbnail_apply_queue[:4]
+        del self._thumbnail_apply_queue[:4]
+        for project_id, path in batch:
+            if self._thumbnail_paths.get(project_id) == path:
+                self._apply_thumbnail(project_id, path)
+        if self._thumbnail_apply_queue:
+            self._thumbnail_apply_timer.start(16)
 
     def _thumbnail_unavailable(self, project_id: str, path: str) -> None:
         expected = self._thumbnail_paths.get(project_id)
@@ -479,7 +601,17 @@ class ProjectsScreen(QWidget):
 
     def _finish_reflow(self) -> None:
         self._reflow_pending = False
-        self._render_cards()
+        columns = self._recent_columns()
+        if columns != self._rendered_columns:
+            self._render_cards()
+        if self._render_signature is not None:
+            # The projection itself did not change; only its responsive grid
+            # did.  Record the new column count so the next warm refresh can
+            # reuse the exact cards instead of rebuilding them a second time.
+            self._render_signature = (
+                columns,
+                self._render_signature[1],
+            )
 
     def _apply_responsive_layout(self, *, force: bool = False) -> None:
         """Reflow source onboarding before a scaled laptop viewport clips it.
@@ -491,7 +623,7 @@ class ProjectsScreen(QWidget):
         compact composition keeps the approved content, stacked in order.
         """
 
-        compact = self.width() < 720
+        compact = self.width() < 900
         if not force and compact == self._compact_source_layout:
             return
         self._compact_source_layout = compact
@@ -505,6 +637,25 @@ class ProjectsScreen(QWidget):
             self.local_note,
             Qt.AlignmentFlag.AlignLeft if compact else Qt.AlignmentFlag.AlignTop,
         )
+        self._source_methods_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._source_methods_layout.setSpacing(12 if compact else 20)
+        divider_shape = QFrame.Shape.HLine if compact else QFrame.Shape.VLine
+        self.source_divider_before.setFrameShape(divider_shape)
+        self.source_divider_after.setFrameShape(divider_shape)
+        self._source_divider_layout.setDirection(
+            QBoxLayout.Direction.LeftToRight
+            if compact
+            else QBoxLayout.Direction.TopToBottom
+        )
+        self.source_divider.setSizePolicy(
+            QSizePolicy.Policy.Expanding if compact else QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed if compact else QSizePolicy.Policy.Expanding,
+        )
+        self.url_panel.layout().setContentsMargins(0, 8, 0, 8)
         # Give the URL field and its CTA independent full rows in the same
         # compact profile. This avoids relying on a few spare pixels that can
         # disappear with Windows font scaling.

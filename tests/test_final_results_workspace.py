@@ -150,6 +150,14 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
         assert workspace.minimumSizeHint().width() <= width
         assert workspace.list_scroll.horizontalScrollBar().maximum() == 0
         assert workspace.info_scroll.horizontalScrollBar().maximum() == 0
+        assert workspace._info_layout.indexOf(
+            workspace.open_video_button,
+        ) < workspace._info_layout.indexOf(workspace.info_scroll)
+        assert workspace.preview.video.width() >= {
+            "dense": 220,
+            "compact": 252,
+            "standard": 288,
+        }[profile]
         assert workspace.preview.active_candidate.geometry().bottom() < workspace.preview.media_stage.geometry().top()
         assert workspace.preview.media_stage.geometry().bottom() < workspace.preview.preview_status.geometry().top()
         assert workspace.preview.preview_status.geometry().bottom() < workspace.preview.controls_host.geometry().top()
