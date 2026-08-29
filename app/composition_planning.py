@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.3.actual-reframe.3"
+COMPOSITION_PLANNER_VERSION = "7J.4.target-handoff.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -359,7 +359,21 @@ class CompositionPlanner:
                         held_confidence < self.config.exit_confidence
                         or candidate.confidence >= held_confidence + self.config.switch_advantage
                     )
-                    if hold_ok and cooldown_ok and advantage_ok:
+                    if _is_explicit_target_handoff(current, candidate, interval):
+                        # Do not let a minimum hold preserve a target whose
+                        # own decision has ended. The replacement is already
+                        # confidence-gated above and is therefore an explicit,
+                        # evidence-backed handoff rather than a speculative
+                        # camera ping-pong proposal.
+                        selected = candidate
+                        current = candidate
+                        last_confirmed = candidate
+                        pending_reframe = None
+                        held_since = frame
+                        last_switch = frame
+                        reason = "target_switch"
+                        diagnostics.append(f"TARGET_SWITCH_TIMELY:{frame}")
+                    elif hold_ok and cooldown_ok and advantage_ok:
                         selected = candidate
                         current = candidate
                         last_confirmed = candidate
@@ -471,12 +485,14 @@ class CompositionPlanner:
             )
             fallback = item.fallback
             layout = item.layout
-            if containment < self.config.minimum_target_containment and item.state is not None:
-                # A bounded pan may not reach a newly acquired target before
-                # this short semantic interval ends.  Do not turn the whole
-                # candidate into a blurred full frame: reset this scene to
-                # the evidence-resolved 9:16 crop so the protected target is
-                # visible for the complete interval.
+            track_containment = _track_minimum_containment(keyframes, item.state.bounds) if item.state else 1.0
+            if track_containment < self.config.minimum_target_containment and item.state is not None:
+                # A bounded pan can finish on the new target while leaving it
+                # clipped at the beginning of a target handoff. Final-crop
+                # containment alone therefore is not enough. Reset only this
+                # transition to the evidence-resolved crop when the complete
+                # interpolated track cannot preserve the protected target.
+                # Normal in-frame motion keeps the bounded, smooth controller.
                 crop = item.desired_crop
                 layout = item.layout
                 fallback = "wider_crop" if item.fallback == "none" else item.fallback
@@ -487,7 +503,7 @@ class CompositionPlanner:
                 geometry, protected, containment = _geometry_for(
                     item, crop, observations, source_width, source_height,
                 )
-                diagnostics.append(f"CROP_RESET_FOR_TARGET_CONTAINMENT:{item.output.start_frame}")
+                diagnostics.append(f"CROP_RESET_FOR_TARGET_TRACK_SAFETY:{item.output.start_frame}")
             punch = None
             if item.punch_event is not None:
                 punch = CompositionPunchIn(
@@ -1201,6 +1217,27 @@ def _same_target_reframe_requires_confirmation(
     return _target_state_distance(candidate, reference) > config.same_target_reframe_distance
 
 
+def _is_explicit_target_handoff(
+    current: _TargetState,
+    candidate: _TargetState,
+    interval: OutputInterval,
+) -> bool:
+    """Whether current target evidence has been explicitly superseded.
+
+    The state machine's hold/cooldown protects two competing candidates inside
+    the *same* target decision. Once that decision no longer covers the active
+    output interval, preserving it would turn a continuity guard into a stale
+    crop. A replacement remains subject to the normal enter-confidence
+    threshold before this helper is reached.
+    """
+
+    return (
+        current.decision.decision_id != candidate.decision.decision_id
+        and not current.decision.output.contains(interval)
+        and candidate.decision.output.contains(interval)
+    )
+
+
 def _target_state_distance(left: _TargetState, right: _TargetState) -> float:
     left_x = left.bounds.x + left.bounds.width / 2
     left_y = left.bounds.y + left.bounds.height / 2
@@ -1631,6 +1668,15 @@ def _containment(bounds: NormalizedRect, crop: NormalizedRect) -> float:
     bottom = min(bounds.y + bounds.height, crop.y + crop.height)
     intersection = max(0.0, right - left) * max(0.0, bottom - top)
     return intersection / (bounds.width * bounds.height)
+
+
+def _track_minimum_containment(
+    keyframes: Sequence[CompositionCropKeyframe],
+    bounds: NormalizedRect,
+) -> float:
+    """Return the weakest protected-target containment across a crop track."""
+
+    return min((_containment(bounds, item.crop) for item in keyframes), default=1.0)
 
 
 def _rect_values(rect: NormalizedRect) -> tuple[float, float, float, float]:

@@ -7,6 +7,7 @@ from app.composition_planning import (
     TargetObservation,
     _AtomicState,
     _calibrate_layout_timeline,
+    _containment,
     build_composition_plan,
 )
 from app.creative_contracts import (
@@ -185,7 +186,7 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
     )
 
 
-def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:
+def test_explicit_confident_speaker_handoff_bypasses_stale_crop_hold() -> None:
     targets = (
         _target("speaker-a-1", AttentionTarget.SPEAKER, 0, 30, "evidence-a", target_ref="speaker-a"),
         _target("speaker-b", AttentionTarget.SPEAKER, 30, 60, "evidence-b", target_ref="speaker-b"),
@@ -203,11 +204,39 @@ def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:
     )
 
     assert plan.segments[0].target_ref == "speaker-a"
-    assert all(segment.movement_reason != "target_switch" for segment in plan.segments)
-    assert plan.segments[1].fallback == "stable_source"
-    assert plan.segments[1].crop != NormalizedRect(x=0, y=0, width=1, height=1)
-    assert plan.quality_report.metrics.suppressed_switch_count == 1
-    assert any(value.startswith("SWITCH_SUPPRESSED_HYSTERESIS") for value in plan.diagnostics)
+    assert plan.segments[1].target_ref == "speaker-b"
+    assert plan.segments[1].movement_reason == "target_switch"
+    assert plan.segments[2].target_ref == "speaker-a"
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
+    assert "TARGET_SWITCH_TIMELY:30" in plan.diagnostics
+    assert "TARGET_SWITCH_TIMELY:60" in plan.diagnostics
+
+
+def test_target_handoff_resets_only_when_smooth_track_would_clip_new_target() -> None:
+    targets = (
+        _target("speaker-left", AttentionTarget.SPEAKER, 0, 60, "evidence-left", target_ref="speaker-left"),
+        _target("speaker-right", AttentionTarget.SPEAKER, 60, 120, "evidence-right", target_ref="speaker-right"),
+    )
+    observations = (
+        _observation("left", 30, AttentionTarget.SPEAKER, "speaker-left", "evidence-left", 0.04),
+        _observation("right", 90, AttentionTarget.SPEAKER, "speaker-right", "evidence-right", 0.80),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(minimum_hold_frames=120, switch_cooldown_frames=120),
+    )
+
+    handoff = next(item for item in plan.segments if item.output.start_frame == 60)
+    assert handoff.target_ref == "speaker-right"
+    assert handoff.movement_reason == "target_switch"
+    assert handoff.crop_keyframes[0].crop == handoff.crop
+    assert all(
+        _containment(observations[1].bounds, keyframe.crop) >= 0.82
+        for keyframe in handoff.crop_keyframes
+    )
+    assert "TARGET_SWITCH_TIMELY:60" in plan.diagnostics
+    assert "CROP_RESET_FOR_TARGET_TRACK_SAFETY:60" in plan.diagnostics
 
 
 def test_story_short_uses_actual_crop_and_blocks_an_uncontainable_group() -> None:
