@@ -161,17 +161,19 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
     )
 
     assert plan.schema_version == "7D.composition-plan.1"
-    assert plan.ordered_fallbacks == ("wider_crop", "stable_source", "fit_background")
+    assert plan.ordered_fallbacks == ("wider_crop", "stable_source")
     assert [segment.target for segment in plan.segments] == [
         AttentionTarget.SPEAKER, AttentionTarget.SCREEN, AttentionTarget.GROUP,
     ]
     assert [segment.layout for segment in plan.segments] == [
-        LayoutFamily.STABLE_SPEAKER, LayoutFamily.FIT_BACKGROUND, LayoutFamily.FIT_BACKGROUND,
+        LayoutFamily.STABLE_SPEAKER, LayoutFamily.SCREEN_PRIORITY, LayoutFamily.WIDE_GROUP,
     ]
+    assert all(segment.layout != LayoutFamily.FIT_BACKGROUND for segment in plan.segments)
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
     assert all(segment.geometry is not None for segment in plan.segments)
-    assert all(segment.protected_regions for segment in plan.segments)
-    assert plan.quality_report.metrics.layout_switch_count == 1
-    assert plan.quality_report.metrics.layout_switches_per_minute == 6.0
+    assert all(segment.target_bounds is not None for segment in plan.segments)
+    assert plan.quality_report.metrics.layout_switch_count == 2
+    assert plan.quality_report.metrics.layout_switches_per_minute == 12.0
 
     strict = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
@@ -208,7 +210,7 @@ def test_hysteresis_hold_and_cooldown_suppress_camera_ping_pong() -> None:
     assert any(value.startswith("SWITCH_SUPPRESSED_HYSTERESIS") for value in plan.diagnostics)
 
 
-def test_story_short_fit_wide_fit_island_uses_safe_fit_without_dropping_evidence() -> None:
+def test_story_short_uses_actual_crop_and_blocks_an_uncontainable_group() -> None:
     target = _target(
         "story-group", AttentionTarget.GROUP, 120, 138, "story-group-evidence",
         target_ref=None, layouts=(LayoutFamily.WIDE_GROUP,),
@@ -229,14 +231,16 @@ def test_story_short_fit_wide_fit_island_uses_safe_fit_without_dropping_evidence
     )
 
     assert plan.segments
-    assert all(segment.layout == LayoutFamily.FIT_BACKGROUND for segment in plan.segments)
+    assert all(segment.layout != LayoutFamily.FIT_BACKGROUND for segment in plan.segments)
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
     evidence_segment = next(segment for segment in plan.segments if segment.target == AttentionTarget.GROUP)
     assert evidence_segment.evidence_refs == ("story-group-evidence",)
-    assert evidence_segment.protected_regions
+    assert evidence_segment.target_bounds is not None
     assert evidence_segment.geometry is not None
-    assert plan.quality_report.metrics.clipped_target_count == 0
+    assert plan.quality_report.status == "BLOCKED"
+    assert plan.quality_report.metrics.clipped_target_count == 1
     assert plan.quality_report.metrics.layout_switch_count == 0
-    assert "SCENE_FAMILY_FIT_FALLBACK:0" in plan.diagnostics
+    assert "SCENE_TARGET_CONTAINMENT_UNRESOLVED:0" in plan.diagnostics
 
 
 def test_layout_edge_fragments_and_local_switch_bursts_are_calibrated() -> None:
@@ -506,7 +510,7 @@ def test_scene_family_lock_suppresses_observation_local_punch_in() -> None:
     assert "SCENE_PUNCH_IN_SUPPRESSED:0" in plan.diagnostics
 
 
-def test_low_confidence_and_untrusted_evidence_produce_calm_fit_blur_fallback() -> None:
+def test_low_confidence_and_untrusted_evidence_produce_calm_actual_crop() -> None:
     target = _target(
         "speaker-target", AttentionTarget.SPEAKER, 0, 300, "speaker-evidence",
         target_ref="speaker-a", confidence=0.9,
@@ -528,14 +532,39 @@ def test_low_confidence_and_untrusted_evidence_produce_calm_fit_blur_fallback() 
     assert len(plan.segments) == 1
     segment = plan.segments[0]
     assert segment.target == AttentionTarget.STABLE_SOURCE
-    assert segment.layout == LayoutFamily.FIT_BACKGROUND
-    assert segment.crop == NormalizedRect(x=0, y=0, width=1, height=1)
-    assert segment.fallback == "fit_background"
+    assert segment.layout == LayoutFamily.WIDE_GROUP
+    assert segment.crop == NormalizedRect(x=0.34179688, y=0, width=0.31640625, height=1)
+    assert segment.fallback == "stable_source"
     assert segment.easing_id == "none"
     assert plan.quality_report.status == "PASS_WITH_WARNINGS"
     assert {finding.code for finding in plan.quality_report.findings} >= {
         "COMPOSITION_LOW_CONFIDENCE", "COMPOSITION_SAFE_FALLBACK",
     }
+
+
+def test_widescreen_speaker_uses_a_target_crop_without_fit_blur() -> None:
+    target = _target(
+        "speaker-target", AttentionTarget.SPEAKER, 0, 300, "speaker-evidence",
+        target_ref="speaker-a", layouts=(LayoutFamily.STABLE_SPEAKER,),
+    )
+    observation = _observation(
+        "speaker-frame", 60, AttentionTarget.SPEAKER, "speaker-a",
+        "speaker-evidence", 0.37, width=0.32,
+    )
+
+    plan = build_composition_plan(
+        _intent((target,)), (observation,), source_width=1920, source_height=960,
+    )
+
+    assert plan.quality_report.status != "BLOCKED"
+    assert all(segment.layout != LayoutFamily.FIT_BACKGROUND for segment in plan.segments)
+    assert all(segment.fallback != "fit_background" for segment in plan.segments)
+    assert any(segment.target == AttentionTarget.SPEAKER for segment in plan.segments)
+    expected_ratio = (9 / 16) / (1920 / 960)
+    assert all(
+        abs(segment.crop.width / segment.crop.height - expected_ratio) < 1e-7
+        for segment in plan.segments
+    )
 
 
 def test_crop_track_respects_velocity_acceleration_and_reports_safe_geometry() -> None:

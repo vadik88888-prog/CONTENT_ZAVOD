@@ -57,7 +57,7 @@ def test_rapid_file_selection_is_deferred_and_coalesced(tmp_path: Path, monkeypa
 @pytest.mark.parametrize(
     ("show_method", "expected_title"),
     [
-        ("show_draft", "Черновик · Тестовый момент"),
+        ("show_draft", "Creative Preview · Тестовый момент"),
         ("show_final", "Готовый ролик · Тестовый момент"),
     ],
 )
@@ -165,6 +165,75 @@ def test_volume_and_mute_restore_the_last_audible_level() -> None:
         assert preview.audio.isMuted() is False
         assert preview.audio.volume() == pytest.approx(0.37)
         assert preview.volume_slider.value() == 37
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
+def test_audio_output_is_rebound_for_source_and_reused_playback_session(tmp_path: Path) -> None:
+    """A source switch must not leave a decoded MP4 without the Qt audio sink."""
+
+    app = _application()
+    source = tmp_path / "audible.mp4"
+    source.write_bytes(b"preview")
+    expected = QUrl.fromLocalFile(str(source))
+    preview = VideoPreview()
+
+    class FakePlayer:
+        def __init__(self) -> None:
+            self.current_source = QUrl()
+            self.current_audio = None
+            self.calls: list[tuple[str, object]] = []
+
+        @staticmethod
+        def playbackState() -> QMediaPlayer.PlaybackState:
+            return QMediaPlayer.PlaybackState.StoppedState
+
+        @staticmethod
+        def mediaStatus() -> QMediaPlayer.MediaStatus:
+            return QMediaPlayer.MediaStatus.NoMedia
+
+        def source(self) -> QUrl:
+            return self.current_source
+
+        def videoOutput(self):
+            return preview.video
+
+        def audioOutput(self):
+            return self.current_audio
+
+        def setAudioOutput(self, output) -> None:
+            self.current_audio = output
+            self.calls.append(("audio", output))
+
+        def setSource(self, value: QUrl) -> None:
+            self.current_source = value
+            self.calls.append(("source", value))
+
+        def play(self) -> None:
+            self.calls.append(("play", self.current_source))
+
+    player = FakePlayer()
+    preview.player = player  # type: ignore[assignment]
+    preview._path = source
+    preview._expected_source = expected
+    preview._selection_token = 3
+    preview.volume_slider.setValue(37)
+    preview.audio.setMuted(True)
+
+    try:
+        preview._load_selected_source(3)
+        assert player.calls == [("audio", preview.audio), ("source", expected)]
+        assert preview.audio.volume() == pytest.approx(0.37)
+        assert preview.audio.isMuted() is True
+
+        # Simulate the Windows backend losing its sink between Moment cards.
+        player.current_audio = None
+        preview._play_if_current(3)
+        assert player.calls[-2:] == [("audio", preview.audio), ("play", expected)]
+        assert preview.audio.volume() == pytest.approx(0.37)
+        assert preview.audio.isMuted() is True
     finally:
         preview.close()
         preview.deleteLater()

@@ -839,6 +839,7 @@ class VideoPreview(QFrame):
         if token != self._selection_token or self._path is None:
             return
         self._ensure_video_output()
+        self._bind_audio_output(force=True)
         source = QUrl.fromLocalFile(str(self._path))
         if source != self._expected_source:
             return
@@ -979,6 +980,26 @@ class VideoPreview(QFrame):
         if output is not expected_output:
             logger.warning("media video output was detached; restoring persistent output")
             self.player.setVideoOutput(expected_output)
+
+    def _bind_audio_output(self, *, force: bool = False) -> None:
+        """Keep the persistent audio sink bound across Windows media sessions.
+
+        Changing or retargeting a ``QMediaPlayer`` source can leave the
+        Windows backend with a decoded stream but without its previous
+        ``QAudioOutput`` session.  Rebind the same user-owned sink before a
+        source handoff and immediately before playback; this deliberately
+        preserves the user's mute and volume choices instead of changing the
+        renderer or audio mix.
+        """
+
+        getter = getattr(self.player, "audioOutput", None)
+        setter = getattr(self.player, "setAudioOutput", None)
+        if not callable(setter):
+            return
+        attached = getter() if callable(getter) else None
+        if force or attached is not self.audio:
+            logger.info("media audio output rebound source=%s", self._path)
+            setter(self.audio)
 
     def _request_poster(
         self, source_path: Path, *, timestamp_seconds: float = 0.05,
@@ -1678,6 +1699,7 @@ class VideoPreview(QFrame):
                 self._show_status("Видео ещё загружается.")
             return
         self._ensure_video_output()
+        self._bind_audio_output()
         self._show_video()
         if self._range_start_ms is None:
             self.player.play()
@@ -1698,6 +1720,7 @@ class VideoPreview(QFrame):
 
     def _play_if_current(self, token: int) -> None:
         if token == self._selection_token and self._is_current_player_source():
+            self._bind_audio_output(force=True)
             self.player.play()
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:

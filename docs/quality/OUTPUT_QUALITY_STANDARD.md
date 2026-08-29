@@ -184,6 +184,10 @@ stable target crop
 → BLOCKED
 ```
 
+For short-form, each normal fallback remains an actual 9:16 crop/reframe.
+Candidate-wide blurred full-frame presentation is not a default escape hatch
+for missing or sparse target evidence.
+
 ## 9. Subtitle quality
 
 Hard rules:

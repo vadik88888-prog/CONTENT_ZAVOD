@@ -247,6 +247,14 @@ Punch-in:
 
 ## 8. Vertical composition
 
+Short-form output uses an actual 9:16 crop/reframe for every source segment.
+The crop is resolved from the existing scene/subject/target evidence and may
+move only at evidence-backed scene or target changes. A candidate-wide
+full-frame `fit_background` / blurred background is not a default composition
+fallback; sparse evidence uses a calm 9:16 stable crop, and an unresolved
+protected target is surfaced as a composition failure rather than hidden by
+blur.
+
 Priority:
 
 ```text

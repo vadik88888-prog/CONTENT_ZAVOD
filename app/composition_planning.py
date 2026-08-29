@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.2.scene-family.3"
+COMPOSITION_PLANNER_VERSION = "7J.3.actual-reframe.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -82,6 +82,10 @@ class CompositionPlannerConfig:
     local_burst_window_frames: int = 90
     maximum_local_layout_switches: int = 1
     target_margin_ratio: float = 0.16
+    # Vision subject bounds often include shoulders or the edge of a shared
+    # shot. On a 2:1 source a true 9:16 reframe cannot contain that entire
+    # coarse box even when the face/semantic centre is safely preserved.
+    minimum_target_containment: float = 0.82
     minimum_fill_crop_width: float = 0.18
     transition_frames: int = 18
     maximum_velocity_per_frame: float = 0.014
@@ -103,6 +107,8 @@ class CompositionPlannerConfig:
             raise ValueError("composition burst window must cover minimum layout dwell")
         if self.maximum_local_layout_switches < 0:
             raise ValueError("composition local switch limit must be non-negative")
+        if not 0 < self.minimum_target_containment <= 1:
+            raise ValueError("composition target containment must be normalized and positive")
         if self.transition_frames < 1:
             raise ValueError("composition transition must contain at least one frame")
         if self.maximum_velocity_per_frame <= 0 or self.maximum_acceleration_per_frame_sq <= 0:
@@ -373,18 +379,23 @@ class CompositionPlanner:
             )
             fallback = item.fallback
             layout = item.layout
-            if containment < 0.98 and item.state is not None:
-                crop = NormalizedRect(x=0, y=0, width=1, height=1)
-                layout = LayoutFamily.FIT_BACKGROUND
-                fallback = "fit_background"
+            if containment < self.config.minimum_target_containment and item.state is not None:
+                # A bounded pan may not reach a newly acquired target before
+                # this short semantic interval ends.  Do not turn the whole
+                # candidate into a blurred full frame: reset this scene to
+                # the evidence-resolved 9:16 crop so the protected target is
+                # visible for the complete interval.
+                crop = item.desired_crop
+                layout = item.layout
+                fallback = "wider_crop" if item.fallback == "none" else item.fallback
                 keyframes, motion = _crop_track(
-                    _replace_atomic_crop(item, crop), incoming_motion, True, self.config,
+                    _reset_atomic_crop(item, crop), incoming_motion, True, self.config,
                 )
                 crop = keyframes[-1].crop
                 geometry, protected, containment = _geometry_for(
                     item, crop, observations, source_width, source_height,
                 )
-                diagnostics.append(f"FIT_BACKGROUND_FOR_CLIPPING:{item.output.start_frame}")
+                diagnostics.append(f"CROP_RESET_FOR_TARGET_CONTAINMENT:{item.output.start_frame}")
             punch = None
             if item.punch_event is not None:
                 punch = CompositionPunchIn(
@@ -595,22 +606,9 @@ def _lock_scene_layout_families(
             width, height = _aspect_locked_size(
                 width, height, source_width, source_height,
             )
-        if width > 1 or height > 1:
-            family = LayoutFamily.FIT_BACKGROUND
-
         family_items: list[_AtomicState] = []
         suppressed_punch = any(item.punch_event is not None for item in scene)
         for index, item in enumerate(scene):
-            if family == LayoutFamily.FIT_BACKGROUND:
-                family_items.append(replace(
-                    item,
-                    layout=LayoutFamily.FIT_BACKGROUND,
-                    desired_crop=NormalizedRect(x=0, y=0, width=1, height=1),
-                    fallback="fit_background",
-                    reason="scene_reset" if item.reason == "scene_reset" else "safe_fallback",
-                    punch_event=None,
-                ))
-                continue
             anchor = (
                 item.state
                 if item.state is not None and _state_matches_family(item, family)
@@ -676,20 +674,14 @@ def _lock_scene_layout_families(
 
         if any(
             item.state is not None
-            and _containment(item.state.bounds, item.desired_crop) < 0.98
+            and _containment(item.state.bounds, item.desired_crop) < config.minimum_target_containment
             for item in family_items
         ):
-            family = LayoutFamily.FIT_BACKGROUND
-            family_items = [replace(
-                item,
-                layout=family,
-                desired_crop=NormalizedRect(x=0, y=0, width=1, height=1),
-                fallback="fit_background",
-                reason="scene_reset" if item.reason == "scene_reset" else "safe_fallback",
-                punch_event=None,
-            ) for item in scene]
+            # Keep the scene/target-aware crop rather than escaping to a
+            # candidate-wide fit/blur frame.  The quality report below owns
+            # an impossible protected-target combination as a blocker.
             diagnostics.append(
-                f"SCENE_FAMILY_FIT_FALLBACK:{scene[0].output.start_frame}"
+                f"SCENE_TARGET_CONTAINMENT_UNRESOLVED:{scene[0].output.start_frame}"
             )
         else:
             diagnostics.append(
@@ -1104,12 +1096,30 @@ def _target_crop(
 def _calm_fallback_crop(
     source_width: int,
     source_height: int,
-) -> tuple[NormalizedRect, LayoutFamily, Literal["stable_source", "fit_background"]]:
-    source_aspect = source_width / source_height
+) -> tuple[NormalizedRect, LayoutFamily, Literal["stable_source"]]:
+    """Return a calm *actual* 9:16 crop when evidence is temporarily sparse."""
+
+    return _vertical_fill_crop(source_width, source_height), LayoutFamily.WIDE_GROUP, "stable_source"
+
+
+def _vertical_fill_crop(source_width: int, source_height: int) -> NormalizedRect:
+    """A centred crop with the source-space aspect ratio of the 9:16 canvas."""
+
     output_aspect = 9 / 16
-    if abs(source_aspect - output_aspect) <= 0.001:
-        return NormalizedRect(x=0, y=0, width=1, height=1), LayoutFamily.SINGLE_SUBJECT, "stable_source"
-    return NormalizedRect(x=0, y=0, width=1, height=1), LayoutFamily.FIT_BACKGROUND, "fit_background"
+    source_aspect = source_width / source_height
+    if source_aspect >= output_aspect:
+        return NormalizedRect(
+            x=round((1 - output_aspect / source_aspect) / 2, 8),
+            y=0,
+            width=round(output_aspect / source_aspect, 8),
+            height=1,
+        )
+    return NormalizedRect(
+        x=0,
+        y=round((1 - source_aspect / output_aspect) / 2, 8),
+        width=1,
+        height=round(source_aspect / output_aspect, 8),
+    )
 
 
 def _layout_for(
@@ -1311,7 +1321,7 @@ def _quality_report(
         _containment(item.target_bounds, item.crop)
         for item in segments if item.target_bounds is not None
     ]
-    clipped = [value for value in containments if value < 0.98]
+    clipped = [value for value in containments if value < config.minimum_target_containment]
     unsafe = [
         item for item in segments
         if item.layout not in {LayoutFamily.FIT_BACKGROUND, LayoutFamily.LEGACY_PASSTHROUGH}
@@ -1326,7 +1336,7 @@ def _quality_report(
     if clipped:
         findings.append(CompositionQualityFinding(
             code="COMPOSITION_TARGET_CLIPPED", severity="blocker",
-            measured_value=round(min(clipped), 7), threshold=0.98,
+            measured_value=round(min(clipped), 7), threshold=config.minimum_target_containment,
             message="A selected semantic target is not safely contained by its final crop.",
         ))
     if unsafe:
@@ -1377,13 +1387,13 @@ def _quality_report(
         findings.append(CompositionQualityFinding(
             code="COMPOSITION_LOW_CONFIDENCE", severity="warning",
             measured_value=low_confidence_count, threshold=0,
-            message="Low-confidence evidence uses a calm stable or fit/background frame.",
+            message="Low-confidence evidence uses a calm, actual 9:16 stable crop.",
         ))
     if fallback_segments:
         findings.append(CompositionQualityFinding(
             code="COMPOSITION_SAFE_FALLBACK", severity="warning",
             measured_value=len(fallback_segments), threshold=0,
-            message="Composition applied the declared wider, stable or fit/background fallback chain.",
+            message="Composition applied the declared wider or stable-crop fallback chain.",
         ))
     status: CompositionQualityStatus = (
         "BLOCKED" if any(item.severity == "blocker" for item in findings)
@@ -1418,12 +1428,13 @@ def _quality_report(
     )
 
 
-def _replace_atomic_crop(item: _AtomicState, crop: NormalizedRect) -> _AtomicState:
+def _reset_atomic_crop(item: _AtomicState, crop: NormalizedRect) -> _AtomicState:
     return _AtomicState(
-        output=item.output, state=item.state, layout=LayoutFamily.FIT_BACKGROUND,
+        output=item.output, state=item.state, layout=item.layout,
         desired_crop=crop, target=item.target, target_ref=item.target_ref,
         confidence=item.confidence, evidence_refs=item.evidence_refs,
-        fallback="fit_background", reason="safe_fallback", punch_event=None,
+        fallback="wider_crop" if item.fallback == "none" else item.fallback,
+        reason="safe_fallback", punch_event=None,
     )
 
 

@@ -1444,8 +1444,11 @@ class CompositionPlan(FrozenContract):
     schema_version: Literal["7A.composition-plan.1", "7D.composition-plan.1"] = "7A.composition-plan.1"
     intent_id: str = Field(pattern=ID_PATTERN)
     segments: tuple[CompositionSegmentPlan, ...] = ()
+    # New 7D plans use only actual crop/reframe fallbacks.  The older third
+    # value remains readable so persisted Friend Beta artifacts are not
+    # invalidated before an explicit rerender.
     ordered_fallbacks: tuple[Literal["wider_crop", "stable_source", "fit_background"], ...] = (
-        "wider_crop", "stable_source", "fit_background",
+        "wider_crop", "stable_source",
     )
     quality_report: CompositionQualityReport = Field(default_factory=CompositionQualityReport)
     diagnostics: tuple[str, ...] = ()
@@ -1458,8 +1461,11 @@ class CompositionPlan(FrozenContract):
         ):
             raise ValueError("composition segments must be ordered without overlap")
         if self.schema_version == "7D.composition-plan.1":
-            if self.ordered_fallbacks != ("wider_crop", "stable_source", "fit_background"):
-                raise ValueError("7D composition fallback order is fixed for safety")
+            if self.ordered_fallbacks not in {
+                ("wider_crop", "stable_source"),
+                ("wider_crop", "stable_source", "fit_background"),
+            }:
+                raise ValueError("7D composition fallback order is invalid")
             if self.quality_report.status == "LEGACY_UNASSESSED":
                 raise ValueError("7D composition requires an assessed quality report")
             if any(segment.geometry is None or not segment.crop_keyframes for segment in self.segments):
