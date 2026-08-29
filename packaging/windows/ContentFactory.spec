@@ -19,12 +19,11 @@ if assets_directory.is_dir():
     datas.append((str(assets_directory), "assets"))
 
 tools_directory = spec_directory / "tools"
-youtube_access_runtime = spec_directory / "youtube-access-runtime"
-if not youtube_access_runtime.is_dir():
-    raise RuntimeError(
-        "Pinned YouTube access runtime is missing; run prepare_youtube_access_runtime.py first."
-    )
-datas.append((str(youtube_access_runtime), "youtube-access-runtime"))
+# Do not bundle the optional BGutil/mweb provider.  Current YouTube accepts
+# the pinned public yt-dlp path, while that provider makes otherwise public
+# videos unavailable in a fresh portable profile.  Its absence selects the
+# existing public-only yt-dlp fallback at runtime; Deno remains bundled and
+# independently verified for the portable dependency contract.
 shiboken_directory = Path(__import__("shiboken6").__file__).resolve().parent
 binaries = [
     (str(path), "tools")

@@ -224,7 +224,13 @@ def main() -> int:
 
     collected = dist_path / "ContentFactory"
     executable = collected / "ContentFactory.exe"
-    _restore_deno_junctions(collected / "_internal" / "youtube-access-runtime")
+    # The optional BGutil/mweb provider is intentionally not staged into the
+    # portable package: on current YouTube it rejects public videos that the
+    # pinned yt-dlp executable can ingest normally.  Keep this tolerant for
+    # older build caches, but never require it for the portable artifact.
+    staged_youtube_runtime = collected / "_internal" / "youtube-access-runtime"
+    if staged_youtube_runtime.is_dir():
+        _restore_deno_junctions(staged_youtube_runtime)
     required = [
         executable,
         collected / "_internal" / "config.example.yaml",
