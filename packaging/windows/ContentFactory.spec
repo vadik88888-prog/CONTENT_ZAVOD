@@ -25,13 +25,25 @@ if not youtube_access_runtime.is_dir():
         "Pinned YouTube access runtime is missing; run prepare_youtube_access_runtime.py first."
     )
 datas.append((str(youtube_access_runtime), "youtube-access-runtime"))
+shiboken_directory = Path(__import__("shiboken6").__file__).resolve().parent
 binaries = [
     (str(path), "tools")
     for path in tools_directory.iterdir()
     if path.is_file() and path.suffix.casefold() in {".exe", ".dll"}
 ]
+# Keep the Qt binding and its companion MSVC DLLs together.  The runtime hook
+# makes this directory the DLL lookup root before the first PySide6 import so
+# unrelated extension runtimes collected into ``_internal`` cannot override it.
+binaries += [
+    (str(path), "PySide6")
+    for path in shiboken_directory.iterdir()
+    if path.is_file() and path.suffix.casefold() == ".dll"
+]
 hiddenimports = []
-for package in ("faster_whisper", "ctranslate2", "tokenizers", "onnxruntime"):
+# The PySide6 hook collects the Qt modules used by the app, but Shiboken ships
+# additional MSVC helper DLLs beside its binding library.  They are required
+# by QtCore at frozen startup and are not a user-installed dependency.
+for package in ("faster_whisper", "ctranslate2", "tokenizers", "onnxruntime", "shiboken6"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -54,7 +66,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(spec_directory / "pyside_runtime_hook.py")],
     excludes=[],
     noarchive=False,
 )

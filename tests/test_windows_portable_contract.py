@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = ROOT / "packaging" / "windows"
+
+
+def _build_module():
+    spec = importlib.util.spec_from_file_location(
+        "windows_portable_build", WINDOWS / "build_portable.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_windows_portable_pins_supported_deno_with_notice_and_license() -> None:
@@ -54,3 +65,39 @@ def test_fresh_zip_smoke_requires_deno_runtime_and_doctor_capability() -> None:
     assert '[str(deno), "--version"]' in smoke
     assert '"OK Deno"' in smoke
     assert 'smoke_settings["ai"]["provider"] = "mock"' in smoke
+    assert '$null -ne $process.MainWindowHandle' in smoke
+
+
+def test_portable_collects_shiboken_runtime_for_frozen_qt_startup() -> None:
+    spec = (WINDOWS / "ContentFactory.spec").read_text(encoding="utf-8")
+    hook = (WINDOWS / "pyside_runtime_hook.py").read_text(encoding="utf-8")
+
+    assert '"shiboken6"' in spec
+    assert '"PySide6"' in spec
+    assert 'pyside_runtime_hook.py' in spec
+    assert 'SetDllDirectoryW' in hook
+
+
+def test_materialized_deno_junction_is_accepted_in_portable_onedir(tmp_path: Path) -> None:
+    runtime = tmp_path / "youtube-access-runtime"
+    node_modules = runtime / "server" / "node_modules"
+    target = node_modules / ".deno" / "axios" / "node_modules" / "axios"
+    target.mkdir(parents=True)
+    (target / "package.json").write_text("{}", encoding="utf-8")
+    # PyInstaller dereferences the original junction when collecting datas.
+    # Model the resulting bundled directory rather than relying on junction
+    # creation privileges in the test environment.
+    materialized = node_modules / "axios"
+    materialized.mkdir()
+    (materialized / "package.json").write_text("{}", encoding="utf-8")
+    (runtime / "deno-junctions.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "links": [{"path": "axios", "target": ".deno/axios/node_modules/axios"}],
+        }),
+        encoding="utf-8",
+    )
+
+    _build_module()._restore_deno_junctions(runtime)
+
+    assert materialized.is_dir()

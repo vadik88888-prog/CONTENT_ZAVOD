@@ -141,10 +141,10 @@ $deadline = [DateTime]::UtcNow.AddSeconds(30)
 while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {{
     Start-Sleep -Milliseconds 100
     $process.Refresh()
-    if ($process.MainWindowHandle -ne 0) {{
+    if ($null -ne $process.MainWindowHandle -and [int64]$process.MainWindowHandle -ne 0) {{
         $visible = $true
         $title = $process.MainWindowTitle
-        $handle = $process.MainWindowHandle.ToInt64()
+        $handle = [int64]$process.MainWindowHandle
         break
     }}
 }}

@@ -103,7 +103,14 @@ def _verify_youtube_access_runtime(windows: Path) -> dict:
 
 
 def _restore_deno_junctions(runtime: Path) -> None:
-    """Restore the staged Deno node_modules links inside a portable onedir."""
+    """Restore Deno links unless PyInstaller has safely materialized them.
+
+    PyInstaller follows Windows directory junctions while collecting ``datas``.
+    A materialized directory is therefore an expected, self-contained onedir
+    representation of a staged junction and must not make the package build
+    fail.  The manifest still constrains both paths to the bundled runtime;
+    only an existing directory is accepted, never an arbitrary file.
+    """
 
     node_modules = runtime / "server" / "node_modules"
     manifest = _read_json(runtime / "deno-junctions.json")
@@ -116,7 +123,14 @@ def _restore_deno_junctions(runtime: Path) -> None:
         target = (node_modules / str(entry.get("target", ""))).resolve(strict=False)
         if not link.is_relative_to(node_modules) or not target.is_relative_to(node_modules):
             raise RuntimeError("Deno junction manifest escapes the portable runtime.")
-        if link.exists() or not target.is_dir():
+        if not target.is_dir():
+            raise RuntimeError(f"Cannot restore Deno junction: {link}")
+        if link.is_dir():
+            # PyInstaller dereferenced this junction while copying the runtime.
+            # Its contents now live inside the portable package, so rebuilding
+            # a junction would be unnecessary and could discard bundled files.
+            continue
+        if link.exists():
             raise RuntimeError(f"Cannot restore Deno junction: {link}")
         link.parent.mkdir(parents=True, exist_ok=True)
         try:
