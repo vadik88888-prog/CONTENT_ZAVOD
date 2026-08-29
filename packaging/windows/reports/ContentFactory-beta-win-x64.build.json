@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "artifact": "ContentFactory-beta-win-x64",
-  "built_at": "2026-08-29T06:40:05.391851+00:00",
-  "base_git_commit": "a11e200b948d984b54a3a74bf4f05a43900213b3",
+  "built_at": "2026-08-29T07:03:33.394855+00:00",
+  "base_git_commit": "081a431ee8d22029e536f5b558e65ee7bacfbac6",
   "source_mode": "worktree",
   "python": {
     "implementation": "CPython",
@@ -103,32 +103,32 @@
     "packaging/windows/licenses/LICENSE-deno-MIT.txt": "5852e46d672830a8254a68e91cc0e7b2a6e82817111b7a47c503716ec26fedb5"
   },
   "status": "smoke_passed",
-  "build_seconds": 372.589,
-  "zip_seconds": 157.093,
+  "build_seconds": 377.27,
+  "zip_seconds": 115.633,
   "onedir": {
     "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64",
     "file_count": 33997,
     "size_bytes": 1581664508,
-    "executable_sha256": "5d9fc019228709b2f94b8cafc29bda16f95baa966a065781f03700d4ebc7e853"
+    "executable_sha256": "beea3c659fdc30a26cdd8485e660d0b275f569e599371cfb0bb02feb22dc4267"
   },
   "zip": {
     "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64.zip",
     "file_count": 33997,
-    "size_bytes": 553581059,
-    "sha256": "f6b81b4e15a618e275c68f20e5d4b00e45a239e1eae4ccb28da938941cfcd3f5"
+    "size_bytes": 553580161,
+    "sha256": "4e70cd1e7c8a6f2a7739e64e45ba91fb5f291402974fc0ec9b866a9124344460"
   },
   "smoke": {
-    "completed_at": "2026-08-29T06:45:27.250817+00:00",
+    "completed_at": "2026-08-29T07:07:17.015380+00:00",
     "source": "fresh_zip_extraction",
     "extracted_path": "build/windows-portable-smoke/extracted/ContentFactory-beta-win-x64",
     "deno": {
       "exit_code": 0,
-      "seconds": 1.696,
+      "seconds": 1.504,
       "version_line": "deno 2.9.5 (stable, release, x86_64-pc-windows-msvc)"
     },
     "frozen_cli": {
       "exit_code": 0,
-      "seconds": 11.716,
+      "seconds": 9.872,
       "ai_mode": "mock",
       "markers": [
         "Content Factory",
@@ -137,17 +137,17 @@
         "OK yt-dlp",
         "OK Deno"
       ],
-      "output_tail": "Content Factory — проверка окружения\r\n\r\nOK Runtime: Встроенный runtime portable-сборки доступен.\r\nOK Ресурсы приложения: Папка ресурсов доступна.\r\nOK FFmpeg: Доступен: ffmpeg.EXE.\r\nOK FFprobe: Доступен: ffprobe.EXE.\r\nOK yt-dlp: Доступен: yt-dlp.EXE.\r\nOK Deno: Доступен: deno.EXE.\r\nOK NVIDIA GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU · 4096 · 610.88\r\nOK CUDA: CTranslate2 видит CUDA-устройств: 1.\r\nOK faster-whisper: Модуль транскрибации доступен.\r\nOK AI provider: mock · gpt-5.6-terra\r\nWARNING Локальный тестовый режим: Используется mock-провайдер; этот режим не подтверждает готовность реальной AI-обработки.\r\n  Что сделать: Для реальной обработки выберите OpenAI или Gemini и подтвердите рабочий API-ключ.\r\nOK Папка input: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\input\r\nOK Папка work: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\work\r\nOK Папка output: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\output\r\nOK Свободное место: Доступно 114.7 ГБ.\r\n\r\nИтог: С ограничениями. Критических проблем — 0, предупреждений — 1.\r\nWARNING не блокирует работу; BLOCKING нужно исправить до завершения первого запуска."
+      "output_tail": "Content Factory — проверка окружения\r\n\r\nOK Runtime: Встроенный runtime portable-сборки доступен.\r\nOK Ресурсы приложения: Папка ресурсов доступна.\r\nOK FFmpeg: Доступен: ffmpeg.EXE.\r\nOK FFprobe: Доступен: ffprobe.EXE.\r\nOK yt-dlp: Доступен: yt-dlp.EXE.\r\nOK Deno: Доступен: deno.EXE.\r\nOK NVIDIA GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU · 4096 · 610.88\r\nOK CUDA: CTranslate2 видит CUDA-устройств: 1.\r\nOK faster-whisper: Модуль транскрибации доступен.\r\nOK AI provider: mock · gpt-5.6-terra\r\nWARNING Локальный тестовый режим: Используется mock-провайдер; этот режим не подтверждает готовность реальной AI-обработки.\r\n  Что сделать: Для реальной обработки выберите OpenAI или Gemini и подтвердите рабочий API-ключ.\r\nOK Папка input: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\input\r\nOK Папка work: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\work\r\nOK Папка output: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\output\r\nOK Свободное место: Доступно 113.2 ГБ.\r\n\r\nИтог: С ограничениями. Критических проблем — 0, предупреждений — 1.\r\nWARNING не блокирует работу; BLOCKING нужно исправить до завершения первого запуска."
     },
     "native_window": {
-      "process_id": 27460,
+      "process_id": 24036,
       "window_visible": true,
       "window_title": "Content Factory",
-      "window_handle": 4131714,
+      "window_handle": 7473886,
       "survived_settle": true,
       "close_requested": false,
       "exited": true,
-      "seconds": 13.416,
+      "seconds": 11.78,
       "launch_method": "Start-Process"
     }
   }
