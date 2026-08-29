@@ -686,6 +686,13 @@ class ProjectViewModel(QObject):
                 )
         except Exception as recovery_error:
             details = f"{details}; recovery failed: {recovery_error}"
+        try:
+            self.services.recover_live_draft_progress(project, run, prepared)
+        except Exception as progress_error:
+            # Progress recovery is defensive and must not strand the run in an
+            # active state.  The terminal failure remains retryable and keeps
+            # the recovery diagnostic in the private run details.
+            details = f"{details}; draft progress recovery failed: {progress_error}"
         run = self.services.finish_failure(project, run, message, details)
         final_message = (
             "Обработка остановилась и не отвечает."
@@ -718,6 +725,12 @@ class ProjectViewModel(QObject):
                     ProcessingPhase.COMPLETED_WITH_WARNINGS,
                     "Часть роликов готова; незавершённые можно запустить снова",
                     recovered,
+                )
+            try:
+                self.services.recover_live_draft_progress(project, run, prepared)
+            except Exception as progress_error:
+                self.services.append_log(
+                    run, f"Draft progress recovery failed during cancellation: {progress_error}",
                 )
         run = self.services.finish_cancelled(project, run)
         return _FinalizationResult(ProcessingPhase.CANCELLED, "Создание отменено", run)

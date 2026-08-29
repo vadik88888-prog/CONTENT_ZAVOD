@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from app.analysis_artifact import AnalysisArtifactError
 from app.candidate_review import validate_boundary_override
+from app.clip_results import ClipResult, unique_primary_results
 from app.gui.models import (
     DesktopProject,
     DesktopSettings,
@@ -510,15 +511,30 @@ class DesktopServices:
             self.projects.save(project)
         return project
 
+    def _has_reusable_analysis(self, project: DesktopProject) -> bool:
+        """Return true only for an integrity- and identity-verified Analysis.
+
+        A stale path is not a cache hit.  Keeping this decision in the service
+        lets the normal Desktop CTA replace a corrupt artifact while retaining
+        a valid prior Analysis until its dependency-changing rerun succeeds.
+        """
+
+        if not project.analysis_artifact_path:
+            return False
+        try:
+            return self.pipeline.load_verified_analysis(project, required=False) is not None
+        except (InputValidationError, OSError, ValueError):
+            return False
+
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         self._require_idle_heavy_job()
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
+        reusable_analysis = self._has_reusable_analysis(project)
         if (
             not project.settings.recompute_all
             and not project.setup_state.needs_new_analysis
-            and project.analysis_artifact_path
-            and Path(project.analysis_artifact_path).is_file()
+            and reusable_analysis
         ):
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
@@ -530,7 +546,13 @@ class DesktopServices:
             if project.source_spec.kind == "url":
                 raise InputValidationError("Сначала загрузите видео по ссылке.")
             raise InputValidationError("Исходный видеофайл больше недоступен.")
-        intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        analysis_project = project if reusable_analysis else replace(
+            project,
+            analysis_artifact_path=None,
+            analysis_id=None,
+            analysis_fingerprint=None,
+        )
+        intent, resolved, estimate = self.pipeline.plan_processing(analysis_project, self.settings)
         estimate = calibrate_processing_estimate(estimate, self.runs_for(project))
         run = self.runs.create(
             project,
@@ -576,7 +598,9 @@ class DesktopServices:
         run.cost_estimate = estimate.estimated_ai_cost_max
         self.runs.save(run)
         try:
-            prepared = self._with_observability_paths(self.pipeline.prepare(project, run, self.settings), run)
+            prepared = self._with_observability_paths(
+                self.pipeline.prepare(analysis_project, run, self.settings), run,
+            )
         except Exception:
             run.status = RunStatus.FAILED
             run.finished_at = utc_now()
@@ -593,7 +617,12 @@ class DesktopServices:
 
     def prepare_analysis(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
         self._require_idle_heavy_job()
-        if not project.settings.recompute_all and project.analysis_artifact_path and Path(project.analysis_artifact_path).is_file():
+        reusable_analysis = self._has_reusable_analysis(project)
+        if (
+            not project.settings.recompute_all
+            and not project.setup_state.needs_new_analysis
+            and reusable_analysis
+        ):
             project.status = ProjectStatus.ANALYSIS_READY
             self.projects.save(project)
             raise InputValidationError(
@@ -604,7 +633,16 @@ class DesktopServices:
         source = project.source
         if not source.is_file():
             raise InputValidationError("Исходный видеофайл больше недоступен.")
-        intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
+        # A corrupt/stale hand-off is precisely why this action is allowed to
+        # start.  Plan and prepare the replacement as a first Analysis instead
+        # of letting the unusable previous file block before the child starts.
+        analysis_project = project if reusable_analysis else replace(
+            project,
+            analysis_artifact_path=None,
+            analysis_id=None,
+            analysis_fingerprint=None,
+        )
+        intent, resolved, estimate = self.pipeline.plan_processing(analysis_project, self.settings)
         run = self.runs.create(
             project,
             settings_snapshot={
@@ -618,7 +656,9 @@ class DesktopServices:
         run.cost_estimate = estimate.estimated_ai_cost_max
         self.runs.save(run)
         try:
-            prepared = self._with_observability_paths(self.pipeline.prepare_analysis(project, run, self.settings), run)
+            prepared = self._with_observability_paths(
+                self.pipeline.prepare_analysis(analysis_project, run, self.settings), run,
+            )
         except Exception:
             run.status = RunStatus.FAILED; run.finished_at = utc_now(); run.error_summary = "Не удалось подготовить анализ."
             self.runs.save(run)
@@ -1094,6 +1134,7 @@ class DesktopServices:
             "runtime_config_path": str(prepared.runtime_config_path),
             "run_id": prepared.run_id,
             "project_id": prepared.project_id or run.project_id,
+            "expected_candidate_ids": list(prepared.expected_candidate_ids),
             "artifact_metadata_path": str(prepared.artifact_metadata_path) if prepared.artifact_metadata_path else None,
             "allow_legacy_artifact_scan": prepared.allow_legacy_artifact_scan,
             "source_path": str(prepared.source_path) if prepared.source_path else None,
@@ -1244,18 +1285,29 @@ class DesktopServices:
     @classmethod
     def _apply_selected_render_report(
         cls, project: DesktopProject, report: dict, expected_candidate_ids: list[str],
-        *, fallback: str,
+        *, fallback: str, completed_candidate_ids: Iterable[str] | None = None,
     ) -> tuple[set[str], set[str]]:
         """Apply individual final-export outcomes and return completed/failed IDs."""
 
         production = report.get("production_render", {}) if isinstance(report, dict) else {}
         production_items = production.get("items", []) if isinstance(production, dict) else []
         allowed = set(expected_candidate_ids) or set(project.selected_candidate_ids)
-        completed_ids = {
-            str(item.get("candidate_id")) for item in production_items
-            if isinstance(item, dict) and str(item.get("candidate_id") or "") in allowed
-            and item.get("status") in {"completed", "warning"}
-        }
+        if completed_candidate_ids is None:
+            # Compatibility path for legacy technical completion and reported
+            # terminal failures, where no canonical ClipResult registry exists.
+            completed_ids = {
+                str(item.get("candidate_id")) for item in production_items
+                if isinstance(item, dict) and str(item.get("candidate_id") or "") in allowed
+                and item.get("status") in {"completed", "warning"}
+            }
+        else:
+            # Strict Final success identity was already validated against the
+            # run manifest.  Report items remain diagnostics only and cannot
+            # promote or demote a candidate at this point.
+            completed_ids = {
+                str(candidate_id) for candidate_id in completed_candidate_ids
+                if str(candidate_id) in allowed
+            }
         flow = report.get("candidate_flow", {}) if isinstance(report, dict) else {}
         flow_items = flow.get("items", []) if isinstance(flow, dict) else []
         failures: dict[str, dict] = {}
@@ -1432,11 +1484,22 @@ class DesktopServices:
             project.analysis_artifact_path = str(run_info.get("analysis_artifact_path") or "") or None
             project.analysis_id = str(run_info.get("analysis_id") or "") or None
             project.analysis_fingerprint = str(run_info.get("analysis_fingerprint") or "") or None
-            candidates = report.get("clip_intelligence", {}).get("candidates", []) if isinstance(report.get("clip_intelligence"), dict) else []
-            project.candidate_states = {
-                str(item.get("id")): "analyzed" for item in candidates
-                if isinstance(item, dict) and item.get("id")
-            }
+            if completion.legacy_technical_completion:
+                candidates = (
+                    report.get("clip_intelligence", {}).get("candidates", [])
+                    if isinstance(report.get("clip_intelligence"), dict) else []
+                )
+                project.candidate_states = {
+                    str(item.get("id")): "analyzed" for item in candidates
+                    if isinstance(item, dict) and item.get("id")
+                }
+            else:
+                analysis = self.pipeline.load_verified_analysis(project, required=True)
+                assert analysis is not None
+                project.candidate_states = {
+                    str(item.get("candidate_id")): "analyzed" for item in analysis.candidates
+                    if isinstance(item, dict) and item.get("candidate_id")
+                }
             project.candidate_draft_statuses = {
                 candidate_id: "pending" for candidate_id in project.candidate_states
             }
@@ -1453,6 +1516,9 @@ class DesktopServices:
             project.draft_artifact_path = None
             project.draft_id = None
             project.active_preview_candidate_id = None
+            project.setup_state.needs_new_analysis = False
+            project.setup_state.change_summary = "Анализ обновлён; найденные моменты готовы к просмотру."
+            project.setup_state.reused_stages = []
             project.status = ProjectStatus.ANALYSIS_READY
         elif run.run_kind == RunKind.DRAFT:
             run.status = RunStatus.DRAFT_READY
@@ -1473,9 +1539,47 @@ class DesktopServices:
                 str(candidate_id) for candidate_id in run.settings_snapshot.get("candidate_ids", [])
                 if str(candidate_id)
             ] or list(project.selected_candidate_ids)
+            canonical_registry: list[ClipResult] | None = None
+            if completion.canonical_results:
+                canonical_registry = unique_primary_results(
+                    result for result in completion.validated_results
+                    if result.run_id == run.run_id
+                )
             completed_ids, failed_ids = self._apply_selected_render_report(
                 project, report, expected, fallback="Не удалось создать ролик.",
+                completed_candidate_ids=(
+                    [result.candidate_id for result in canonical_registry]
+                    if canonical_registry is not None else None
+                ),
             )
+            # ``selected_candidate_ids`` is the pending export queue and is
+            # intentionally emptied for successful items.  Persist the exact
+            # canonical result separately so Results actions and restart can
+            # still bind to the just-finished candidate/run identity.
+            if canonical_registry is not None:
+                current_results = [
+                    result for result in canonical_registry
+                    if result.candidate_id in completed_ids
+                ]
+            else:
+                # Legacy render reports predate the canonical manifest result
+                # projection.  Retain their prior best-effort compatibility
+                # without letting that path affect strict Final completion.
+                raw_results = report.get("primary_results", []) if isinstance(report, dict) else []
+                registry = [
+                    result for value in raw_results
+                    if (result := ClipResult.from_dict(value)) is not None
+                ] if isinstance(raw_results, list) else []
+                current_results = unique_primary_results(
+                    result
+                    for result in registry
+                    if result.candidate_id in completed_ids
+                    and result.run_id == run.run_id
+                    and Path(result.output_file).is_file()
+                )
+            if current_results:
+                current = current_results[0]
+                project.last_final_result_id = current.clip_result_id or current.candidate_id
             # The current run may finish a one-item retry while other
             # independently approved exports are still failed/pending.  Those
             # neighbours stay in the durable hand-off queue and must not be
@@ -1536,6 +1640,55 @@ class DesktopServices:
         execution["artifact_metadata_path"] = (
             str(resolved.artifact_metadata_path.resolve()) if resolved.artifact_metadata_path else execution.get("artifact_metadata_path")
         )
+
+    def recover_live_draft_progress(
+        self,
+        project: DesktopProject,
+        run: ProjectRun,
+        prepared: PreparedPipelineRun | None,
+    ) -> bool:
+        """Persist verified candidate previews before a live Draft terminates.
+
+        The engine publishes ``draft-progress.json`` atomically after each
+        candidate.  Normal process failure/cancellation must consume the same
+        strict run/project/Analysis/candidate/parity contract as restart
+        recovery, otherwise one stopped sibling discards previews that already
+        completed successfully.
+        """
+
+        if run.run_kind != RunKind.DRAFT or prepared is None:
+            return False
+        expected = self._run_candidate_ids(run)
+        progress = self.pipeline.recover_draft_progress(prepared, expected)
+        if progress is None:
+            return False
+        artifact_path = str(progress.artifact_path.resolve())
+        project.draft_artifact_path = artifact_path
+        project.draft_id = progress.artifact.draft_id
+        changed = False
+        for candidate_id in progress.ready_candidate_ids:
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="ready", approval="pending", export="pending",
+            )
+            project.candidate_draft_artifacts[candidate_id] = artifact_path
+            project.candidate_errors.pop(candidate_id, None)
+            changed = True
+        for candidate_id in progress.invalid_candidate_ids:
+            self._set_candidate_lifecycle(
+                project, candidate_id, draft="failed", approval="pending", export="pending",
+            )
+            project.candidate_draft_artifacts.pop(candidate_id, None)
+            project.candidate_errors[candidate_id] = (
+                "Неполный файл черновика не прошёл проверку и не был сохранён."
+            )
+            changed = True
+        if changed:
+            self._snapshot_engine_paths(run)
+            # Candidate artifacts are the user-visible durable boundary.  Save
+            # them before the caller writes the terminal run state so a second
+            # interruption can safely replay the same progress contract.
+            self.projects.save(project)
+        return changed
 
     def finish_failure(
         self, project: DesktopProject, run: ProjectRun, message: str, technical_details: str | None = None,

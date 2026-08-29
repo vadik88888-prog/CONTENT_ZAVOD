@@ -6,8 +6,9 @@ import pytest
 
 from app.analysis_artifact import AnalysisArtifact
 from app.draft_artifact import new_draft_artifact
-from app.gui.models import ProjectStatus, RunKind, RunStatus
+from app.gui.models import ProcessingPhase, ProjectStatus, RunKind, RunStatus
 from app.gui.services.pipeline_facade import PipelineFacade, PreparedPipelineRun
+from app.gui.viewmodels import ProjectViewModel
 
 from test_draft_workflow import _services
 from test_gui_analysis_integrity import _write_verified_analysis
@@ -120,6 +121,77 @@ def test_interrupted_draft_restores_only_bound_preview_and_resumes_missing(tmp_p
         "candidate-b", "candidate-c",
     ]
     assert restored.candidate_states["candidate-a"] == "draft_ready"
+
+
+def test_live_draft_failure_preserves_verified_sibling_progress(tmp_path: Path, monkeypatch) -> None:
+    candidate_ids = ["candidate-a", "candidate-b"]
+    services, project, run, prepared = _interrupted_draft_context(tmp_path, candidate_ids)
+    preview = prepared.output_directory / "drafts" / "01-candidate-a" / "draft-preview.mp4"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"verified preview")
+    new_draft_artifact(
+        draft_id=f"draft-progress-{run.run_id}",
+        analysis_id=project.analysis_id, analysis_fingerprint=project.analysis_fingerprint,
+        analysis_artifact_path=project.analysis_artifact_path, project_id=project.project_id,
+        source_fingerprint="source-fingerprint", status="draft_partial", run_id=run.run_id,
+        candidates=[
+            _progress_candidate(candidate_ids[0], 1, state="draft_ready", output_file=preview),
+            _progress_candidate(candidate_ids[1], 2),
+        ],
+    ).write(prepared.output_directory / "draft-progress.json")
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
+
+    result = ProjectViewModel(services)._finalize_failure(
+        project, run, prepared, "renderer crashed", "renderer crashed",
+    )
+
+    restored = services.projects.load(project.project_id)
+    assert result.phase == ProcessingPhase.FAILED
+    assert result.run.status == RunStatus.FAILED
+    assert restored.candidate_states == {
+        "candidate-a": "draft_ready", "candidate-b": "draft_failed",
+    }
+    assert restored.candidate_draft_artifacts == {
+        "candidate-a": str((prepared.output_directory / "draft-progress.json").resolve()),
+    }
+
+
+def test_live_draft_cancel_preserves_verified_sibling_and_retries_only_missing(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    candidate_ids = ["candidate-a", "candidate-b"]
+    services, project, run, prepared = _interrupted_draft_context(tmp_path, candidate_ids)
+    preview = prepared.output_directory / "drafts" / "01-candidate-a" / "draft-preview.mp4"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"verified preview")
+    new_draft_artifact(
+        draft_id=f"draft-progress-{run.run_id}",
+        analysis_id=project.analysis_id, analysis_fingerprint=project.analysis_fingerprint,
+        analysis_artifact_path=project.analysis_artifact_path, project_id=project.project_id,
+        source_fingerprint="source-fingerprint", status="draft_partial", run_id=run.run_id,
+        candidates=[
+            _progress_candidate(candidate_ids[0], 1, state="draft_ready", output_file=preview),
+            _progress_candidate(candidate_ids[1], 2),
+        ],
+    ).write(prepared.output_directory / "draft-progress.json")
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
+
+    result = ProjectViewModel(services)._finalize_cancelled(project, run, prepared)
+
+    restored = services.projects.load(project.project_id)
+    assert result.phase == ProcessingPhase.CANCELLED
+    assert result.run.status == RunStatus.CANCELLED
+    assert restored.candidate_states == {
+        "candidate-a": "draft_ready", "candidate-b": "analyzed",
+    }
+    assert restored.candidate_draft_statuses == {
+        "candidate-a": "ready", "candidate-b": "pending",
+    }
+    retry_run, retry = services.prepare_draft(restored, ["candidate-b"])
+    assert retry_run.run_kind == RunKind.DRAFT
+    assert [retry.arguments[index + 1] for index, value in enumerate(retry.arguments) if value == "--candidate-id"] == [
+        "candidate-b",
+    ]
 
 
 def test_obsolete_interrupted_draft_does_not_override_a_later_ready_run(tmp_path: Path) -> None:

@@ -3,12 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.analysis_artifact import new_analysis_artifact
 from app.cli import _apply_draft_command_arguments, _apply_render_command_arguments
+from app.clip_results import ClipResult
 from app.config import AppConfig, load_config
 from app.draft_artifact import new_draft_artifact
 from app.gui.models import DesktopSettings, ProjectStatus, RunKind, RunStatus
-from app.gui.services.desktop_project_store import DesktopProjectStore
+from app.gui.services.desktop_project_store import DesktopProjectStore, InputValidationError
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineCompletion, PipelineFacade, PreparedPipelineRun
 from app.gui.services.run_history_store import RunHistoryStore
@@ -32,7 +35,13 @@ def _services(tmp_path: Path):
 
 
 def _write_analysis_artifact(
-    path: Path, project_id: str, analysis_id: str, fingerprint: str, candidate_ids: list[str],
+    path: Path,
+    project_id: str,
+    analysis_id: str,
+    fingerprint: str,
+    candidate_ids: list[str],
+    *,
+    analysis_run_id: str = "",
 ) -> None:
     new_analysis_artifact(
         analysis_id=analysis_id, project_id=project_id,
@@ -42,10 +51,209 @@ def _write_analysis_artifact(
         candidates=[{"candidate_id": candidate_id} for candidate_id in candidate_ids],
         recommendation={}, summary={}, content_profile={}, duration_seconds=30.0,
         candidate_count=len(candidate_ids),
+        analysis_run_id=analysis_run_id,
+        schema_version="1.0",
     ).write(path)
 
 
-def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp_path: Path) -> None:
+def test_analysis_start_reuses_only_a_verified_current_artifact(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    analysis_path = tmp_path / "analysis.json"
+    _write_analysis_artifact(
+        analysis_path, project.project_id, "analysis-current", "fingerprint-current", ["candidate-a"],
+    )
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = "analysis-current"
+    project.analysis_fingerprint = "fingerprint-current"
+    services.projects.save(project)
+
+    with pytest.raises(InputValidationError, match="Сохранённый анализ уже готов"):
+        services.prepare_analysis(project)
+
+    analysis_path.write_text("{}", encoding="utf-8")
+    retry_run, retry = services.prepare_analysis(project)
+
+    assert retry_run.run_kind == RunKind.ANALYSIS
+    assert "analyze" in retry.arguments
+
+
+def test_analysis_dependency_change_allows_refresh_without_recompute_all(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    analysis_path = tmp_path / "analysis.json"
+    _write_analysis_artifact(
+        analysis_path, project.project_id, "analysis-current", "fingerprint-current", ["candidate-a"],
+    )
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = "analysis-current"
+    project.analysis_fingerprint = "fingerprint-current"
+    project.setup_state.needs_new_analysis = True
+    services.projects.save(project)
+
+    run, prepared = services.prepare_analysis(project)
+
+    assert run.run_kind == RunKind.ANALYSIS
+    assert project.settings.recompute_all is False
+    assert "analyze" in prepared.arguments
+
+
+def test_full_run_can_replace_a_corrupt_analysis_handoff(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text("{}", encoding="utf-8")
+    project.analysis_artifact_path = str(analysis_path)
+    project.analysis_id = "stale-analysis"
+    project.analysis_fingerprint = "stale-fingerprint"
+    services.projects.save(project)
+
+    run, prepared = services.prepare_run(project)
+
+    assert run.run_kind == RunKind.FULL
+    assert "process" in prepared.arguments
+
+
+def test_normal_analysis_completion_rejects_foreign_run_identity(tmp_path: Path) -> None:
+    output = tmp_path / "run-output"
+    output.mkdir()
+    artifact_path = output / "analysis.json"
+    _write_analysis_artifact(
+        artifact_path, "project-a", "analysis-a", "fingerprint-a", ["candidate-a"],
+    )
+    report_path = output / "report.json"
+    write_json(report_path, {
+        "terminal": {"status": "analysis_ready"},
+        "run": {
+            "run_id": "run-other", "project_id": "project-a",
+            "analysis_id": "analysis-a", "analysis_fingerprint": "fingerprint-a",
+            "analysis_artifact_path": str(artifact_path),
+        },
+    })
+    prepared = PreparedPipelineRun(
+        program="", arguments=[], working_directory=tmp_path,
+        state_path=output / "state.json", report_path=report_path,
+        output_directory=output, runtime_config_path=tmp_path / "runtime.yaml",
+        run_id="run-a", project_id="project-a", runtime_flags={"mode": "analysis"},
+        allow_legacy_artifact_scan=False,
+    )
+
+    completion = PipelineFacade(tmp_path).completion(prepared)
+
+    assert completion.error_summary is not None
+    assert completion.technical_details == "Stage report run_id does not match the current Desktop run."
+
+
+def test_normal_draft_completion_rejects_foreign_artifact_run(tmp_path: Path) -> None:
+    output = tmp_path / "run-output"
+    output.mkdir()
+    analysis_path = tmp_path / "analysis.json"
+    _write_analysis_artifact(
+        analysis_path, "project-a", "analysis-a", "fingerprint-a", ["candidate-a"],
+    )
+    draft_path = output / "draft.json"
+    new_draft_artifact(
+        draft_id="draft-a", analysis_id="analysis-a", analysis_fingerprint="fingerprint-a",
+        analysis_artifact_path=str(analysis_path), project_id="project-a",
+        source_fingerprint="source-fingerprint", run_id="run-other",
+        candidates=[{
+            "candidate_id": "candidate-a", "state": "draft_failed",
+            "requested_index": 1, "source_start_seconds": 1.0,
+            "source_end_seconds": 18.0, "output_file": None,
+        }],
+    ).write(draft_path)
+    report_path = output / "report.json"
+    write_json(report_path, {
+        "terminal": {"status": "draft_ready"},
+        "run": {
+            "run_id": "run-a", "project_id": "project-a", "analysis_id": "analysis-a",
+            "draft_id": "draft-a", "draft_artifact_path": str(draft_path),
+        },
+        "candidate_flow": {"draft_candidates": [{
+            "candidate_id": "candidate-a", "state": "draft_failed",
+        }]},
+    })
+    prepared = PreparedPipelineRun(
+        program="", arguments=[], working_directory=tmp_path,
+        state_path=output / "state.json", report_path=report_path,
+        output_directory=output, runtime_config_path=tmp_path / "runtime.yaml",
+        run_id="run-a", project_id="project-a",
+        runtime_flags={"mode": "draft", "analysis_id": "analysis-a"},
+        expected_candidate_ids=("candidate-a",), allow_legacy_artifact_scan=False,
+    )
+
+    completion = PipelineFacade(tmp_path).completion(prepared)
+
+    assert completion.error_summary is not None
+    assert completion.technical_details == "Draft artifact belongs to another run."
+
+
+def test_normal_draft_completion_accepts_verified_partial_success(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    output = tmp_path / "run-output"
+    output.mkdir()
+    analysis_path = tmp_path / "analysis.json"
+    _write_analysis_artifact(
+        analysis_path, "project-a", "analysis-a", "fingerprint-a",
+        ["candidate-a", "candidate-b"],
+    )
+    preview = output / "drafts" / "01-candidate-a" / "draft-preview.mp4"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"preview")
+    records = [
+        {
+            "candidate_id": "candidate-a", "state": "draft_ready", "requested_index": 1,
+            "source_start_seconds": 1.0, "source_end_seconds": 18.0,
+            "draft_final_script": {"candidate_id": "candidate-a"},
+            "draft_production_plan": {"metadata": {"candidate_id": "candidate-a"}},
+            "output_file": str(preview),
+            "preview": {
+                "status": "draft_ready", "output_file": str(preview),
+                "segments": [{"source_start_seconds": 1.0, "source_end_seconds": 18.0}],
+            },
+        },
+        {
+            "candidate_id": "candidate-b", "state": "draft_failed", "requested_index": 2,
+            "source_start_seconds": 20.0, "source_end_seconds": 29.0, "output_file": None,
+        },
+    ]
+    draft_path = output / "draft.json"
+    new_draft_artifact(
+        draft_id="draft-a", analysis_id="analysis-a", analysis_fingerprint="fingerprint-a",
+        analysis_artifact_path=str(analysis_path), project_id="project-a",
+        source_fingerprint="source-fingerprint", run_id="run-a", status="draft_partial",
+        candidates=records,
+    ).write(draft_path)
+    report_path = output / "report.json"
+    write_json(report_path, {
+        "terminal": {"status": "draft_ready"},
+        "run": {
+            "run_id": "run-a", "project_id": "project-a", "analysis_id": "analysis-a",
+            "draft_id": "draft-a", "draft_artifact_path": str(draft_path),
+        },
+        "candidate_flow": {"draft_candidates": [
+            {"candidate_id": record["candidate_id"], "state": record["state"]}
+            for record in records
+        ]},
+    })
+    prepared = PreparedPipelineRun(
+        program="", arguments=[], working_directory=tmp_path,
+        state_path=output / "state.json", report_path=report_path,
+        output_directory=output, runtime_config_path=tmp_path / "runtime.yaml",
+        run_id="run-a", project_id="project-a",
+        runtime_flags={"mode": "draft", "analysis_id": "analysis-a"},
+        expected_candidate_ids=("candidate-a", "candidate-b"),
+        allow_legacy_artifact_scan=False,
+    )
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
+
+    completion = PipelineFacade(tmp_path).completion(prepared)
+
+    assert completion.error_summary is None
+    assert completion.output_files == [preview]
+
+
+def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(
+    tmp_path: Path, monkeypatch,
+) -> None:
     services, project, source = _services(tmp_path)
 
     analysis_run, analysis_prepared = services.prepare_analysis(project)
@@ -54,13 +262,19 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert "--transform-script" not in analysis_prepared.arguments
     assert project.status == ProjectStatus.ANALYZING
 
-    analysis_path = tmp_path / "analysis.json"
+    analysis_path = analysis_prepared.output_directory / "analysis.json"
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     _write_analysis_artifact(
-        analysis_path, project.project_id, "analysis-001", "fingerprint-001", ["candidate-a", "candidate-b"],
+        analysis_path, project.project_id, "analysis-001", "fingerprint-001",
+        ["candidate-a", "candidate-b"], analysis_run_id=analysis_run.run_id,
     )
     write_json(analysis_prepared.report_path, {
         "terminal": {"status": "analysis_ready"}, "output_files": [], "warnings": [],
-        "run": {"analysis_id": "analysis-001", "analysis_fingerprint": "fingerprint-001", "analysis_artifact_path": str(analysis_path)},
+        "run": {
+            "run_id": analysis_run.run_id, "project_id": project.project_id,
+            "analysis_id": "analysis-001", "analysis_fingerprint": "fingerprint-001",
+            "analysis_artifact_path": str(analysis_path),
+        },
         "clip_intelligence": {"candidates": [{"id": "candidate-a"}, {"id": "candidate-b"}]},
     })
     finished_analysis = services.finish_success(project, analysis_run, analysis_prepared)
@@ -76,20 +290,33 @@ def test_desktop_flow_prepares_analysis_then_draft_then_confirmed_production(tmp
     assert "render" not in draft_prepared.arguments
     assert project.candidate_states["candidate-a"] == "draft_planning"
 
-    preview = tmp_path / "draft-preview.mp4"; preview.write_bytes(b"preview")
-    draft_path = tmp_path / "draft-a.json"
+    preview = draft_prepared.output_directory / "drafts" / "01-candidate-a" / "draft-preview.mp4"
+    preview.parent.mkdir(parents=True, exist_ok=True)
+    preview.write_bytes(b"preview")
+    draft_path = draft_prepared.output_directory / "draft.json"
     new_draft_artifact(
         draft_id="draft-001", analysis_id="analysis-001", analysis_fingerprint="fingerprint-001",
         analysis_artifact_path=str(analysis_path), project_id=project.project_id,
-        source_fingerprint="source-fingerprint", candidates=[{
+        source_fingerprint="source-fingerprint", run_id=draft_run.run_id, candidates=[{
             "candidate_id": "candidate-a", "state": "draft_ready",
-            "draft_production_plan": {"plan_id": "plan-a"},
-            "preview": {"output_file": str(preview)},
+            "requested_index": 1, "source_start_seconds": 1.0, "source_end_seconds": 18.0,
+            "draft_final_script": {"candidate_id": "candidate-a"},
+            "draft_production_plan": {"plan_id": "plan-a", "metadata": {"candidate_id": "candidate-a"}},
+            "output_file": str(preview),
+            "preview": {
+                "status": "draft_ready", "output_file": str(preview),
+                "segments": [{"source_start_seconds": 1.0, "source_end_seconds": 18.0}],
+            },
         }],
     ).write(draft_path)
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
     write_json(draft_prepared.report_path, {
         "terminal": {"status": "draft_ready"}, "output_files": [str(preview)], "warnings": [],
-        "run": {"draft_id": "draft-001", "draft_artifact_path": str(draft_path)},
+        "run": {
+            "run_id": draft_run.run_id, "project_id": project.project_id,
+            "analysis_id": "analysis-001", "draft_id": "draft-001",
+            "draft_artifact_path": str(draft_path),
+        },
         "candidate_flow": {"draft_candidates": [{"candidate_id": "candidate-a", "state": "draft_ready"}]},
     })
     finished_draft = services.finish_success(project, draft_run, draft_prepared)
@@ -156,19 +383,27 @@ def test_targeted_preview_failure_keeps_previous_valid_candidate_preview(tmp_pat
     }
     assert project.candidate_draft_artifacts["candidate-a"] == str(previous_draft)
 
-    failed_artifact = tmp_path / "failed-revision.json"
+    failed_artifact = prepared.output_directory / "failed-revision.json"
+    failed_artifact.parent.mkdir(parents=True, exist_ok=True)
     failed_artifact.write_text("{}", encoding="utf-8")
     write_json(prepared.report_path, {
-        "terminal": {"status": "draft_ready"},
+        "terminal": {
+            "status": "failed", "error_code": "NO_DRAFT_PREVIEWS",
+            "message": "new revision failed",
+        },
         "output_files": [],
         "warnings": [],
-        "run": {"draft_id": "draft-targeted", "draft_artifact_path": str(failed_artifact)},
+        "run": {
+            "run_id": run.run_id, "project_id": project.project_id,
+            "analysis_id": project.analysis_id,
+            "draft_id": "draft-targeted", "draft_artifact_path": str(failed_artifact),
+        },
         "candidate_flow": {"draft_candidates": [{
             "candidate_id": "candidate-a", "state": "draft_failed",
             "error": "new revision failed",
         }]},
     })
-    services.finish_success(project, run, prepared)
+    assert services.recover_reported_failure(project, run, prepared) is run
 
     assert project.candidate_states["candidate-a"] == "draft_ready"
     assert project.candidate_draft_artifacts["candidate-a"] == str(previous_draft)
@@ -359,6 +594,70 @@ def test_completed_selected_render_with_warnings_is_not_marked_partial(tmp_path:
     assert project.status == ProjectStatus.COMPLETED_WITH_WARNINGS
     assert project.selected_candidate_ids == []
     assert project.candidate_states["candidate-a"] == "rendered"
+
+
+def test_canonical_final_results_override_divergent_report_projection(tmp_path: Path) -> None:
+    services, project, _source = _services(tmp_path)
+    project.selected_candidate_ids = ["candidate-a"]
+    project.candidate_states = {"candidate-a": "production_rendering"}
+    project.candidate_draft_statuses = {"candidate-a": "ready"}
+    project.candidate_approval_states = {"candidate-a": "approved"}
+    project.candidate_export_statuses = {"candidate-a": "running"}
+    services.projects.save(project)
+    run = services.runs.create(
+        project, {"candidate_ids": ["candidate-a"]}, {}, "test",
+        run_kind=RunKind.SELECTED_RENDER,
+    )
+    final = tmp_path / "canonical-final.mp4"
+    final.write_bytes(b"canonical final")
+    untrusted = tmp_path / "untrusted-report-final.mp4"
+    untrusted.write_bytes(b"untrusted report final")
+    report_path = tmp_path / "divergent-report.json"
+    write_json(report_path, {
+        "production_render": {
+            "status": "partial",
+            "items": [{
+                "candidate_id": "candidate-a", "status": "failed",
+                "error": "stale report projection",
+            }],
+        },
+        "candidate_flow": {"items": [{
+            "candidate_id": "candidate-a", "status": "failed",
+            "error": "stale report projection",
+        }]},
+        "primary_results": [{
+            "clip_result_id": "untrusted-report-result",
+            "candidate_id": "candidate-a",
+            "production_plan_id": "untrusted-plan",
+            "output_file": str(untrusted),
+            "run_id": run.run_id,
+            "status": "completed",
+            "primary": True,
+        }],
+    })
+    canonical = ClipResult(
+        "candidate-a", str(final),
+        clip_result_id="canonical-result",
+        production_plan_id="canonical-plan",
+        run_id=run.run_id,
+        revision_id=f"{run.run_id}:canonical-revision",
+    )
+    completion = PipelineCompletion(
+        report_path, [final], [], None, None, 0.0,
+        canonical_results=True,
+        validated_results=(canonical,),
+    )
+
+    finished = services._finish_completion(project, run, completion)
+
+    assert finished.status == RunStatus.COMPLETED
+    assert project.status == ProjectStatus.COMPLETED
+    assert project.candidate_states["candidate-a"] == "rendered"
+    assert project.candidate_export_statuses["candidate-a"] == "ready"
+    assert project.candidate_errors.get("candidate-a") is None
+    assert project.selected_candidate_ids == []
+    assert project.last_final_result_id == "canonical-result"
+    assert services.projects.load(project.project_id).last_final_result_id == "canonical-result"
 
 
 def _reported_failure_prepared(tmp_path: Path, report_path: Path, mode: str) -> PreparedPipelineRun:
@@ -629,6 +928,7 @@ def test_single_final_export_retry_keeps_other_approved_candidates_queued(tmp_pa
 
     final = tmp_path / "final-a.mp4"
     final.write_bytes(b"valid final artifact")
+    result_id = "candidate-a:plan-a"
     write_json(prepared.report_path, {
         "terminal": {"status": "completed"},
         "output_files": [str(final)],
@@ -636,6 +936,15 @@ def test_single_final_export_retry_keeps_other_approved_candidates_queued(tmp_pa
         "production_render": {"status": "completed", "output_file": str(final), "items": [{
             "candidate_id": "candidate-a", "status": "completed", "output_file": str(final),
         }]},
+        "primary_results": [{
+            "clip_result_id": result_id,
+            "candidate_id": "candidate-a",
+            "production_plan_id": "plan-a",
+            "output_file": str(final),
+            "run_id": run.run_id,
+            "status": "completed",
+            "primary": True,
+        }],
         "candidate_flow": {"items": [{"candidate_id": "candidate-a", "status": "completed"}]},
     })
 
@@ -648,6 +957,8 @@ def test_single_final_export_retry_keeps_other_approved_candidates_queued(tmp_pa
     assert project.selected_candidate_ids == ["candidate-b"]
     assert project.candidate_export_statuses["candidate-a"] == "ready"
     assert project.candidate_export_statuses["candidate-b"] == "failed"
+    assert project.last_final_result_id == result_id
+    assert services.projects.load(project.project_id).last_final_result_id == result_id
 
 
 def test_stale_ready_draft_is_regenerated_without_rebuilding_other_ready_drafts(tmp_path: Path) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,8 +75,49 @@ def test_gui_completion_reads_only_selected_run_manifest(tmp_path: Path, monkeyp
 
     assert completion.output_files == [file_a]
     assert file_b not in completion.output_files
+    assert [result.candidate_id for result in completion.validated_results] == ["candidate-a"]
     assert completion_b.output_files == [file_b]
     assert file_a not in completion_b.output_files
+    assert [result.candidate_id for result in completion_b.validated_results] == ["candidate-b"]
+
+
+def test_prepared_execution_migrates_durable_candidate_allow_list(tmp_path: Path) -> None:
+    execution = {
+        "run_id": "run-a",
+        "project_id": "project-a",
+        "state_path": str(tmp_path / "state.json"),
+        "report_path": str(tmp_path / "report.json"),
+        "output_directory": str(tmp_path / "output"),
+        "runtime_config_path": str(tmp_path / "runtime.yaml"),
+        "runtime_flags": {"mode": "selected_render"},
+        "allow_legacy_artifact_scan": False,
+    }
+    run = SimpleNamespace(
+        run_id="run-a",
+        project_id="project-a",
+        settings_snapshot={
+            "candidate_ids": ["candidate-b", "candidate-a", "candidate-b", ""],
+            "execution": execution,
+        },
+    )
+    facade = PipelineFacade(tmp_path)
+
+    migrated = facade.prepared_from_execution(run)
+
+    assert migrated is not None
+    assert migrated.expected_candidate_ids == ("candidate-b", "candidate-a")
+
+    execution["expected_candidate_ids"] = ["candidate-explicit", "candidate-explicit"]
+    explicit = facade.prepared_from_execution(run)
+    assert explicit is not None
+    assert explicit.expected_candidate_ids == ("candidate-explicit",)
+
+    # An explicit empty list is a deliberate scope, not permission to widen
+    # the run from the older top-level snapshot.
+    execution["expected_candidate_ids"] = []
+    explicit_empty = facade.prepared_from_execution(run)
+    assert explicit_empty is not None
+    assert explicit_empty.expected_candidate_ids == ()
 
 
 def test_run_manifest_persists_project_identity(tmp_path: Path) -> None:
@@ -144,6 +187,42 @@ def test_manifest_rejects_result_owned_by_another_run(tmp_path: Path) -> None:
             production_render={"enabled": True, "status": "completed"},
             results=[_result("candidate-b", output, "run-b")], run_directory=run_a,
         )
+
+
+def test_completion_rejects_manifest_owned_by_another_project(tmp_path: Path, monkeypatch) -> None:
+    run_directory = tmp_path / "runs" / "run-a"
+    (run_directory / "results").mkdir(parents=True)
+    output = run_directory / "results" / "final-short-01.mp4"
+    output.write_bytes(b"video")
+    prepared = _write_scoped_report(
+        run_directory, "run-a", _result("candidate-a", output, "run-a"),
+    )
+    prepared = replace(
+        prepared, project_id="project-other", allow_legacy_artifact_scan=False,
+    )
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
+
+    completion = PipelineFacade(tmp_path).completion(prepared)
+
+    assert completion.error_summary == "Результат относится к другому проекту."
+    assert completion.technical_details and "Expected project_id=project-other" in completion.technical_details
+
+
+def test_completion_rejects_candidate_outside_dispatched_allow_list(tmp_path: Path, monkeypatch) -> None:
+    run_directory = tmp_path / "runs" / "run-a"
+    (run_directory / "results").mkdir(parents=True)
+    output = run_directory / "results" / "final-short-01.mp4"
+    output.write_bytes(b"video")
+    prepared = _write_scoped_report(
+        run_directory, "run-a", _result("candidate-b", output, "run-a"),
+    )
+    prepared = replace(prepared, expected_candidate_ids=("candidate-a",))
+    monkeypatch.setattr(PipelineFacade, "_validate_final_mp4", staticmethod(lambda _path: None))
+
+    completion = PipelineFacade(tmp_path).completion(prepared)
+
+    assert completion.error_summary == "Результат относится к другому выбранному моменту."
+    assert completion.technical_details and "candidate-b" in completion.technical_details
 
 
 def test_recovery_uses_only_its_manifest_and_never_falls_back_to_neighbour_run(

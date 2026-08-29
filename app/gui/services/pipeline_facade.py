@@ -67,6 +67,11 @@ class PreparedPipelineRun:
     # it, state/report/output paths are replaced with the engine's real values.
     artifact_metadata_path: Path | None = None
     project_id: str | None = None
+    # Candidate-scoped Desktop actions persist the exact allow-list beside the
+    # run identity.  Completion may legitimately return only a subset after a
+    # partial batch, but it must never attach a sibling candidate that the user
+    # did not dispatch in this run.
+    expected_candidate_ids: tuple[str, ...] = ()
     # New launches require the engine's indexed metadata contract.  Legacy
     # records may opt into the expensive identity scan when that index was not
     # available in the engine version that created them.
@@ -90,6 +95,11 @@ class PipelineCompletion:
     quality_status: str | None = None
     quality_report_paths: tuple[Path, ...] = ()
     legacy_technical_completion: bool = True
+    # Strict Final completion exposes the exact manifest-owned records that
+    # passed run/candidate/path/media/quality validation.  Downstream Desktop
+    # lifecycle code must not reconstruct success identity from the looser
+    # diagnostic report after this boundary.
+    validated_results: tuple[ClipResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +290,7 @@ class PipelineFacade:
                  len(candidate_ids) == 1 and project.candidate_creative_overrides.get(candidate_ids[0])
              )).lower()},
             source_duration_seconds=_source_duration_seconds(project),
+            expected_candidate_ids=tuple(candidate_ids),
         )
 
     @staticmethod
@@ -339,6 +350,7 @@ class PipelineFacade:
              "encoder": str(config.production_render.encoder), "processing_mode": resolved.processing_mode,
              "platform": resolved.platform.platform},
             source_duration_seconds=_source_duration_seconds(project),
+            expected_candidate_ids=tuple(candidate_ids),
         )
 
     @staticmethod
@@ -554,10 +566,12 @@ class PipelineFacade:
         self, arguments: list[str], source_path: Path, config_path: Path, run_id: str, project_id: str,
         runtime_flags: dict[str, str], *,
         source_duration_seconds: float | None = None,
+        expected_candidate_ids: tuple[str, ...] = (),
     ) -> PreparedPipelineRun:
         return self._pending_prepared(
             arguments, source_path, config_path, run_id, project_id, runtime_flags,
             source_duration_seconds=source_duration_seconds,
+            expected_candidate_ids=expected_candidate_ids,
         )
 
     def _require_provider_credential(
@@ -600,6 +614,7 @@ class PipelineFacade:
     def _pending_prepared(
         self, arguments: list[str], source_path: Path, config_path: Path, run_id: str, project_id: str,
         runtime_flags: dict[str, str], *, source_duration_seconds: float | None = None,
+        expected_candidate_ids: tuple[str, ...] = (),
     ) -> PreparedPipelineRun:
         """Prepare a launch without deriving engine output locations in GUI code."""
 
@@ -615,6 +630,7 @@ class PipelineFacade:
             run_id=run_id, runtime_flags=runtime_flags,
             source_duration_seconds=source_duration_seconds,
             artifact_metadata_path=metadata_path, project_id=project_id,
+            expected_candidate_ids=expected_candidate_ids,
             allow_legacy_artifact_scan=False,
         )
 
@@ -673,7 +689,185 @@ class PipelineFacade:
                 "platform": resolved.platform.platform, "candidate_count": str(len(candidate_ids)),
             },
             source_duration_seconds=_source_duration_seconds(project),
+            expected_candidate_ids=tuple(candidate_ids),
         )
+
+    @staticmethod
+    def _reported_path(value: object, output_directory: Path) -> Path | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        return path if path.is_absolute() else output_directory / path
+
+    @staticmethod
+    def _report_identity_error(
+        raw: dict[str, Any], prepared: PreparedPipelineRun,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        run_info = raw.get("run")
+        if not isinstance(run_info, dict):
+            return None, "Current stage report is missing its run identity."
+        strict = not prepared.allow_legacy_artifact_scan
+        report_run_id = str(run_info.get("run_id") or "")
+        report_project_id = str(run_info.get("project_id") or "")
+        if prepared.run_id and report_run_id != prepared.run_id:
+            if report_run_id or strict:
+                return None, "Stage report run_id does not match the current Desktop run."
+        if prepared.project_id and report_project_id != prepared.project_id:
+            if report_project_id or strict:
+                return None, "Stage report project_id does not match the current Desktop project."
+        return run_info, None
+
+    def _validate_analysis_completion(
+        self, raw: dict[str, Any], prepared: PreparedPipelineRun,
+    ) -> str | None:
+        run_info, identity_error = self._report_identity_error(raw, prepared)
+        if identity_error or run_info is None:
+            return identity_error
+        artifact_path = self._reported_path(
+            run_info.get("analysis_artifact_path"), prepared.output_directory,
+        )
+        if artifact_path is None:
+            return "Analysis report is missing analysis_artifact_path."
+        # Historical Desktop records predate the checksummed Analysis hand-off.
+        # Keep their identity-based path recovery compatible; every newly
+        # launched run below is strict because _pending_prepared opts out of
+        # legacy scanning.
+        if prepared.allow_legacy_artifact_scan:
+            return None if artifact_path.is_file() else "Legacy Analysis artifact is missing."
+        if not prepared.allow_legacy_artifact_scan and not is_run_scoped_path(
+            artifact_path, prepared.output_directory,
+        ):
+            return "Analysis artifact path is outside the current run."
+        try:
+            artifact = AnalysisArtifact.read_verified(artifact_path)
+        except (AnalysisArtifactError, OSError, ValueError) as error:
+            return f"Analysis artifact failed integrity validation: {error}"
+        if str(run_info.get("analysis_id") or "") != artifact.analysis_id:
+            return "Analysis report analysis_id does not match analysis.json."
+        if str(run_info.get("analysis_fingerprint") or "") != artifact.analysis_fingerprint:
+            return "Analysis report fingerprint does not match analysis.json."
+        if prepared.project_id and artifact.project_id != prepared.project_id:
+            if artifact.project_id or not prepared.allow_legacy_artifact_scan:
+                return "Analysis artifact belongs to another project."
+        # Analysis 1.1 is producer-bound and always carries this identity.
+        # A verified 1.0 artifact has no run field, so its exact report,
+        # project, analysis ID/fingerprint and run-scoped path remain the
+        # compatibility binding used by existing Desktop recovery records.
+        if prepared.run_id and artifact.analysis_run_id and artifact.analysis_run_id != prepared.run_id:
+            return "Analysis artifact belongs to another analysis run."
+        return None
+
+    def _validate_draft_completion(
+        self, raw: dict[str, Any], prepared: PreparedPipelineRun,
+    ) -> tuple[list[Path], str | None]:
+        run_info, identity_error = self._report_identity_error(raw, prepared)
+        if identity_error or run_info is None:
+            return [], identity_error
+        artifact_path = self._reported_path(
+            run_info.get("draft_artifact_path"), prepared.output_directory,
+        )
+        if artifact_path is None:
+            return [], "Draft report is missing draft_artifact_path."
+        if prepared.allow_legacy_artifact_scan:
+            if not artifact_path.is_file():
+                return [], "Legacy Draft artifact is missing."
+            outputs = [
+                path for value in raw.get("output_files", [])
+                if (path := self._reported_path(value, prepared.output_directory)) is not None
+            ]
+            return outputs, None
+        if not prepared.allow_legacy_artifact_scan and not is_run_scoped_path(
+            artifact_path, prepared.output_directory,
+        ):
+            return [], "Draft artifact path is outside the current run."
+        try:
+            artifact = DraftArtifact.read(artifact_path)
+        except (DraftArtifactError, OSError, ValueError) as error:
+            return [], f"Draft artifact failed validation: {error}"
+        if artifact.status not in {"draft_ready", "draft_partial"}:
+            return [], "Completed Draft handoff is not ready for review."
+        if str(run_info.get("draft_id") or "") != artifact.draft_id:
+            return [], "Draft report draft_id does not match draft.json."
+        if str(run_info.get("analysis_id") or "") != artifact.analysis_id:
+            return [], "Draft report analysis_id does not match draft.json."
+        if prepared.project_id and artifact.project_id != prepared.project_id:
+            if artifact.project_id or not prepared.allow_legacy_artifact_scan:
+                return [], "Draft artifact belongs to another project."
+        if prepared.run_id and artifact.run_id != prepared.run_id:
+            if artifact.run_id or not prepared.allow_legacy_artifact_scan:
+                return [], "Draft artifact belongs to another run."
+        expected_analysis_id = str(prepared.runtime_flags.get("analysis_id") or "")
+        if expected_analysis_id and artifact.analysis_id != expected_analysis_id:
+            return [], "Draft artifact belongs to another Analysis identity."
+        analysis_path = self._reported_path(
+            artifact.analysis_artifact_path, prepared.output_directory,
+        )
+        if analysis_path is None:
+            return [], "Draft artifact is missing its Analysis reference."
+        try:
+            analysis = AnalysisArtifact.read_verified(
+                analysis_path,
+                expected_sha256=artifact.analysis_artifact_sha256 or None,
+            )
+        except (AnalysisArtifactError, OSError, ValueError) as error:
+            return [], f"Draft Analysis reference failed integrity validation: {error}"
+        if (
+            analysis.analysis_id != artifact.analysis_id
+            or analysis.analysis_fingerprint != artifact.analysis_fingerprint
+            or analysis.source_fingerprint != artifact.source_fingerprint
+            or (prepared.project_id and analysis.project_id != prepared.project_id)
+            or (
+                artifact.analysis_run_id
+                and artifact.analysis_run_id != (analysis.analysis_run_id or analysis.analysis_id)
+            )
+        ):
+            return [], "Draft artifact Analysis lineage is inconsistent."
+
+        records = artifact.candidates
+        record_ids = [str(record.get("candidate_id") or "") for record in records]
+        expected_ids = list(prepared.expected_candidate_ids) or record_ids
+        if not expected_ids or record_ids != expected_ids:
+            return [], "Draft artifact candidate order does not match the dispatched candidate allow-list."
+        flow = raw.get("candidate_flow")
+        reported = flow.get("draft_candidates") if isinstance(flow, dict) else None
+        if not isinstance(reported, list):
+            return [], "Draft report is missing candidate-level completion state."
+        reported_ids = [
+            str(item.get("candidate_id") or "") if isinstance(item, dict) else ""
+            for item in reported
+        ]
+        if reported_ids != expected_ids:
+            return [], "Draft report candidates do not match the dispatched candidate allow-list."
+        reported_states = {
+            str(item.get("candidate_id") or ""): str(item.get("state") or "")
+            for item in reported if isinstance(item, dict)
+        }
+
+        outputs: list[Path] = []
+        for index, record in enumerate(records, start=1):
+            candidate_id = expected_ids[index - 1]
+            if not self._valid_draft_binding(
+                record, candidate_id, index, prepared.output_directory,
+            ):
+                return [], f"Draft candidate binding is invalid: {candidate_id}."
+            state = str(record.get("state") or "")
+            if reported_states.get(candidate_id) != state:
+                return [], f"Draft report state disagrees with draft.json: {candidate_id}."
+            if state != "draft_ready":
+                continue
+            if not self._valid_draft_preview(
+                record, candidate_id, index, prepared.output_directory,
+            ):
+                return [], f"Draft preview parity or media validation failed: {candidate_id}."
+            output_path = self._reported_path(
+                record.get("output_file"), prepared.output_directory,
+            )
+            assert output_path is not None
+            outputs.append(output_path)
+        if not outputs:
+            return [], "Draft completion contains no validated Creative Preview."
+        return outputs, None
 
     def completion(self, prepared: PreparedPipelineRun) -> PipelineCompletion:
         resolved = self.resolve_engine_paths(prepared)
@@ -707,10 +901,26 @@ class PipelineFacade:
             message = str(terminal.get("message") or "Pipeline завершился без финального ролика.")
             return self._failed_completion(prepared, message, f"{code}: {message}")
         if isinstance(terminal, dict) and terminal.get("status") in {"analysis_ready", "draft_ready"}:
-            outputs = [
-                Path(str(value)) for value in raw.get("output_files", [])
-                if isinstance(value, str) and Path(value).is_file()
-            ]
+            terminal_status = str(terminal.get("status"))
+            mode = prepared.runtime_flags.get("mode")
+            expected_status = {"analysis": "analysis_ready", "draft": "draft_ready"}.get(mode)
+            if expected_status and terminal_status != expected_status:
+                return self._failed_completion(
+                    prepared,
+                    "Сохранённый результат этапа не соответствует текущему запуску.",
+                    f"runtime mode={mode} cannot accept terminal status={terminal_status}",
+                )
+            if terminal_status == "analysis_ready":
+                validation_error = self._validate_analysis_completion(raw, prepared)
+                outputs: list[Path] = []
+            else:
+                outputs, validation_error = self._validate_draft_completion(raw, prepared)
+            if validation_error:
+                return self._failed_completion(
+                    prepared,
+                    "Не удалось проверить сохранённый результат этапа.",
+                    validation_error,
+                )
             return PipelineCompletion(
                 report_path=prepared.report_path,
                 output_files=outputs,
@@ -719,6 +929,7 @@ class PipelineFacade:
                 technical_details=None,
                 cost_estimate=None,
                 canonical_results=False,
+                legacy_technical_completion=prepared.allow_legacy_artifact_scan,
             )
         manifest: dict[str, Any] | None = None
         if prepared.run_id:
@@ -732,6 +943,13 @@ class PipelineFacade:
                     prepared, "Не удалось проверить результат текущей сборки.",
                     f"Expected run_id={prepared.run_id} in {manifest_path}",
                 )
+            if prepared.project_id and manifest_value.get("project_id") != prepared.project_id:
+                if manifest_value.get("project_id") or not prepared.allow_legacy_artifact_scan:
+                    return self._failed_completion(
+                        prepared,
+                        "Результат относится к другому проекту.",
+                        f"Expected project_id={prepared.project_id} in {manifest_path}",
+                    )
             manifest = manifest_value
         production = raw.get("production_render", {})
         if not isinstance(production, dict):
@@ -791,6 +1009,16 @@ class PipelineFacade:
                     )
                 if any(not is_run_scoped_path(Path(result.output_file), prepared.output_directory) for result in registry):
                     return self._failed_completion(prepared, "Готовый ролик сохранён в неожиданном месте.", "Canonical result path escapes run directory.")
+            if prepared.expected_candidate_ids:
+                allowed = set(prepared.expected_candidate_ids)
+                unexpected = [result.candidate_id for result in registry if result.candidate_id not in allowed]
+                if unexpected:
+                    return self._failed_completion(
+                        prepared,
+                        "Результат относится к другому выбранному моменту.",
+                        "Canonical result candidate_id is outside the dispatched allow-list: "
+                        + ", ".join(unexpected),
+                    )
             output_files = result_paths(registry, prepared.output_directory)
             for candidate in output_files:
                 artifact_error = self._validate_final_mp4(candidate)
@@ -810,6 +1038,7 @@ class PipelineFacade:
             return PipelineCompletion(
                 prepared.report_path, output_files, warnings, None, None, cost, True,
                 quality_status, tuple(quality_paths), quality_status is None,
+                tuple(registry),
             )
         output_files = [final_path]
         for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
@@ -1087,6 +1316,23 @@ class PipelineFacade:
         run_id = str(stored_run_id).strip() if stored_run_id else None
         project_id = str(execution.get("project_id") or run.project_id).strip() or None
         runtime_flags = execution.get("runtime_flags", {})
+        # Current records persist the launch-time allow-list in ``execution``.
+        # Runs written just before that field was introduced still have the
+        # same durable identity in the top-level settings snapshot.  An
+        # explicitly stored execution value (including an empty one) remains
+        # authoritative so migration never widens a deliberately scoped run.
+        expected_raw = (
+            execution.get("expected_candidate_ids")
+            if "expected_candidate_ids" in execution
+            else run.settings_snapshot.get("candidate_ids", ())
+        )
+        expected_candidate_ids = tuple(
+            dict.fromkeys(
+                normalized
+                for value in expected_raw
+                if value is not None and (normalized := str(value).strip())
+            )
+        ) if isinstance(expected_raw, (list, tuple)) else ()
         source = execution.get("source_path")
         metadata_value = str(execution.get("artifact_metadata_path") or "").strip()
         allow_legacy_artifact_scan = execution.get("allow_legacy_artifact_scan")
@@ -1103,6 +1349,7 @@ class PipelineFacade:
                 source_path=Path(str(source)) if source else None,
                 runtime_flags={str(key): str(value) for key, value in runtime_flags.items()} if isinstance(runtime_flags, dict) else {},
                 run_id=run_id, artifact_metadata_path=metadata_path, project_id=project_id,
+                expected_candidate_ids=expected_candidate_ids,
                 allow_legacy_artifact_scan=allow_legacy_artifact_scan,
             )
         engine_paths = execution.get("engine_paths")
@@ -1122,6 +1369,8 @@ class PipelineFacade:
                 manifest_path=Path(str(engine_paths["manifest_path"])) if engine_paths.get("manifest_path") else None,
                 heartbeat_path=Path(str(engine_paths["heartbeat_path"])) if engine_paths.get("heartbeat_path") else None,
                 project_id=project_id,
+                expected_candidate_ids=expected_candidate_ids,
+                allow_legacy_artifact_scan=allow_legacy_artifact_scan,
             )
         required_paths = ("state_path", "report_path", "output_directory")
         if not all(isinstance(execution.get(name), str) and execution[name].strip() for name in required_paths):
@@ -1145,6 +1394,8 @@ class PipelineFacade:
             run_id=run_id,
             manifest_path=manifest_path,
             project_id=project_id,
+            expected_candidate_ids=expected_candidate_ids,
+            allow_legacy_artifact_scan=allow_legacy_artifact_scan,
         )
 
     def resolve_engine_paths(self, prepared: PreparedPipelineRun | None) -> PreparedPipelineRun | None:
