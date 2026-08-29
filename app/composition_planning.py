@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.5.safe-track-fallback.1"
+COMPOSITION_PLANNER_VERSION = "7J.6.keyframe-containment.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -1579,11 +1579,19 @@ def _quality_report(
     punch_count = sum(item.punch_in is not None for item in segments)
     maximum_velocity = max((key.velocity_per_frame for item in segments for key in item.crop_keyframes), default=0)
     maximum_acceleration = max((key.acceleration_per_frame_sq for item in segments for key in item.crop_keyframes), default=0)
-    containments = [
-        _containment(item.target_bounds, item.crop)
-        for item in segments if item.target_bounds is not None
+    # ``segment.crop`` is the final keyframe.  A pan can therefore finish on
+    # target while having clipped it earlier in the same emitted segment.
+    # Assess every frozen keyframe and retain the exact segment/frame that
+    # makes the quality gate fail; the latter is essential for a safe replay
+    # to distinguish impossible source geometry from a stale composition.
+    containment_samples = [
+        (item.segment_id, keyframe.frame, _containment(item.target_bounds, keyframe.crop))
+        for item in segments
+        if item.target_bounds is not None
+        for keyframe in item.crop_keyframes
     ]
-    clipped = [value for value in containments if value < config.minimum_target_containment]
+    containments = [value for _, _, value in containment_samples]
+    clipped = [sample for sample in containment_samples if sample[2] < config.minimum_target_containment]
     unsafe = [
         item for item in segments
         if item.layout not in {LayoutFamily.FIT_BACKGROUND, LayoutFamily.LEGACY_PASSTHROUGH}
@@ -1596,10 +1604,15 @@ def _quality_report(
     )
     jitter = _jitter_events(segments)
     if clipped:
+        clipped_segment_id, clipped_frame, clipped_value = min(clipped, key=lambda item: item[2])
         findings.append(CompositionQualityFinding(
             code="COMPOSITION_TARGET_CLIPPED", severity="blocker",
-            measured_value=round(min(clipped), 7), threshold=config.minimum_target_containment,
-            message="A selected semantic target is not safely contained by its final crop.",
+            segment_id=clipped_segment_id,
+            measured_value=round(clipped_value, 7), threshold=config.minimum_target_containment,
+            message=(
+                "A selected semantic target is not safely contained by its crop "
+                f"keyframe at output frame {clipped_frame}."
+            ),
         ))
     if unsafe:
         findings.append(CompositionQualityFinding(
@@ -1672,7 +1685,7 @@ def _quality_report(
             suppressed_switch_count=suppressed_switches,
             fallback_count=len(fallback_segments),
             punch_in_count=punch_count,
-            clipped_target_count=len(clipped),
+            clipped_target_count=len({segment_id for segment_id, _, _ in clipped}),
             unsafe_crop_count=len(unsafe),
             jitter_event_count=jitter,
             minimum_hold_violation_count=0,

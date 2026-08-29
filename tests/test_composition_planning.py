@@ -8,11 +8,14 @@ from app.composition_planning import (
     _AtomicState,
     _calibrate_layout_timeline,
     _containment,
+    _quality_report,
     _safe_area_containment,
     build_composition_plan,
 )
 from app.creative_contracts import (
     AttentionTarget,
+    CompositionCropKeyframe,
+    CompositionSegmentPlan,
     CreativeIntent,
     CreativePolicy,
     EditMapSegment,
@@ -295,6 +298,43 @@ def test_story_short_uses_actual_crop_and_blocks_an_uncontainable_group() -> Non
     assert plan.quality_report.metrics.clipped_target_count == 1
     assert plan.quality_report.metrics.layout_switch_count == 0
     assert "SCENE_TARGET_CONTAINMENT_UNRESOLVED:0" in plan.diagnostics
+
+
+def test_real_series_uncontainable_track_reports_the_worst_crop_keyframe() -> None:
+    """Regression for candidate-chapter-056-story-001 at output frame 262.
+
+    Its 1920x960 source admits at most a 0.28125-wide true 9:16 crop, while
+    the persisted person box is 0.32 wide.  The first pan keyframe clips more
+    of the person than the final keyframe, so checking only ``segment.crop``
+    misreports both the severity and the frame to investigate.
+    """
+    bounds = NormalizedRect(x=0.203, y=0.164, width=0.32, height=0.52)
+    first_crop = NormalizedRect(x=0.36875, y=0, width=0.28125, height=1)
+    final_crop = NormalizedRect(x=0.34375, y=0, width=0.28125, height=1)
+    segment = CompositionSegmentPlan(
+        segment_id="composition-010",
+        output=OutputInterval(start_frame=262, end_frame=266),
+        layout=LayoutFamily.STABLE_SPEAKER,
+        target=AttentionTarget.SPEAKER,
+        target_ref="speaker-series",
+        crop=final_crop,
+        target_bounds=bounds,
+        crop_keyframes=(
+            CompositionCropKeyframe(frame=262, crop=first_crop),
+            CompositionCropKeyframe(frame=265, crop=final_crop),
+        ),
+    )
+
+    report = _quality_report(
+        (segment,), (), 0, 1, _intent(()), CompositionPlannerConfig(),
+    )
+
+    finding = next(item for item in report.findings if item.code == "COMPOSITION_TARGET_CLIPPED")
+    assert report.status == "BLOCKED"
+    assert finding.segment_id == "composition-010"
+    assert finding.measured_value == pytest.approx(_containment(bounds, first_crop))
+    assert "output frame 262" in finding.message
+    assert report.metrics.clipped_target_count == 1
 
 
 def test_layout_edge_fragments_and_local_switch_bursts_are_calibrated() -> None:
