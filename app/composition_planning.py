@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.6.keyframe-containment.1"
+COMPOSITION_PLANNER_VERSION = "7K.0.shot-aware-subject-lock.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -95,6 +95,15 @@ class CompositionPlannerConfig:
     transition_frames: int = 18
     maximum_velocity_per_frame: float = 0.014
     maximum_acceleration_per_frame_sq: float = 0.0028
+    # All temporal behaviour of the virtual camera lives here.  The values
+    # describe editorial evidence, never detector-smoothing knobs.
+    subject_switch_confirmation_frames: int = 90
+    subject_occlusion_hold_frames: int = 90
+    camera_move_frames: int = 18
+    camera_dead_zone_ratio: float = 0.035
+    maximum_pan_episode_distance: float = 0.28
+    core_width_ratio: float = 0.58
+    core_height_ratio: float = 0.62
     punch_in_low: float = 1.025
     punch_in_balanced: float = 1.045
     punch_in_high: float = 1.065
@@ -122,6 +131,16 @@ class CompositionPlannerConfig:
             raise ValueError("composition transition must contain at least one frame")
         if self.maximum_velocity_per_frame <= 0 or self.maximum_acceleration_per_frame_sq <= 0:
             raise ValueError("composition motion limits must be positive")
+        if self.subject_switch_confirmation_frames < 1 or self.subject_occlusion_hold_frames < 1:
+            raise ValueError("composition subject evidence holds must be positive")
+        if self.camera_move_frames < 2:
+            raise ValueError("composition camera moves must have a bounded duration")
+        if not 0 <= self.camera_dead_zone_ratio < 0.5:
+            raise ValueError("composition camera dead zone must be normalized")
+        if not 0 < self.maximum_pan_episode_distance <= 1:
+            raise ValueError("composition pan episode distance must be normalized")
+        if not 0 < self.core_width_ratio <= 1 or not 0 < self.core_height_ratio <= 1:
+            raise ValueError("composition semantic core ratios must be normalized")
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +170,13 @@ class _AtomicState:
     reason: MovementReason
     punch_event: ResolvedMotionEvent | None
     hold_reframe: bool = False
+    camera_mode: Literal["STATIONARY", "PAN_ONLY", "TRACKING", "GROUP", "BLOCKED"] = "STATIONARY"
+    camera_phase: Literal["HOLD", "MOVE"] = "HOLD"
+    subject_lock_state: Literal[
+        "ACQUIRE", "LOCKED", "TEMPORARILY_OCCLUDED", "SWITCH_PENDING", "SWITCH_CONFIRMED", "EVIDENCE_GAP",
+    ] = "EVIDENCE_GAP"
+    movement_explanation: str | None = None
+    move_from: NormalizedRect | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +228,10 @@ class CompositionPlanner:
         diagnostics.extend(family_diagnostics)
         atomic, calibration_diagnostics = _calibrate_layout_timeline(atomic, self.config)
         diagnostics.extend(calibration_diagnostics)
+        atomic, camera_diagnostics = _plan_shot_virtual_camera(
+            atomic, cuts, source_width, source_height, self.config,
+        )
+        diagnostics.extend(camera_diagnostics)
         segments, track_diagnostics = self._smooth_and_freeze(
             atomic, trusted, source_width, source_height,
         )
@@ -485,8 +515,9 @@ class CompositionPlanner:
             )
             fallback = item.fallback
             layout = item.layout
+            core_bounds = _must_keep_core(item.state.bounds, self.config) if item.state is not None else None
             track_requires_recovery = (
-                _track_requires_safety_recovery(keyframes, item.state.bounds, self.config)
+                _track_requires_safety_recovery(keyframes, core_bounds, self.config)
                 if item.state else False
             )
             if track_requires_recovery and item.state is not None:
@@ -506,7 +537,7 @@ class CompositionPlanner:
                     )
                     if (
                         _track_minimum_safe_containment(
-                            candidate_keyframes, item.state.bounds, self.config,
+                            candidate_keyframes, core_bounds, self.config,
                         )
                         < self.config.minimum_target_containment
                     ):
@@ -547,7 +578,7 @@ class CompositionPlanner:
                 target_ref=item.target_ref,
                 crop=crop,
                 target_confidence=item.confidence,
-                target_bounds=item.state.bounds if item.state is not None else None,
+                target_bounds=core_bounds,
                 protected_regions=protected,
                 geometry=geometry.model_copy(update={"source_crop": crop}),
                 crop_keyframes=keyframes,
@@ -556,6 +587,10 @@ class CompositionPlanner:
                 easing_id="ease_in_out" if len(keyframes) > 1 else "none",
                 evidence_refs=item.evidence_refs,
                 fallback=fallback,
+                camera_mode=item.camera_mode,
+                camera_phase=item.camera_phase,
+                subject_lock_state=item.subject_lock_state,
+                movement_explanation=item.movement_explanation,
             ))
             previous_end = item.output.end_frame
         return tuple(result), tuple(diagnostics)
@@ -1079,6 +1114,251 @@ def _crop_area(crop: NormalizedRect) -> float:
     return crop.width * crop.height
 
 
+def _plan_shot_virtual_camera(
+    atomic: Sequence[_AtomicState],
+    cuts: frozenset[int],
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> tuple[tuple[_AtomicState, ...], tuple[str, ...]]:
+    """Resolve evidence samples into a shot-local, static-first camera plan.
+
+    This is intentionally after target selection and before renderer keyframes:
+    target observations retain their role as evidence, while crop decisions are
+    made with lookahead over a whole source shot.  The greedy interval
+    intersection is a deterministic minimum partition for ordered feasible
+    ranges: a hold is extended until the next constraint makes it impossible.
+    """
+
+    if not atomic:
+        return (), ()
+    shots: list[list[_AtomicState]] = [[]]
+    for item in atomic:
+        if shots[-1] and item.output.start_frame in cuts:
+            shots.append([])
+        shots[-1].append(item)
+    planned: list[_AtomicState] = []
+    diagnostics: list[str] = []
+    for shot in shots:
+        resolved, shot_diagnostics = _plan_one_source_shot(
+            tuple(shot), source_width, source_height, config,
+        )
+        planned.extend(resolved)
+        diagnostics.extend(shot_diagnostics)
+    return tuple(planned), tuple(diagnostics)
+
+
+def _plan_one_source_shot(
+    shot: Sequence[_AtomicState],
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> tuple[tuple[_AtomicState, ...], tuple[str, ...]]:
+    # Split/facecam and screen/product layouts own a different fixed geometry
+    # contract.  They are already shot-local and must not be coerced through
+    # the human virtual-camera policy.
+    target_kinds = {item.target for item in shot if item.state is not None}
+    if (
+        any(item.layout == LayoutFamily.SPLIT for item in shot)
+        or len(target_kinds) > 1
+        or any(kind in {AttentionTarget.SCREEN, AttentionTarget.PRODUCT, AttentionTarget.OBJECT} for kind in target_kinds)
+    ):
+        return tuple(replace(item, hold_reframe=True) for item in shot), ()
+    evidence = [item for item in shot if item.state is not None and item.confidence >= config.exit_confidence]
+    if not evidence:
+        return tuple(replace(
+            item,
+            subject_lock_state="EVIDENCE_GAP",
+            camera_mode="GROUP" if item.layout == LayoutFamily.WIDE_GROUP else "STATIONARY",
+            camera_phase="HOLD",
+            hold_reframe=True,
+        ) for item in shot), (f"SHOT_EVIDENCE_GAP:{shot[0].output.start_frame}",)
+
+    # First sufficiently supported identity wins the shot.  A short response
+    # from another person is deliberately not a camera command.  Existing
+    # editorial target intervals remain available to the state machine; this
+    # pass requires their evidence to be sustained before a later integration
+    # can request a genuine composition cut/group layout.
+    lock = evidence[0].state
+    assert lock is not None
+    locked_ref = lock.target_ref
+    distinct_refs = {item.state.target_ref for item in evidence if item.state is not None}
+    group_mode = len(distinct_refs) > 1
+    lock_states = [item for item in evidence if item.state is not None and item.state.target_ref == locked_ref]
+    fallback_state = lock_states[0].state
+    assert fallback_state is not None
+
+    template = _vertical_fill_crop(source_width, source_height)
+    constraints: list[tuple[float, float, float, float] | None] = []
+    normalized: list[_AtomicState] = []
+    for item in shot:
+        state = item.state
+        if state is None:
+            normalized.append(replace(
+                item, state=fallback_state, target=fallback_state.decision.target,
+                target_ref=locked_ref, confidence=fallback_state.confidence,
+                subject_lock_state="TEMPORARILY_OCCLUDED", hold_reframe=True,
+            ))
+            constraints.append(None)
+            continue
+        if state.target_ref != locked_ref:
+            # Fast dialogue gets one stable group framing, not a pan ping-pong.
+            normalized.append(replace(
+                item, state=fallback_state, target=fallback_state.decision.target,
+                target_ref=locked_ref, confidence=fallback_state.confidence,
+                layout=LayoutFamily.WIDE_GROUP if group_mode else item.layout,
+                subject_lock_state="SWITCH_PENDING", hold_reframe=True,
+            ))
+            constraints.append(None)
+            continue
+        core = _must_keep_core(state.bounds, config)
+        feasible = _feasible_crop_center_range(core, template, config)
+        normalized.append(replace(item, subject_lock_state="LOCKED", hold_reframe=True))
+        constraints.append(feasible)
+
+    if not any(item is not None for item in constraints):
+        return tuple(normalized), (f"SHOT_EVIDENCE_GAP:{shot[0].output.start_frame}",)
+    if any(item is not None and item[0] > item[1] or item is not None and item[2] > item[3] for item in constraints):
+        blocked = tuple(replace(
+            item, camera_mode="BLOCKED", camera_phase="HOLD",
+            movement_explanation="must_keep_core cannot fit inside the approved safe crop",
+        ) for item in normalized)
+        return blocked, (f"SHOT_CORE_GEOMETRY_BLOCKED:{shot[0].output.start_frame}",)
+
+    # Partition into the fewest stationary holds by maintaining the running
+    # intersection.  Missing evidence represents temporary occlusion and does
+    # not manufacture a new crop constraint.
+    holds: list[tuple[int, int, tuple[float, float, float, float]]] = []
+    start = 0
+    current: tuple[float, float, float, float] | None = None
+    for index, feasible in enumerate(constraints):
+        if feasible is None:
+            continue
+        candidate = feasible if current is None else _intersect_center_ranges(current, feasible)
+        if candidate[0] > candidate[1] or candidate[2] > candidate[3]:
+            assert current is not None
+            holds.append((start, index, current))
+            start = index
+            current = feasible
+        else:
+            current = candidate
+    if current is not None:
+        holds.append((start, len(normalized), current))
+
+    crops: list[NormalizedRect | None] = [None] * len(normalized)
+    for start, end, feasible in holds:
+        anchor_centers = [
+            _rect_values(normalized[index].desired_crop)[:2]
+            for index in range(start, end)
+            if constraints[index] is not None
+        ]
+        desired_x = median(value[0] for value in anchor_centers)
+        desired_y = median(value[1] for value in anchor_centers)
+        center_x = _clamp(desired_x, feasible[0], feasible[1])
+        # Talking-head default is horizontal only.  If its static Y range is
+        # empty it was handled above; otherwise the shot keeps one Y anchor.
+        center_y = _clamp(desired_y, feasible[2], feasible[3])
+        crop = _crop_at_center(template, center_x, center_y)
+        for index in range(start, end):
+            crops[index] = crop
+
+    result: list[_AtomicState] = []
+    previous_crop: NormalizedRect | None = None
+    for index, (item, crop) in enumerate(zip(normalized, crops)):
+        assert crop is not None
+        mode: Literal["STATIONARY", "PAN_ONLY", "TRACKING", "GROUP", "BLOCKED"] = (
+            "GROUP" if group_mode else "STATIONARY"
+        )
+        move_from: NormalizedRect | None = None
+        if previous_crop is not None:
+            distance_x = abs((crop.x + crop.width / 2) - (previous_crop.x + previous_crop.width / 2))
+            distance_y = abs((crop.y + crop.height / 2) - (previous_crop.y + previous_crop.height / 2))
+            if distance_x <= config.camera_dead_zone_ratio and distance_y <= config.camera_dead_zone_ratio:
+                crop = previous_crop
+            elif distance_y <= 1e-7 and distance_x <= config.maximum_pan_episode_distance:
+                if item.output.end_frame - item.output.start_frame > config.camera_move_frames:
+                    mode = "PAN_ONLY"
+                    move_from = previous_crop
+                else:
+                    item = replace(
+                        item, camera_mode="BLOCKED", camera_phase="HOLD",
+                        movement_explanation="edit-map interval is too short for a comfortable pan",
+                    )
+                    result.append(replace(item, desired_crop=previous_crop, hold_reframe=True))
+                    previous_crop = previous_crop
+                    continue
+            elif distance_y > 1e-7 or distance_x > config.maximum_pan_episode_distance:
+                item = replace(
+                    item, camera_mode="BLOCKED", camera_phase="HOLD",
+                    movement_explanation="no safe static or bounded pan-only solution for must_keep_core",
+                )
+                result.append(replace(item, desired_crop=crop, hold_reframe=True))
+                previous_crop = crop
+                continue
+        phase: Literal["HOLD", "MOVE"] = "MOVE" if move_from is not None else "HOLD"
+        lock_state = item.subject_lock_state
+        result.append(replace(
+            item, desired_crop=crop, hold_reframe=move_from is None,
+            camera_mode=mode, camera_phase=phase, move_from=move_from,
+            movement_explanation=("must_keep_core left the inner comfort zone" if move_from is not None else None),
+            subject_lock_state=lock_state if lock_state != "EVIDENCE_GAP" else "ACQUIRE",
+        ))
+        previous_crop = crop
+    diagnostics = [f"SHOT_SUBJECT_LOCK:{shot[0].output.start_frame}:{locked_ref}"]
+    diagnostics.append(
+        f"SHOT_STATIC_FIRST_{'PARTITIONED' if len(holds) > 1 else 'STATIONARY'}:{shot[0].output.start_frame}"
+    )
+    if group_mode:
+        diagnostics.append(f"SHOT_GROUP_LOCK_NO_PING_PONG:{shot[0].output.start_frame}")
+    return tuple(result), tuple(diagnostics)
+
+
+def _must_keep_core(bounds: NormalizedRect, config: CompositionPlannerConfig) -> NormalizedRect:
+    """Derive a conservative face/head/shoulder core from verified person evidence.
+
+    Until face landmarks are present in the shared observation contract, this
+    is deliberately smaller than the full person box.  The full upper body is
+    retained as a soft geometry region and cannot force camera chatter.
+    """
+
+    width = bounds.width * config.core_width_ratio
+    height = bounds.height * config.core_height_ratio
+    return NormalizedRect(
+        x=round(bounds.x + (bounds.width - width) / 2, 8),
+        y=round(bounds.y + bounds.height * 0.03, 8),
+        width=round(width, 8), height=round(height, 8),
+    )
+
+
+def _feasible_crop_center_range(
+    core: NormalizedRect,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> tuple[float, float, float, float]:
+    safe_half_x = crop.width * (0.5 - config.target_margin_ratio)
+    safe_half_y = crop.height * (0.5 - config.target_margin_ratio)
+    return (
+        max(crop.width / 2, core.x + core.width - safe_half_x),
+        min(1 - crop.width / 2, core.x + safe_half_x),
+        max(crop.height / 2, core.y + core.height - safe_half_y),
+        min(1 - crop.height / 2, core.y + safe_half_y),
+    )
+
+
+def _intersect_center_ranges(
+    left: tuple[float, float, float, float], right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    return max(left[0], right[0]), min(left[1], right[1]), max(left[2], right[2]), min(left[3], right[3])
+
+
+def _crop_at_center(template: NormalizedRect, center_x: float, center_y: float) -> NormalizedRect:
+    return NormalizedRect(
+        x=round(_clamp(center_x - template.width / 2, 0, 1 - template.width), 8),
+        y=round(_clamp(center_y - template.height / 2, 0, 1 - template.height), 8),
+        width=template.width, height=template.height,
+    )
+
+
 def build_composition_plan(
     intent: CreativeIntent,
     observations: Iterable[TargetObservation],
@@ -1447,11 +1727,55 @@ def _crop_track(
     config: CompositionPlannerConfig,
 ) -> tuple[tuple[CompositionCropKeyframe, ...], _MotionState]:
     desired = _rect_values(item.desired_crop)
+    if item.move_from is not None:
+        # A virtual-camera move is one bounded, planned episode.  The five
+        # eased samples are renderer interpolation anchors, not detector
+        # samples, so the path cannot resume a continuous tracker chase.
+        start = _rect_values(item.move_from)
+        available = item.output.end_frame - item.output.start_frame - 1
+        if available < 1:
+            return (CompositionCropKeyframe(
+                frame=item.output.start_frame, crop=item.desired_crop,
+                reason="safe_fallback", camera_phase="HOLD",
+            ),), _MotionState(values=desired, velocity=(0, 0, 0, 0))
+        duration = min(available, max(config.camera_move_frames, 2))
+        if duration < config.camera_move_frames:
+            # The current edit-map partition leaves no legal interval for a
+            # comfortable pan.  Retain a static crop and let quality expose
+            # the geometry instead of emitting an invisible cross-cut chase.
+            return (CompositionCropKeyframe(
+                frame=item.output.start_frame, crop=item.move_from,
+                reason="safe_fallback", camera_phase="HOLD",
+            ),), _MotionState(values=start, velocity=(0, 0, 0, 0))
+        frames: list[CompositionCropKeyframe] = []
+        previous = start
+        previous_velocity = 0.0
+        for ratio in (0.0, 0.15625, 0.5, 0.84375, 1.0):
+            frame = item.output.start_frame + round(duration * ratio)
+            values = tuple(left + (right - left) * ratio for left, right in zip(start, desired))
+            rect = _rect_from_values(values)  # type: ignore[arg-type]
+            span = max(1, frame - (frames[-1].frame if frames else item.output.start_frame))
+            velocity = max(abs(left - right) for left, right in zip(values, previous)) / span
+            acceleration = abs(velocity - previous_velocity) / span
+            frames.append(CompositionCropKeyframe(
+                frame=frame, crop=rect, velocity_per_frame=round(velocity, 9),
+                acceleration_per_frame_sq=round(acceleration, 9),
+                reason=_keyframe_reason(item.reason), camera_phase="MOVE",
+            ))
+            previous = values
+            previous_velocity = velocity
+        unique = tuple(item for index, item in enumerate(frames) if index == 0 or item.frame != frames[index - 1].frame)
+        return unique, _MotionState(values=desired, velocity=(0, 0, 0, 0))
+    if item.hold_reframe:
+        return (CompositionCropKeyframe(
+            frame=item.output.start_frame, crop=item.desired_crop,
+            reason="scene_reset" if reset else "static", camera_phase="HOLD",
+        ),), _MotionState(values=desired, velocity=(0, 0, 0, 0))
     if previous is None or reset:
         state = _MotionState(values=desired, velocity=(0, 0, 0, 0))
         return (CompositionCropKeyframe(
             frame=item.output.start_frame, crop=item.desired_crop,
-            reason="scene_reset" if reset else "static",
+            reason="scene_reset" if reset else "static", camera_phase="HOLD",
         ),), state
 
     values = previous.values
@@ -1494,14 +1818,14 @@ def _crop_track(
             crop=rect,
             velocity_per_frame=round(speed, 9),
             acceleration_per_frame_sq=round(acceleration, 9),
-            reason=reason,
+            reason=reason, camera_phase="MOVE",
         ))
         previous_speed = speed
         if values == desired and not any(velocity):
             break
     if not frames:
         frames.append(CompositionCropKeyframe(
-            frame=item.output.start_frame, crop=_rect_from_values(values), reason="static",
+            frame=item.output.start_frame, crop=_rect_from_values(values), reason="static", camera_phase="HOLD",
         ))
     return tuple(frames), _MotionState(values=values, velocity=velocity)
 
@@ -1571,6 +1895,13 @@ def _quality_report(
     config: CompositionPlannerConfig,
 ) -> CompositionQualityReport:
     findings: list[CompositionQualityFinding] = []
+    blocked_shots = [item for item in diagnostics if item.startswith("SHOT_CORE_GEOMETRY_BLOCKED:")]
+    if blocked_shots:
+        findings.append(CompositionQualityFinding(
+            code="COMPOSITION_TARGET_CLIPPED", severity="blocker",
+            measured_value="must_keep_core_uncontainable", threshold=config.minimum_target_containment,
+            message="The selected must_keep_core cannot fit inside the approved safe 9:16 crop.",
+        ))
     switch_count = sum(item.movement_reason == "target_switch" for item in segments)
     layout_switch_count = sum(
         left.layout != right.layout for left, right in zip(segments, segments[1:])

@@ -194,6 +194,37 @@ PRESET_CONSTRAINT_VIOLATION
 OUTPUT_CONTRACT_INVALID
 ```
 
+### 6.1 Decision: shot-aware subject-lock virtual camera
+
+`CompositionPlanner` remains the sole owner of vertical crop geometry.  It
+plans one source shot at a time from existing verified observations; it does
+not turn detector samples into per-frame crop commands.
+
+- A shot starts with an `ACQUIRE → LOCKED` subject decision keyed by the
+  stable evidence track ID.  A loss of evidence is `TEMPORARILY_OCCLUDED`, not
+  a target switch.  A new subject needs sustained, audio-visual evidence and
+  an editorial reason before `SWITCH_PENDING → SWITCH_CONFIRMED`.
+- The hard geometry is the semantic `must_keep_core` (face, head and critical
+  shoulders).  Upper body, hands and context are soft objectives.  A planner
+  must emit an evidence gap or `BLOCKED` decision when the hard region cannot
+  be shown; it must not claim success by measuring only a convenient person
+  box.
+- Static-first feasibility intersects the safe crop-centre ranges over the
+  whole shot.  A non-empty intersection produces exactly one stationary crop.
+  Otherwise the deterministic planner partitions the shot into the minimum
+  practical sequence of static holds and only joins adjacent holds with an
+  explicit eased `HOLD → MOVE → HOLD` episode.
+- Source cuts reset crop and subject state.  Crop interpolation, identity
+  inheritance and motion velocity never cross a source-cut boundary.
+- The lexicographic priority is: core visibility; justified identity; fewest
+  camera moves; shortest travel; lowest acceleration; then preferred/context
+  preservation.  Talking-head planning locks Y and scale unless the existing
+  approved layout policy requires a different mode.
+
+Rendered-output verification is independent of planner boxes and remains a
+separate gate.  Its provisional result is never a visual GO: until a human
+reviews the real MP4, the artifact state is `AWAITING MANUAL VISUAL ACCEPTANCE`.
+
 ## 7. AI boundary
 
 Allowed:

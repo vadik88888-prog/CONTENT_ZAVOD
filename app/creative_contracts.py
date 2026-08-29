@@ -1300,6 +1300,7 @@ class CompositionCropKeyframe(FrozenContract):
         "static", "target_acquired", "target_switch", "editorial_punch_in",
         "punch_out", "scene_reset", "safe_fallback",
     ] = "static"
+    camera_phase: Literal["HOLD", "MOVE"] = "HOLD"
 
 
 class CompositionGeometryRegion(FrozenContract):
@@ -1420,6 +1421,14 @@ class CompositionSegmentPlan(FrozenContract):
     easing_id: Literal["none", "linear", "ease_in_out"] = "none"
     evidence_refs: tuple[str, ...] = ()
     fallback: Literal["none", "wider_crop", "stable_source", "fit_background"] = "none"
+    # Virtual-camera fields are descriptive, deterministic plan data.  They
+    # do not create another renderer or a second composition source of truth.
+    camera_mode: Literal["STATIONARY", "PAN_ONLY", "TRACKING", "GROUP", "BLOCKED"] = "STATIONARY"
+    camera_phase: Literal["HOLD", "MOVE"] = "HOLD"
+    subject_lock_state: Literal[
+        "ACQUIRE", "LOCKED", "TEMPORARILY_OCCLUDED", "SWITCH_PENDING", "SWITCH_CONFIRMED", "EVIDENCE_GAP",
+    ] = "EVIDENCE_GAP"
+    movement_explanation: str | None = Field(default=None, max_length=400)
 
     @model_validator(mode="after")
     def _valid_geometry_and_track(self) -> "CompositionSegmentPlan":
@@ -1435,6 +1444,10 @@ class CompositionSegmentPlan(FrozenContract):
             raise ValueError("composition punch-in must stay inside its segment")
         if (self.punch_in is not None) != (self.movement_reason == "editorial_punch_in"):
             raise ValueError("composition punch-in requires an explicit editorial movement reason")
+        if self.camera_phase == "MOVE" and len(self.crop_keyframes) < 2:
+            raise ValueError("a virtual-camera MOVE requires a bounded path")
+        if self.camera_mode == "STATIONARY" and self.camera_phase == "MOVE":
+            raise ValueError("a stationary virtual camera cannot have a MOVE phase")
         return self
 
 
