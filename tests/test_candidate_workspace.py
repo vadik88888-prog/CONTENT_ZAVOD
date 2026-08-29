@@ -102,6 +102,35 @@ def _workspace(tmp_path: Path):
     return services, project
 
 
+def test_settings_keeps_gameplay_above_fold_and_discloses_long_tail_profiles(
+    tmp_path: Path,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    screen = ProjectScreen(ProjectViewModel(services))
+
+    try:
+        project.settings.content_profile_preset = "gameplay"
+        screen._sync_setup_choice_buttons(project)
+
+        assert screen._setup_choice_buttons["profile"]["gameplay"].isHidden() is False
+        assert screen.setup_profile_more_toggle.isChecked() is False
+        assert screen.setup_profile_more.isHidden() is True
+        assert screen.setup_profile_more_toggle.text() == "Ещё 11 профилей"
+
+        project.settings.content_profile_preset = "news_commentary"
+        screen._sync_setup_choice_buttons(project)
+
+        assert screen.setup_profile_more_toggle.isChecked() is True
+        assert screen.setup_profile_more.isHidden() is False
+        assert screen.setup_profile_more_toggle.text() == "Скрыть дополнительные"
+    finally:
+        screen.close()
+
+
 def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(tmp_path: Path, monkeypatch) -> None:
     # A few non-UI tests intentionally initialise QCoreApplication first. Qt
     # cannot upgrade that singleton to QApplication in the same process; doing
@@ -670,7 +699,14 @@ def test_video_preview_frames_drafts_and_final_outputs_as_a_phone(tmp_path: Path
         assert preview.presentation == "source"
         assert preview.video.maximumWidth() == 840
         assert preview.media_stage.maximumWidth() == 840
+        assert preview.media_stage.minimumHeight() == 260
+        assert preview.media_stage.maximumHeight() == 420
         assert preview.active_candidate.text() == "Исходное видео"
+
+        preview.set_source_frame_height_bounds(220, 360)
+        assert preview.media_stage.minimumHeight() == 220
+        assert preview.media_stage.maximumHeight() == 360
+        assert preview.video.sizeHint().height() == 360
 
         preview.show_draft(vertical, "Тестовый момент")
         assert preview.presentation == "vertical"
@@ -1858,7 +1894,10 @@ def test_moments_keep_quality_risks_selectable_at_catalogue_scale(
 
     try:
         screen.open(project)
-        app.processEvents()
+        screen.resize(1536, 786)
+        screen.show()
+        for _ in range(6):
+            app.processEvents()
 
         assert len(screen._all_candidates_by_id) == 95
         assert len(screen._draftable_candidates_by_id) == 95
@@ -1878,8 +1917,28 @@ def test_moments_keep_quality_risks_selectable_at_catalogue_scale(
         assert set(screen._candidate_cards) == set(candidate_ids)
         assert len(screen._candidate_selection_buttons) == 95
         screen._preview_candidate(screen._all_candidates_by_id[candidate_ids[89]])
-        app.processEvents()
-        assert screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls") is not None
+        screen.content_scroll.verticalScrollBar().setValue(0)
+        for _ in range(6):
+            app.processEvents()
+        assert screen.preview.media_stage.maximumHeight() == 310
+        viewport = screen.content_scroll.viewport()
+        transport_origin = screen.preview.controls_host.mapTo(viewport, QPoint(0, 0))
+        assert transport_origin.y() >= 0
+        assert (
+            transport_origin.y() + screen.preview.controls_host.height()
+            <= viewport.height()
+        )
+        controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
+        assert controls is not None
+        assert all(
+            button.fontMetrics().horizontalAdvance(button.text()) + 24 <= button.width()
+            for button in controls.findChildren(QPushButton)
+        )
+        boundary_origin = controls.mapTo(viewport, QPoint(0, 0))
+        assert boundary_origin.y() >= 0
+        assert boundary_origin.y() + controls.height() <= viewport.height()
+        detail_layout = screen.candidate_detail.layout()
+        assert detail_layout.itemAt(detail_layout.count() - 1).spacerItem() is not None
     finally:
         screen.close()
 
@@ -2067,6 +2126,7 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
             (1280, 720),
             (1024, 576),
             (1093, 614),
+            (1536, 786),
             (1536, 864),
             (1920, 1080),
             (1024, 576),
@@ -2147,6 +2207,18 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
                 <= screen.review_preview_panel.contentsRect().bottom() + 1
             )
             assert screen.preview.presentation == ("vertical" if with_preview else "source")
+            if with_preview and 720 < height <= 840 and not screen._compact_stage_layout:
+                screen.content_scroll.verticalScrollBar().setValue(0)
+                for _ in range(3):
+                    app.processEvents()
+                preview_controls_origin = screen.preview.controls_host.mapTo(
+                    screen.content_scroll.viewport(), QPoint(0, 0),
+                )
+                assert preview_controls_origin.y() >= 0
+                assert (
+                    preview_controls_origin.y() + screen.preview.controls_host.height()
+                    <= screen.content_scroll.viewport().height()
+                )
 
             controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
             assert controls is not None
@@ -2159,7 +2231,7 @@ def test_drafts_shell_uses_one_outer_scroll_and_keeps_workspace_content_accessib
             assert (
                 screen.candidate_detail.contentsRect().bottom()
                 - controls.geometry().bottom()
-                <= 24
+                <= 32
             )
 
             current_geometry = (

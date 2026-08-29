@@ -19,9 +19,11 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QCheckBox, QLabel, QPushButton
+from PySide6.QtWidgets import (
+    QApplication, QAbstractScrollArea, QCheckBox, QLabel, QPushButton, QWidget,
+)
 
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.draft_artifact import DraftArtifact
@@ -225,10 +227,46 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
             raise AssertionError("Moments exposes internal analysis detail")
         if screen.preview.poster.pixmap().isNull():
             raise AssertionError("Moments real candidate poster is not visible")
+        preview_viewport = screen.content_scroll.viewport()
+        controls_origin = screen.preview.controls_host.mapTo(
+            preview_viewport, QPoint(0, 0),
+        )
+        if (
+            controls_origin.y() < 0
+            or controls_origin.y() + screen.preview.controls_host.height()
+            > preview_viewport.height()
+        ):
+            raise AssertionError(
+                "Moments transport controls are outside the first viewport: "
+                f"origin_y={controls_origin.y()}, "
+                f"height={screen.preview.controls_host.height()}, "
+                f"viewport_height={preview_viewport.height()}, "
+                f"media_height={screen.preview.media_stage.height()}, "
+                f"media_max={screen.preview.media_stage.maximumHeight()}"
+            )
+        boundary_controls = screen.candidate_detail.findChild(
+            QWidget, "candidateBoundaryControls",
+        )
+        if boundary_controls is None:
+            raise AssertionError("Moments boundary controls are missing")
+        boundary_origin = boundary_controls.mapTo(preview_viewport, QPoint(0, 0))
+        if (
+            boundary_origin.y() < 0
+            or boundary_origin.y() + boundary_controls.height()
+            > preview_viewport.height()
+        ):
+            raise AssertionError(
+                "Moments boundary controls are outside the first viewport: "
+                f"origin_y={boundary_origin.y()}, "
+                f"height={boundary_controls.height()}, "
+                f"viewport_height={preview_viewport.height()}"
+            )
         stage_evidence = {
             "active_candidate_id": screen._active_candidate_id,
             "source_path": str(screen.preview.source_path.resolve()) if screen.preview.source_path else None,
             "real_candidate_poster": True,
+            "transport_in_first_viewport": True,
+            "boundary_controls_in_first_viewport": True,
             "surfacing_states": ["RECOMMENDED", "AVAILABLE", "BLOCKED"],
         }
     elif stage == "drafts":
@@ -237,6 +275,16 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
         active = screen.preview.active_media_path
         if expected is None or active is None or expected.resolve() != active.resolve():
             raise AssertionError("Drafts preview is not bound to its persisted Creative Preview")
+        preview_viewport = screen.content_scroll.viewport()
+        controls_origin = screen.preview.controls_host.mapTo(
+            preview_viewport, QPoint(0, 0),
+        )
+        if (
+            controls_origin.y() < 0
+            or controls_origin.y() + screen.preview.controls_host.height()
+            > preview_viewport.height()
+        ):
+            raise AssertionError("Drafts transport controls are outside the first viewport")
         extra_shots = screen.candidate_detail.findChild(QCheckBox, "draftExtraShots")
         stage_evidence = {
             "active_candidate_id": candidate_id,
@@ -248,24 +296,71 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
     elif stage == "final":
         workspace = screen.final_results
         output = workspace._output_for(workspace.active_output_id)
+        active = workspace.preview.active_media_path
         if (
             output is None
             or output.result_id not in workspace._thumbnail_paths
+            or active is None
+            or active.resolve() != output.path.resolve()
+            or workspace.preview.presentation != "vertical"
         ):
             raise AssertionError(
                 "Final player is not bound to its canonical ClipResult: "
                 f"active={workspace.active_output_id!r}, "
                 f"output={getattr(output, 'title', None)!r}, "
+                f"media={active!s}, "
+                f"presentation={workspace.preview.presentation!r}, "
                 f"thumbnail_ids={list(workspace._thumbnail_paths)!r}"
             )
         if workspace.preview.poster.pixmap().isNull():
             raise AssertionError("Final real poster is not visible")
+        preview_viewport = screen.content_scroll.viewport()
+        controls_origin = workspace.preview.controls_host.mapTo(
+            preview_viewport, QPoint(0, 0),
+        )
+        if (
+            controls_origin.y() < 0
+            or controls_origin.y() + workspace.preview.controls_host.height()
+            > preview_viewport.height()
+        ):
+            raise AssertionError(
+                "Final transport controls are outside the first viewport: "
+                f"origin_y={controls_origin.y()}, "
+                f"height={workspace.preview.controls_host.height()}, "
+                f"viewport_height={preview_viewport.height()}"
+            )
+        for action in (workspace.open_video_button, workspace.show_folder_button):
+            action_origin = action.mapTo(workspace._info_panel, QPoint(0, 0))
+            action_viewport_origin = action.mapTo(preview_viewport, QPoint(0, 0))
+            if (
+                not action.isVisibleTo(workspace._info_panel)
+                or action_origin.y() < workspace._info_panel.contentsRect().top()
+                or action_origin.y() + action.height()
+                > workspace._info_panel.contentsRect().bottom()
+                or action_viewport_origin.y() < 0
+                or action_viewport_origin.y() + action.height()
+                > preview_viewport.height()
+            ):
+                raise AssertionError(
+                    "Final action is outside the first inspector viewport: "
+                    f"text={action.text()!r}, "
+                    f"panel_y={action_origin.y()}, "
+                    f"viewport_y={action_viewport_origin.y()}, "
+                    f"height={action.height()}, "
+                    f"viewport_height={preview_viewport.height()}, "
+                    f"panel_height={workspace._info_panel.height()}, "
+                    f"info_scroll_height={workspace.info_scroll.height()}, "
+                    f"info_scroll_max={workspace.info_scroll.maximumHeight()}, "
+                    f"short_window={workspace._short_window!r}, "
+                    f"body_mode={workspace._body_layout_mode!r}"
+                )
         summary = {key: label.text() for key, label in workspace.summary_values.items()}
         if any(value == "—" for value in summary.values()):
             raise AssertionError(f"Final summary is incomplete: {summary}")
         stage_evidence = {
             "clip_result_id": output.result_id,
             "output_path": str(output.path.resolve()),
+            "preview_presentation": workspace.preview.presentation,
             "real_final_poster": True,
             "summary": summary,
         }
@@ -421,11 +516,10 @@ def main() -> int:
         settings_project.review_selected_candidate_ids = []
         settings_project.selected_candidate_ids = []
         settings_project.last_final_result_id = None
-        # Capture the most expressive existing dynamic preset.  This changes
-        # only the isolated Settings-state projection and plays the canonical
-        # packaging-time production MP4; no Draft/Brain/Vision work is started.
-        settings_project.settings.caption_preset_id = "word_pop"
-        settings_project.settings.subtitle_style = "dynamic"
+        # Keep the exact persisted project choices.  All six screenshots must
+        # describe one project/preset lineage; substituting an expressive
+        # Settings sample while opening unrelated Draft/Final artifacts would
+        # create attractive but false acceptance evidence.
         screen.viewmodel.project = settings_project
         screen.viewmodel.snapshot = ProcessingSnapshot()
         screen.runs = []

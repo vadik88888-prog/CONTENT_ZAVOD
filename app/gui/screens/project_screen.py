@@ -230,7 +230,7 @@ class ProjectScreen(QWidget):
         self._project_thumbnail_loader.poster_unavailable.connect(self._project_thumbnail_unavailable)
         root = QVBoxLayout(self)
         self._root_layout = root
-        root.setContentsMargins(34, 26, 34, 30)
+        root.setContentsMargins(24, 18, 24, 24)
         header = QHBoxLayout()
         self._header_layout = header
         self.back_button = QPushButton("← Проекты")
@@ -263,7 +263,7 @@ class ProjectScreen(QWidget):
         self.flow_card = QFrame()
         self.flow_card.setObjectName("workflowStepper")
         flow_layout = QVBoxLayout(self.flow_card)
-        flow_layout.setContentsMargins(14, 10, 14, 10)
+        flow_layout.setContentsMargins(0, 2, 0, 0)
         self._global_step_labels: dict[str, QLabel] = {}
         self._global_step_dividers: list[QLabel] = []
         stepper_row = QHBoxLayout()
@@ -415,19 +415,19 @@ class ProjectScreen(QWidget):
             (preset.label, preset.id) for preset in CONTENT_PROFILE_PRESETS.values()
         )]
         profile_buttons = self._add_setup_choice_buttons(
-            profile_layout, "profile", profile_values[:4], self.setup_content_profile, columns=4,
+            profile_layout, "profile", profile_values[:5], self.setup_content_profile, columns=5,
         )
         self.setup_profile_more = QWidget()
         more_profile_layout = QGridLayout(self.setup_profile_more)
         more_profile_layout.setContentsMargins(0, 4, 0, 0)
         more_profile_layout.setSpacing(7)
         profile_buttons.update(self._add_setup_choice_buttons(
-            more_profile_layout, "profile", profile_values[4:], self.setup_content_profile,
+            more_profile_layout, "profile", profile_values[5:], self.setup_content_profile,
             columns=4, reuse_group=True,
         ))
         profile_layout.addWidget(self.setup_profile_more)
         self.setup_profile_more.hide()
-        self.setup_profile_more_toggle = QPushButton("Все 15 профилей")
+        self.setup_profile_more_toggle = QPushButton("Ещё 11 профилей")
         self.setup_profile_more_toggle.setObjectName("choiceMore")
         self.setup_profile_more_toggle.setCheckable(True)
         self.setup_profile_more_toggle.toggled.connect(self._set_all_profiles_visible)
@@ -703,6 +703,7 @@ class ProjectScreen(QWidget):
         self.viewmodel.error_occurred.connect(self._error)
         self._compact_stage_layout: bool | None = None
         self._compact_action_layout: bool | None = None
+        self._short_stage_layout: bool | None = None
         self._apply_stage_responsive_layout(force=True)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -730,6 +731,8 @@ class ProjectScreen(QWidget):
         # visual reference.
         compact = self.width() < self._WIDE_STAGE_MINIMUM_WIDTH
         compact_actions = self.width() < self._COMPACT_ACTION_BREAKPOINT
+        window_height = self.window().height() if self.window() else 0
+        short_stage = 0 < window_height <= 840
         cards_need_reflow = (
             self._compact_action_layout is not None
             and compact_actions != self._compact_action_layout
@@ -738,6 +741,7 @@ class ProjectScreen(QWidget):
             not force
             and compact == self._compact_stage_layout
             and compact_actions == self._compact_action_layout
+            and short_stage == self._short_stage_layout
         ):
             # Height-for-width still changes inside one responsive profile.
             # In particular, the full review hint can need several rows just
@@ -755,6 +759,7 @@ class ProjectScreen(QWidget):
             return
         self._compact_stage_layout = compact
         self._compact_action_layout = compact_actions
+        self._short_stage_layout = short_stage
         direction = (
             QBoxLayout.Direction.TopToBottom
             if compact
@@ -767,10 +772,10 @@ class ProjectScreen(QWidget):
         )
         spacing = 12 if compact else 18
         self._root_layout.setContentsMargins(
-            18 if compact else 34,
-            14 if compact else 26,
-            18 if compact else 34,
-            18 if compact else 30,
+            14 if compact else 24,
+            10 if compact else 18,
+            14 if compact else 24,
+            14 if compact else 24,
         )
         self._body_layout.setDirection(direction)
         self._body_layout.setSpacing(spacing)
@@ -802,12 +807,12 @@ class ProjectScreen(QWidget):
                 panel.setMaximumWidth(16_777_215)
         else:
             dense_columns = self.width() < 1320
-            self.review_list_panel.setMinimumWidth(300 if dense_columns else 340)
-            self.review_list_panel.setMaximumWidth(350 if dense_columns else 410)
-            self.review_preview_panel.setMinimumWidth(320 if dense_columns else 390)
+            self.review_list_panel.setMinimumWidth(290 if dense_columns else 330)
+            self.review_list_panel.setMaximumWidth(340 if dense_columns else 400)
+            self.review_preview_panel.setMinimumWidth(340 if dense_columns else 410)
             self.review_preview_panel.setMaximumWidth(16_777_215)
-            self.review_inspector_panel.setMinimumWidth(270 if dense_columns else 300)
-            self.review_inspector_panel.setMaximumWidth(330 if dense_columns else 370)
+            self.review_inspector_panel.setMinimumWidth(250 if dense_columns else 280)
+            self.review_inspector_panel.setMaximumWidth(310 if dense_columns else 350)
         self.settings_panel.setMaximumWidth(16_777_215 if compact else 300)
         self.setup_summary.setMinimumWidth(0)
         self.setup_summary.setMaximumWidth(16_777_215)
@@ -816,11 +821,18 @@ class ProjectScreen(QWidget):
             self.setup_summary.setMaximumWidth(330)
         self.processing_summary.setMaximumWidth(16_777_215)
         # Give Creative Preview visual priority at ordinary desktop widths,
-        # while keeping a bounded phone stage when the three panels stack.
-        self.preview.set_vertical_frame_size(
-            252 if compact else 288,
-            448 if compact else 512,
-        )
+        # while keeping the complete player and its controls above the sticky
+        # CTA on short Windows viewports.  Tall desktop windows retain the
+        # larger approved-reference stage.
+        if short_stage:
+            self.preview.set_source_frame_height_bounds(200, 310)
+            self.preview.set_vertical_frame_size(188, 334)
+        else:
+            self.preview.set_source_frame_height_bounds(260, 420)
+            self.preview.set_vertical_frame_size(
+                252 if compact else 304,
+                448 if compact else 540,
+            )
         self._apply_compact_chrome()
         self._reflow_candidate_boundary_controls()
         self._review_body_layout.invalidate()
@@ -1399,7 +1411,7 @@ class ProjectScreen(QWidget):
         self.review_list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.review_list_scroll.setWidget(self.candidate_review)
         list_panel_layout.addWidget(self.review_list_scroll)
-        review_body.addWidget(list_panel, 2)
+        review_body.addWidget(list_panel, 3)
         preview_panel = QFrame()
         self.review_preview_panel = preview_panel
         preview_panel.setObjectName("reviewPreviewPanel")
@@ -1407,7 +1419,7 @@ class ProjectScreen(QWidget):
         self._review_preview_panel_layout = preview_layout
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        review_body.addWidget(preview_panel, 3)
+        review_body.addWidget(preview_panel, 5)
         inspector_panel = QFrame()
         self.review_inspector_panel = inspector_panel
         inspector_panel.setObjectName("reviewInspectorPanel")
@@ -1419,7 +1431,7 @@ class ProjectScreen(QWidget):
         self.review_inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.review_inspector_scroll.setWidget(self.candidate_detail)
         inspector_layout.addWidget(self.review_inspector_scroll)
-        review_body.addWidget(inspector_panel, 2)
+        review_body.addWidget(inspector_panel, 3)
         review_layout.addLayout(review_body, 1)
         self.review_action_bar = QFrame()
         self.review_action_bar.setObjectName("stickyActionBar")
@@ -1560,7 +1572,8 @@ class ProjectScreen(QWidget):
             self._active_candidate_range = None
             self._active_preview_kind = "source"
             self._processing_structure_key = None
-        self.title.setText(project.name)
+        self.title.setText(project.name.replace("_", " "))
+        self.title.setToolTip(project.name)
         presentation = self.viewmodel.services.presentation(
             project,
             snapshot=self.viewmodel.snapshot,
@@ -1778,7 +1791,7 @@ class ProjectScreen(QWidget):
     def _set_all_profiles_visible(self, visible: bool) -> None:
         self.setup_profile_more.setVisible(visible)
         self.setup_profile_more_toggle.setText(
-            "Скрыть профили" if visible else "Все 15 профилей"
+            "Скрыть дополнительные" if visible else "Ещё 11 профилей"
         )
 
     def _sync_setup_choice_buttons(self, project: DesktopProject) -> None:
@@ -1801,7 +1814,7 @@ class ProjectScreen(QWidget):
                     preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, value))
                     if preset is not None:
                         self._style_caption_choice(button, preset, selected=selected)
-        hidden_profiles = list(CONTENT_PROFILE_PRESETS)[3:]
+        hidden_profiles = list(CONTENT_PROFILE_PRESETS)[4:]
         if project.settings.content_profile_preset in hidden_profiles:
             self.setup_profile_more_toggle.setChecked(True)
 
@@ -2661,6 +2674,14 @@ class ProjectScreen(QWidget):
                 status_label = "Не прошёл проверку качества · только просмотр"
             frame = QFrame(); frame.setObjectName("card")
             frame.setProperty("candidateBlocked", workflow_step == "candidates" and not candidate_draftable)
+            frame.setProperty(
+                "candidateSelected",
+                candidate_id in (
+                    project.selected_candidate_ids
+                    if workflow_step == "drafts"
+                    else project.review_selected_candidate_ids
+                ),
+            )
             frame.setMinimumWidth(0)
             frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             self._candidate_cards[candidate_id] = frame
@@ -2670,10 +2691,16 @@ class ProjectScreen(QWidget):
             thumbnail = QLabel("Кадр\nзагружается")
             thumbnail.setObjectName("candidateThumbnail")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            thumbnail.setFixedSize(
-                88 if self._compact_action_layout else 104,
-                52 if self._compact_action_layout else 60,
-            )
+            if workflow_step == "drafts":
+                thumbnail.setFixedSize(
+                    58 if self._compact_action_layout else 68,
+                    96 if self._compact_action_layout else 112,
+                )
+            else:
+                thumbnail.setFixedSize(
+                    88 if self._compact_action_layout else 104,
+                    52 if self._compact_action_layout else 60,
+                )
             self._candidate_thumbnail_labels.setdefault(candidate_id, []).append(thumbnail)
             try:
                 start_seconds = float(start_value)
@@ -3829,14 +3856,14 @@ class ProjectScreen(QWidget):
         grid.setVerticalSpacing(6)
         columns = 2 if self._compact_stage_layout else 4
         for index, (full_text, compact_text, boundary, delta) in enumerate((
-            ("Начало −1 с", "Нач −1 с", "start", -1.0),
-            ("Начало −0.5 с", "Нач −0.5 с", "start", -0.5),
-            ("Начало +0.5 с", "Нач +0.5 с", "start", 0.5),
-            ("Начало +1 с", "Нач +1 с", "start", 1.0),
-            ("Конец −1 с", "Кон −1 с", "end", -1.0),
-            ("Конец −0.5 с", "Кон −0.5 с", "end", -0.5),
-            ("Конец +0.5 с", "Кон +0.5 с", "end", 0.5),
-            ("Конец +1 с", "Кон +1 с", "end", 1.0),
+            ("Начало −1 с", "Н −1", "start", -1.0),
+            ("Начало −0.5 с", "Н −½", "start", -0.5),
+            ("Начало +0.5 с", "Н +½", "start", 0.5),
+            ("Начало +1 с", "Н +1", "start", 1.0),
+            ("Конец −1 с", "К −1", "end", -1.0),
+            ("Конец −0.5 с", "К −½", "end", -0.5),
+            ("Конец +0.5 с", "К +½", "end", 0.5),
+            ("Конец +1 с", "К +1", "end", 1.0),
         )):
             button = QPushButton(full_text if columns == 2 else compact_text)
             button.setProperty("boundaryOrder", index)
@@ -3853,6 +3880,10 @@ class ProjectScreen(QWidget):
         for column in range(columns):
             grid.setColumnStretch(column, 1)
         self.candidate_detail.layout().addWidget(controls)
+        # The wide inspector is viewport-sized.  Let one terminal spacer own
+        # any surplus so Qt keeps the explanatory copy and boundary controls
+        # together at the top instead of spreading labels through the pane.
+        self.candidate_detail.layout().addStretch()
         self._refresh_candidate_detail_geometry()
         self.review_inspector_scroll.verticalScrollBar().setValue(0)
         QTimer.singleShot(

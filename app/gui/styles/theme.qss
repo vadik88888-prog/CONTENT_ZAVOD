@@ -3,10 +3,10 @@
 
 * {
   color: @PRIMARY_TEXT@;
-  /* Arial is present on supported Windows installations and keeps Cyrillic
-     project names/local paths legible even in a clean Qt environment. */
-  font-family: Arial;
-  font-size: 14px;
+  /* Segoe UI is the native Windows humanist face and keeps the approved
+     compact desktop hierarchy readable for both Latin and Cyrillic copy. */
+  font-family: "Segoe UI";
+  font-size: 13px;
 }
 
 QMainWindow,
@@ -80,29 +80,32 @@ QLabel#dropZoneIcon { color: @PRIMARY@; font-size: 34px; font-weight: 300; }
 QFrame#sourceDivider { color: @BORDER@; }
 
 QFrame#workflowStepper {
-  background: @SIDEBAR@;
-  border: 1px solid @BORDER@;
-  border-radius: 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid @BORDER@;
+  border-radius: 0;
 }
 
 QLabel#workflowStep {
   color: @MUTED@;
-  padding: 7px 4px;
+  padding: 6px 4px 8px 4px;
   font-weight: 600;
-  border-radius: 7px;
+  border: 0;
+  border-bottom: 2px solid transparent;
 }
 QLabel#workflowStep[stepState="done"] { color: @SUCCESS@; }
 QLabel#workflowStep[stepState="current"] {
   color: @PRIMARY_TEXT@;
-  background: @ACCENT@;
-  border: 1px solid @PRIMARY@;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid @PRIMARY@;
 }
-QLabel#workflowDivider { color: @MUTED@; font-size: 19px; padding: 0 2px; }
-QLabel#flowScreenTitle { color: @PRIMARY_TEXT@; font-size: 22px; font-weight: 700; }
+QLabel#workflowDivider { color: @MUTED@; font-size: 16px; padding: 0 3px; }
+QLabel#flowScreenTitle { color: @PRIMARY_TEXT@; font-size: 21px; font-weight: 700; }
 
-QLabel#title { color: @PRIMARY_TEXT@; font-size: 27px; font-weight: 700; }
-QLabel#screenTitle { color: @PRIMARY_TEXT@; font-size: 25px; font-weight: 700; }
-QLabel#subtitle { color: @SECONDARY@; font-size: 15px; }
+QLabel#title { color: @PRIMARY_TEXT@; font-size: 24px; font-weight: 700; }
+QLabel#screenTitle { color: @PRIMARY_TEXT@; font-size: 22px; font-weight: 700; }
+QLabel#subtitle { color: @SECONDARY@; font-size: 14px; }
 QLabel#muted { color: @MUTED@; }
 QLabel#warning { color: @WARNING@; }
 QLabel#status {
@@ -130,7 +133,7 @@ QPushButton:focus, QComboBox:focus, QLineEdit:focus, QCheckBox:focus {
 }
 
 QPushButton#primary {
-  color: @APP_BG@;
+  color: @PRIMARY_TEXT@;
   background: @PRIMARY@;
   border: 1px solid @PRIMARY@;
   font-weight: 700;
@@ -157,12 +160,12 @@ QPushButton#nav {
 QPushButton#nav:hover { background: @ELEVATED@; color: @PRIMARY_TEXT@; }
 QPushButton#nav:checked { color: @PRIMARY_TEXT@; background: @ACCENT@; border-color: @PRIMARY@; }
 QPushButton#navNewProject {
-  color: @APP_BG@;
+  color: @PRIMARY_TEXT@;
   background: @PRIMARY@;
   border: 1px solid @PRIMARY@;
   font-weight: 700;
 }
-QPushButton#navNewProject:hover { color: @APP_BG@; background: @PRIMARY_HOVER@; border-color: @PRIMARY_HOVER@; }
+QPushButton#navNewProject:hover { color: @PRIMARY_TEXT@; background: @PRIMARY_HOVER@; border-color: @PRIMARY_HOVER@; }
 
 QLineEdit,
 QComboBox,
@@ -263,6 +266,13 @@ QFrame#momentSelectionToolbar { background: transparent; border: 0; }
 QFrame#card[activeCandidate="true"] {
   background: @ACCENT@;
   border: 1px solid @PRIMARY@;
+}
+QFrame#card[candidateSelected="true"] {
+  border-left: 3px solid @PRIMARY@;
+}
+QFrame#card[activeCandidate="true"][candidateSelected="true"] {
+  border: 1px solid @PRIMARY@;
+  border-left: 3px solid @PRIMARY@;
 }
 QFrame#card[candidateBlocked="true"] { background: @MAIN@; }
 QLabel#momentState {

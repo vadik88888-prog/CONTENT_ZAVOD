@@ -71,6 +71,22 @@ def test_final_results_workspace_switches_only_between_bound_outputs(tmp_path: P
         assert workspace.preview.active_media_path == second
         assert selected == [outputs[1].result_id]
         assert workspace._cards[outputs[1].result_id].property("activeFinalOutput") is True
+
+        workspace.preview.suspend()
+        assert workspace.preview.active_media_path is None
+        workspace.set_results(
+            outputs, selected_id=outputs[1].result_id, project_directory=tmp_path,
+            warnings=workspace._warnings,
+        )
+        assert workspace.preview.active_media_path == second
+
+        workspace._outputs = [FinalOutput(
+            "candidate-four-five:plan:two.mp4", "candidate-four-five", second,
+            "Вертикальный 4:5", 18.0, 1080, 1350,
+        )]
+        workspace._update_summary()
+        assert workspace.summary_values["format"].text() == "4:5"
+        assert workspace._summary_captions[2].text() == "Формат · 1080×1350"
     finally:
         workspace.close()
         workspace.deleteLater()
@@ -151,11 +167,18 @@ def test_final_results_reflows_without_hidden_horizontal_clipping(
         assert workspace.list_scroll.horizontalScrollBar().maximum() == 0
         assert workspace.info_scroll.horizontalScrollBar().maximum() == 0
         assert workspace._info_layout.indexOf(
+            workspace._actions_heading,
+        ) > workspace._info_layout.indexOf(workspace.info_scroll)
+        assert workspace._info_layout.indexOf(
             workspace.open_video_button,
-        ) < workspace._info_layout.indexOf(workspace.info_scroll)
+        ) > workspace._info_layout.indexOf(workspace._actions_heading)
+        assert not workspace.info_scroll.isAncestorOf(workspace.open_video_button)
+        for action in (workspace.open_video_button, workspace.show_folder_button):
+            assert action.isVisibleTo(workspace._info_panel)
+            assert action.geometry().bottom() <= workspace._info_panel.contentsRect().bottom()
         assert workspace.preview.video.width() >= {
             "dense": 220,
-            "compact": 252,
+            "compact": 184 if height <= 840 else 252,
             "standard": 288,
         }[profile]
         assert workspace.preview.active_candidate.geometry().bottom() < workspace.preview.media_stage.geometry().top()
@@ -206,7 +229,7 @@ def test_vertical_preview_height_for_width_shrinks_and_controls_stay_inside() ->
 
     try:
         heights: list[int] = []
-        for width in (360, 500, 360):
+        for width in (360, 418, 360):
             preview.resize(width, max(1, preview.minimumHeight()))
             preview.show()
             app.processEvents()
@@ -233,6 +256,8 @@ def test_vertical_preview_height_for_width_shrinks_and_controls_stay_inside() ->
                 assert position.x() >= 0
                 assert position.x() + control.width() <= preview.controls_host.width()
                 assert control.width() >= control.minimumSizeHint().width()
+
+            assert preview._compact_controls is (width < 400)
 
         assert heights[1] < heights[0]
         assert heights[2] == heights[0]

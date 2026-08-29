@@ -139,6 +139,7 @@ class VideoPreview(QFrame):
         self._using_proxy = False
         self._presentation = "source"
         self._vertical_frame_size = (270, 480)
+        self._source_frame_height_bounds = (260, 420)
         self._selection_token = 0
         self._expected_source = QUrl()
         self._media_loading = False
@@ -405,6 +406,17 @@ class VideoPreview(QFrame):
         if self._presentation == "vertical":
             self._set_presentation("vertical")
 
+    def set_source_frame_height_bounds(
+        self, minimum_height: int, maximum_height: int,
+    ) -> None:
+        """Bound the existing source player for the current window height."""
+
+        if minimum_height <= 0 or maximum_height < minimum_height:
+            raise ValueError("Source preview height bounds must be positive and ordered.")
+        self._source_frame_height_bounds = (minimum_height, maximum_height)
+        if self._presentation == "source":
+            self._set_presentation("source")
+
     def set_frame_sink_output(self, enabled: bool) -> None:
         """Present decoded frames in the QWidget tree instead of a native surface.
 
@@ -446,11 +458,12 @@ class VideoPreview(QFrame):
     def _apply_controls_layout(self, *, force: bool = False) -> None:
         """Reflow transport controls before their themed hints can collide."""
 
-        # The frame/layout consume 26 px before controls receive their row.
-        # With the production Windows font the wide row needs 761 px, so a
-        # 760 px preview still clips the full external-player CTA.  Keep a
-        # small DPI/font-metric safety margin and switch to one row at 800.
-        compact = self._presentation == "vertical" or self.width() < 800
+        # A vertical media *frame* is narrow, but its player panel is often a
+        # wide center column.  Keep a two-row transport only when that panel
+        # itself is narrow; a wide Draft/Final panel uses the approved single
+        # transport row and leaves more of a short viewport to the 9:16 image.
+        compact_breakpoint = 400 if self._presentation == "vertical" else 800
+        compact = self.width() < compact_breakpoint
         if not force and compact == self._compact_controls:
             return
         self._compact_controls = compact
@@ -481,7 +494,9 @@ class VideoPreview(QFrame):
             self._controls_layout.addWidget(self.volume_slider, 0, 4)
             self._controls_layout.addWidget(self.fullscreen_button, 0, 5)
             self._controls_layout.addWidget(self.open_button, 0, 6)
-            self.open_button.setText("Открыть в проигрывателе")
+            self.open_button.setText(
+                "↗" if self._presentation == "vertical" else "Открыть в проигрывателе"
+            )
         self._controls_layout.invalidate()
         QTimer.singleShot(0, self._refresh_layout_geometry)
 
@@ -527,7 +542,8 @@ class VideoPreview(QFrame):
         if self._presentation == "vertical":
             width, height = self._vertical_frame_size
             return QSize(max(360, width + 230), max(height + 120, self.minimumHeight()))
-        return QSize(864, max(520, self.minimumHeight()))
+        _minimum_height, maximum_height = self._source_frame_height_bounds
+        return QSize(864, max(maximum_height + 100, self.minimumHeight()))
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API name
         # QVideoWidget's native frame size can change after media loads.  The
@@ -1086,14 +1102,15 @@ class VideoPreview(QFrame):
             self.media_stage.setFixedSize(width, height)
             self.media_stage.setObjectName("phoneStage")
         else:
+            minimum_height, maximum_height = self._source_frame_height_bounds
             self.setMaximumWidth(864)
-            self.video.set_preview_size(840, 420)
+            self.video.set_preview_size(840, maximum_height)
             for widget in (self.video, self.poster, self.placeholder):
-                widget.setMinimumSize(0, 260)
-                widget.setMaximumSize(840, 420)
+                widget.setMinimumSize(0, minimum_height)
+                widget.setMaximumSize(840, maximum_height)
                 widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-            self.media_stage.setMinimumSize(0, 260)
-            self.media_stage.setMaximumSize(840, 420)
+            self.media_stage.setMinimumSize(0, minimum_height)
+            self.media_stage.setMaximumSize(840, maximum_height)
             self.media_stage.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             self.media_stage.setObjectName("")
         self.media_stage.style().unpolish(self.media_stage)

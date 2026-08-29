@@ -90,10 +90,11 @@ class ProjectsScreen(QWidget):
         titles.addWidget(title)
         titles.addWidget(subtitle)
         top.addLayout(titles, 1)
-        local_note = QLabel("●  Локальная работа")
-        local_note.setObjectName("status")
+        local_note = QLabel("▣  Исходники и проекты хранятся локально")
+        local_note.setObjectName("muted")
         self.local_note = local_note
-        top.addWidget(local_note, 0, Qt.AlignmentFlag.AlignTop)
+        titles.addWidget(local_note)
+        local_note.setWordWrap(True)
         content.addLayout(top)
 
         source_card = QFrame()
@@ -446,7 +447,8 @@ class ProjectsScreen(QWidget):
         name.setStyleSheet("font-size: 15px; font-weight: 600;")
         name.setWordWrap(True)
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        set_responsive_text(name, project.name)
+        set_responsive_text(name, project.name.replace("_", " "))
+        name.setToolTip(project.name)
         presentation = self._presentations.get(project.project_id)
         if presentation is None:
             runs = self.viewmodel.services.runs_for(project)

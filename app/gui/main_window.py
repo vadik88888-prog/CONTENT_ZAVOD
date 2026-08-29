@@ -333,14 +333,11 @@ class MainWindow(QMainWindow):
                 self.help_button: "?",
             }
         else:
-            # Full meanings stay in tooltips.  These visible forms fit the
-            # 192 logical px left inside the wide sidebar with the shipped
-            # Windows font metrics and button padding.
             labels = {
-                self.new_button: "＋  Новый",
+                self.new_button: "＋  Новый проект",
                 self.projects_button: "▣  Проекты",
                 self.settings_button: "⚙  Настройки",
-                self.help_button: "?  Помощь",
+                self.help_button: "?  Помощь и поддержка",
             }
         for button, button_text in labels.items():
             if button.text() != button_text:

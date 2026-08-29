@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import gcd
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
@@ -83,6 +84,7 @@ class FinalResultsWorkspace(QWidget):
         self._responsive_profile: str | None = None
         self._body_layout_mode: str | None = None
         self._bottom_actions_stacked: bool | None = None
+        self._short_window: bool | None = None
         self._body_height_floor = 0
         self._body_geometry_refresh_pending = False
         self._observed_window: QWidget | None = None
@@ -201,6 +203,7 @@ class FinalResultsWorkspace(QWidget):
         self.info_scroll = QScrollArea()
         self.info_scroll.setWidgetResizable(True)
         self.info_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.info_scroll.setMinimumHeight(0)
         self._info_host = QWidget()
         self._info_content_layout = QVBoxLayout(self._info_host)
         self._info_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -250,8 +253,8 @@ class FinalResultsWorkspace(QWidget):
         warning_layout.addWidget(warning_scroll)
         self.warning_box.hide()
         self._info_content_layout.addWidget(self.warning_box)
-        self._info_content_layout.addStretch()
         self.info_scroll.setWidget(self._info_host)
+        self._info_layout.addWidget(self.info_scroll)
         self._actions_heading = QLabel("Действия")
         self._actions_heading.setStyleSheet("font-weight: 600;")
         self._info_layout.addWidget(self._actions_heading)
@@ -273,10 +276,7 @@ class FinalResultsWorkspace(QWidget):
         self._info_layout.addWidget(self.open_video_button)
         self._info_layout.addWidget(self.show_folder_button)
         self._info_layout.addWidget(self.rerender_button)
-        # Keep the selected-output actions in the initial viewport.  Metadata
-        # and potentially long quality warnings remain independently scrollable
-        # below, so a warning can never push the primary actions off-screen.
-        self._info_layout.addWidget(self.info_scroll, 1)
+        self._info_layout.addStretch()
         self._place_body_panels("standard")
         self._root_layout.addWidget(self._body_host)
 
@@ -297,11 +297,9 @@ class FinalResultsWorkspace(QWidget):
         self.projects_button.clicked.connect(self.projects_requested)
         self._bottom_layout.addWidget(self.drafts_button)
         self._bottom_layout.addStretch()
+        self._bottom_layout.addWidget(self.project_folder_button)
+        self._bottom_layout.addStretch()
         self._bottom_layout.addWidget(self.create_more_primary_button)
-        # The selected-output inspector already owns "Показать в папке".
-        # Keep these compatibility actions callable but avoid duplicating them
-        # in the reference bottom bar or forcing a desktop minimum width.
-        self.project_folder_button.hide()
         self.projects_button.hide()
         self._root_layout.addWidget(self._bottom)
         self._apply_responsive_layout(force=True)
@@ -361,6 +359,7 @@ class FinalResultsWorkspace(QWidget):
         width = self.width()
         dense = width < 1020 or (0 < window_height <= 720)
         compact = dense or width < 1320 or (0 < window_height <= 840)
+        short_window = 0 < window_height <= 840
         profile = "dense" if dense else "compact" if compact else "standard"
         # Panel composition follows the actual workspace width.  Height only
         # tunes density; a wide-but-short window can use columns and let the
@@ -374,11 +373,13 @@ class FinalResultsWorkspace(QWidget):
             and profile == self._responsive_profile
             and body_mode == self._body_layout_mode
             and bottom_actions_stacked == self._bottom_actions_stacked
+            and short_window == self._short_window
         ):
             return
         self._responsive_profile = profile
         self._body_layout_mode = body_mode
         self._bottom_actions_stacked = bottom_actions_stacked
+        self._short_window = short_window
 
         # The inspector is intentionally narrow beside the 9:16 player.
         # Keep actions readable without allowing their full desktop copy to
@@ -434,6 +435,13 @@ class FinalResultsWorkspace(QWidget):
             self.heading.setStyleSheet("")
             summary_value_style = ""
 
+        if short_window and body_mode == "columns":
+            # Preserve the complete video, status and transport controls in
+            # the first viewport.  Metadata/warnings keep their own scroll;
+            # fixed actions remain reachable below that scroll surface.
+            frame_size = (184, 327)
+            body_height = 420
+
         self._thumbnail_size = thumbnail_size
         self._root_layout.setSpacing(spacing)
         self._body_layout.setSpacing(spacing)
@@ -458,6 +466,9 @@ class FinalResultsWorkspace(QWidget):
         self.info_grid.setHorizontalSpacing(max(8, spacing))
         self.info_grid.setVerticalSpacing(max(6, spacing - 2))
         self._warning_scroll.setFixedHeight(warning_height)
+        self.info_scroll.setMaximumHeight(
+            190 if short_window and body_mode == "columns" else 16_777_215
+        )
         if body_mode in {"columns", "two_row"}:
             self._list_panel.setMinimumWidth(list_width[0])
             self._list_panel.setMaximumWidth(list_width[1])
@@ -591,10 +602,19 @@ class FinalResultsWorkspace(QWidget):
             self._signature = signature
             self._rebuild_list()
         target = selected_id if any(output.result_id == selected_id for output in outputs) else (outputs[0].result_id if outputs else None)
-        if target and (changed or target != self._active_id):
+        target_output = self._output_for(target) if target else None
+        active_media = self.preview.active_media_path
+        media_needs_rebind = bool(
+            target_output is not None
+            and (
+                active_media is None
+                or active_media.resolve() != target_output.path.resolve()
+            )
+        )
+        if target and (changed or target != self._active_id or media_needs_rebind):
             self._activate(target, emit=False, warnings=self._warnings)
         elif target:
-            self._render_details(self._output_for(target), self._warnings)
+            self._render_details(target_output, self._warnings)
             self._mark_active()
 
     def _rebuild_list(self) -> None:
@@ -714,6 +734,7 @@ class FinalResultsWorkspace(QWidget):
         self.open_video_button.setEnabled(available)
         self.show_folder_button.setEnabled(available)
         self.rerender_button.setEnabled(bool(output.run_id))
+        self.rerender_button.setVisible(output.status != "completed" and bool(output.run_id))
 
     def _mark_active(self) -> None:
         for result_id, card in self._cards.items():
@@ -765,13 +786,17 @@ class FinalResultsWorkspace(QWidget):
         sizes = [self._file_size(value.path) for value in self._outputs]
         formats = {(value.width, value.height) for value in self._outputs if value.width and value.height}
         format_text = "—"
+        format_caption = "Формат"
         if len(formats) == 1:
             width, height = next(iter(formats))
-            format_text = f"{width}×{height}"
+            divisor = gcd(width, height)
+            format_text = f"{width // divisor}:{height // divisor}"
+            format_caption = f"Формат · {width}×{height}"
         self.summary_values["count"].setText(str(len(self._outputs)))
         self.summary_values["duration"].setText(self._seconds(sum(durations)) if durations else "—")
         self.summary_values["format"].setText(format_text)
         self.summary_values["size"].setText(self._size(sum(sizes)))
+        self._summary_captions[2].setText(format_caption)
 
     @staticmethod
     def _file_size(path: Path) -> int:
