@@ -937,7 +937,7 @@ def test_word_pop_reduced_motion_and_short_timing_use_static_single_word_fallbac
     assert short.cues[0].output.start_frame == short.cues[0].words[0].output.start_frame
 
 
-def test_word_pop_weak_timing_degrades_to_phrase_level_static_caption() -> None:
+def test_word_pop_weak_timing_keeps_static_phrase_identity(tmp_path: Path) -> None:
     transcript = {"segments": [{
         "start": 0.0, "end": 3.0,
         "text": "Слабый тайминг остаётся статичной фразой",
@@ -949,6 +949,22 @@ def test_word_pop_weak_timing_degrades_to_phrase_level_static_caption() -> None:
     assert all(cue.primitive_id == "static" for cue in plan.cues)
     assert all(cue.timing_mode != "word" for cue in plan.cues)
     assert "WEAK_TIMING_DEGRADED_TO_PHRASE_STATIC" in plan.diagnostics
+    assert "WORD_POP_WEAK_TIMING_PHRASE_HIGHLIGHT" in plan.diagnostics
+    assert plan.typography is not None
+    assert plan.typography.token_id == "caption-preset:word_pop:2.1.0"
+    assert plan.font_manifest is not None
+    assert plan.font_manifest.font_id == "font.unbounded.bold"
+
+    ass = write_caption_plan_ass(
+        plan, tmp_path / "word-pop-weak.ass", 1080, 1920,
+    ).read_text(encoding="utf-8-sig")
+    assert "Style: CaptionPlan,Unbounded" in ass
+    assert all(
+        "\\1c&H0000FFC6&" in event
+        for event in ass.splitlines()
+        if event.startswith("Dialogue:")
+    )
+    assert "\\t(" not in ass
 
 
 def test_word_pop_localizes_weak_timing_without_disabling_trusted_word_cadence() -> None:

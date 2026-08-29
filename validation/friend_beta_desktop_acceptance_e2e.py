@@ -26,6 +26,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
+from app.caption_presets import caption_preset_definition
+from app.creative_execution import CAPTION_RENDER_BACKEND_VERSION
 from app.clip_results import ClipResult
 from app.creative_contracts import RenderParityManifest, assert_preview_final_parity
 from app.draft_artifact import DraftArtifact
@@ -263,6 +265,101 @@ def _ffprobe(ffprobe: Path, media: Path) -> dict[str, Any]:
     return value
 
 
+def _caption_identity(plan_path: Path, ass_path: Path) -> dict[str, Any]:
+    plan = read_json(plan_path, {})
+    caption = plan.get("caption_plan", {}) if isinstance(plan, dict) else {}
+    if not isinstance(caption, dict):
+        caption = {}
+    typography = caption.get("typography", {})
+    font = caption.get("font_manifest", {})
+    caption_backends = [
+        item for item in plan.get("backends", [])
+        if isinstance(item, dict) and item.get("domain") == "caption"
+    ]
+    cues = [cue for cue in caption.get("cues", []) if isinstance(cue, dict)]
+    if not plan_path.is_file() or not ass_path.is_file() or not isinstance(typography, dict) or not isinstance(font, dict):
+        raise AssertionError("Caption plan/ASS identity artifacts are missing.")
+    token = str(typography.get("token_id") or "")
+    cue_tokens = sorted({str(cue.get("typography_token_id") or "") for cue in cues})
+    if not token or cue_tokens != [token]:
+        raise AssertionError("Caption cues lost the compiled preset typography token.")
+    if len(caption_backends) != 1 or caption_backends[0].get("backend_version") != CAPTION_RENDER_BACKEND_VERSION:
+        raise AssertionError("Compiled caption backend is stale for the current ASS treatment.")
+    ass = ass_path.read_text(encoding="utf-8-sig")
+    dialogue_lines = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+    style_line = next(
+        (line for line in ass.splitlines() if line.startswith("Style: CaptionPlan,")),
+        "",
+    )
+    style_parts = style_line.split(",", 2)
+    ass_font_family = style_parts[1] if len(style_parts) >= 2 else ""
+    resolved_family = str(font.get("resolved_family") or "")
+    if not dialogue_lines or len(dialogue_lines) != len(cues):
+        raise AssertionError("Rendered ASS dialogue count differs from the compiled CaptionPlan.")
+    if not resolved_family or ass_font_family != resolved_family:
+        raise AssertionError("Rendered ASS font family differs from the compiled font identity.")
+    highlight = str(typography.get("highlight_color") or "").lstrip("#")
+    if len(highlight) != 6:
+        raise AssertionError("Caption highlight color is not a resolved RGB token.")
+    ass_highlight = f"&H00{highlight[4:6]}{highlight[2:4]}{highlight[0:2]}&".upper()
+    ass_transform_tag_count = sum(line.count("\\t(") for line in dialogue_lines)
+    ass_word_pop_curve_count = sum(
+        line.count("\\t(") == 2 for line in dialogue_lines
+    )
+    ass_highlight_count = sum(
+        line.upper().count(f"\\1C{ass_highlight}") for line in dialogue_lines
+    )
+    treatment_counts: dict[str, int] = {}
+    for cue in cues:
+        key = "|".join(str(cue.get(name) or "") for name in (
+            "display_mode", "timing_mode", "primitive_id", "fallback_reason",
+        ))
+        treatment_counts[key] = treatment_counts.get(key, 0) + 1
+    expected_word_pop_curves = sum(
+        cue.get("primitive_id") == "word_pop" for cue in cues
+    )
+    if ass_word_pop_curve_count != expected_word_pop_curves:
+        raise AssertionError(
+            "Physical ASS two-stage curves differ from Word Pop cue treatments."
+        )
+    weak_pairs = [
+        (cue, line) for cue, line in zip(cues, dialogue_lines, strict=True)
+        if token.startswith("caption-preset:word_pop:")
+        and cue.get("fallback_reason") == "weak_timing"
+    ]
+    weak_static_highlight_count = sum(
+        "\\t(" not in line
+        and "\\move(" not in line
+        and "\\fad(" not in line
+        and f"\\1C{ass_highlight}" in line.upper()
+        for _cue, line in weak_pairs
+    )
+    if weak_pairs and weak_static_highlight_count != len(weak_pairs):
+        raise AssertionError("Weak-timing Word Pop ASS is not static and accent-preserving.")
+    return {
+        "compiled_plan_path": str(plan_path.resolve()),
+        "compiled_plan_sha256": _sha256(plan_path),
+        "ass_path": str(ass_path.resolve()),
+        "ass_sha256": _sha256(ass_path),
+        "token_id": token,
+        "font_id": font.get("font_id"),
+        "font_file": font.get("file_name"),
+        "font_sha256": font.get("file_sha256"),
+        "text_color": typography.get("text_color"),
+        "highlight_color": typography.get("highlight_color"),
+        "backend_version": caption_backends[0]["backend_version"],
+        "cue_count": len(cues),
+        "ass_dialogue_count": len(dialogue_lines),
+        "ass_font_family": ass_font_family,
+        "ass_transform_tag_count": ass_transform_tag_count,
+        "ass_word_pop_curve_count": ass_word_pop_curve_count,
+        "ass_weak_static_highlight_count": weak_static_highlight_count,
+        "ass_highlight_tag_count": ass_highlight_count,
+        "treatment_counts": treatment_counts,
+        "diagnostics": list(caption.get("diagnostics", [])),
+    }
+
+
 def _validate_final(
     services: DesktopServices,
     runtime: RuntimeLayout,
@@ -382,6 +479,49 @@ def _validate_final(
     ):
         raise AssertionError("Preview/Final parity manifests are not bound to their exact media bytes.")
 
+    expected_preset = caption_preset_definition(
+        persisted_project.settings.caption_preset_id  # type: ignore[arg-type]
+    )
+    preview_caption = _caption_identity(
+        preview_path.with_name("compiled-render-plan.json"),
+        preview_path.with_name("production-subtitles.ass"),
+    )
+    final_caption = _caption_identity(
+        run_output / "production-render" / "compiled-render-plan.json",
+        run_output / "production-render" / "production-subtitles.ass",
+    )
+    identity_fields = (
+        "compiled_plan_sha256", "ass_sha256", "token_id", "font_id", "font_file",
+        "font_sha256", "text_color", "highlight_color", "cue_count",
+        "backend_version", "ass_dialogue_count", "ass_font_family",
+        "ass_transform_tag_count", "ass_word_pop_curve_count",
+        "ass_weak_static_highlight_count", "ass_highlight_tag_count",
+        "treatment_counts", "diagnostics",
+    )
+    expected_identity = {
+        "token_id": expected_preset.token_id,
+        "font_id": expected_preset.preferred_font_asset_id,
+        "text_color": expected_preset.text_color,
+        "highlight_color": expected_preset.highlight_color,
+    }
+    if any(preview_caption[field] != value for field, value in expected_identity.items()):
+        raise AssertionError(
+            "Creative Preview caption preset differs from the persisted Settings choice."
+        )
+    if expected_preset.preset_id == "word_pop" and not any(
+        key.startswith("single_spoken_word|word|word_pop|")
+        and count > 0
+        for key, count in preview_caption["treatment_counts"].items()
+    ):
+        raise AssertionError("Word Pop lost its spoken-word production treatment.")
+    if expected_preset.preset_id == "word_pop" and (
+        preview_caption["ass_word_pop_curve_count"] <= 0
+        or preview_caption["ass_highlight_tag_count"] <= 0
+    ):
+        raise AssertionError("Physical ASS output lost Word Pop motion or accent treatment.")
+    if any(preview_caption[field] != final_caption[field] for field in identity_fields):
+        raise AssertionError("Creative Preview and Final caption identities differ.")
+
     probe = _ffprobe(runtime.tools / "ffprobe.exe", media)
     preview_probe = _ffprobe(runtime.tools / "ffprobe.exe", preview_path)
     streams = [item for item in probe.get("streams", []) if isinstance(item, dict)]
@@ -431,6 +571,12 @@ def _validate_final(
         "creative_preview_path": str(preview_path.resolve()),
         "creative_preview_sha256": preview_sha256,
         "creative_preview_ffprobe": preview_probe,
+        "caption_preset": {
+            "preset_id": expected_preset.preset_id,
+            "preset_version": expected_preset.preset_version,
+            "preview": preview_caption,
+            "final": final_caption,
+        },
     }
 
 

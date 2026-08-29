@@ -47,6 +47,7 @@ from app.video_models import (
 
 
 NATIVE_CREATIVE_EXECUTION_VERSION = "7G.2.scene-family.2"
+CAPTION_RENDER_BACKEND_VERSION = "7C.libass-tier1.2"
 
 
 def default_native_creative_intent(
@@ -187,7 +188,7 @@ def compile_native_creative_plan(
             ),
             BackendAssignment(
                 domain="caption", backend_id="libass",
-                backend_version="7C.libass-tier1.1",
+                backend_version=CAPTION_RENDER_BACKEND_VERSION,
             ),
             BackendAssignment(
                 domain="composition", backend_id="ffmpeg",
@@ -231,7 +232,16 @@ def caption_plan_with_motion(captions: CaptionPlan, motion: MotionPlan) -> Capti
     cues = []
     for cue in captions.cues:
         event = events.get(cue.cue_id)
-        if event is None:
+        if (
+            event is None
+            or cue.display_mode == "single_spoken_word"
+            or cue.fallback_reason in {"weak_timing", "short_timing"}
+        ):
+            # Word Pop owns its bounded spoken-word primitive.  Likewise, a
+            # weak/short clock has already made an explicit timing-safety
+            # decision in CaptionPlan.  A generic cross-domain MotionPlan must
+            # not replace either with slide/fade and erase preset identity or
+            # reanimate a safety fallback.
             cues.append(cue)
             continue
         primitive = event.primitive_id if event.primitive_id in {"static", "fade", "scale", "slide"} else "static"

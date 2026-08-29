@@ -482,6 +482,17 @@ class CaptionPlanner:
         )
         report = _quality_report(cues, findings, manifest, measurer, intent)
         diagnostics.extend(_diagnostics(cues, manifest, measurer))
+        if word_pop_requested and any(
+            cue.display_mode == "phrase"
+            and cue.fallback_reason == "weak_timing"
+            for cue in cues
+        ):
+            # A weak clock must never drive per-word motion.  Keep the safe
+            # phrase/static fallback physically recognisable as Word Pop via
+            # its preset-owned lime phrase highlight and bundled Unbounded
+            # face.  The diagnostic is part of the immutable plan, so only
+            # affected caption/render descendants receive a new plan hash.
+            diagnostics.append("WORD_POP_WEAK_TIMING_PHRASE_HIGHLIGHT")
         if readability_coalesced:
             diagnostics.append("CAPTION_READABILITY_COALESCED")
         if readability_extended:
@@ -2490,7 +2501,15 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     for cue in plan.cues:
         if cue.normalized_bounds is None:
             raise ValueError(f"CAPTION_GEOMETRY_MISSING: {cue.cue_id}")
-        payload = _format_plan_cue(cue, typography, width, height)
+        payload = _format_plan_cue(
+            cue,
+            typography,
+            width,
+            height,
+            phrase_fallback_highlight=(
+                "WORD_POP_WEAK_TIMING_PHRASE_HIGHLIGHT" in plan.diagnostics
+            ),
+        )
         events.append(
             f"Dialogue: 0,{_ass_time(cue.output.start_frame / 30)},{_ass_time(cue.output.end_frame / 30)},"
             f"CaptionPlan,{_escape_style(cue.cue_id)},0,0,0,,{payload}"
@@ -2500,7 +2519,12 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 
 
 def _format_plan_cue(
-    cue: CaptionCuePlan, typography: CaptionTypographyToken, width: int, height: int,
+    cue: CaptionCuePlan,
+    typography: CaptionTypographyToken,
+    width: int,
+    height: int,
+    *,
+    phrase_fallback_highlight: bool = False,
 ) -> str:
     assert cue.normalized_bounds is not None
     x = round((cue.normalized_bounds.x + cue.normalized_bounds.width / 2) * width)
@@ -2528,11 +2552,35 @@ def _format_plan_cue(
     elif cue.scale_keyframes[0] != 100:
         fixed = cue.scale_keyframes[0]
         tags.append(fr"\fscx{fixed}\fscy{fixed}")
-    text = _format_plan_text(cue, typography)
+    text = _format_plan_text(
+        cue,
+        typography,
+        phrase_fallback_highlight=phrase_fallback_highlight,
+    )
     return "{" + "".join(tags) + "}" + text
 
 
-def _format_plan_text(cue: CaptionCuePlan, typography: CaptionTypographyToken) -> str:
+def _format_plan_text(
+    cue: CaptionCuePlan,
+    typography: CaptionTypographyToken,
+    *,
+    phrase_fallback_highlight: bool = False,
+) -> str:
+    preset = caption_preset_from_token_id(typography.token_id)
+    if (
+        phrase_fallback_highlight
+        and preset is not None
+        and preset.preset_id == "word_pop"
+        and cue.display_mode == "phrase"
+        and cue.fallback_reason == "weak_timing"
+    ):
+        # This is a preset treatment, not an inferred semantic emphasis: the
+        # whole safely timed phrase uses Word Pop's accent while remaining
+        # static.  Resolved lines stay frozen for Preview/Final parity.
+        primary = _ass_color(typography.text_color)
+        highlight = _ass_color(typography.highlight_color)
+        resolved = r"\N".join(_escape_text(line) for line in cue.resolved_lines)
+        return f"{{\\1c{highlight}}}{resolved}{{\\1c{primary}}}"
     if not cue.words:
         return r"\N".join(_escape_text(line) for line in cue.resolved_lines)
     line_counts = [len(line.split()) for line in cue.resolved_lines]
@@ -2542,7 +2590,6 @@ def _format_plan_text(cue: CaptionCuePlan, typography: CaptionTypographyToken) -
         cursor += count
         boundaries.add(cursor)
     emphasis = set(cue.emphasis.word_indexes if cue.emphasis is not None else ())
-    preset = caption_preset_from_token_id(typography.token_id)
     semantic_bold = preset is not None and preset.semantic_bold
     primary = _ass_color(typography.text_color)
     highlight = _ass_color(typography.highlight_color)

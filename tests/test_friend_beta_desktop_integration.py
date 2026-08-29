@@ -437,6 +437,9 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
         composition_strategy="fit_blur_background",
         same_source_broll_allowed=True,
         subtitles_enabled=False,
+        subtitle_style="dynamic",
+        caption_preset_id="word_pop",
+        preset_selection_mode="explicit",
         reduced_motion=True,
         use_cache=False,
     )
@@ -454,6 +457,9 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
     assert persisted.settings.composition_strategy == "fit_blur_background"
     assert persisted.settings.same_source_broll_allowed is True
     assert persisted.settings.subtitles_enabled is False
+    assert persisted.settings.subtitle_style == "dynamic"
+    assert persisted.settings.caption_preset_id == "word_pop"
+    assert persisted.settings.preset_selection_mode == "explicit"
     assert persisted.settings.reduced_motion is True
     assert persisted.settings.use_cache is False
     assert config.product_flow.processing_mode == "maximum"
@@ -462,11 +468,14 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
     assert config.product_flow.platform == "reels"
     assert config.product_flow.clip_count == 5
     assert config.product_flow.audio_mode == "original_enhanced"
+    assert config.product_flow.caption_preset_id == "word_pop"
+    assert config.product_flow.caption_preset_version == "2.1.0"
     assert config.product_flow.reduced_motion is True
     assert config.production.audio_mode == "original_enhanced"
     assert config.production_render.crop_strategy == "fit_blur_background"
     assert config.production_render.same_source_broll_allowed is True
     assert config.production_render.subtitles_enabled is False
+    assert config.production_render.subtitle_style == "dynamic"
     assert config.production_render.cache_enabled is False
 
 

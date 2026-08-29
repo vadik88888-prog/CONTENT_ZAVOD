@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from app.creative_execution import CAPTION_RENDER_BACKEND_VERSION, caption_plan_with_motion
 from app.creative_contracts import (
+    BackendAssignment,
     CaptionCuePlan,
     CaptionPlan,
+    CaptionWordPlan,
     CanvasPlan,
     CompositionPlan,
     CompositionPunchIn,
@@ -114,6 +117,27 @@ def _cue(cue_id: str, start: int, end: int, text: str = "Readable caption") -> C
     )
 
 
+def _single_word_cue(*, fallback_reason: str | None = None) -> CaptionCuePlan:
+    output = OutputInterval(start_frame=0, end_frame=60)
+    word = CaptionWordPlan(
+        word_id="word-protected",
+        text="Readable",
+        output=output,
+        timing_source="verified",
+        confidence=0.95,
+        source=SourceInterval.from_seconds(0, 2),
+        mapping_segment_ids=("edit-motion",),
+    )
+    return _cue("protected-cue", 0, 60, "Readable").model_copy(update={
+        "words": (word,),
+        "display_mode": "single_spoken_word",
+        "primitive_id": "static" if fallback_reason else "word_pop",
+        "motion_duration_frames": 0 if fallback_reason else 9,
+        "scale_keyframes": (100, 100, 100) if fallback_reason else (88, 112, 100),
+        "fallback_reason": fallback_reason,
+    })
+
+
 def _captions(intent: CreativeIntent, *cues: CaptionCuePlan) -> CaptionPlan:
     return CaptionPlan(intent_id=intent.intent_id, cues=tuple(cues))
 
@@ -178,6 +202,45 @@ def test_high_intensity_is_a_ceiling_not_an_animation_quota() -> None:
     assert plan.events == ()
     assert plan.animation_budget.points_used == 0
     assert plan.animation_budget.animated_frames_used == 0
+
+
+@pytest.mark.parametrize(
+    "protected_cue",
+    (
+        _single_word_cue(),
+        _cue("protected-cue", 0, 60).model_copy(update={
+            "primitive_id": "static",
+            "timing_mode": "phrase",
+            "fallback_reason": "weak_timing",
+        }),
+        _single_word_cue(fallback_reason="short_timing"),
+    ),
+)
+def test_generic_motion_cannot_replace_word_pop_or_timing_safe_fallback(
+    protected_cue: CaptionCuePlan,
+) -> None:
+    event = _event("caption-hook", 0, 60, MotionPurpose.HOOK, MotionDomain.CAPTION)
+    intent = _intent((event,))
+    captions = _captions(intent, protected_cue)
+    motion = build_motion_plan(intent, captions, _composition(intent), _broll(intent))
+
+    effective = caption_plan_with_motion(captions, motion)
+
+    assert motion.events
+    assert effective.cues == captions.cues
+
+
+def test_generic_motion_still_applies_to_normal_phrase_caption() -> None:
+    event = _event("caption-hook", 0, 60, MotionPurpose.HOOK, MotionDomain.CAPTION)
+    intent = _intent((event,))
+    captions = _captions(intent, _cue("normal-cue", 0, 60))
+    motion = build_motion_plan(intent, captions, _composition(intent), _broll(intent))
+
+    effective = caption_plan_with_motion(captions, motion)
+
+    assert motion.events
+    assert effective.cues[0].primitive_id in {"fade", "scale", "slide"}
+    assert effective.cues[0].primitive_id != captions.cues[0].primitive_id
 
 
 def test_reduced_motion_is_reported_even_when_intent_compiler_removed_all_animation_requests() -> None:
@@ -406,3 +469,37 @@ def test_assessed_motion_plan_crosses_compiled_renderer_handoff_and_detects_stal
             intent, stale_captions, composition, motion, broll,
             CanvasPlan(width=1080, height=1920),
         )
+
+
+def test_caption_backend_revision_invalidates_only_caption_render_descendants() -> None:
+    intent = _intent(())
+    captions = _captions(intent, _cue("caption-cache-cue", 0, 60))
+    composition = _composition(intent)
+    broll = _broll(intent)
+    motion = build_motion_plan(intent, captions, composition, broll)
+
+    def compile_with(version: str):
+        return compile_render_plan(
+            intent,
+            captions,
+            composition,
+            motion,
+            broll,
+            CanvasPlan(width=1080, height=1920),
+            backends=(BackendAssignment(
+                domain="caption",
+                backend_id="libass",
+                backend_version=version,
+            ),),
+        )
+
+    previous = compile_with("7C.libass-tier1.1")
+    current = compile_with(CAPTION_RENDER_BACKEND_VERSION)
+    previous_nodes = {node.node_id: node.cache_key for node in previous.render_graph_nodes}
+    current_nodes = {node.node_id: node.cache_key for node in current.render_graph_nodes}
+
+    assert CAPTION_RENDER_BACKEND_VERSION == "7C.libass-tier1.2"
+    assert current_nodes["captions"] != previous_nodes["captions"]
+    assert current_nodes["base-visual"] == previous_nodes["base-visual"]
+    assert current_nodes["composite"] != previous_nodes["composite"]
+    assert current_nodes["encode"] != previous_nodes["encode"]
