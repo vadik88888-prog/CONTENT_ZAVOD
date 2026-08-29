@@ -567,6 +567,56 @@ def test_widescreen_speaker_uses_a_target_crop_without_fit_blur() -> None:
     )
 
 
+def test_same_target_reframe_waits_for_a_second_spatial_observation() -> None:
+    targets = (
+        _target("speaker-1", AttentionTarget.SPEAKER, 0, 90, "speaker-evidence", target_ref="speaker-a"),
+        _target("speaker-2", AttentionTarget.SPEAKER, 90, 180, "speaker-evidence", target_ref="speaker-a"),
+        _target("speaker-3", AttentionTarget.SPEAKER, 180, 270, "speaker-evidence", target_ref="speaker-a"),
+    )
+    observations = (
+        _observation("speaker-left", 30, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.16),
+        _observation("speaker-shift", 120, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.62),
+        _observation("speaker-shift-confirmed", 210, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.63),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(minimum_hold_frames=1),
+    )
+
+    by_start = {segment.output.start_frame: segment for segment in plan.segments}
+    assert by_start[90].target == AttentionTarget.STABLE_SOURCE
+    assert by_start[90].fallback == "stable_source"
+    assert by_start[90].crop.x == pytest.approx(by_start[0].crop.x)
+    assert by_start[180].target_ref == "speaker-a"
+    assert by_start[180].crop.x > by_start[0].crop.x
+    assert "TARGET_REFRAME_HELD:90" in plan.diagnostics
+    assert "TARGET_REFRAME_CONFIRMED:180" in plan.diagnostics
+
+
+def test_same_target_reframe_does_not_confirm_from_distant_sparse_evidence() -> None:
+    targets = (
+        _target("speaker-1", AttentionTarget.SPEAKER, 0, 90, "speaker-evidence", target_ref="speaker-a"),
+        _target("speaker-2", AttentionTarget.SPEAKER, 90, 180, "speaker-evidence", target_ref="speaker-a"),
+        _target("speaker-3", AttentionTarget.SPEAKER, 180, 300, "speaker-evidence", target_ref="speaker-a"),
+    )
+    observations = (
+        _observation("speaker-left", 30, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.16),
+        _observation("speaker-shift", 120, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.62),
+        _observation("speaker-late-repeat", 270, AttentionTarget.SPEAKER, "speaker-a", "speaker-evidence", 0.63),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations, source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(minimum_hold_frames=1),
+    )
+
+    by_start = {segment.output.start_frame: segment for segment in plan.segments}
+    assert by_start[180].target == AttentionTarget.STABLE_SOURCE
+    assert by_start[180].crop.x == pytest.approx(by_start[0].crop.x)
+    assert "TARGET_REFRAME_CONFIRMED:180" not in plan.diagnostics
+
+
 def test_crop_track_respects_velocity_acceleration_and_reports_safe_geometry() -> None:
     targets = (
         _target("left", AttentionTarget.SUBJECT, 0, 150, "left-evidence", target_ref="left"),

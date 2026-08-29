@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7J.3.actual-reframe.1"
+COMPOSITION_PLANNER_VERSION = "7J.3.actual-reframe.3"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -86,6 +86,11 @@ class CompositionPlannerConfig:
     # shot. On a 2:1 source a true 9:16 reframe cannot contain that entire
     # coarse box even when the face/semantic centre is safely preserved.
     minimum_target_containment: float = 0.82
+    # A single sparse observation must not jerk a 9:16 crop across a face.
+    # Require a second nearby observation before moving an already selected
+    # target this far within the same source scene.
+    same_target_reframe_distance: float = 0.09
+    same_target_reframe_confirmation_window_frames: int = 120
     minimum_fill_crop_width: float = 0.18
     transition_frames: int = 18
     maximum_velocity_per_frame: float = 0.014
@@ -109,6 +114,10 @@ class CompositionPlannerConfig:
             raise ValueError("composition local switch limit must be non-negative")
         if not 0 < self.minimum_target_containment <= 1:
             raise ValueError("composition target containment must be normalized and positive")
+        if not 0 < self.same_target_reframe_distance <= 1:
+            raise ValueError("composition same-target reframe distance must be normalized and positive")
+        if self.same_target_reframe_confirmation_window_frames < 1:
+            raise ValueError("composition same-target reframe confirmation window must be positive")
         if self.transition_frames < 1:
             raise ValueError("composition transition must contain at least one frame")
         if self.maximum_velocity_per_frame <= 0 or self.maximum_acceleration_per_frame_sq <= 0:
@@ -141,6 +150,7 @@ class _AtomicState:
     fallback: CompositionFallback
     reason: MovementReason
     punch_event: ResolvedMotionEvent | None
+    hold_reframe: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +228,8 @@ class CompositionPlanner:
         current: _TargetState | None = None
         held_since = -100_000
         last_switch = -100_000
+        last_confirmed: _TargetState | None = None
+        pending_reframe: _TargetState | None = None
         suppressed = 0
         previous_punch = False
         result: list[_AtomicState] = []
@@ -255,22 +267,88 @@ class CompositionPlanner:
             reason: MovementReason = "none"
             fallback: CompositionFallback = "none"
             selected: _TargetState | None = None
+            hold_reframe = False
 
             if cut:
                 current = None
+                last_confirmed = None
+                pending_reframe = None
                 held_since = frame
                 last_switch = frame
                 reason = "scene_reset"
             if candidate is not None and candidate.confidence >= self.config.enter_confidence:
                 if current is None:
-                    selected = candidate
-                    current = candidate
-                    held_since = frame
-                    if not cut:
-                        reason = "target_acquired"
+                    if (
+                        last_confirmed is not None
+                        and candidate.key == last_confirmed.key
+                        and _same_target_reframe_requires_confirmation(
+                            candidate, last_confirmed, self.config,
+                        )
+                    ):
+                        if (
+                            pending_reframe is not None
+                            and pending_reframe.key == candidate.key
+                            and not _same_target_reframe_requires_confirmation(
+                                candidate, pending_reframe, self.config,
+                            )
+                            and _reframe_confirmation_is_timely(
+                                candidate, pending_reframe, self.config,
+                            )
+                        ):
+                            selected = candidate
+                            current = candidate
+                            last_confirmed = candidate
+                            pending_reframe = None
+                            held_since = frame
+                            diagnostics.append(f"TARGET_REFRAME_CONFIRMED:{frame}")
+                            if not cut:
+                                reason = "target_acquired"
+                        else:
+                            current = last_confirmed
+                            pending_reframe = candidate
+                            held_since = frame
+                            fallback = "stable_source"
+                            reason = "safe_fallback"
+                            hold_reframe = True
+                            diagnostics.append(f"TARGET_REFRAME_HELD:{frame}")
+                    else:
+                        selected = candidate
+                        current = candidate
+                        last_confirmed = candidate
+                        pending_reframe = None
+                        held_since = frame
+                        if not cut:
+                            reason = "target_acquired"
                 elif candidate.key == current.key:
-                    selected = candidate
-                    current = candidate
+                    if _same_target_reframe_requires_confirmation(
+                        candidate, current, self.config,
+                    ):
+                        if (
+                            pending_reframe is not None
+                            and pending_reframe.key == candidate.key
+                            and not _same_target_reframe_requires_confirmation(
+                                candidate, pending_reframe, self.config,
+                            )
+                            and _reframe_confirmation_is_timely(
+                                candidate, pending_reframe, self.config,
+                            )
+                        ):
+                            selected = candidate
+                            current = candidate
+                            last_confirmed = candidate
+                            pending_reframe = None
+                            diagnostics.append(f"TARGET_REFRAME_CONFIRMED:{frame}")
+                        else:
+                            pending_reframe = candidate
+                            fallback = "stable_source"
+                            reason = "safe_fallback"
+                            hold_reframe = True
+                            diagnostics.append(f"TARGET_REFRAME_HELD:{frame}")
+                    else:
+                        selected = candidate
+                        current = candidate
+                        last_confirmed = candidate
+                        pending_reframe = None
                 else:
                     hold_ok = frame - held_since >= self.config.minimum_hold_frames
                     cooldown_ok = frame - last_switch >= self.config.switch_cooldown_frames
@@ -284,6 +362,8 @@ class CompositionPlanner:
                     if hold_ok and cooldown_ok and advantage_ok:
                         selected = candidate
                         current = candidate
+                        last_confirmed = candidate
+                        pending_reframe = None
                         held_since = frame
                         last_switch = frame
                         reason = "target_switch"
@@ -296,6 +376,8 @@ class CompositionPlanner:
                 if candidate.confidence >= self.config.exit_confidence:
                     selected = candidate
                     current = candidate
+                    last_confirmed = candidate
+                    pending_reframe = None
                 else:
                     current = None
             elif (
@@ -309,6 +391,15 @@ class CompositionPlanner:
                 # is inherited from the last acquired state.
                 fallback = "stable_source"
                 reason = "safe_fallback"
+                hold_reframe = pending_reframe is not None
+            elif pending_reframe is not None and last_confirmed is not None:
+                # Sparse target evidence cannot turn an unconfirmed move into
+                # an eager pan. Keep the last safe crop until the next
+                # corroborating observation or an actual scene reset.
+                current = last_confirmed
+                fallback = "stable_source"
+                reason = "safe_fallback"
+                hold_reframe = True
             else:
                 current = None
 
@@ -335,6 +426,7 @@ class CompositionPlanner:
                     evidence_refs=(), fallback=fallback,
                     reason="scene_reset" if cut else "safe_fallback",
                     punch_event=None,
+                    hold_reframe=hold_reframe,
                 ))
                 index += 1
                 continue
@@ -634,8 +726,14 @@ def _lock_scene_layout_families(
                 )
                 if speaker_reference is not None:
                     anchor = _speaker_anchor_within_group(anchor, speaker_reference)
+            # The state machine may deliberately hold a prior actual crop
+            # while it waits for a second observation to corroborate a large
+            # same-target move.  Family locking must not look ahead to a
+            # later target and undo that safety decision.
             crop = (
-                _split_facecam_crop(
+                item.desired_crop
+                if item.hold_reframe
+                else _split_facecam_crop(
                     anchor, source_width, source_height, config,
                 )
                 if family == LayoutFamily.SPLIT else
@@ -1091,6 +1189,36 @@ def _target_crop(
     height = min(1.0, 1 / max(normalized_ratio, 1e-9))
     width = min(1.0, normalized_ratio * height)
     return _centered_rect(bounds, width, height), "wider_crop"
+
+
+def _same_target_reframe_requires_confirmation(
+    candidate: _TargetState,
+    reference: _TargetState,
+    config: CompositionPlannerConfig,
+) -> bool:
+    """Return true when a same-target observation would visibly jump crop."""
+
+    return _target_state_distance(candidate, reference) > config.same_target_reframe_distance
+
+
+def _target_state_distance(left: _TargetState, right: _TargetState) -> float:
+    left_x = left.bounds.x + left.bounds.width / 2
+    left_y = left.bounds.y + left.bounds.height / 2
+    right_x = right.bounds.x + right.bounds.width / 2
+    right_y = right.bounds.y + right.bounds.height / 2
+    return max(abs(left_x - right_x), abs(left_y - right_y))
+
+
+def _reframe_confirmation_is_timely(
+    candidate: _TargetState,
+    pending: _TargetState,
+    config: CompositionPlannerConfig,
+) -> bool:
+    return (
+        max(item.frame for item in candidate.observations)
+        - max(item.frame for item in pending.observations)
+        <= config.same_target_reframe_confirmation_window_frames
+    )
 
 
 def _calm_fallback_crop(
