@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "artifact": "ContentFactory-beta-win-x64",
-  "built_at": "2026-08-29T07:03:33.394855+00:00",
-  "base_git_commit": "081a431ee8d22029e536f5b558e65ee7bacfbac6",
+  "built_at": "2026-08-29T07:16:35.550546+00:00",
+  "base_git_commit": "069b695b0cd6659de93ee941485d0fd1535d0f61",
   "source_mode": "worktree",
   "python": {
     "implementation": "CPython",
@@ -88,9 +88,9 @@
     }
   },
   "inputs": {
-    "packaging/windows/ContentFactory.spec": "1d2b0d6dc1e32c3a2d40836bfefa83125a93f6cf05ba7546e50bc01d0286807e",
+    "packaging/windows/ContentFactory.spec": "0ad4f58e8cfcec0f61b64d19787a539e3755c55d42d41338d744c7873c3c5670",
     "packaging/windows/desktop_entrypoint.py": "198f618b71c28a3abfa846cb56132ac902cf1e9dfcd84c647050aeefcfd01c4c",
-    "packaging/windows/build_portable.py": "b509b936940a2a3c62f19aeddaabb5af717308317f39795cf561986234ccec12",
+    "packaging/windows/build_portable.py": "de20db67bb986e2f18b2c5a74ce460873ca552a5b939213d12911a215f156694",
     "packaging/windows/smoke_portable.py": "267efa4302081f13dc493008119ebfa3c78dfd3b145c0ba94ca1b0b18cb14b29",
     "packaging/windows/prepare_youtube_access_runtime.py": "64f6c770d9845db547378b5677d2bcf954bc1af92bd68622fc600762f79114ec",
     "packaging/windows/runtime.lock.json": "cd875fc8c7a9ba92cdffaac9010c3a97ac8f40ceb4d3a4055c80985e228251ec",
@@ -103,32 +103,32 @@
     "packaging/windows/licenses/LICENSE-deno-MIT.txt": "5852e46d672830a8254a68e91cc0e7b2a6e82817111b7a47c503716ec26fedb5"
   },
   "status": "smoke_passed",
-  "build_seconds": 377.27,
-  "zip_seconds": 115.633,
+  "build_seconds": 172.559,
+  "zip_seconds": 39.979,
   "onedir": {
     "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64",
-    "file_count": 33997,
-    "size_bytes": 1581664508,
-    "executable_sha256": "beea3c659fdc30a26cdd8485e660d0b275f569e599371cfb0bb02feb22dc4267"
+    "file_count": 1078,
+    "size_bytes": 773554550,
+    "executable_sha256": "4c1a0789b60d1c535c687cec1722a889f8ad983948ea284b4f08d4ab7e399abd"
   },
   "zip": {
     "path": "packaging/windows/artifacts/ContentFactory-beta-win-x64.zip",
-    "file_count": 33997,
-    "size_bytes": 553580161,
-    "sha256": "4e70cd1e7c8a6f2a7739e64e45ba91fb5f291402974fc0ec9b866a9124344460"
+    "file_count": 1078,
+    "size_bytes": 323430622,
+    "sha256": "489ca3004d7e3ddad300f9bc95b002ce2531356bcd382e4513033d4ea1243d5d"
   },
   "smoke": {
-    "completed_at": "2026-08-29T07:07:17.015380+00:00",
+    "completed_at": "2026-08-29T07:19:27.903714+00:00",
     "source": "fresh_zip_extraction",
     "extracted_path": "build/windows-portable-smoke/extracted/ContentFactory-beta-win-x64",
     "deno": {
       "exit_code": 0,
-      "seconds": 1.504,
+      "seconds": 0.798,
       "version_line": "deno 2.9.5 (stable, release, x86_64-pc-windows-msvc)"
     },
     "frozen_cli": {
       "exit_code": 0,
-      "seconds": 9.872,
+      "seconds": 10.189,
       "ai_mode": "mock",
       "markers": [
         "Content Factory",
@@ -137,17 +137,17 @@
         "OK yt-dlp",
         "OK Deno"
       ],
-      "output_tail": "Content Factory — проверка окружения\r\n\r\nOK Runtime: Встроенный runtime portable-сборки доступен.\r\nOK Ресурсы приложения: Папка ресурсов доступна.\r\nOK FFmpeg: Доступен: ffmpeg.EXE.\r\nOK FFprobe: Доступен: ffprobe.EXE.\r\nOK yt-dlp: Доступен: yt-dlp.EXE.\r\nOK Deno: Доступен: deno.EXE.\r\nOK NVIDIA GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU · 4096 · 610.88\r\nOK CUDA: CTranslate2 видит CUDA-устройств: 1.\r\nOK faster-whisper: Модуль транскрибации доступен.\r\nOK AI provider: mock · gpt-5.6-terra\r\nWARNING Локальный тестовый режим: Используется mock-провайдер; этот режим не подтверждает готовность реальной AI-обработки.\r\n  Что сделать: Для реальной обработки выберите OpenAI или Gemini и подтвердите рабочий API-ключ.\r\nOK Папка input: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\input\r\nOK Папка work: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\work\r\nOK Папка output: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\output\r\nOK Свободное место: Доступно 113.2 ГБ.\r\n\r\nИтог: С ограничениями. Критических проблем — 0, предупреждений — 1.\r\nWARNING не блокирует работу; BLOCKING нужно исправить до завершения первого запуска."
+      "output_tail": "Content Factory — проверка окружения\r\n\r\nOK Runtime: Встроенный runtime portable-сборки доступен.\r\nOK Ресурсы приложения: Папка ресурсов доступна.\r\nOK FFmpeg: Доступен: ffmpeg.EXE.\r\nOK FFprobe: Доступен: ffprobe.EXE.\r\nOK yt-dlp: Доступен: yt-dlp.EXE.\r\nOK Deno: Доступен: deno.EXE.\r\nOK NVIDIA GPU: NVIDIA GeForce RTX 3050 Ti Laptop GPU · 4096 · 610.88\r\nOK CUDA: CTranslate2 видит CUDA-устройств: 1.\r\nOK faster-whisper: Модуль транскрибации доступен.\r\nOK AI provider: mock · gpt-5.6-terra\r\nWARNING Локальный тестовый режим: Используется mock-провайдер; этот режим не подтверждает готовность реальной AI-обработки.\r\n  Что сделать: Для реальной обработки выберите OpenAI или Gemini и подтвердите рабочий API-ключ.\r\nOK Папка input: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\input\r\nOK Папка work: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\work\r\nOK Папка output: Доступна для записи: C:\\Users\\Вадим\\Desktop\\КОНТЕТ ЗАВОД\\build\\windows-portable-smoke\\profile\\ContentFactoryData\\output\r\nOK Свободное место: Доступно 113.7 ГБ.\r\n\r\nИтог: С ограничениями. Критических проблем — 0, предупреждений — 1.\r\nWARNING не блокирует работу; BLOCKING нужно исправить до завершения первого запуска."
     },
     "native_window": {
-      "process_id": 24036,
+      "process_id": 72652,
       "window_visible": true,
       "window_title": "Content Factory",
-      "window_handle": 7473886,
+      "window_handle": 41879740,
       "survived_settle": true,
       "close_requested": false,
       "exited": true,
-      "seconds": 11.78,
+      "seconds": 11.941,
       "launch_method": "Start-Process"
     }
   }
