@@ -1101,14 +1101,18 @@ def test_terminal_failed_draft_does_not_reenter_batch_but_targeted_retry_is_avai
 
         assert candidate_id not in viewmodel.project.review_selected_candidate_ids
         assert "требуют внимания: 1" in screen.review_metrics_text.text()
-        assert screen.findChild(QPushButton, f"retry-candidate-{candidate_id}") is not None
+        retry = screen.findChild(QPushButton, f"retry-candidate-{candidate_id}")
+        assert retry is not None
+        assert retry.text() == "Исправьте границы"
+        assert not retry.isEnabled()
+        assert screen.findChild(QPushButton, f"fix-boundary-candidate-{candidate_id}") is not None
 
         screen._draft_action()
         assert launches == []
 
         screen._retry_draft(candidate_id)
-        assert launches == [[candidate_id]]
-        assert candidate_id in viewmodel.project.review_selected_candidate_ids
+        assert launches == []
+        assert candidate_id not in viewmodel.project.review_selected_candidate_ids
     finally:
         screen.close()
         screen.deleteLater()

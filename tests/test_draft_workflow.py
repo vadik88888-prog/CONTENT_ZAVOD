@@ -744,6 +744,70 @@ def test_terminal_draft_failure_report_keeps_item_level_retry_state(tmp_path: Pa
     assert restored_project.review_selected_candidate_ids == []
 
 
+def test_boundary_terminal_failure_requires_boundary_change_before_requeue(tmp_path: Path, monkeypatch) -> None:
+    services, project, _source = _services(tmp_path)
+    candidate_id = "candidate-a"
+    project.candidate_states = {candidate_id: "draft_failed"}
+    project.candidate_draft_statuses = {candidate_id: "failed"}
+    project.candidate_approval_states = {candidate_id: "pending"}
+    project.candidate_export_statuses = {candidate_id: "pending"}
+    project.candidate_errors[candidate_id] = "BOUNDARY_DECISION_REQUIRED: missing evidence"
+    project.status = ProjectStatus.REVIEWING_CANDIDATES
+    services.projects.save(project)
+
+    # Caption, style, and crop edits remain durable, but cannot erase evidence
+    # that the source interval itself still needs a boundary decision.
+    services.update_candidate_creative_override(
+        project,
+        candidate_id,
+        creative_style="dynamic",
+        caption_preset_id="clean_white",
+        composition_strategy="center_crop",
+    )
+    assert project.candidate_states[candidate_id] == "draft_failed"
+    assert project.candidate_draft_statuses[candidate_id] == "failed"
+    assert project.review_selected_candidate_ids == []
+    assert "BOUNDARY_DECISION_REQUIRED" in project.candidate_errors[candidate_id]
+    restored = services.projects.load(project.project_id)
+    assert restored.candidate_draft_statuses[candidate_id] == "failed"
+    assert restored.review_selected_candidate_ids == []
+    assert restored.candidate_creative_overrides[candidate_id] == {
+        "creative_style": "dynamic",
+        "caption_preset_id": "clean_white",
+        "composition_strategy": "center_crop",
+    }
+
+    # Restoring the card or calling the service directly cannot create a run.
+    services.set_review_selection(project, [candidate_id])
+    assert project.review_selected_candidate_ids == []
+
+    analysis = SimpleNamespace(
+        candidates=[{"candidate_id": candidate_id, "start": 2.0, "end": 20.0}],
+        load_reference=lambda _name: {},
+    )
+    project.analysis_artifact_path = str(tmp_path / "analysis.json")
+    monkeypatch.setattr(
+        services.pipeline, "load_verified_analysis", lambda *_args, **_kwargs: analysis,
+    )
+    with pytest.raises(InputValidationError, match="Сначала измените начало или конец"):
+        services.prepare_draft(project, [candidate_id])
+    assert services.runs.list(project.project_id) == []
+    monkeypatch.setattr(
+        "app.gui.services.desktop_services.validate_boundary_override",
+        lambda *_args, **_kwargs: {
+            "valid": True, "start": 2.5, "end": 20.0,
+            "warnings": [], "revalidation": {"status": "valid"},
+        },
+    )
+
+    # A relevant, validated boundary change clears exactly this retry gate.
+    services.adjust_candidate_boundary(project, candidate_id, "start", 0.5)
+    assert project.candidate_states[candidate_id] == "analyzed"
+    assert project.candidate_draft_statuses[candidate_id] == "pending"
+    assert project.review_selected_candidate_ids == [candidate_id]
+    assert candidate_id not in project.candidate_errors
+
+
 def test_reported_failure_requires_current_run_and_project_identity(tmp_path: Path) -> None:
     report_path = tmp_path / "report.json"
     write_json(report_path, {

@@ -403,6 +403,22 @@ class DesktopServices:
             item for item in project.selected_candidate_ids if item != candidate_id
         ]
 
+    @staticmethod
+    def draft_retry_requirement(
+        project: DesktopProject, candidate_id: str,
+    ) -> str | None:
+        """Return the one persisted change required before retrying a Draft.
+
+        This is an error-to-action mapping, not a second lifecycle.  It keeps
+        terminal evidence authoritative: visual/caption choices cannot repair
+        missing validated boundary evidence.
+        """
+
+        error = str(project.candidate_errors.get(candidate_id) or "")
+        if "BOUNDARY_DECISION_REQUIRED" in error:
+            return "Сначала измените начало или конец фрагмента и подтвердите границы речи."
+        return None
+
     def set_active_preview_candidate(
         self, project: DesktopProject, candidate_id: str | None,
     ) -> DesktopProject:
@@ -422,6 +438,10 @@ class DesktopServices:
         unknown = [item for item in unique if item not in project.candidate_states]
         if unknown:
             raise InputValidationError("Один из выбранных моментов отсутствует в сохранённом анализе.")
+        unique = [
+            item for item in unique
+            if self.draft_retry_requirement(project, item) is None
+        ]
         project.review_selected_candidate_ids = unique
         for candidate_id in unique:
             self._ensure_candidate_lifecycle(project, candidate_id)
@@ -700,6 +720,13 @@ class DesktopServices:
         requested_ids = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
         if not requested_ids:
             raise InputValidationError("Выберите хотя бы один момент для подготовки черновика.")
+        requirements = [
+            self.draft_retry_requirement(project, candidate_id)
+            for candidate_id in requested_ids
+        ]
+        requirements = [item for item in requirements if item]
+        if requirements:
+            raise InputValidationError(requirements[0])
         outside_selection = [item for item in requested_ids if item not in project.review_selected_candidate_ids]
         if outside_selection:
             raise InputValidationError("Сначала выберите моменты для подготовки черновика.")
@@ -942,6 +969,17 @@ class DesktopServices:
         else:
             project.candidate_creative_overrides.pop(candidate_id, None)
         project.validate()
+        requirement = self.draft_retry_requirement(project, candidate_id)
+        if requirement:
+            project.setup_state.change_summary = (
+                "Оформление сохранено только для этого черновика. " + requirement
+            )
+            project.setup_state.needs_new_analysis = False
+            project.setup_state.reused_stages = [
+                "сохранённый анализ", "Brain/Vision evidence", "границы фрагмента",
+            ]
+            self.projects.save(project)
+            return project
         self._set_candidate_lifecycle(
             project, candidate_id, draft="pending", approval="pending", export="pending",
         )

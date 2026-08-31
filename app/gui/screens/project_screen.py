@@ -2673,7 +2673,8 @@ class ProjectScreen(QWidget):
             if state == "draft_ready" and candidate_id not in project.review_selected_candidate_ids:
                 status_label = "черновик не выбран для готового ролика"
             if draft_status == "failed" or state == "draft_failed":
-                status_label = "Черновик не создан. Его можно повторить отдельно."
+                requirement = self.viewmodel.services.draft_retry_requirement(project, candidate_id)
+                status_label = requirement or "Черновик не создан. Его можно повторить отдельно."
             elif export_status == "failed":
                 status_label = "Готовый ролик не создан. Черновик сохранён и остаётся подтверждённым."
             elif workflow_step == "drafts" and preview_projection.stale:
@@ -2847,11 +2848,17 @@ class ProjectScreen(QWidget):
                 reject.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
                 add_candidate_action(reject)
             elif state == "draft_failed" and workflow_step == "drafts":
+                retry_requirement = self.viewmodel.services.draft_retry_requirement(project, candidate_id)
                 if candidate_id in self._draftable_candidates_by_id:
-                    retry = QPushButton("Повторить черновик")
+                    retry = QPushButton(
+                        "Исправьте границы" if retry_requirement else "Повторить черновик"
+                    )
                     retry.setObjectName(f"retry-candidate-{candidate_id}")
-                    retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
-                    retry.setDisabled(self.viewmodel.blocked_by_other_project)
+                    retry.setToolTip(
+                        retry_requirement
+                        or "Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново."
+                    )
+                    retry.setDisabled(self.viewmodel.blocked_by_other_project or bool(retry_requirement))
                     retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
                     add_candidate_action(retry)
                 if candidate_id in project.review_selected_candidate_ids:
@@ -2861,11 +2868,20 @@ class ProjectScreen(QWidget):
                     skip.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
                     add_candidate_action(skip)
                 else:
-                    restore = QPushButton("Вернуть в набор")
-                    restore.setObjectName(f"restore-candidate-{candidate_id}")
-                    restore.setToolTip("Вернёт этот черновик в текущий набор, после чего его можно повторить отдельно.")
-                    restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
-                    add_candidate_action(restore)
+                    if retry_requirement:
+                        repair = QPushButton("Исправить границы")
+                        repair.setObjectName(f"fix-boundary-candidate-{candidate_id}")
+                        repair.setToolTip(retry_requirement)
+                        repair.clicked.connect(
+                            lambda _checked=False, value=dict(item): self._preview_candidate(value)
+                        )
+                        add_candidate_action(repair)
+                    else:
+                        restore = QPushButton("Вернуть в набор")
+                        restore.setObjectName(f"restore-candidate-{candidate_id}")
+                        restore.setToolTip("Вернёт этот черновик в текущий набор, после чего его можно повторить отдельно.")
+                        restore.clicked.connect(lambda _checked=False, value=candidate_id: self._restore_draft(value))
+                        add_candidate_action(restore)
             elif state == "rendered":
                 final_file = final_outputs.get(candidate_id)
                 if final_file:
@@ -3403,6 +3419,8 @@ class ProjectScreen(QWidget):
         if not self.project or candidate_id not in self._draftable_candidates_by_id:
             return
         if self.project.candidate_states.get(candidate_id) == "draft_failed":
+            if self.viewmodel.services.draft_retry_requirement(self.project, candidate_id):
+                return
             if candidate_id not in self.project.review_selected_candidate_ids:
                 self.viewmodel.set_review_selection([
                     *self.project.review_selected_candidate_ids, candidate_id,
@@ -3837,6 +3855,8 @@ class ProjectScreen(QWidget):
         if candidate_id and self.project.candidate_errors.get(candidate_id):
             if self.project.candidate_export_statuses.get(candidate_id) == "failed":
                 lines.append("Готовый ролик для этого момента не создан. Сохранённый черновик остаётся подтверждённым: повторите только экспорт или снимите подтверждение.")
+            elif requirement := self.viewmodel.services.draft_retry_requirement(self.project, candidate_id):
+                lines.append(requirement)
             elif preview_projection.stale:
                 lines.append(
                     f"{preview_projection.inspector_text}. "
