@@ -190,7 +190,7 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
     )
 
 
-def test_short_speaker_exchange_keeps_one_group_lock_without_ping_pong() -> None:
+def test_explicit_confident_speaker_handoff_bypasses_stale_crop_hold() -> None:
     targets = (
         _target("speaker-a-1", AttentionTarget.SPEAKER, 0, 30, "evidence-a", target_ref="speaker-a"),
         _target("speaker-b", AttentionTarget.SPEAKER, 30, 60, "evidence-b", target_ref="speaker-b"),
@@ -207,14 +207,15 @@ def test_short_speaker_exchange_keeps_one_group_lock_without_ping_pong() -> None
         _intent(targets), observations, source_width=1920, source_height=1080, config=config,
     )
 
-    assert {segment.target_ref for segment in plan.segments} == {"speaker-a"}
-    assert any(segment.camera_mode == "GROUP" for segment in plan.segments)
+    assert [segment.target_ref for segment in plan.segments[:3]] == ["speaker-a", "speaker-b", "speaker-a"]
+    assert plan.segments[1].movement_reason == "target_switch"
     assert all(segment.camera_phase == "HOLD" for segment in plan.segments)
     assert all(segment.fallback != "fit_background" for segment in plan.segments)
-    assert "SHOT_GROUP_LOCK_NO_PING_PONG:0" in plan.diagnostics
+    assert "TARGET_SWITCH_TIMELY:30" in plan.diagnostics
+    assert "TARGET_SWITCH_TIMELY:60" in plan.diagnostics
 
 
-def test_short_target_handoff_stays_on_the_locked_subject() -> None:
+def test_confident_target_handoff_resets_to_the_new_person_inside_safe_area() -> None:
     targets = (
         _target("speaker-left", AttentionTarget.SPEAKER, 0, 60, "evidence-left", target_ref="speaker-left"),
         _target("speaker-right", AttentionTarget.SPEAKER, 60, 120, "evidence-right", target_ref="speaker-right"),
@@ -223,20 +224,26 @@ def test_short_target_handoff_stays_on_the_locked_subject() -> None:
         _observation("left", 30, AttentionTarget.SPEAKER, "speaker-left", "evidence-left", 0.04),
         _observation("right", 90, AttentionTarget.SPEAKER, "speaker-right", "evidence-right", 0.80),
     )
+    config = CompositionPlannerConfig(minimum_hold_frames=120, switch_cooldown_frames=120)
 
     plan = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
-        config=CompositionPlannerConfig(minimum_hold_frames=120, switch_cooldown_frames=120),
+        config=config,
     )
 
     handoff = next(item for item in plan.segments if item.output.start_frame == 60)
-    assert handoff.target_ref == "speaker-left"
-    assert handoff.subject_lock_state == "SWITCH_PENDING"
-    assert handoff.camera_mode == "GROUP"
+    assert handoff.target_ref == "speaker-right"
+    assert handoff.subject_lock_state == "SWITCH_CONFIRMED"
+    assert handoff.movement_reason == "target_switch"
     assert handoff.camera_phase == "HOLD"
+    assert all(
+        _safe_area_containment(observations[1].bounds, keyframe.crop, config) >= 0.82
+        for keyframe in handoff.crop_keyframes
+    )
+    assert "TARGET_SWITCH_TIMELY:60" in plan.diagnostics
 
 
-def test_short_target_handoff_does_not_create_a_safety_pan() -> None:
+def test_target_handoff_does_not_create_a_safety_pan() -> None:
     targets = (
         _target("speaker-left", AttentionTarget.SPEAKER, 0, 60, "evidence-left", target_ref="speaker-left"),
         _target("speaker-right", AttentionTarget.SPEAKER, 60, 120, "evidence-right", target_ref="speaker-right"),
@@ -252,9 +259,12 @@ def test_short_target_handoff_does_not_create_a_safety_pan() -> None:
     )
 
     handoff = next(item for item in plan.segments if item.output.start_frame == 60)
-    assert handoff.target_ref == "speaker-left"
-    assert handoff.camera_mode == "GROUP"
+    assert handoff.target_ref == "speaker-right"
+    assert handoff.subject_lock_state == "SWITCH_CONFIRMED"
+    assert handoff.camera_phase == "HOLD"
     assert len(handoff.crop_keyframes) == 1
+    assert _containment(observations[1].bounds, handoff.crop) == pytest.approx(1)
+    assert _safe_area_containment(observations[1].bounds, handoff.crop, config) >= 0.82
 
 
 def test_story_short_uses_actual_crop_and_blocks_an_uncontainable_group() -> None:
@@ -719,3 +729,8 @@ def test_crop_track_respects_velocity_acceleration_and_reports_safe_geometry() -
     assert metrics.jitter_event_count == 0
     assert plan.segments[-1].geometry is not None
     assert plan.segments[-1].geometry.output_coordinate_space == "normalized_output"
+    assert all(
+        _safe_area_containment(segment.target_bounds, keyframe.crop, config) >= config.minimum_target_containment
+        for segment in plan.segments if segment.target_bounds is not None
+        for keyframe in segment.crop_keyframes
+    )

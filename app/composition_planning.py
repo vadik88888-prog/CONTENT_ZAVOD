@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7K.0.shot-aware-subject-lock.1"
+COMPOSITION_PLANNER_VERSION = "7K.1.confirmed-target-handoff.1"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -1134,7 +1134,10 @@ def _plan_shot_virtual_camera(
         return (), ()
     shots: list[list[_AtomicState]] = [[]]
     for item in atomic:
-        if shots[-1] and item.output.start_frame in cuts:
+        if shots[-1] and (
+            item.output.start_frame in cuts
+            or _starts_confirmed_target_handoff(shots[-1][-1], item)
+        ):
             shots.append([])
         shots[-1].append(item)
     planned: list[_AtomicState] = []
@@ -1146,6 +1149,28 @@ def _plan_shot_virtual_camera(
         planned.extend(resolved)
         diagnostics.extend(shot_diagnostics)
     return tuple(planned), tuple(diagnostics)
+
+
+def _starts_confirmed_target_handoff(
+    previous: _AtomicState,
+    current: _AtomicState,
+) -> bool:
+    """Keep an admitted subject handoff out of the previous camera hold.
+
+    The state machine has already applied confidence, editorial and hysteresis
+    rules before it marks ``target_switch``.  Treating that event as ordinary
+    in-shot evidence used to replace the new state with the old lock, making
+    the composed crop look safe only because it was measured against the wrong
+    person.  A handoff is a controlled cut/reset, never a pan through a new
+    face; quick unconfirmed proposals still never reach this point.
+    """
+
+    return (
+        current.reason == "target_switch"
+        and previous.state is not None
+        and current.state is not None
+        and previous.state.key != current.state.key
+    )
 
 
 def _plan_one_source_shot(
@@ -1174,11 +1199,10 @@ def _plan_one_source_shot(
             hold_reframe=True,
         ) for item in shot), (f"SHOT_EVIDENCE_GAP:{shot[0].output.start_frame}",)
 
-    # First sufficiently supported identity wins the shot.  A short response
-    # from another person is deliberately not a camera command.  Existing
-    # editorial target intervals remain available to the state machine; this
-    # pass requires their evidence to be sustained before a later integration
-    # can request a genuine composition cut/group layout.
+    # First sufficiently supported identity wins this shot.  Confirmed target
+    # handoffs were split before this point, while short or unconfirmed
+    # proposals remain inside the original shot and therefore cannot trigger a
+    # camera chase.
     lock = evidence[0].state
     assert lock is not None
     locked_ref = lock.target_ref
@@ -1213,7 +1237,13 @@ def _plan_one_source_shot(
             continue
         core = _must_keep_core(state.bounds, config)
         feasible = _feasible_crop_center_range(core, template, config)
-        normalized.append(replace(item, subject_lock_state="LOCKED", hold_reframe=True))
+        normalized.append(replace(
+            item,
+            subject_lock_state=(
+                "SWITCH_CONFIRMED" if item.reason == "target_switch" else "LOCKED"
+            ),
+            hold_reframe=True,
+        ))
         constraints.append(feasible)
 
     if not any(item is not None for item in constraints):
