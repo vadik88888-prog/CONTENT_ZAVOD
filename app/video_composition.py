@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import asdict
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, cast
 
@@ -35,11 +36,15 @@ from app.creative_contracts import (
     CompiledRenderPlan,
     CreativeIntent,
     MotionDomain,
+    OUTPUT_FPS,
     RenderParityManifest,
     RenderProfile,
+    SourceOutputTimeMap,
     assert_preview_final_parity,
     build_render_parity_manifest,
     compile_legacy_render_plan,
+    seconds_to_output_frame,
+    seconds_to_source_tick,
     source_output_map_from_legacy_timeline,
 )
 from app.errors import ProductionRenderError
@@ -48,6 +53,7 @@ from app.production_models import DialogueSegment, NarrationSegment, ProductionP
 from app.production_subtitles import build_subtitle_project, write_production_ass
 from app.rendering import nvenc_available
 from app.render_cache import CacheArtifact, GranularRenderCache, runtime_cache_key
+from app.scene_detection import parse_scene_output
 from app.sources import Source
 from app.source_broll_planning import SourceSceneEvidence
 from app.subprocess_utils import UTF8_REPLACE_TEXT
@@ -78,7 +84,14 @@ from app.video_models import (
 )
 
 
-PRODUCTION_RENDER_ENGINE_VERSION = "7G.3"
+PRODUCTION_RENDER_ENGINE_VERSION = "7G.4.cut-track-continuity.4"
+HARD_CUT_PROBE_VERSION = "7G.4.hard-cut-source-output-track.4"
+_HARD_CUT_SCAN_FLOOR = 0.01
+_HARD_CUT_MIN_SCORE = 0.06
+_HARD_CUT_EDGE_GUARD_SECONDS = 0.0
+_HARD_CUT_SEEK_WARMUP_SECONDS = 0.18
+_HARD_CUT_WARMUP_MIN_SCORE = 0.12
+_HARD_CUT_CLUSTER_SECONDS = 0.18
 
 
 class VideoCompositionService:
@@ -195,6 +208,9 @@ class VideoCompositionService:
             raise ProductionRenderError(
                 f"SOURCE_OUTPUT_TIME_MAP_REJECTED: {_safe_error(error)}"
             ) from error
+        source_cut_frames = _source_cut_output_frames(
+            mapping, _scene_boundary_times(source_info),
+        )
         if compiled_plan is not None and creative_intent is not None and (
             compiled_plan.intent_hash != creative_intent.canonical_hash()
             or compiled_plan.intent_id != creative_intent.intent_id
@@ -214,6 +230,13 @@ class VideoCompositionService:
                 validate_native_handoff(plan, mapping, compiled_plan)
                 if intent is not None and intent.source_output_mapping != mapping:
                     raise ValueError("NATIVE_CREATIVE_INTENT_EDIT_MAPPING_MISMATCH")
+                if compiled_plan.compatibility_mode == "native":
+                    source_cut_frames = _merge_source_cut_frames(
+                        source_cut_frames,
+                        _probe_hard_output_cut_frames(
+                            source.path, source_checksum, timeline,
+                        ),
+                    )
             elif creative_intent is not None or (
                 plan.envelope is not None and plan.envelope.compatibility_mode == "native"
             ):
@@ -238,6 +261,12 @@ class VideoCompositionService:
                     intent = creative_intent or default_native_creative_intent(plan, mapping, self.config)
                 if intent.source_output_mapping != mapping:
                     raise ValueError("NATIVE_CREATIVE_INTENT_EDIT_MAPPING_MISMATCH")
+                source_cut_frames = _merge_source_cut_frames(
+                    source_cut_frames,
+                    _probe_hard_output_cut_frames(
+                        source.path, source_checksum, timeline,
+                    ),
+                )
                 compiled_plan = compile_native_creative_plan(
                     intent,
                     transcript,
@@ -246,6 +275,7 @@ class VideoCompositionService:
                     source_height=int(source_info["display_height"]),
                     target_observations=target_observations,
                     source_scenes=source_scenes,
+                    source_cut_frames=source_cut_frames,
                 )
             else:
                 assert reframe_plan is not None and subtitle_project is not None
@@ -257,6 +287,8 @@ class VideoCompositionService:
                     reframe_plan=reframe_plan,
                 )
             validate_native_handoff(plan, mapping, compiled_plan)
+            if compiled_plan.compatibility_mode == "native":
+                _validate_native_source_cut_resets(compiled_plan, source_cut_frames)
         except ValueError as error:
             raise ProductionRenderError(f"NATIVE_CREATIVE_PLAN_REJECTED: {_safe_error(error)}") from error
         if compiled_plan.compatibility_mode == "native":
@@ -1908,6 +1940,395 @@ def _scene_boundary_times(source_info: dict[str, Any]) -> list[float]:
     return sorted(set(timestamps))
 
 
+def _source_cut_output_frames(
+    mapping: SourceOutputTimeMap,
+    boundary_seconds: Iterable[float],
+) -> tuple[int, ...]:
+    """Map persisted physical source cuts onto the fixed output frame base.
+
+    A source-cut timeline split can remain numerically continuous in source
+    and output time, so continuity alone cannot distinguish it from a harmless
+    edit-map partition. Persisted pixel-derived scene boundaries are the
+    authority; target switches and sparse observation timestamps are not.
+    """
+
+    frames: set[int] = set()
+    for seconds in boundary_seconds:
+        tick = seconds_to_source_tick(seconds)
+        for segment in mapping.segments:
+            if not segment.source.start_tick <= tick < segment.source.end_tick:
+                continue
+            source_span = segment.source.end_tick - segment.source.start_tick
+            output_span = segment.output.end_frame - segment.output.start_frame
+            if abs(source_span / 1_000_000 - output_span / OUTPUT_FPS) > 0.05:
+                # Freeze/rate-adjusted mappings are not linear in rendered
+                # frame time. Do not invent a reset from a linear projection.
+                continue
+            offset = tick - segment.source.start_tick
+            # A cut timestamp identifies the first source frame of the new
+            # shot. Use ceil so the crop reset cannot begin on the preceding
+            # output frame when the mapped position is fractional.
+            mapped = segment.output.start_frame + (
+                offset * output_span + source_span - 1
+            ) // source_span
+            if mapped < segment.output.end_frame:
+                frames.add(mapped)
+    return tuple(sorted(frames))
+
+
+def _probe_hard_source_cut_times(
+    source_path: Path,
+    source_sha256: str,
+    timeline: VideoTimeline,
+) -> tuple[float, ...]:
+    """Probe physical cuts only inside source ranges already selected to render.
+
+    This is a renderer-side pixel probe, not a new analysis stage: it neither
+    changes candidate selection nor creates semantic evidence. The low scan
+    floor captures dark-footage cuts, while local-peak clustering rejects the
+    adjacent aftershock frames emitted by FFmpeg's scene metric. Source PTS
+    corroborates the output-timebase probe so technical concat boundaries
+    cannot be mistaken for physical cuts.
+    """
+
+    spans = _selected_source_spans(timeline, source_path)
+    ranges: list[tuple[float, float]] = []
+    for start, end, _output_start, _output_end in spans:
+        if ranges and abs(start - ranges[-1][1]) <= 1e-4:
+            ranges[-1] = (ranges[-1][0], end)
+        else:
+            ranges.append((start, end))
+    return _probe_hard_source_cut_times_cached(
+        str(source_path.resolve()), source_sha256, tuple(ranges),
+    )
+
+
+def _probe_hard_output_cut_frames(
+    source_path: Path,
+    source_sha256: str,
+    timeline: VideoTimeline,
+) -> tuple[int, ...]:
+    """Locate corroborated source cuts on the renderer's unsplit output track."""
+
+    spans = _selected_source_spans(timeline, source_path)
+    candidates = _probe_rendered_cut_frames_cached(
+        str(source_path.resolve()), source_sha256, spans,
+    )
+    source_cuts = _probe_hard_source_cut_times(
+        source_path, source_sha256, timeline,
+    )
+    return _correlate_source_and_output_cuts(source_cuts, spans, candidates)
+
+
+@lru_cache(maxsize=128)
+def _probe_rendered_cut_frames_cached(
+    source_path: str,
+    source_sha256: str,
+    spans: tuple[tuple[float, float, int, int], ...],
+) -> tuple[int, ...]:
+    del source_sha256
+    groups: list[list[tuple[float, float, int, int]]] = []
+    for span in spans:
+        if groups and span[2] == groups[-1][-1][3]:
+            groups[-1].append(span)
+        else:
+            groups.append([span])
+    cuts: list[int] = []
+    for group in groups:
+        output_start = group[0][2]
+        frame_count = group[-1][3] - output_start
+        inputs: list[str] = []
+        filters: list[str] = []
+        labels: list[str] = []
+        source_duration = 0.0
+        for index, (start, end, span_start, span_end) in enumerate(group):
+            duration = end - start
+            source_duration += duration
+            label = f"[cut_probe_{index}]"
+            labels.append(label)
+            inputs.extend([
+                "-ss", f"{start:.6f}", "-t", f"{duration:.6f}",
+                "-i", source_path,
+            ])
+            filters.append(
+                f"[{index}:v]fps={OUTPUT_FPS},tpad=stop_mode=clone:stop=-1,"
+                f"trim=end_frame={span_end - span_start},setpts=PTS-STARTPTS{label}"
+            )
+        joined = labels[0]
+        if len(labels) > 1:
+            joined = "[cut_probe_joined]"
+            filters.append(
+                f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0{joined}"
+            )
+        filters.append(
+            f"{joined}fps={OUTPUT_FPS},trim=end_frame={frame_count},"
+            f"setpts=PTS-STARTPTS,select='gt(scene,{_HARD_CUT_SCAN_FLOOR})',"
+            "metadata=print[cut_probe_out]"
+        )
+        command = [
+            _ffmpeg(), "-hide_banner", "-loglevel", "info", *inputs,
+            "-filter_complex", ";".join(filters),
+            "-map", "[cut_probe_out]", "-an", "-f", "null", "-",
+        ]
+        try:
+            completed = subprocess.run(
+                command, check=True, capture_output=True,
+                timeout=max(120, int(source_duration * 3)), **UTF8_REPLACE_TEXT,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ProductionRenderError(
+                "FFmpeg timed out during selected-range output cut probe."
+            ) from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            details = getattr(error, "stderr", "") or getattr(error, "stdout", "") or ""
+            raise ProductionRenderError(
+                f"FFmpeg failed during selected-range output cut probe: {details[-1200:]}"
+            ) from error
+        output = completed.stderr or completed.stdout or ""
+        cuts.extend(_hard_cut_frames_from_scene_output(
+            output, output_start, frame_count, frame_count / OUTPUT_FPS,
+        ))
+    return tuple(sorted(set(cuts)))
+
+
+def _correlate_source_and_output_cuts(
+    source_cuts: Iterable[float],
+    spans: tuple[tuple[float, float, int, int], ...],
+    output_candidates: Iterable[int],
+) -> tuple[int, ...]:
+    candidates = tuple(sorted(set(int(frame) for frame in output_candidates)))
+    correlated: set[int] = set()
+    for cut in source_cuts:
+        for start, end, output_start, output_end in spans:
+            # Source intervals are half-open. A cut exactly on a contiguous
+            # span seam belongs to the span that starts there; assigning it
+            # to the preceding span would reject the matching output_start
+            # frame and lose a real physical cut.
+            if not start - 1e-4 <= cut < end - 1e-4:
+                continue
+            source_span = end - start
+            output_span = output_end - output_start
+            if source_span <= 0 or output_span <= 0:
+                break
+            ratio = max(0.0, min(1.0, (cut - start) / source_span))
+            approximate = output_start + int(round(ratio * output_span))
+            nearby = tuple(
+                frame for frame in candidates
+                if output_start <= frame < output_end
+                and abs(frame - approximate) <= 3
+            )
+            if nearby:
+                correlated.add(min(nearby, key=lambda frame: (abs(frame - approximate), frame)))
+    return tuple(sorted(correlated))
+
+
+def _merge_source_cut_frames(
+    persisted: Iterable[int],
+    probed: Iterable[int],
+) -> tuple[int, ...]:
+    authoritative = tuple(sorted(set(int(frame) for frame in persisted)))
+    measured = tuple(sorted(set(int(frame) for frame in probed)))
+    merged = set(authoritative)
+    merged.update(
+        frame for frame in measured
+        if all(abs(frame - persisted_frame) > 1 for persisted_frame in authoritative)
+    )
+    return tuple(sorted(merged))
+
+
+@lru_cache(maxsize=128)
+def _probe_hard_source_cut_times_cached(
+    source_path: str,
+    source_sha256: str,
+    ranges: tuple[tuple[float, float], ...],
+) -> tuple[float, ...]:
+    # ``source_sha256`` intentionally participates in the cache identity even
+    # though the subprocess only needs the path. Replacing media in place must
+    # never reuse cut timestamps measured from the previous file.
+    del source_sha256
+    cuts: list[float] = []
+    for start, end in ranges:
+        duration = end - start
+        command = [
+            _ffmpeg(), "-hide_banner", "-loglevel", "info",
+            "-ss", f"{start:.6f}", "-t", f"{duration:.6f}",
+            "-i", source_path,
+            "-vf", f"select='gt(scene,{_HARD_CUT_SCAN_FLOOR})',metadata=print",
+            "-an", "-f", "null", "-",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                timeout=max(120, int(duration * 3)),
+                **UTF8_REPLACE_TEXT,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ProductionRenderError(
+                "FFmpeg timed out during selected-range hard-cut probe."
+            ) from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            details = getattr(error, "stderr", "") or getattr(error, "stdout", "") or ""
+            raise ProductionRenderError(
+                f"FFmpeg failed during selected-range hard-cut probe: {details[-1200:]}"
+            ) from error
+        output = completed.stderr or completed.stdout or ""
+        cuts.extend(start + item for item in _hard_cut_peak_times(output, duration))
+    return tuple(sorted(set(round(item, 6) for item in cuts)))
+
+
+def _selected_source_spans(
+    timeline: VideoTimeline,
+    source_path: Path,
+) -> tuple[tuple[float, float, int, int], ...]:
+    resolved_source = source_path.resolve()
+    spans: list[tuple[float, float, int, int]] = []
+    destination_cursor = 0
+    for clip in timeline.clips:
+        output_start = max(
+            destination_cursor,
+            seconds_to_output_frame(clip.timeline_start_seconds),
+        )
+        output_end = max(
+            output_start + 1,
+            seconds_to_output_frame(clip.timeline_end_seconds, end=True),
+        )
+        destination_cursor = output_end
+        if (
+            not isinstance(clip, SourceVideoClip)
+            or clip.source_start_seconds is None
+            or clip.source_end_seconds is None
+            or clip.source_end_seconds <= clip.source_start_seconds
+            or Path(clip.source_path).resolve() != resolved_source
+        ):
+            continue
+        spans.append((
+            float(clip.source_start_seconds),
+            float(clip.source_end_seconds),
+            output_start,
+            output_end,
+        ))
+    return tuple(spans)
+
+
+def _hard_cut_frames_from_scene_output(
+    output: str,
+    output_start_frame: int,
+    frame_count: int,
+    duration: float,
+) -> tuple[int, ...]:
+    cuts: list[int] = []
+    for timestamp in _hard_cut_peak_times(output, duration):
+        local_frame = int(round(timestamp * OUTPUT_FPS))
+        if 0 < local_frame < frame_count:
+            cuts.append(output_start_frame + local_frame)
+    return tuple(cuts)
+
+
+def _hard_cut_peak_times(output: str, duration: float) -> tuple[float, ...]:
+    candidates = [
+        (float(item["timestamp"]), float(item["scene_change_score"]))
+        for item in parse_scene_output(output, duration)
+        if (
+            _HARD_CUT_EDGE_GUARD_SECONDS
+            <= float(item["timestamp"])
+            <= duration - _HARD_CUT_EDGE_GUARD_SECONDS
+            and float(item["scene_change_score"]) >= _HARD_CUT_MIN_SCORE
+            and (
+                float(item["timestamp"]) >= _HARD_CUT_SEEK_WARMUP_SECONDS
+                or float(item["scene_change_score"]) >= _HARD_CUT_WARMUP_MIN_SCORE
+            )
+        )
+    ]
+    if not candidates:
+        return ()
+    clusters: list[list[tuple[float, float]]] = []
+    for candidate in candidates:
+        if (
+            clusters
+            and candidate[0] - clusters[-1][-1][0] <= _HARD_CUT_CLUSTER_SECONDS
+        ):
+            clusters[-1].append(candidate)
+        else:
+            clusters.append([candidate])
+    cuts: list[float] = []
+    for cluster in clusters:
+        peak = max(cluster, key=lambda item: item[1])
+        if peak[1] < _HARD_CUT_MIN_SCORE:
+            continue
+        scores = sorted((item[1] for item in cluster), reverse=True)
+        if (
+            peak[1] < 0.1
+            and len(scores) > 1
+            and peak[1] < scores[1] * 1.5
+        ):
+            continue
+        cuts.append(peak[0])
+    return tuple(cuts)
+
+
+def _validate_native_source_cut_resets(
+    compiled_plan: CompiledRenderPlan,
+    source_cut_frames: Iterable[int],
+) -> None:
+    mappings = compiled_plan.source_output_mapping.segments
+    required = {mappings[0].output.start_frame} if mappings else set()
+    for left, right in zip(mappings, mappings[1:]):
+        if not compiled_plan.source_output_mapping.segments_are_continuous(left, right):
+            required.add(right.output.start_frame)
+    required.update(int(frame) for frame in source_cut_frames)
+    reset_segments = {
+        segment.output.start_frame: segment
+        for segment in compiled_plan.composition_plan.segments
+        if segment.crop_keyframes
+        and segment.crop_keyframes[0].reason == "scene_reset"
+    }
+    hidden_resets = sorted(
+        keyframe.frame
+        for segment in compiled_plan.composition_plan.segments
+        for keyframe in segment.crop_keyframes[1:]
+        if keyframe.reason == "scene_reset"
+    )
+    if hidden_resets:
+        raise ValueError(
+            "NATIVE_SOURCE_CUT_RESET_NOT_STATIC:"
+            + ",".join(str(frame) for frame in hidden_resets)
+            + f":{HARD_CUT_PROBE_VERSION}"
+        )
+    planned = set(reset_segments)
+    missing = sorted(required.difference(planned))
+    if missing:
+        raise ValueError(
+            "NATIVE_SOURCE_CUT_RESET_MISSING:"
+            + ",".join(str(frame) for frame in missing)
+            + f":{HARD_CUT_PROBE_VERSION}"
+        )
+    extra = sorted(planned.difference(required))
+    if extra:
+        raise ValueError(
+            "NATIVE_UNPROVEN_SCENE_RESET:"
+            + ",".join(str(frame) for frame in extra)
+            + f":{HARD_CUT_PROBE_VERSION}"
+        )
+    malformed = sorted(
+        frame for frame, segment in reset_segments.items()
+        if (
+            segment.camera_phase != "HOLD"
+            or segment.movement_reason != "scene_reset"
+            or len(segment.crop_keyframes) != 1
+            or segment.crop_keyframes[0].frame != frame
+            or segment.crop_keyframes[0].crop != segment.crop
+        )
+    )
+    if malformed:
+        raise ValueError(
+            "NATIVE_SOURCE_CUT_RESET_NOT_STATIC:"
+            + ",".join(str(frame) for frame in malformed)
+            + f":{HARD_CUT_PROBE_VERSION}"
+        )
+
+
 def _crop_plan_for_center(source_info: dict[str, Any], canvas: CanvasConfig, center_x: float, center_y: float) -> CropPlan:
     width, height = int(source_info["display_width"]), int(source_info["display_height"])
     crop_width, crop_height = _crop_dimensions(source_info, canvas)
@@ -2516,10 +2937,15 @@ def _visual_filter(
     fg_label = f"[{label_prefix}_fg]"
     blur_label = f"[{label_prefix}_blur]"
     fit_label = f"[{label_prefix}_fit]"
+    timed_label = f"[{label_prefix}_timed]"
     frame_count = _clip_frame_count(clip, canvas.fps)
+    head = (
+        f"{input_label}fps={canvas.fps},tpad=stop_mode=clone:stop=-1,"
+        f"trim=end_frame={frame_count},setpts=PTS-STARTPTS{timed_label};"
+    )
     tail = (
-        f",fps={canvas.fps},tpad=stop_mode=clone:stop=-1,"
-        f"trim=end_frame={frame_count},setpts=PTS-STARTPTS,format={canvas.pixel_format}{output_label}"
+        f",trim=end_frame={frame_count},setpts=PTS-STARTPTS,"
+        f"format={canvas.pixel_format}{output_label}"
     )
     if crop.strategy == "facecam_gameplay_split":
         assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
@@ -2549,7 +2975,7 @@ def _visual_filter(
                 f"{face_source}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y}{face_crop}"
             )
         return (
-            f"{input_label}split=2{face_source}{game_source};"
+            head + f"{timed_label}split=2{face_source}{game_source};"
             f"{face_filter};"
             f"{face_crop}scale={canvas.width}:{top_height}:force_original_aspect_ratio=increase,"
             f"crop={canvas.width}:{top_height},setsar=1{face_pane};"
@@ -2560,14 +2986,14 @@ def _visual_filter(
         )
     if crop.strategy == "fit_blur_background":
         return (
-            f"{input_label}split=2{bg_label}{fg_label};{bg_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
+            head + f"{timed_label}split=2{bg_label}{fg_label};{bg_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
             f"crop={canvas.width}:{canvas.height},boxblur=20:10{blur_label};{fg_label}scale={canvas.width}:{canvas.height}:"
             f"force_original_aspect_ratio=decrease{fit_label};{blur_label}{fit_label}overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     if crop.strategy == "fit_solid_background":
         return (
-            f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}{bg_label};"
-            f"{input_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease{fit_label};"
+            head + f"color=c=0x161616:s={canvas.width}x{canvas.height}:r={canvas.fps}{bg_label};"
+            f"{timed_label}scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease{fit_label};"
             f"{bg_label}{fit_label}overlay=(W-w)/2:(H-h)/2,setsar=1" + tail
         )
     assert crop.crop_width and crop.crop_height and crop.crop_x is not None and crop.crop_y is not None
@@ -2575,12 +3001,12 @@ def _visual_filter(
         x = _tracking_crop_expression(crop.tracking_keyframes, crop.source_width, crop.crop_width, "x")
         y = _tracking_crop_expression(crop.tracking_keyframes, crop.source_height, crop.crop_height, "y")
         return (
-            f"{input_label}crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
+            head + f"{timed_label}crop={crop.crop_width}:{crop.crop_height}:x='{x}':y='{y}',"
             f"scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
             f"crop={canvas.width}:{canvas.height},setsar=1" + tail
         )
     return (
-        f"{input_label}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
+        head + f"{timed_label}crop={crop.crop_width}:{crop.crop_height}:{crop.crop_x}:{crop.crop_y},"
         f"scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=increase,"
         f"crop={canvas.width}:{canvas.height},setsar=1" + tail
     )

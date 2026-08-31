@@ -15,6 +15,7 @@ from app.creative_contracts import (
     CaptionPlan,
     CompiledRenderPlan,
     CompositionCropKeyframe,
+    CompositionSegmentPlan,
     CreativeIntent,
     CreativePolicy,
     ImmutableProductionPlanLink,
@@ -46,7 +47,7 @@ from app.video_models import (
 )
 
 
-NATIVE_CREATIVE_EXECUTION_VERSION = "7G.2.scene-family.2"
+NATIVE_CREATIVE_EXECUTION_VERSION = "7G.3.cut-track-continuity.2"
 CAPTION_RENDER_BACKEND_VERSION = "7C.libass-tier1.2"
 
 
@@ -143,6 +144,7 @@ def compile_native_creative_plan(
     source_height: int,
     target_observations: Iterable[TargetObservation] = (),
     source_scenes: Iterable[SourceSceneEvidence] = (),
+    source_cut_frames: Iterable[int] = (),
 ) -> CompiledRenderPlan:
     """Run the production 7C -> 7D -> 7E -> 7F -> 7G compiler chain."""
 
@@ -152,6 +154,7 @@ def compile_native_creative_plan(
         target_observations,
         source_width=source_width,
         source_height=source_height,
+        source_cut_frames=source_cut_frames,
     )
     broll = build_source_broll_plan(intent, source_scenes, composition)
     motion = build_motion_plan(intent, captions, composition, broll)
@@ -266,17 +269,7 @@ def apply_native_visual_plan(
     """Execute normalized 7D geometry and 7E source cutaways on the visual track."""
 
     fps = compiled_plan.source_output_mapping.output_fps
-    boundaries = {
-        frame
-        for segment in (
-            *compiled_plan.composition_plan.segments,
-            *compiled_plan.source_broll_plan.segments,
-        )
-        for frame in (
-            segment.output.start_frame if hasattr(segment, "output") else segment.destination.start_frame,
-            segment.output.end_frame if hasattr(segment, "output") else segment.destination.end_frame,
-        )
-    }
+    boundaries = _native_visual_boundaries(compiled_plan)
     mapped_outputs = {
         segment.map_id: segment.output
         for segment in compiled_plan.source_output_mapping.segments
@@ -325,23 +318,24 @@ def apply_native_visual_plan(
             continue
         start_frame = output.start_frame
         end_frame = output.end_frame
-        composition = next((
-            item for item in compiled_plan.composition_plan.segments
-            if item.output.start_frame <= start_frame and end_frame <= item.output.end_frame
-        ), None)
+        compositions = _composition_segments_for_interval(
+            compiled_plan.composition_plan.segments,
+            output,
+        )
         broll = next((
             item for item in compiled_plan.source_broll_plan.segments
             if item.destination.start_frame <= start_frame and end_frame <= item.destination.end_frame
         ), None)
         crop = clip.crop_plan
-        if composition is not None:
+        if compositions:
+            composition = compositions[-1]
             crop = _native_crop_plan(
                 composition.crop,
                 composition.layout,
                 source_width,
                 source_height,
                 rotation,
-                composition.crop_keyframes,
+                _composition_crop_keyframes(compositions),
                 clip.timeline_start_seconds,
                 clip.timeline_end_seconds,
             )
@@ -461,13 +455,30 @@ def _native_crop_plan(
             source_height=source_height,
             display_rotation_degrees=rotation,
         )
+    for keyframe in keyframes:
+        if (
+            abs(keyframe.crop.width - rect.width) > 1e-7
+            or abs(keyframe.crop.height - rect.height) > 1e-7
+        ):
+            raise ValueError("NATIVE_DYNAMIC_CROP_SCALE_UNSUPPORTED")
     width = _even_dimension(rect.width * source_width, source_width)
     height = _even_dimension(rect.height * source_height, source_height)
     x = _even_origin(rect.x * source_width, source_width - width)
     y = _even_origin(rect.y * source_height, source_height - height)
     tracking = []
     seen_times: set[float] = set()
-    for keyframe in keyframes:
+    ordered_keyframes = tuple(sorted(keyframes, key=lambda item: item.frame))
+    if ordered_keyframes:
+        clip_start_frame = seconds_to_output_frame(clip_start)
+        center_x, center_y = _crop_center_at_frame(ordered_keyframes, clip_start_frame)
+        tracking.append(ReframeKeyframe(
+            time_seconds=0,
+            normalized_x=center_x,
+            normalized_y=center_y,
+            confidence=1,
+        ))
+        seen_times.add(0)
+    for keyframe in ordered_keyframes:
         time = round(keyframe.frame / 30 - clip_start, 6)
         if time < 0 or time >= clip_end - clip_start or time in seen_times:
             continue
@@ -494,6 +505,162 @@ def _native_crop_plan(
         crop_y=y,
         tracking_keyframes=tracking,
     )
+
+
+def _native_visual_boundaries(compiled_plan: CompiledRenderPlan) -> set[int]:
+    segments = compiled_plan.composition_plan.segments
+    boundaries = {
+        frame
+        for item in compiled_plan.source_broll_plan.segments
+        for frame in (item.destination.start_frame, item.destination.end_frame)
+    }
+    if segments:
+        boundaries.update((segments[0].output.start_frame, segments[-1].output.end_frame))
+    for left, right in zip(segments, segments[1:]):
+        boundary = right.output.start_frame
+        if left.output.end_frame != boundary:
+            boundaries.update((left.output.end_frame, boundary))
+            continue
+        right_start = right.crop_keyframes[0] if right.crop_keyframes else None
+        if right_start is not None and right_start.reason == "scene_reset":
+            # A proven source cut is a crop-track discontinuity, not a reason
+            # to seek/restart the source input. Re-seeking changes the fps
+            # phase and can move the physical cut by one frame. Constant-size
+            # cut resets stay inside one render clip and receive a frame-1
+            # hold anchor below; layout/scale changes still need a partition.
+            if (
+                _native_layout_render_family(left.layout)
+                != _native_layout_render_family(right.layout)
+                or not _same_crop_size(left.crop, right.crop)
+            ):
+                boundaries.add(boundary)
+            continue
+        if (
+            _native_layout_render_family(left.layout)
+            != _native_layout_render_family(right.layout)
+        ):
+            boundaries.add(boundary)
+            continue
+        if not _same_crop_size(left.crop, right.crop):
+            # Fixed-size native crop tracks cannot execute a bounded zoom.
+            # Partitioning here would hide the unsupported scale change as a
+            # one-frame render-boundary snap on a continuous source shot.
+            raise ValueError(
+                f"NATIVE_DYNAMIC_CROP_SCALE_UNSUPPORTED_AT_BOUNDARY:{boundary}"
+            )
+        left_end_crop = left.crop_keyframes[-1].crop if left.crop_keyframes else left.crop
+        right_start_crop = right_start.crop if right_start is not None else right.crop
+        if not _same_crop(left_end_crop, right_start_crop):
+            raise ValueError(
+                f"NATIVE_CROP_BOUNDARY_DISCONTINUITY:{boundary}"
+            )
+    return boundaries
+
+
+def _composition_crop_keyframes(
+    segments: Sequence[CompositionSegmentPlan],
+) -> tuple[CompositionCropKeyframe, ...]:
+    """Flatten a crop track without interpolating through a proven source cut."""
+
+    result: dict[int, CompositionCropKeyframe] = {}
+    for index, segment in enumerate(segments):
+        keyframes = tuple(segment.crop_keyframes)
+        first = keyframes[0] if keyframes else None
+        if index and first is not None and first.reason == "scene_reset":
+            anchor_frame = first.frame - 1
+            if anchor_frame >= segments[index - 1].output.start_frame and anchor_frame not in result:
+                previous = segments[index - 1]
+                previous_crop = (
+                    previous.crop_keyframes[-1].crop
+                    if previous.crop_keyframes else previous.crop
+                )
+                result[anchor_frame] = CompositionCropKeyframe(
+                    frame=anchor_frame,
+                    crop=previous_crop,
+                    reason="static",
+                    camera_phase="HOLD",
+                )
+        for keyframe in keyframes:
+            result[keyframe.frame] = keyframe
+    return tuple(result[frame] for frame in sorted(result))
+
+
+def _composition_segments_for_interval(
+    segments: Sequence[CompositionSegmentPlan],
+    output: OutputInterval,
+) -> tuple[CompositionSegmentPlan, ...]:
+    selected = tuple(
+        item for item in segments
+        if item.output.start_frame < output.end_frame
+        and output.start_frame < item.output.end_frame
+    )
+    if not selected:
+        return ()
+    cursor = output.start_frame
+    for item in selected:
+        if item.output.start_frame > cursor:
+            raise ValueError("NATIVE_COMPOSITION_OUTPUT_GAP")
+        cursor = max(cursor, min(item.output.end_frame, output.end_frame))
+    if cursor < output.end_frame:
+        raise ValueError("NATIVE_COMPOSITION_OUTPUT_GAP")
+    render_family = _native_layout_render_family(selected[0].layout)
+    size = selected[0].crop
+    if any(
+        _native_layout_render_family(item.layout) != render_family
+        or not _same_crop_size(item.crop, size)
+        for item in selected[1:]
+    ):
+        raise ValueError("NATIVE_COMPOSITION_RENDER_PARTITION_MISMATCH")
+    return selected
+
+
+def _native_layout_render_family(layout: LayoutFamily) -> str:
+    if layout == LayoutFamily.FIT_BACKGROUND:
+        return "fit_background"
+    if layout == LayoutFamily.SPLIT:
+        return "split"
+    return "fixed_crop"
+
+
+def _crop_center_at_frame(
+    keyframes: Sequence[CompositionCropKeyframe],
+    frame: int,
+) -> tuple[float, float]:
+    if frame <= keyframes[0].frame:
+        crop = keyframes[0].crop
+        return crop.x + crop.width / 2, crop.y + crop.height / 2
+    for left, right in zip(keyframes, keyframes[1:]):
+        if frame > right.frame:
+            continue
+        span = right.frame - left.frame
+        ratio = 0 if span <= 0 else (frame - left.frame) / span
+        left_x = left.crop.x + left.crop.width / 2
+        left_y = left.crop.y + left.crop.height / 2
+        right_x = right.crop.x + right.crop.width / 2
+        right_y = right.crop.y + right.crop.height / 2
+        return (
+            left_x + (right_x - left_x) * ratio,
+            left_y + (right_y - left_y) * ratio,
+        )
+    crop = keyframes[-1].crop
+    return crop.x + crop.width / 2, crop.y + crop.height / 2
+
+
+def _same_crop_size(left: NormalizedRect, right: NormalizedRect) -> bool:
+    return (
+        abs(left.width - right.width) <= 1e-7
+        and abs(left.height - right.height) <= 1e-7
+    )
+
+
+def _same_crop(left: NormalizedRect, right: NormalizedRect) -> bool:
+    return max(
+        abs(a - b)
+        for a, b in zip(
+            (left.x, left.y, left.width, left.height),
+            (right.x, right.y, right.width, right.height),
+        )
+    ) <= 1e-7
 
 
 def _broll_crop_rect(

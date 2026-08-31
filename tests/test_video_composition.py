@@ -16,6 +16,7 @@ from app.creative_contracts import (
     CanvasPlan,
     CaptionPlan,
     CompiledRenderPlan,
+    CompositionCropKeyframe,
     CompositionPlan,
     CompositionSegmentPlan,
     CreativeIntent,
@@ -68,7 +69,14 @@ from app.video_composition import (
     probe_media,
     production_render_report_section,
     _ffmpeg,
+    _correlate_source_and_output_cuts,
+    _hard_cut_frames_from_scene_output,
+    _merge_source_cut_frames,
     _native_motion_filter,
+    _probe_hard_output_cut_frames,
+    _probe_hard_source_cut_times,
+    _selected_source_spans,
+    _source_cut_output_frames,
     _source_range_for_audio,
     _timeline_filter,
     _split_timeline_at_scene_boundaries,
@@ -296,6 +304,280 @@ def test_facecam_gameplay_split_filter_is_stable_and_never_stretches_source() ->
     assert "scale=180:320,setsar=1" not in graph
 
 
+def test_native_crop_plan_adds_an_exact_clip_local_start_anchor() -> None:
+    crop = NormalizedRect(x=0.1, y=0, width=0.5, height=1)
+    shifted = NormalizedRect(x=0.3, y=0, width=0.5, height=1)
+
+    plan = _native_crop_plan(
+        shifted,
+        LayoutFamily.SINGLE_SUBJECT,
+        320,
+        180,
+        0,
+        (
+            CompositionCropKeyframe(frame=30, crop=crop, camera_phase="MOVE"),
+            CompositionCropKeyframe(frame=48, crop=shifted, camera_phase="MOVE"),
+        ),
+        1,
+        2,
+    )
+
+    assert plan.tracking_keyframes[0].time_seconds == 0
+    assert plan.tracking_keyframes[0].normalized_x == pytest.approx(0.35)
+    assert plan.tracking_keyframes[0].normalized_y == pytest.approx(0.5)
+    assert plan.crop_width == 160
+    assert plan.crop_height == 180
+
+
+def test_native_crop_plan_rejects_unrenderable_dynamic_scale() -> None:
+    final = NormalizedRect(x=0.25, y=0, width=0.5, height=1)
+    varying = NormalizedRect(x=0.3, y=0.1, width=0.4, height=0.8)
+
+    with pytest.raises(ValueError, match="NATIVE_DYNAMIC_CROP_SCALE_UNSUPPORTED"):
+        _native_crop_plan(
+            final,
+            LayoutFamily.SINGLE_SUBJECT,
+            320,
+            180,
+            0,
+            (
+                CompositionCropKeyframe(frame=0, crop=varying, camera_phase="MOVE"),
+                CompositionCropKeyframe(frame=18, crop=final, camera_phase="MOVE"),
+            ),
+            0,
+            1,
+        )
+
+
+def test_hard_cut_probe_keeps_isolated_dark_scene_peaks_and_rejects_noise() -> None:
+    output = "\n".join((
+        "frame:0 pts_time:0.1",
+        "lavfi.scene_score=0.080000",
+        "frame:1 pts_time:1.0",
+        "lavfi.scene_score=0.070000",
+        "frame:2 pts_time:1.04",
+        "lavfi.scene_score=0.020000",
+        "frame:3 pts_time:2.0",
+        "lavfi.scene_score=0.080000",
+        "frame:4 pts_time:2.05",
+        "lavfi.scene_score=0.060000",
+        "frame:5 pts_time:3.0",
+        "lavfi.scene_score=0.120000",
+        "frame:6 pts_time:4.9",
+        "lavfi.scene_score=0.050000",
+    ))
+
+    assert _hard_cut_frames_from_scene_output(output, 300, 150, 5) == (330, 390)
+
+
+def test_source_cut_mapping_uses_first_post_cut_output_frame() -> None:
+    timeline = VideoTimeline(clips=[SourceVideoClip(
+        clip_id="visual-cut-map", order=1,
+        timeline_start_seconds=0, timeline_end_seconds=1, duration_seconds=1,
+        source_path="source.mp4", source_start_seconds=0, source_end_seconds=1,
+        visual_strategy="mapped_source", crop_plan=CropPlan(
+            strategy="fit_blur_background", source_width=320, source_height=180,
+        ), status="ready",
+    )], duration_seconds=1)
+    mapping = source_output_map_from_legacy_timeline(timeline)
+
+    assert _source_cut_output_frames(mapping, (0.5,)) == (15,)
+    assert _source_cut_output_frames(mapping, (0.501,)) == (16,)
+    assert _source_cut_output_frames(mapping, (0.999999,)) == ()
+
+
+def test_source_cut_probe_requires_output_corroboration_and_preserves_persisted_frames() -> None:
+    spans = ((0.0, 10.0, 0, 300),)
+
+    assert _correlate_source_and_output_cuts((5.0,), spans, ()) == ()
+    assert _correlate_source_and_output_cuts((5.0,), spans, (150,)) == (150,)
+    assert _correlate_source_and_output_cuts((5.0,), spans, (154,)) == ()
+    assert _correlate_source_and_output_cuts(
+        (1.0,), ((0.0, 1.0, 0, 30), (1.0, 2.0, 30, 60)), (30,),
+    ) == (30,)
+    assert _merge_source_cut_frames((30,), (31,)) == (30,)
+    assert _merge_source_cut_frames((30,), (33,)) == (30, 33)
+    assert _merge_source_cut_frames((), (31,)) == (31,)
+
+
+def test_hard_cut_probe_returns_exact_output_frames(tmp_path: Path) -> None:
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        pytest.skip("ffmpeg is required for the hard-cut probe regression")
+    source_path = tmp_path / "hard-cuts.mp4"
+    subprocess.run([
+        executable, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=30:d=1",
+        "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=1",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30:d=1",
+        "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]",
+        "-map", "[v]", "-c:v", "libx264", str(source_path),
+    ], check=True)
+    timeline = VideoTimeline(clips=[SourceVideoClip(
+        clip_id="visual-hard-cuts", order=1,
+        timeline_start_seconds=0, timeline_end_seconds=3, duration_seconds=3,
+        source_path=str(source_path), source_start_seconds=0, source_end_seconds=3,
+        visual_strategy="mapped_source", crop_plan=CropPlan(
+            strategy="fit_blur_background", source_width=320, source_height=180,
+        ), status="ready",
+    )], duration_seconds=3)
+
+    cut_times = _probe_hard_source_cut_times(source_path, "0" * 64, timeline)
+    assert cut_times == pytest.approx((1.0, 2.0), abs=1 / 30)
+    assert _source_cut_output_frames(
+        source_output_map_from_legacy_timeline(timeline), cut_times,
+    ) == (30, 60)
+    assert _probe_hard_output_cut_frames(
+        source_path, "0" * 64, timeline,
+    ) == (30, 60)
+
+
+def test_hard_cut_probe_preserves_each_renderer_input_fps_phase() -> None:
+    crop = CropPlan(
+        strategy="fit_blur_background", source_width=320, source_height=180,
+    )
+    timeline = VideoTimeline(clips=[
+        SourceVideoClip(
+            clip_id="visual-phase-a", order=1,
+            timeline_start_seconds=0, timeline_end_seconds=0.633333333,
+            duration_seconds=0.633333333, source_path="source.mp4",
+            source_start_seconds=0, source_end_seconds=0.617,
+            visual_strategy="mapped_source", crop_plan=crop, status="ready",
+        ),
+        SourceVideoClip(
+            clip_id="visual-phase-b", order=2,
+            timeline_start_seconds=0.633333333, timeline_end_seconds=3,
+            duration_seconds=2.366666667, source_path="source.mp4",
+            source_start_seconds=0.617, source_end_seconds=3,
+            visual_strategy="mapped_source", crop_plan=crop, status="ready",
+        ),
+    ], duration_seconds=3)
+
+    assert _selected_source_spans(timeline, Path("source.mp4")) == (
+        (0.0, 0.617, 0, 19),
+        (0.617, 3.0, 19, 90),
+    )
+
+
+def test_native_visual_plan_coalesces_static_seams_and_rejects_crop_snaps() -> None:
+    fit = CropPlan(strategy="fit_blur_background", source_width=320, source_height=180)
+    timeline = VideoTimeline(clips=[SourceVideoClip(
+        clip_id="visual-continuous", order=1,
+        timeline_start_seconds=0, timeline_end_seconds=2, duration_seconds=2,
+        source_path="source.mp4", source_start_seconds=0, source_end_seconds=2,
+        visual_strategy="mapped_source", crop_plan=fit, status="ready",
+    )], duration_seconds=2)
+    mapping = source_output_map_from_legacy_timeline(timeline)
+    plan = _plan()
+    intent = CreativeIntent(
+        intent_id="intent-static-seam", revision=1,
+        production_plan=ImmutableProductionPlanLink.from_reference(plan.reference()),
+        source_output_mapping=mapping, evidence_fingerprint="7" * 64,
+        proposal_hash="8" * 64,
+        policy=CreativePolicy(
+            preset_id="documentary", preset_version="1", platform="universal",
+            caption_style_family="clean", intensity=Intensity.LOW,
+        ),
+        confidence=0,
+    )
+    left = NormalizedRect(x=0, y=0, width=0.5, height=1)
+    composition = CompositionPlan(intent_id=intent.intent_id, segments=(
+        CompositionSegmentPlan(
+            segment_id="composition-a", output=OutputInterval(start_frame=0, end_frame=30),
+            layout=LayoutFamily.SINGLE_SUBJECT, crop=left,
+        ),
+        CompositionSegmentPlan(
+            segment_id="composition-b", output=OutputInterval(start_frame=30, end_frame=60),
+            layout=LayoutFamily.WIDE_GROUP, crop=left,
+        ),
+    ))
+
+    def compiled(value: CompositionPlan) -> CompiledRenderPlan:
+        return compile_render_plan(
+            intent,
+            CaptionPlan(intent_id=intent.intent_id),
+            value,
+            MotionPlan(intent_id=intent.intent_id),
+            SourceBRollPlan(intent_id=intent.intent_id),
+            CanvasPlan(width=180, height=320),
+        )
+
+    applied = apply_native_visual_plan(
+        timeline, compiled(composition), source_width=320, source_height=180,
+    )
+    assert len(applied.clips) == 1
+
+    snapped = composition.model_copy(update={"segments": (
+        composition.segments[0],
+        composition.segments[1].model_copy(update={
+            "crop": NormalizedRect(x=0.5, y=0, width=0.5, height=1),
+        }),
+    )})
+    with pytest.raises(ValueError, match="NATIVE_CROP_BOUNDARY_DISCONTINUITY:30"):
+        apply_native_visual_plan(
+            timeline, compiled(snapped), source_width=320, source_height=180,
+        )
+
+    scaled = composition.model_copy(update={"segments": (
+        composition.segments[0],
+        composition.segments[1].model_copy(update={
+            "crop": NormalizedRect(x=0.3, y=0.1, width=0.4, height=0.8),
+            "movement_reason": "target_switch",
+            "crop_keyframes": (CompositionCropKeyframe(
+                frame=30,
+                crop=NormalizedRect(x=0.3, y=0.1, width=0.4, height=0.8),
+                reason="target_switch",
+                camera_phase="HOLD",
+            ),),
+        }),
+    )})
+    with pytest.raises(
+        ValueError,
+        match="NATIVE_DYNAMIC_CROP_SCALE_UNSUPPORTED_AT_BOUNDARY:30",
+    ):
+        apply_native_visual_plan(
+            timeline, compiled(scaled), source_width=320, source_height=180,
+        )
+
+    cut_reset = composition.model_copy(update={"segments": (
+        composition.segments[0],
+        composition.segments[1].model_copy(update={
+            "crop": NormalizedRect(x=0.5, y=0, width=0.5, height=1),
+            "movement_reason": "scene_reset",
+            "crop_keyframes": (CompositionCropKeyframe(
+                frame=30,
+                crop=NormalizedRect(x=0.5, y=0, width=0.5, height=1),
+                reason="scene_reset",
+                camera_phase="HOLD",
+            ),),
+        }),
+    )})
+    cut_applied = apply_native_visual_plan(
+        timeline, compiled(cut_reset), source_width=320, source_height=180,
+    )
+    assert len(cut_applied.clips) == 1
+    cut_track = cut_applied.clips[0].crop_plan.tracking_keyframes
+    assert [item.time_seconds for item in cut_track] == pytest.approx((0.0, 29 / 30, 1.0))
+    assert [item.normalized_x for item in cut_track] == pytest.approx((0.25, 0.25, 0.75))
+
+    scaled_cut = scaled.model_copy(update={"segments": (
+        scaled.segments[0],
+        scaled.segments[1].model_copy(update={
+            "movement_reason": "scene_reset",
+            "crop_keyframes": (CompositionCropKeyframe(
+                frame=30,
+                crop=scaled.segments[1].crop,
+                reason="scene_reset",
+                camera_phase="HOLD",
+            ),),
+        }),
+    )})
+    scaled_cut_applied = apply_native_visual_plan(
+        timeline, compiled(scaled_cut), source_width=320, source_height=180,
+    )
+    assert len(scaled_cut_applied.clips) == 2
+
+
 def test_facecam_gameplay_split_renders_facecam_above_gameplay(tmp_path: Path) -> None:
     executable = shutil.which("ffmpeg")
     if not executable:
@@ -386,7 +668,11 @@ def test_native_visual_boundary_is_half_open_on_the_output_frame_lattice(tmp_pat
             layout=LayoutFamily.FIT_BACKGROUND, crop=full,
         ),
         CompositionSegmentPlan(
-            segment_id="composition-close", output=OutputInterval(start_frame=9, end_frame=28),
+            segment_id="composition-close-a", output=OutputInterval(start_frame=9, end_frame=18),
+            layout=LayoutFamily.SINGLE_SUBJECT, crop=close_left,
+        ),
+        CompositionSegmentPlan(
+            segment_id="composition-close-b", output=OutputInterval(start_frame=18, end_frame=28),
             layout=LayoutFamily.SINGLE_SUBJECT, crop=close_left,
         ),
         CompositionSegmentPlan(
@@ -411,6 +697,7 @@ def test_native_visual_boundary_is_half_open_on_the_output_frame_lattice(tmp_pat
         for clip in applied.clips
     ]
     assert intervals == [(0, 8), (8, 9), (9, 28), (28, 43)]
+    assert all(18 not in interval for interval in intervals)
     assert all(end > start for start, end in intervals)
 
     rendered = tmp_path / "frame-boundary.mp4"
