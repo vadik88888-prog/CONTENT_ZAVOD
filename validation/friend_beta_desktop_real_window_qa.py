@@ -135,10 +135,10 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
     stage_evidence: dict[str, object] = {}
     screen = window.project_screen
     if stage == "settings":
-        caption_cards = screen._setup_choice_buttons["caption"]
+        caption_cards = screen.setup_caption_picker.cards
         caption_fonts = {
-            preset_id: button.font().family()
-            for preset_id, button in caption_cards.items()
+            preset_id: card.sample.font().family()
+            for preset_id, card in caption_cards.items()
         }
         expected_fonts = {
             preset_id: FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].render_family

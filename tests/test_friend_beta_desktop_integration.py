@@ -18,7 +18,7 @@ from app.clip_results import ClipResult
 from app.config import load_config
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
-from app.gui.components import VideoPreview
+from app.gui.components import CaptionPresetPickerDialog, VideoPreview
 from app.gui.components.project_poster import project_poster_path
 from app.gui.models import DesktopProject, DesktopSettings, ProjectStatus
 from app.gui.screens.project_screen import ProjectScreen
@@ -223,15 +223,15 @@ def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
         screen.open(project)
         screen.show()
         app.processEvents()
-        cards = screen._setup_choice_buttons["caption"]
+        cards = screen.setup_caption_picker.cards
         assert set(cards) == set(CAPTION_PRESET_DEFINITIONS)
         assert screen.setup_caption_preset.isHidden()
         for preset_id, preset in CAPTION_PRESET_DEFINITIONS.items():
             card = cards[preset_id]
             asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
-            assert card.font().family() == asset.render_family
+            assert card.sample.font().family() == asset.render_family
             assert asset.file_name in card.toolTip()
-            assert preset.label in card.text()
+            assert preset.label == card.title.text()
 
         screen._choose_setup_value(screen.setup_caption_preset, "word_pop")
         app.processEvents()
@@ -249,6 +249,78 @@ def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
             "без обработки вашего видео" in label.text()
             for label in screen.setup_summary.findChildren(QLabel)
         )
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_draft_caption_picker_compares_all_presets_before_saving() -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    dialog = CaptionPresetPickerDialog("editorial_narrow")
+    try:
+        cards = dialog.picker.cards
+        assert set(cards) == set(CAPTION_PRESET_DEFINITIONS)
+        assert dialog.selected_preset_id == "editorial_narrow"
+        assert cards["editorial_narrow"].badge.text() == "Выбрано"
+        for preset_id, preset in CAPTION_PRESET_DEFINITIONS.items():
+            asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
+            assert cards[preset_id].sample.font().family() == asset.render_family
+            assert cards[preset_id].sample.text()
+        dialog.picker.choose("word_pop")
+        app.processEvents()
+        assert dialog.selected_preset_id == "word_pop"
+        assert cards["word_pop"].badge.text() == "Выбрано"
+        assert cards["editorial_narrow"].badge.text() == "Выбрать"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def test_draft_caption_picker_saves_a_pending_override_without_replacing_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _services(tmp_path)
+    _attach_analysis(tmp_path, project, count=1)
+    previous = tmp_path / "previous-draft.json"
+    previous.write_text("{}", encoding="utf-8")
+    project.candidate_draft_artifacts = {"candidate-000": str(previous)}
+    project.candidate_draft_statuses = {"candidate-000": "ready"}
+    project.candidate_approval_states = {"candidate-000": "pending"}
+    project.candidate_export_statuses = {"candidate-000": "pending"}
+    project.candidate_states = {"candidate-000": "draft_ready"}
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    viewmodel.project = project
+    screen = ProjectScreen(viewmodel)
+
+    class AcceptedPicker:
+        DialogCode = SimpleNamespace(Accepted=1)
+
+        def __init__(self, _current: str, _parent) -> None:
+            self.selected_preset_id = "word_pop"
+
+        def exec(self) -> int:
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr("app.gui.screens.project_screen.CaptionPresetPickerDialog", AcceptedPicker)
+    try:
+        screen.project = project
+        screen._edit_draft_option("candidate-000", "caption_preset_id")
+        assert project.candidate_creative_overrides["candidate-000"] == {
+            "caption_preset_id": "word_pop",
+        }
+        assert project.candidate_draft_statuses["candidate-000"] == "pending"
+        assert project.candidate_draft_artifacts["candidate-000"] == str(previous)
+        assert previous.is_file()
     finally:
         screen.close()
         screen.deleteLater()

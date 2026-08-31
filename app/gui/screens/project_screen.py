@@ -10,7 +10,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QPixmap
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
@@ -27,9 +27,9 @@ from app.content_profile_taxonomy import (
     user_overridable_values,
 )
 from app.editorial_profile_policy import evaluate_editorial_candidate
-from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
+from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.components import (
-    CandidateThumbnailLoader,
+    CandidateThumbnailLoader, CaptionPresetPicker, CaptionPresetPickerDialog,
     FinalOutput,
     FinalResultsWorkspace,
     ProcessingProgress,
@@ -446,11 +446,15 @@ class ProjectScreen(QWidget):
         caption_section, caption_layout = self._setup_choice_section(
             "Субтитры", "Семь production presets — с теми же bundled fonts, что в Preview и Final."
         )
-        caption_values = [(preset.label, preset.preset_id) for preset in CAPTION_PRESET_DEFINITIONS.values()]
-        self._setup_choice_buttons["caption"] = self._add_setup_choice_buttons(
-            caption_layout, "caption", caption_values, self.setup_caption_preset,
-            columns=4, caption_samples=True,
+        self.setup_caption_picker = CaptionPresetPicker(columns=4)
+        self.setup_caption_picker.setObjectName("setupCaptionPresetPicker")
+        self.setup_caption_picker.setToolTip(
+            "Каждая карточка использует точный bundled font и цвет выбранного production preset."
         )
+        self.setup_caption_picker.preset_selected.connect(
+            lambda preset_id: self._choose_setup_value(self.setup_caption_preset, preset_id)
+        )
+        caption_layout.addWidget(self.setup_caption_picker)
         setup_choices_layout.addWidget(caption_section, 2, 0, 1, 2)
 
         count_section, count_layout = self._setup_choice_section(
@@ -1698,7 +1702,6 @@ class ProjectScreen(QWidget):
         owner: QComboBox,
         *,
         columns: int,
-        caption_samples: bool = False,
         reuse_group: bool = False,
     ) -> dict[object, QPushButton]:
         """Expose an existing combo owner as an approved visual choice grid."""
@@ -1718,33 +1721,13 @@ class ProjectScreen(QWidget):
         grid.setVerticalSpacing(7)
         buttons: dict[object, QPushButton] = {}
         for index, (label, value) in enumerate(choices):
-            text = label
-            if caption_samples:
-                text = f"{label}\nAa  Сильная мысль"
-            button = QPushButton(text)
+            button = QPushButton(label)
             button.setObjectName("setupChoice")
             button.setProperty("choiceKind", kind)
             button.setProperty("choiceValue", str(value))
             button.setCheckable(True)
-            button.setMinimumHeight(46 if caption_samples else 36)
+            button.setMinimumHeight(36)
             button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-            if caption_samples:
-                preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, value))
-                if preset is not None:
-                    font_asset = FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id]
-                    font_path = bundled_font_asset_path(font_asset)
-                    if font_path.is_file():
-                        QFontDatabase.addApplicationFont(str(font_path))
-                    font = QFont(font_asset.render_family)
-                    font.setWeight(QFont.Weight.Bold if font_asset.weight == "bold" else QFont.Weight.Light)
-                    font.setPointSize(10)
-                    button.setFont(font)
-                    button.setProperty("captionTone", preset.highlight_color)
-                    button.setToolTip(
-                        f"{preset.label} · встроенный шрифт {font_asset.family} ({font_asset.file_name})"
-                    )
-                    button.setProperty("captionPresetId", preset.preset_id)
-                    self._style_caption_choice(button, preset, selected=False)
             group.addButton(button)
             button.clicked.connect(
                 lambda checked=False, combo=owner, choice=value: self._choose_setup_value(combo, choice)
@@ -1763,26 +1746,6 @@ class ProjectScreen(QWidget):
         return buttons
 
     @staticmethod
-    def _style_caption_choice(button: QPushButton, preset: object, *, selected: bool) -> None:
-        definition = cast(Any, preset)
-        font_asset = FONT_ASSET_DEFINITIONS[definition.preferred_font_asset_id]
-        background = (
-            definition.background_color
-            if definition.background_mode == "opaque_box"
-            else "#17191D"
-        )
-        foreground = definition.highlight_color
-        border = definition.highlight_color if selected else "#3B4048"
-        weight = "700" if definition.font_weight == "bold" else "300"
-        button.setStyleSheet(
-            f"QPushButton {{ background: {background}; color: {foreground}; "
-            f"border: {2 if selected else 1}px solid {border}; border-radius: 8px; "
-            f"font-family: '{font_asset.render_family}'; font-weight: {weight}; "
-            f"text-align: left; padding: 7px 9px; }} "
-            f"QPushButton:hover {{ border-color: {definition.highlight_color}; }}"
-        )
-
-    @staticmethod
     def _choose_setup_value(owner: QComboBox, value: object) -> None:
         index = owner.findData(value)
         if index >= 0 and index != owner.currentIndex():
@@ -1798,7 +1761,6 @@ class ProjectScreen(QWidget):
         values = {
             "profile": project.settings.content_profile_preset,
             "style": project.settings.subtitle_style,
-            "caption": project.settings.caption_preset_id,
             "count": str(project.settings.clip_count),
         }
         for kind, selected_value in values.items():
@@ -1810,10 +1772,7 @@ class ProjectScreen(QWidget):
                 button.style().unpolish(button)
                 button.style().polish(button)
                 button.blockSignals(False)
-                if kind == "caption":
-                    preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, value))
-                    if preset is not None:
-                        self._style_caption_choice(button, preset, selected=selected)
+        self.setup_caption_picker.set_selected(project.settings.caption_preset_id)
         hidden_profiles = list(CONTENT_PROFILE_PRESETS)[4:]
         if project.settings.content_profile_preset in hidden_profiles:
             self.setup_profile_more_toggle.setChecked(True)
@@ -4103,9 +4062,14 @@ class ProjectScreen(QWidget):
             choices = [(label, value) for label, value in _CREATIVE_STYLE_CHOICES]
             current = override.get(option, self.project.settings.subtitle_style)
         elif option == "caption_preset_id":
-            title = "Стиль субтитров"
-            choices = [(item.label, item.preset_id) for item in CAPTION_PRESET_DEFINITIONS.values()]
             current = override.get(option, self.project.settings.caption_preset_id)
+            picker = CaptionPresetPickerDialog(str(current), self)
+            if picker.exec() != picker.DialogCode.Accepted:
+                return
+            value = picker.selected_preset_id
+            if value and value != current:
+                self.viewmodel.revise_draft(candidate_id, caption_preset_id=value)
+            return
         elif option == "composition_strategy":
             title = "Кадрирование"
             choices = [
