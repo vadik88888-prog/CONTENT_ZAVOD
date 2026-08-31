@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.font_assets import FONT_ASSET_DEFINITIONS
-from app.gui.components import CaptionPresetPickerDialog
+from app.gui.components import CaptionPresetPickerDialog, CompositionPickerDialog, CreativeStylePickerDialog
 from app.gui.models import DesktopProject, DesktopSettings
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -124,7 +124,20 @@ def main() -> int:
                 raise AssertionError("Selected Settings caption card is not orange.")
             _save(screen, output / "settings-caption-presets.png")
 
-            screen._choose_setup_value(screen.setup_creative_style, "dynamic")
+            before_hover = (project.settings.subtitle_style, project.settings.caption_preset_id)
+            cards["accent_yellow"].hovered.emit("accent_yellow")
+            expected_hover = settings_preview_path(before_hover[0], "accent_yellow")
+            _wait_for(app, lambda: (
+                screen.setup_demo_preview.active_media_path == expected_hover
+                and screen.setup_demo_preview.poster.isVisible()
+                and screen.setup_demo_preview.player.position() > 100
+            ))
+            if (project.settings.subtitle_style, project.settings.caption_preset_id) != before_hover:
+                raise AssertionError("Caption hover persisted a Settings choice.")
+            _save(screen, output / "settings-caption-hover.png")
+            cards["accent_yellow"].hover_left.emit("accent_yellow")
+
+            screen.setup_style_picker.cards["dynamic"].hovered.emit("dynamic")
             expected_style = settings_preview_path("dynamic", "word_pop")
             _wait_for(app, lambda: (
                 screen.setup_demo_preview.active_media_path == expected_style
@@ -133,9 +146,16 @@ def main() -> int:
                 and screen.setup_demo_preview.poster.isVisible()
                 and screen.setup_demo_preview.player.position() > 100
             ))
-            if screen.setup_demo_detail.text() != "Dynamic · Word Pop":
-                raise AssertionError("Creative-style selection did not update the Settings demo label.")
-            _save(screen, output / "settings-creative-style-demo.png")
+            if project.settings.subtitle_style != before_hover[0]:
+                raise AssertionError("Creative-style hover persisted a Settings choice.")
+            _save(screen, output / "settings-creative-style-hover.png")
+            screen.setup_style_picker.cards["dynamic"].hover_left.emit("dynamic")
+
+            screen.content_scroll.ensureWidgetVisible(screen.setup_composition_picker, 12, 12)
+            _settle(app)
+            if len(screen.setup_composition_picker.cards) != 5:
+                raise AssertionError("Settings does not expose every current composition strategy.")
+            _save(screen, output / "settings-composition-cards.png")
 
             dialog = CaptionPresetPickerDialog("editorial_narrow", screen)
             dialog.show()
@@ -152,10 +172,37 @@ def main() -> int:
                 raise AssertionError("Selected Draft caption card is not orange.")
             _save(dialog, output / "drafts-caption-presets.png")
             print(output / "settings-caption-presets.png")
-            print(output / "settings-creative-style-demo.png")
+            print(output / "settings-caption-hover.png")
+            print(output / "settings-creative-style-hover.png")
+            print(output / "settings-composition-cards.png")
             print(output / "drafts-caption-presets.png")
+            dialog.close()
+
+            style_dialog = CreativeStylePickerDialog("documentary", "word_pop", screen)
+            style_dialog.show()
+            _settle(app)
+            style_dialog.picker.cards["dynamic"].hovered.emit("dynamic")
+            _wait_for(app, lambda: (
+                style_dialog.demo_preview.active_media_path == settings_preview_path("dynamic", "word_pop")
+                and style_dialog.demo_preview.poster.isVisible()
+                and style_dialog.demo_preview.player.position() > 100
+            ))
+            _save(style_dialog, output / "drafts-creative-style-cards.png")
+            print(output / "drafts-creative-style-cards.png")
+            style_dialog.close()
+
+            composition_dialog = CompositionPickerDialog("safe_auto", screen)
+            composition_dialog.show()
+            _settle(app)
+            if len(composition_dialog.picker.cards) != 5:
+                raise AssertionError("Draft composition picker does not expose every current strategy.")
+            _save(composition_dialog, output / "drafts-composition-cards.png")
+            print(output / "drafts-composition-cards.png")
+            composition_dialog.close()
         finally:
             dialog.close() if "dialog" in locals() else None
+            style_dialog.close() if "style_dialog" in locals() else None
+            composition_dialog.close() if "composition_dialog" in locals() else None
             screen.preview.suspend()
             screen.setup_demo_preview.suspend()
             screen.close()

@@ -1023,7 +1023,7 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
             if label.property("draftInspectorField")
         ]
         assert [label.text() for label in inspector_fields] == [
-            "Стиль", "Субтитры", "Кадрирование",
+            "Монтаж", "Субтитры", "Кадрирование",
         ]
         assert all(
             label.contentsRect().width()

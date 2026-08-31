@@ -10,13 +10,16 @@ from functools import lru_cache
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QGridLayout, QLabel, QPushButton,
+    QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS, CaptionPresetDefinition
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
+from app.gui.components.video_preview import VideoPreview
+from app.settings_preview_assets import settings_preview_path
 
 
 @lru_cache(maxsize=None)
@@ -48,6 +51,8 @@ class CaptionPresetCard(QFrame):
     """One visual preset choice with a real bundled-font sample."""
 
     activated = Signal(str)
+    hovered = Signal(str)
+    hover_left = Signal(str)
 
     def __init__(self, preset: CaptionPresetDefinition, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,6 +106,14 @@ class CaptionPresetCard(QFrame):
     def activate(self) -> None:
         self.activated.emit(self.preset.preset_id)
 
+    def enterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().enterEvent(event)
+        self.hovered.emit(self.preset.preset_id)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().leaveEvent(event)
+        self.hover_left.emit(self.preset.preset_id)
+
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
@@ -135,6 +148,8 @@ class CaptionPresetPicker(QWidget):
     """A fixed seven-card grid shared by project Settings and Drafts."""
 
     preset_selected = Signal(str)
+    preset_hovered = Signal(str)
+    preset_hover_cleared = Signal()
 
     def __init__(self, *, columns: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -148,6 +163,8 @@ class CaptionPresetPicker(QWidget):
         for index, preset in enumerate(CAPTION_PRESET_DEFINITIONS.values()):
             card = CaptionPresetCard(preset, self)
             card.activated.connect(self.choose)
+            card.hovered.connect(self.preset_hovered)
+            card.hover_left.connect(lambda _preset_id: self.preset_hover_cleared.emit())
             layout.addWidget(card, index // columns, index % columns)
             self.cards[preset.preset_id] = card
         for column in range(columns):
@@ -170,12 +187,19 @@ class CaptionPresetPicker(QWidget):
 class CaptionPresetPickerDialog(QDialog):
     """Draft-only picker that makes the pending/rerender boundary explicit."""
 
-    def __init__(self, current_preset_id: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        current_preset_id: str,
+        parent: QWidget | None = None,
+        *,
+        style_id: str = "documentary",
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("captionPresetPickerDialog")
         self.setWindowTitle("Стиль субтитров")
         self.setModal(True)
-        self.resize(720, 480)
+        self._style_id = style_id
+        self.resize(1120, 620)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(10)
@@ -189,10 +213,24 @@ class CaptionPresetPickerDialog(QDialog):
         copy.setObjectName("muted")
         copy.setWordWrap(True)
         layout.addWidget(copy)
+        content = QHBoxLayout()
+        content.setSpacing(14)
         self.picker = CaptionPresetPicker(columns=3, parent=self)
         self.picker.setObjectName("draftCaptionPresetPicker")
         self.picker.set_selected(current_preset_id)
-        layout.addWidget(self.picker)
+        self.picker.preset_hovered.connect(self._show_demo)
+        self.picker.preset_hover_cleared.connect(self._restore_selected_demo)
+        self.picker.preset_selected.connect(self._show_demo)
+        content.addWidget(self.picker, 3)
+        self.demo_preview = VideoPreview()
+        self.demo_preview.setObjectName("draftCaptionPresetDemo")
+        self.demo_preview.set_vertical_frame_size(230, 409)
+        self.demo_preview.set_frame_sink_output(True)
+        self.demo_preview.controls_host.hide()
+        self.demo_preview.player.setLoops(QMediaPlayer.Loops.Infinite)
+        self.demo_preview.player.mediaStatusChanged.connect(self._demo_media_status_changed)
+        content.addWidget(self.demo_preview, 1, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(content)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.save_button = QPushButton("Сохранить выбор")
         self.save_button.setObjectName("primary")
@@ -203,7 +241,30 @@ class CaptionPresetPickerDialog(QDialog):
         buttons.rejected.connect(self.reject)
         self.save_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
+        self.finished.connect(lambda _result: self.demo_preview.suspend())
+        self._show_demo(current_preset_id)
 
     @property
     def selected_preset_id(self) -> str:
         return self.picker.selected_preset_id or ""
+
+    def _show_demo(self, preset_id: str) -> None:
+        path = settings_preview_path(self._style_id, preset_id)
+        if path is None:
+            self.demo_preview.set_file(None, presentation="vertical", title="Демо недоступно")
+            return
+        if self.demo_preview.active_media_path == path:
+            self.demo_preview._play()
+            return
+        self.demo_preview.set_file(path, presentation="vertical", title="Демо оформления")
+
+    def _restore_selected_demo(self) -> None:
+        self._show_demo(self.selected_preset_id)
+
+    def _demo_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
+            self.demo_preview._play()
+
+    def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self.demo_preview.suspend()
+        super().closeEvent(event)

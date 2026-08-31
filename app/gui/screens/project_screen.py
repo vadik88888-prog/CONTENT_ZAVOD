@@ -13,7 +13,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -30,6 +30,7 @@ from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.components import (
     CandidateThumbnailLoader, CaptionPresetPicker, CaptionPresetPickerDialog,
+    CompositionPicker, CompositionPickerDialog, CreativeStylePicker, CreativeStylePickerDialog,
     FinalOutput,
     FinalResultsWorkspace,
     ProcessingProgress,
@@ -211,6 +212,7 @@ class ProjectScreen(QWidget):
         self._project_thumbnail_labels: list[QLabel] = []
         self._project_thumbnail_path: Path | None = None
         self._settings_demo_identity: tuple[str, str] | None = None
+        self._settings_demo_hover_identity: tuple[str, str] | None = None
         # Drafts owns one vertical scroll surface at every size.  The two
         # inner scroll areas remain available to Moments, but are bypassed in
         # Drafts so wheel/trackpad input always has one unambiguous owner.
@@ -436,11 +438,15 @@ class ProjectScreen(QWidget):
         setup_choices_layout.addWidget(profile_section, 0, 0, 1, 2)
 
         style_section, style_layout = self._setup_choice_section(
-            "Стиль оформления", "Четыре текущие creative families."
+            "Стиль оформления", "Наведите, чтобы посмотреть реальное demo; click сохранит выбор."
         )
-        self._setup_choice_buttons["style"] = self._add_setup_choice_buttons(
-            style_layout, "style", list(_CREATIVE_STYLE_CHOICES), self.setup_creative_style, columns=4,
+        self.setup_style_picker = CreativeStylePicker(columns=4)
+        self.setup_style_picker.option_selected.connect(
+            lambda style_id: self._choose_setup_value(self.setup_creative_style, style_id)
         )
+        self.setup_style_picker.option_hovered.connect(self._preview_setup_style)
+        self.setup_style_picker.option_hover_cleared.connect(self._restore_setup_demo)
+        style_layout.addWidget(self.setup_style_picker)
         setup_choices_layout.addWidget(style_section, 1, 0, 1, 2)
 
         caption_section, caption_layout = self._setup_choice_section(
@@ -455,7 +461,19 @@ class ProjectScreen(QWidget):
             lambda preset_id: self._choose_setup_value(self.setup_caption_preset, preset_id)
         )
         caption_layout.addWidget(self.setup_caption_picker)
+        self.setup_caption_picker.preset_hovered.connect(self._preview_setup_caption)
+        self.setup_caption_picker.preset_hover_cleared.connect(self._restore_setup_demo)
         setup_choices_layout.addWidget(caption_section, 2, 0, 1, 2)
+
+        composition_section, composition_layout = self._setup_choice_section(
+            "Кадрирование", "Выберите, как существующий движок заполняет вертикальный кадр."
+        )
+        self.setup_composition_picker = CompositionPicker(columns=5)
+        self.setup_composition_picker.option_selected.connect(
+            lambda strategy: self.viewmodel.save_options(composition_strategy=str(strategy))
+        )
+        composition_layout.addWidget(self.setup_composition_picker)
+        setup_choices_layout.addWidget(composition_section, 3, 0, 1, 2)
 
         count_section, count_layout = self._setup_choice_section(
             "Количество роликов", "Это рекомендация; после анализа можно выбрать любые доступные моменты."
@@ -467,7 +485,7 @@ class ProjectScreen(QWidget):
         self._setup_choice_buttons["count"] = self._add_setup_choice_buttons(
             count_layout, "count", count_values, self.setup_clip_count, columns=4,
         )
-        setup_choices_layout.addWidget(count_section, 3, 0, 1, 2)
+        setup_choices_layout.addWidget(count_section, 4, 0, 1, 2)
         setup_choices_layout.setColumnStretch(0, 1)
         setup_choices_layout.setColumnStretch(1, 1)
         setup_layout.addWidget(setup_choices)
@@ -1777,7 +1795,9 @@ class ProjectScreen(QWidget):
                 button.style().unpolish(button)
                 button.style().polish(button)
                 button.blockSignals(False)
+        self.setup_style_picker.set_selected(project.settings.subtitle_style)
         self.setup_caption_picker.set_selected(project.settings.caption_preset_id)
+        self.setup_composition_picker.set_selected(project.settings.composition_strategy)
         hidden_profiles = list(CONTENT_PROFILE_PRESETS)[4:]
         if project.settings.content_profile_preset in hidden_profiles:
             self.setup_profile_more_toggle.setChecked(True)
@@ -1788,6 +1808,14 @@ class ProjectScreen(QWidget):
             return
         identity = (style_id, preset.preset_id)
         self._settings_demo_identity = identity
+        if self._settings_demo_hover_identity is not None:
+            return
+        self._show_settings_demo(*identity)
+
+    def _show_settings_demo(self, style_id: str, preset_id: str, *, hovering: bool = False) -> None:
+        preset = CAPTION_PRESET_DEFINITIONS.get(cast(Any, preset_id))
+        if preset is None:
+            return
         if not self.setup_workspace.isVisible():
             return
         path = settings_preview_path(style_id, preset.preset_id)
@@ -1800,7 +1828,9 @@ class ProjectScreen(QWidget):
         style_label = dict((value, label) for label, value in _CREATIVE_STYLE_CHOICES).get(
             style_id, style_id,
         )
-        self.setup_demo_detail.setText(f"{style_label} · {preset.label}")
+        self.setup_demo_detail.setText(
+            f"{style_label} · {preset.label}{' · просмотр' if hovering else ''}"
+        )
         if path is None:
             self.setup_demo_preview.set_file(
                 None, presentation="vertical",
@@ -1812,6 +1842,25 @@ class ProjectScreen(QWidget):
             presentation="vertical",
             title=f"{style_label} · {preset.label}",
         )
+
+    def _preview_setup_caption(self, preset_id: str) -> None:
+        if self._settings_demo_identity is None:
+            return
+        style_id, _current_preset = self._settings_demo_identity
+        self._settings_demo_hover_identity = (style_id, preset_id)
+        self._show_settings_demo(style_id, preset_id, hovering=True)
+
+    def _preview_setup_style(self, style_id: str) -> None:
+        if self._settings_demo_identity is None:
+            return
+        _current_style, preset_id = self._settings_demo_identity
+        self._settings_demo_hover_identity = (style_id, preset_id)
+        self._show_settings_demo(style_id, preset_id, hovering=True)
+
+    def _restore_setup_demo(self) -> None:
+        self._settings_demo_hover_identity = None
+        if self._settings_demo_identity is not None:
+            self._show_settings_demo(*self._settings_demo_identity)
 
     def _settings_demo_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if (
@@ -3986,7 +4035,7 @@ class ProjectScreen(QWidget):
         candidate_note.setWordWrap(True)
         grid.addWidget(candidate_note, 1, 0, 1, 2)
         rows = (
-            ("Стиль", style_labels.get(style_id, style_id), "creative_style"),
+            ("Монтаж", style_labels.get(style_id, style_id), "creative_style"),
             ("Субтитры", caption.label if caption else caption_id, "caption_preset_id"),
             ("Кадрирование", crop_labels.get(crop_id, crop_id), "composition_strategy"),
         )
@@ -4064,12 +4113,21 @@ class ProjectScreen(QWidget):
         choices: list[tuple[str, object]]
         title: str
         if option == "creative_style":
-            title = "Стиль оформления"
-            choices = [(label, value) for label, value in _CREATIVE_STYLE_CHOICES]
             current = override.get(option, self.project.settings.subtitle_style)
+            caption_id = str(override.get(
+                "caption_preset_id", self.project.settings.caption_preset_id,
+            ))
+            picker = CreativeStylePickerDialog(str(current), caption_id, self)
+            if picker.exec() != picker.DialogCode.Accepted:
+                return
+            value = picker.selected_style_id
+            if value and value != current:
+                self.viewmodel.revise_draft(candidate_id, creative_style=value)
+            return
         elif option == "caption_preset_id":
             current = override.get(option, self.project.settings.caption_preset_id)
-            picker = CaptionPresetPickerDialog(str(current), self)
+            style_id = str(override.get("creative_style", self.project.settings.subtitle_style))
+            picker = CaptionPresetPickerDialog(str(current), self, style_id=style_id)
             if picker.exec() != picker.DialogCode.Accepted:
                 return
             value = picker.selected_preset_id
@@ -4077,15 +4135,14 @@ class ProjectScreen(QWidget):
                 self.viewmodel.revise_draft(candidate_id, caption_preset_id=value)
             return
         elif option == "composition_strategy":
-            title = "Кадрирование"
-            choices = [
-                ("Авто — сохранить важное", "safe_auto"),
-                ("По центру", "center_crop"),
-                ("С размытым фоном", "fit_blur_background"),
-                ("С однотонным фоном", "fit_solid_background"),
-                ("Верхняя часть кадра", "top_crop"),
-            ]
             current = override.get(option, self.project.settings.composition_strategy)
+            picker = CompositionPickerDialog(str(current), self)
+            if picker.exec() != picker.DialogCode.Accepted:
+                return
+            value = picker.selected_strategy
+            if value and value != current:
+                self.viewmodel.revise_draft(candidate_id, composition_strategy=value)
+            return
         elif option == "same_source_broll_allowed":
             title = "Дополнительные кадры из этого видео"
             choices = [("Не использовать", False), ("Использовать", True)]
@@ -4604,6 +4661,7 @@ class ProjectScreen(QWidget):
             self.subtitles, self.subtitle_style, self.cache,
             self.setup_editorial_intent, self.content_profile_preset,
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
+            self.setup_style_picker, self.setup_caption_picker, self.setup_composition_picker,
         ):
             widget.setDisabled(active)
         for buttons in self._setup_choice_buttons.values():

@@ -18,7 +18,9 @@ from app.clip_results import ClipResult
 from app.config import load_config
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
-from app.gui.components import CaptionPresetPickerDialog, VideoPreview
+from app.gui.components import (
+    CaptionPresetPickerDialog, CompositionPickerDialog, CreativeStylePickerDialog, VideoPreview,
+)
 from app.gui.components.project_poster import project_poster_path
 from app.gui.models import DesktopProject, DesktopSettings, ProjectStatus
 from app.gui.screens.project_screen import ProjectScreen
@@ -255,13 +257,9 @@ def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
         assert dynamic_expected is not None and dynamic_expected.is_file()
         assert media_calls[-1] == dynamic_expected
         assert screen.setup_demo_detail.text() == "Dynamic · Word Pop"
-        style_buttons = screen._setup_choice_buttons["style"]
-        assert style_buttons["dynamic"].isChecked()
-        assert all(
-            not button.isChecked() and button.property("selected") is False
-            for style_id, button in style_buttons.items()
-            if style_id != "dynamic"
-        )
+        assert screen.setup_style_picker.selected_option_id == "dynamic"
+        assert screen.setup_style_picker.cards["dynamic"].property("selectionTone") == "#FF6846"
+        assert screen.setup_composition_picker.selected_option_id == project.settings.composition_strategy
         record = next(
             item for item in settings_preview_manifest()["items"]
             if item["creative_style_id"] == project.settings.subtitle_style
@@ -308,6 +306,78 @@ def test_draft_caption_picker_compares_all_presets_before_saving() -> None:
         app.processEvents()
 
 
+def test_visual_creative_controls_hover_preview_without_saving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _services(tmp_path)
+    media_calls: list[Path | None] = []
+    monkeypatch.setattr(
+        VideoPreview, "set_file",
+        lambda _self, path, **_kwargs: media_calls.append(Path(path) if path else None),
+    )
+    screen = ProjectScreen(ProjectViewModel(services))
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+        initial = (project.settings.subtitle_style, project.settings.caption_preset_id)
+        screen.setup_caption_picker.cards["word_pop"].hovered.emit("word_pop")
+        app.processEvents()
+        assert (project.settings.subtitle_style, project.settings.caption_preset_id) == initial
+        assert media_calls[-1] == settings_preview_path(initial[0], "word_pop")
+        assert screen.setup_demo_detail.text().endswith("· просмотр")
+        screen.setup_caption_picker.cards["word_pop"].hover_left.emit("word_pop")
+        app.processEvents()
+        assert media_calls[-1] == settings_preview_path(*initial)
+
+        screen.setup_style_picker.cards["dynamic"].hovered.emit("dynamic")
+        app.processEvents()
+        assert (project.settings.subtitle_style, project.settings.caption_preset_id) == initial
+        assert media_calls[-1] == settings_preview_path("dynamic", initial[1])
+        screen.setup_style_picker.cards["dynamic"].hover_left.emit("dynamic")
+        app.processEvents()
+        assert media_calls[-1] == settings_preview_path(*initial)
+
+        assert len(screen.setup_style_picker.cards) == 4
+        assert len(screen.setup_composition_picker.cards) == 5
+        assert "система сама удерживает важного" in screen.setup_composition_picker.cards[
+            "safe_auto"
+        ].description.text().casefold()
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_draft_visual_style_and_composition_dialogs_expose_only_current_options() -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    style_dialog = CreativeStylePickerDialog("documentary", "word_pop")
+    composition_dialog = CompositionPickerDialog("safe_auto")
+    try:
+        assert set(style_dialog.picker.cards) == {"minimal", "documentary", "dynamic", "clean"}
+        style_dialog.picker.choose("dynamic")
+        assert style_dialog.selected_style_id == "dynamic"
+        assert set(composition_dialog.picker.cards) == {
+            "safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
+        }
+        composition_dialog.picker.choose("top_crop")
+        assert composition_dialog.selected_strategy == "top_crop"
+        assert any("ожидать" in label.text().casefold() for label in composition_dialog.findChildren(QLabel))
+    finally:
+        style_dialog.close()
+        composition_dialog.close()
+        style_dialog.deleteLater()
+        composition_dialog.deleteLater()
+        app.processEvents()
+
+
 def test_draft_caption_picker_saves_a_pending_override_without_replacing_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,18 +402,43 @@ def test_draft_caption_picker_saves_a_pending_override_without_replacing_preview
     class AcceptedPicker:
         DialogCode = SimpleNamespace(Accepted=1)
 
-        def __init__(self, _current: str, _parent) -> None:
+        def __init__(self, _current: str, _parent, **_kwargs) -> None:
             self.selected_preset_id = "word_pop"
 
         def exec(self) -> int:
             return self.DialogCode.Accepted
 
     monkeypatch.setattr("app.gui.screens.project_screen.CaptionPresetPickerDialog", AcceptedPicker)
+
+    class AcceptedStylePicker:
+        DialogCode = SimpleNamespace(Accepted=1)
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.selected_style_id = "dynamic"
+
+        def exec(self) -> int:
+            return self.DialogCode.Accepted
+
+    class AcceptedCompositionPicker:
+        DialogCode = SimpleNamespace(Accepted=1)
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.selected_strategy = "top_crop"
+
+        def exec(self) -> int:
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr("app.gui.screens.project_screen.CreativeStylePickerDialog", AcceptedStylePicker)
+    monkeypatch.setattr("app.gui.screens.project_screen.CompositionPickerDialog", AcceptedCompositionPicker)
     try:
         screen.project = project
         screen._edit_draft_option("candidate-000", "caption_preset_id")
+        screen._edit_draft_option("candidate-000", "creative_style")
+        screen._edit_draft_option("candidate-000", "composition_strategy")
         assert project.candidate_creative_overrides["candidate-000"] == {
             "caption_preset_id": "word_pop",
+            "creative_style": "dynamic",
+            "composition_strategy": "top_crop",
         }
         assert project.candidate_draft_statuses["candidate-000"] == "pending"
         assert project.candidate_draft_artifacts["candidate-000"] == str(previous)
