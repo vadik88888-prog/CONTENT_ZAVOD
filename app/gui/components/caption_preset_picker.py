@@ -94,6 +94,7 @@ class CaptionPresetCard(QFrame):
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
+        self.setProperty("selectionTone", "#FF6846" if selected else "")
         self.badge.setText("Выбрано" if selected else "Выбрать")
         self._apply_style(selected=selected)
 
@@ -116,14 +117,15 @@ class CaptionPresetCard(QFrame):
         preset = self.preset
         accent = preset.highlight_color
         background = "#0D0F12" if preset.background_mode == "opaque_box" else "#17191D"
-        border = accent if selected else "#3B4048"
+        selection = "#FF6846"
+        border = selection if selected else "#3B4048"
         sample_background = preset.background_color if preset.background_mode == "opaque_box" else "#101216"
         font_weight = "700" if preset.font_weight == "bold" else "300"
         self.setStyleSheet(
-            f"QFrame#captionPresetCard {{ background: {background}; border: {2 if selected else 1}px solid {border}; border-radius: 9px; }}"
+            f"QFrame#captionPresetCard {{ background: {'#251A17' if selected else background}; border: {2 if selected else 1}px solid {border}; border-radius: 9px; }}"
             "QFrame#captionPresetCard:hover { border-color: " + accent + "; }"
             "QLabel#captionPresetCardTitle { color: #F1F4F8; font-size: 12px; font-weight: 700; background: transparent; border: 0; }"
-            f"QLabel#captionPresetCardBadge {{ color: {accent}; font-size: 11px; font-weight: 700; background: transparent; border: 0; }}"
+            f"QLabel#captionPresetCardBadge {{ color: {selection if selected else accent}; font-size: 11px; font-weight: 700; background: transparent; border: 0; }}"
             f"QFrame#captionPresetSample {{ background: {sample_background}; border: 0; border-radius: 6px; }}"
             f"QLabel#captionPresetSampleText {{ color: {accent}; font-family: '{FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].render_family}'; font-weight: {font_weight}; background: transparent; border: 0; }}"
         )
@@ -192,7 +194,7 @@ class CaptionPresetPickerDialog(QDialog):
         self.picker.set_selected(current_preset_id)
         layout.addWidget(self.picker)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        self.save_button = QPushButton("Сохранить ожидающее изменение")
+        self.save_button = QPushButton("Сохранить выбор")
         self.save_button.setObjectName("primary")
         buttons.addButton(self.save_button, QDialogButtonBox.ButtonRole.AcceptRole)
         cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)

@@ -44,10 +44,15 @@ from app.video_composition import _ass_filter
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "assets" / "settings-previews"
 FPS = 30
-DURATION_SECONDS = 5
-WIDTH = 360
-HEIGHT = 640
-WORDS = ("СИЛЬНАЯ", "МЫСЛЬ", "СТАНОВИТСЯ", "ЯСНОЙ", "СРАЗУ")
+DURATION_SECONDS = 10
+WIDTH = 540
+HEIGHT = 960
+SOURCE_IMAGE = OUTPUT / "source" / "studio-creator-v1.png"
+SOURCE_VIDEO = OUTPUT / "source" / "studio-creator-v1.mp4"
+WORDS = (
+    "СИЛЬНАЯ", "МЫСЛЬ", "СТАНОВИТСЯ", "ЯСНОЙ", "КОГДА",
+    "ЕЁ", "МОЖНО", "СРАЗУ", "ПОКАЗАТЬ", "В КАДРЕ",
+)
 
 
 def _run(command: list[str]) -> None:
@@ -146,7 +151,7 @@ def _intent(style_id: str, caption_id: str) -> CreativeIntent:
 def _transcript() -> dict[str, Any]:
     words = []
     for index, word in enumerate(WORDS):
-        start = 0.35 + index * 0.82
+        start = 0.35 + index * 0.88
         words.append({
             "text": word, "start": start, "end": start + 0.62,
             "confidence": 0.99, "timing_source": "verified",
@@ -160,21 +165,24 @@ def build() -> dict[str, Any]:
         raise FileNotFoundError("ffmpeg")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     items: list[dict[str, Any]] = []
+    if not SOURCE_IMAGE.is_file():
+        raise FileNotFoundError(f"Missing canonical Settings demo source image: {SOURCE_IMAGE}")
     with tempfile.TemporaryDirectory(prefix="friend-beta-settings-preview-") as raw_temp:
         temp = Path(raw_temp)
-        source = temp / "source.mp4"
+        SOURCE_VIDEO.parent.mkdir(parents=True, exist_ok=True)
         _run([
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i",
-            f"color=c=#17191f:s={WIDTH}x{HEIGHT}:r={FPS}:d={DURATION_SECONDS}",
-            "-vf",
-            "drawbox=x=28:y=72:w=304:h=496:color=#252833:t=fill,"
-            "drawbox=x=52:y=112:w=256:h=144:color=#313641:t=fill,"
-            "drawbox=x=52:y=280:w=184:h=10:color=#ff6846:t=fill,"
-            "drawbox=x=52:y=310:w=256:h=8:color=#444957:t=fill",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            str(source),
+            "-loop", "1", "-framerate", str(FPS), "-i", str(SOURCE_IMAGE),
+            "-t", str(DURATION_SECONDS),
+            "-vf", (
+                "scale=604:1074,"
+                "crop=540:960:x='32+12*sin(2*PI*t/10)':y='52+15*cos(2*PI*t/10)',"
+                f"fps={FPS},format=yuv420p"
+            ),
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-movflags", "+faststart", str(SOURCE_VIDEO),
         ])
+        source_sha256 = stable_file_hash(SOURCE_VIDEO)
         for style_id in CREATIVE_PRESET_DEFINITIONS:
             style = creative_preset_definition(style_id)
             for caption_id, caption in CAPTION_PRESET_DEFINITIONS.items():
@@ -202,7 +210,7 @@ def build() -> dict[str, Any]:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 _run([
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(source), "-vf", _ass_filter(ass, fonts),
+                    "-i", str(SOURCE_VIDEO), "-vf", _ass_filter(ass, fonts),
                     "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
                     "-b:v", "420k", "-maxrate", "520k", "-bufsize", "840k",
                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an",
@@ -224,6 +232,8 @@ def build() -> dict[str, Any]:
                     "path": destination.relative_to(OUTPUT).as_posix(),
                     "sha256": stable_file_hash(destination),
                     "size_bytes": destination.stat().st_size,
+                    "demo_source_sha256": source_sha256,
+                    "duration_seconds": DURATION_SECONDS,
                 })
     report = {
         "schema_version": SETTINGS_PREVIEW_SCHEMA_VERSION,
@@ -233,6 +243,16 @@ def build() -> dict[str, Any]:
         "brain_rerun": False,
         "vision_rerun": False,
         "render_owner": "compile_native_creative_plan + write_caption_plan_ass + bundled fonts + libass",
+        "demo_source": {
+            "path": SOURCE_VIDEO.relative_to(OUTPUT).as_posix(),
+            "sha256": source_sha256,
+            "image_path": SOURCE_IMAGE.relative_to(OUTPUT).as_posix(),
+            "image_sha256": stable_file_hash(SOURCE_IMAGE),
+            "duration_seconds": DURATION_SECONDS,
+            "width": WIDTH,
+            "height": HEIGHT,
+            "fps": FPS,
+        },
         "items": items,
     }
     _write_json(OUTPUT / "manifest.json", report)

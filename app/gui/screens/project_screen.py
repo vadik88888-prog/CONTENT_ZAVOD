@@ -1256,14 +1256,14 @@ class ProjectScreen(QWidget):
         setup_main_layout.addStretch()
         setup_workspace_layout.addWidget(setup_main, 3)
 
-        self.setup_summary = self._card("Краткая сводка")
+        self.setup_summary = self._card("Демо оформления")
         self.setup_summary.setObjectName("setupSummary")
         self.setup_summary_text = QLabel()
         self.setup_summary_text.setObjectName("muted")
         make_label_shrinkable(self.setup_summary_text)
         self.setup_demo_preview = VideoPreview()
         self.setup_demo_preview.setObjectName("settingsProductionPreview")
-        self.setup_demo_preview.set_vertical_frame_size(210, 373)
+        self.setup_demo_preview.set_vertical_frame_size(270, 480)
         self.setup_demo_preview.set_frame_sink_output(True)
         self.setup_demo_preview.controls_host.hide()
         self.setup_demo_preview.player.setLoops(QMediaPlayer.Loops.Infinite)
@@ -1273,6 +1273,11 @@ class ProjectScreen(QWidget):
         self.setup_summary.layout().addWidget(
             self.setup_demo_preview, 0, Qt.AlignmentFlag.AlignHCenter,
         )
+        self.setup_demo_detail = QLabel()
+        self.setup_demo_detail.setObjectName("setupDemoDetail")
+        self.setup_demo_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setup_demo_detail.setWordWrap(True)
+        self.setup_summary.layout().addWidget(self.setup_demo_detail)
         example_note = QLabel("Канонический production sample · без обработки вашего видео")
         example_note.setObjectName("muted")
         example_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1795,6 +1800,7 @@ class ProjectScreen(QWidget):
         style_label = dict((value, label) for label, value in _CREATIVE_STYLE_CHOICES).get(
             style_id, style_id,
         )
+        self.setup_demo_detail.setText(f"{style_label} · {preset.label}")
         if path is None:
             self.setup_demo_preview.set_file(
                 None, presentation="vertical",

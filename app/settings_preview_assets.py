@@ -11,7 +11,7 @@ from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.creative_policy import creative_preset_definition
 
 
-SETTINGS_PREVIEW_SCHEMA_VERSION = "friend-beta.settings-preview.1"
+SETTINGS_PREVIEW_SCHEMA_VERSION = "friend-beta.settings-preview.2"
 
 
 def settings_preview_root() -> Path:

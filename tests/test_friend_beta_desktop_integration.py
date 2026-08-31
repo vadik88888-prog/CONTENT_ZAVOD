@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from app.analysis_artifact import new_analysis_artifact
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
@@ -140,6 +140,14 @@ def test_settings_manifest_covers_every_current_style_caption_identity() -> None
     assert manifest["provider_calls"] == 0
     assert manifest["brain_rerun"] is False
     assert manifest["vision_rerun"] is False
+    demo_source = manifest["demo_source"]
+    source_path = Path(__file__).resolve().parents[1] / "assets" / "settings-previews" / demo_source["path"]
+    assert source_path.is_file()
+    assert stable_file_hash(source_path) == demo_source["sha256"]
+    assert demo_source["duration_seconds"] == 10
+    assert demo_source["width"] == 540
+    assert demo_source["height"] == 960
+    assert demo_source["fps"] == 30
     for identity, item in records.items():
         path = settings_preview_path(*identity)
         assert path is not None and path.is_file()
@@ -147,6 +155,8 @@ def test_settings_manifest_covers_every_current_style_caption_identity() -> None
         preset = CAPTION_PRESET_DEFINITIONS[identity[1]]
         assert item["caption_preset_version"] == preset.preset_version
         assert preset.preferred_font_asset_id in item["font_asset_ids"]
+        assert item["demo_source_sha256"] == demo_source["sha256"]
+        assert item["duration_seconds"] == demo_source["duration_seconds"]
 
 
 def test_project_thumbnail_identity_persists_across_store_restart(tmp_path: Path) -> None:
@@ -238,6 +248,20 @@ def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
         expected = settings_preview_path(project.settings.subtitle_style, "word_pop")
         assert expected is not None and expected.is_file()
         assert media_calls[-1] == expected
+        assert cards["word_pop"].property("selectionTone") == "#FF6846"
+        screen._choose_setup_value(screen.setup_creative_style, "dynamic")
+        app.processEvents()
+        dynamic_expected = settings_preview_path("dynamic", "word_pop")
+        assert dynamic_expected is not None and dynamic_expected.is_file()
+        assert media_calls[-1] == dynamic_expected
+        assert screen.setup_demo_detail.text() == "Dynamic · Word Pop"
+        style_buttons = screen._setup_choice_buttons["style"]
+        assert style_buttons["dynamic"].isChecked()
+        assert all(
+            not button.isChecked() and button.property("selected") is False
+            for style_id, button in style_buttons.items()
+            if style_id != "dynamic"
+        )
         record = next(
             item for item in settings_preview_manifest()["items"]
             if item["creative_style_id"] == project.settings.subtitle_style
@@ -275,6 +299,9 @@ def test_draft_caption_picker_compares_all_presets_before_saving() -> None:
         assert dialog.selected_preset_id == "word_pop"
         assert cards["word_pop"].badge.text() == "Выбрано"
         assert cards["editorial_narrow"].badge.text() == "Выбрать"
+        assert cards["word_pop"].property("selectionTone") == "#FF6846"
+        assert dialog.save_button.text() == "Сохранить выбор"
+        assert any(button.text() == "Отмена" for button in dialog.findChildren(QPushButton))
     finally:
         dialog.close()
         dialog.deleteLater()
