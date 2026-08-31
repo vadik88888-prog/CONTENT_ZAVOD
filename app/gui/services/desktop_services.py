@@ -383,6 +383,26 @@ class DesktopServices:
         else:
             project.candidate_states[candidate_id] = "analyzed"
 
+    @staticmethod
+    def _remove_from_pending_draft_batch(
+        project: DesktopProject, candidate_id: str,
+    ) -> None:
+        """Keep a terminal Draft failure visible without scheduling it again.
+
+        ``review_selected_candidate_ids`` is the durable Draft work queue,
+        not an audit trail. A terminal failure must leave that queue or the
+        general CTA will re-run the unchanged impossible input after refresh
+        or restart. Its failed lifecycle and error remain on the card for a
+        focused repair, retry, or explicit restore.
+        """
+
+        project.review_selected_candidate_ids = [
+            item for item in project.review_selected_candidate_ids if item != candidate_id
+        ]
+        project.selected_candidate_ids = [
+            item for item in project.selected_candidate_ids if item != candidate_id
+        ]
+
     def set_active_preview_candidate(
         self, project: DesktopProject, candidate_id: str | None,
     ) -> DesktopProject:
@@ -881,6 +901,8 @@ class DesktopServices:
         )
         project.candidate_errors.pop(candidate_id, None)
         project.selected_candidate_ids = [item for item in project.selected_candidate_ids if item != candidate_id]
+        if candidate_id not in project.review_selected_candidate_ids:
+            project.review_selected_candidate_ids.append(candidate_id)
         self.projects.save(project)
         return project, validation
 
@@ -926,6 +948,8 @@ class DesktopServices:
         project.selected_candidate_ids = [
             value for value in project.selected_candidate_ids if value != candidate_id
         ]
+        if candidate_id not in project.review_selected_candidate_ids:
+            project.review_selected_candidate_ids.append(candidate_id)
         project.candidate_errors.pop(candidate_id, None)
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         project.setup_state.change_summary = (
@@ -1262,6 +1286,7 @@ class DesktopServices:
                 )
                 project.candidate_draft_artifacts.pop(candidate_id, None)
                 project.candidate_errors[candidate_id] = cls._candidate_report_message(item, fallback)
+                cls._remove_from_pending_draft_batch(project, candidate_id)
         for candidate_id in expected_candidate_ids:
             if candidate_id in reported_ids:
                 continue
@@ -1281,6 +1306,7 @@ class DesktopServices:
                 )
                 project.candidate_draft_artifacts.pop(candidate_id, None)
                 project.candidate_errors[candidate_id] = fallback
+                cls._remove_from_pending_draft_batch(project, candidate_id)
 
     @classmethod
     def _apply_selected_render_report(
@@ -1681,6 +1707,7 @@ class DesktopServices:
             project.candidate_errors[candidate_id] = (
                 "Неполный файл черновика не прошёл проверку и не был сохранён."
             )
+            self._remove_from_pending_draft_batch(project, candidate_id)
             changed = True
         if changed:
             self._snapshot_engine_paths(run)
@@ -1727,6 +1754,7 @@ class DesktopServices:
                         project, candidate_id, draft="failed", approval="pending", export="pending",
                     )
                     project.candidate_errors[candidate_id] = run.error_summary
+                    self._remove_from_pending_draft_batch(project, candidate_id)
             project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else ProjectStatus.SOURCE_READY
         elif run.run_kind == RunKind.ANALYSIS:
             project.status = ProjectStatus.SOURCE_READY
@@ -1901,8 +1929,7 @@ class DesktopServices:
             self._set_candidate_lifecycle(
                 project, candidate_id, draft="failed", approval="pending", export="pending",
             )
-            if candidate_id not in project.review_selected_candidate_ids:
-                project.review_selected_candidate_ids.append(candidate_id)
+            self._remove_from_pending_draft_batch(project, candidate_id)
             project.candidate_errors[candidate_id] = (
                 "Этап подготовки черновика: план ролика не прошёл проверку границ. "
                 "Повторите только этот черновик или продолжите с готовыми."
@@ -2021,6 +2048,10 @@ class DesktopServices:
                 if project.candidate_errors.get(candidate_id) != message:
                     project.candidate_errors[candidate_id] = message
                     changed = True
+                before = tuple(project.review_selected_candidate_ids)
+                self._remove_from_pending_draft_batch(project, candidate_id)
+                if tuple(project.review_selected_candidate_ids) != before:
+                    changed = True
             # ``draft_failed`` never counts as ready after an abrupt close: a
             # later click starts only these missing candidates in a new draft run.
             for candidate_id in expected:
@@ -2038,6 +2069,10 @@ class DesktopServices:
                     )
                     changed = True
                 if project.candidate_draft_artifacts.pop(candidate_id, None) is not None:
+                    changed = True
+                before = tuple(project.review_selected_candidate_ids)
+                self._remove_from_pending_draft_batch(project, candidate_id)
+                if tuple(project.review_selected_candidate_ids) != before:
                     changed = True
         else:
             # Legacy interrupted draft runs have no candidate-owned progress

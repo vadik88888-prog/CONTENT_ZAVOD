@@ -832,7 +832,7 @@ def test_workflow_explains_when_only_some_selected_candidates_need_new_drafts(tm
     try:
         screen.open(project)
         app.processEvents()
-        assert "Выбрано 2. Для 1 из них ещё нужен черновик." in screen.workflow_hint.text()
+        assert "Черновиков готовы: 1 · требуют внимания: 1" in screen.review_metrics_text.text()
         assert "Черновик не создан." in "\n".join(
             label.text() for label in screen.findChildren(QLabel)
         )
@@ -882,7 +882,7 @@ def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(
         assert candidate_id not in viewmodel.project.review_selected_candidate_ids
         button_texts = [button.text() for button in screen.findChildren(QPushButton)]
         assert "Вернуть в набор" in button_texts
-        assert "Повторить черновик" not in button_texts
+        assert "Повторить черновик" in button_texts
 
         restore = screen.findChild(QPushButton, f"restore-candidate-{candidate_id}")
         assert restore is not None
@@ -1069,6 +1069,46 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
         assert viewmodel.project.selected_candidate_ids == []
         assert viewmodel.project.review_selected_candidate_ids == []
         assert viewmodel.project.candidate_states["candidate-recommended"] == "draft_ready"
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_terminal_failed_draft_does_not_reenter_batch_but_targeted_retry_is_available(tmp_path: Path, monkeypatch) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    candidate_id = "candidate-other"
+    project.candidate_states[candidate_id] = "draft_failed"
+    project.candidate_draft_statuses[candidate_id] = "failed"
+    project.candidate_errors[candidate_id] = "BOUNDARY_DECISION_REQUIRED"
+    project.status = ProjectStatus.REVIEWING_CANDIDATES
+    services.projects.save(project)
+    viewmodel = ProjectViewModel(services)
+    launches: list[list[str]] = []
+    monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(viewmodel, "build_drafts", lambda ids: launches.append(list(ids)))
+    screen = ProjectScreen(viewmodel)
+    monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+
+    try:
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+
+        assert candidate_id not in viewmodel.project.review_selected_candidate_ids
+        assert "требуют внимания: 1" in screen.review_metrics_text.text()
+        assert screen.findChild(QPushButton, f"retry-candidate-{candidate_id}") is not None
+
+        screen._draft_action()
+        assert launches == []
+
+        screen._retry_draft(candidate_id)
+        assert launches == [[candidate_id]]
+        assert candidate_id in viewmodel.project.review_selected_candidate_ids
     finally:
         screen.close()
         screen.deleteLater()

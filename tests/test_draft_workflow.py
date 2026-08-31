@@ -712,6 +712,7 @@ def test_terminal_draft_failure_report_keeps_item_level_retry_state(tmp_path: Pa
     assert project.status == ProjectStatus.REVIEWING_CANDIDATES
     assert project.candidate_states == {"candidate-a": "draft_failed", "candidate-b": "draft_failed"}
     assert project.candidate_draft_statuses == {"candidate-a": "failed", "candidate-b": "failed"}
+    assert project.review_selected_candidate_ids == []
     assert "draft_generation:candidate-a" in project.candidate_errors["candidate-a"]
     finished_at = run.finished_at
     assert services.recover_reported_failure(
@@ -740,6 +741,7 @@ def test_terminal_draft_failure_report_keeps_item_level_retry_state(tmp_path: Pa
     assert services.runs.load(project.project_id, run.run_id).finished_at == finished_at
     assert restored_project.status == ProjectStatus.REVIEWING_CANDIDATES
     assert restored_project.candidate_draft_statuses == {"candidate-a": "failed", "candidate-b": "failed"}
+    assert restored_project.review_selected_candidate_ids == []
 
 
 def test_reported_failure_requires_current_run_and_project_identity(tmp_path: Path) -> None:
@@ -1034,14 +1036,12 @@ def test_restart_migrates_legacy_partial_draft_artifact_to_individual_retry(tmp_
 
     restored = services.projects.load(project.project_id)
     assert restored.status == ProjectStatus.REVIEWING_CANDIDATES
-    assert restored.review_selected_candidate_ids == ["candidate-a", "candidate-b", "candidate-c"]
+    assert restored.review_selected_candidate_ids == ["candidate-a", "candidate-b"]
     assert restored.candidate_states["candidate-c"] == "draft_failed"
     assert restored.candidate_draft_statuses["candidate-c"] == "failed"
     assert "границ" in restored.candidate_errors["candidate-c"]
 
-    # The migration is one-way: an explicit continue/skip remains durable on
-    # the next startup and does not silently re-add the failed candidate.
-    restored.review_selected_candidate_ids.remove("candidate-c")
-    services.projects.save(restored)
+    # The migration keeps terminal failures out of the persisted Draft queue.
+    # A later restart must not silently re-add the failed candidate.
     services.recover_interrupted_runs()
     assert "candidate-c" not in services.projects.load(project.project_id).review_selected_candidate_ids

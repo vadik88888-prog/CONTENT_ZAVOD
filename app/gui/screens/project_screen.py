@@ -2544,11 +2544,19 @@ class ProjectScreen(QWidget):
         unavailable_count = len(all_candidates) - len(draftable_candidates)
         rendered_count = sum(state == "rendered" for state in project.candidate_states.values())
         ready_count = sum(state in {"draft_ready", "selected"} for state in project.candidate_states.values())
+        attention_count = sum(
+            project.candidate_states.get(candidate_id) == "draft_failed"
+            or project.candidate_draft_statuses.get(candidate_id) == "failed"
+            or project.candidate_export_statuses.get(candidate_id) == "failed"
+            for candidate_id in project.candidate_states
+        )
         processing_count = sum(state in {"draft_planning", "production_rendering"} for state in project.candidate_states.values())
         if workflow_step == "drafts":
             set_responsive_text(
                 self.review_metrics_text,
-                f"Создано черновиков: {ready_count + rendered_count} · выбрано для финала: {len(project.selected_candidate_ids)}"
+                f"Черновиков готовы: {ready_count + rendered_count} · "
+                f"требуют внимания: {attention_count} · "
+                f"выбрано для финала: {len(project.selected_candidate_ids)}"
             )
         else:
             set_responsive_text(
@@ -2839,14 +2847,14 @@ class ProjectScreen(QWidget):
                 reject.clicked.connect(lambda _checked=False, value=candidate_id: self._reject_draft(value))
                 add_candidate_action(reject)
             elif state == "draft_failed" and workflow_step == "drafts":
+                if candidate_id in self._draftable_candidates_by_id:
+                    retry = QPushButton("Повторить черновик")
+                    retry.setObjectName(f"retry-candidate-{candidate_id}")
+                    retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
+                    retry.setDisabled(self.viewmodel.blocked_by_other_project)
+                    retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
+                    add_candidate_action(retry)
                 if candidate_id in project.review_selected_candidate_ids:
-                    if candidate_id in self._draftable_candidates_by_id:
-                        retry = QPushButton("Повторить черновик")
-                        retry.setObjectName(f"retry-candidate-{candidate_id}")
-                        retry.setToolTip("Повторно создаст только этот черновик; найденные моменты не будут анализироваться заново.")
-                        retry.setDisabled(self.viewmodel.blocked_by_other_project)
-                        retry.clicked.connect(lambda _checked=False, value=candidate_id: self._retry_draft(value))
-                        add_candidate_action(retry)
                     skip = QPushButton("Пропустить")
                     skip.setObjectName(f"skip-candidate-{candidate_id}")
                     skip.setToolTip("Уберёт этот неготовый черновик из текущего набора, не затрагивая готовые ролики.")
@@ -3364,7 +3372,7 @@ class ProjectScreen(QWidget):
             self.viewmodel.set_review_selection(candidate_ids)
             if not self.project:
                 return
-        if not candidate_ids:
+        if not candidate_ids and self._derive_flow_step(self.project) == "candidates":
             candidate_ids = self._recommended_candidate_ids()
             if not candidate_ids:
                 return
@@ -3383,7 +3391,7 @@ class ProjectScreen(QWidget):
         """Return whether one review item lacks a usable immutable draft."""
 
         state = project.candidate_states.get(candidate_id)
-        if state in {"rendered", "production_rendering", "draft_planning"}:
+        if state in {"rendered", "production_rendering", "draft_planning", "draft_failed"}:
             return False
         if state in {"draft_ready", "selected"}:
             return not Path(project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
@@ -3392,13 +3400,15 @@ class ProjectScreen(QWidget):
     def _retry_draft(self, candidate_id: str) -> None:
         """Retry one failed draft without broadening the existing selection."""
 
-        if (
-            not self.project
-            or candidate_id not in self.project.review_selected_candidate_ids
-            or candidate_id not in self._draftable_candidates_by_id
-        ):
+        if not self.project or candidate_id not in self._draftable_candidates_by_id:
             return
         if self.project.candidate_states.get(candidate_id) == "draft_failed":
+            if candidate_id not in self.project.review_selected_candidate_ids:
+                self.viewmodel.set_review_selection([
+                    *self.project.review_selected_candidate_ids, candidate_id,
+                ])
+            if not self.project:
+                return
             self.viewmodel.build_drafts([candidate_id])
 
     def _retry_final_export(self, candidate_id: str) -> None:
@@ -3444,6 +3454,8 @@ class ProjectScreen(QWidget):
             candidate_id
             for candidate_id, item in self._draftable_candidates_by_id.items()
             if item.get("recommended", item.get("selected_by_recommendation"))
+            and self.project
+            and self.project.candidate_draft_statuses.get(candidate_id) != "failed"
         ]
 
     def _select_recommended(self) -> None:

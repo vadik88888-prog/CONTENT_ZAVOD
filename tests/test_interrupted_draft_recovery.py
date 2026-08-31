@@ -104,7 +104,7 @@ def test_interrupted_draft_restores_only_bound_preview_and_resumes_missing(tmp_p
     restored_run = services.runs.load(project.project_id, run.run_id)
     assert restored.status == ProjectStatus.INTERRUPTED
     assert restored_run.status == RunStatus.INTERRUPTED
-    assert restored.review_selected_candidate_ids == candidate_ids
+    assert restored.review_selected_candidate_ids == ["candidate-a"]
     assert restored.candidate_states == {
         "candidate-a": "draft_ready", "candidate-b": "draft_failed", "candidate-c": "draft_failed",
     }
@@ -113,6 +113,7 @@ def test_interrupted_draft_restores_only_bound_preview_and_resumes_missing(tmp_p
     }
     assert restored.candidate_draft_artifacts == {"candidate-a": str((prepared.output_directory / "draft-progress.json").resolve())}
 
+    restored = services.set_review_selection(restored, candidate_ids)
     resume_run, resume = services.prepare_draft(restored, ["candidate-b", "candidate-c"])
 
     assert resume_run.run_kind == RunKind.DRAFT
