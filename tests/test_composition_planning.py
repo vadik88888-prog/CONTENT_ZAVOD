@@ -6,10 +6,14 @@ from app.composition_planning import (
     CompositionPlannerConfig,
     TargetObservation,
     _AtomicState,
+    _TargetState,
     _calibrate_layout_timeline,
     _containment,
+    _must_keep_core,
+    _next_character_fallback_state,
     _quality_report,
     _safe_area_containment,
+    _subject_safe_area_containment,
     build_composition_plan,
 )
 from app.creative_contracts import (
@@ -39,13 +43,14 @@ def _intent(
     targets: tuple[ResolvedCompositionTarget, ...],
     *,
     motion: tuple[ResolvedMotionEvent, ...] = (),
+    duration_frames: int = 300,
 ) -> CreativeIntent:
     refs = sorted({ref for item in (*targets, *motion) for ref in item.evidence_refs})
     evidence = tuple(
         EvidenceItem(
             evidence_ref=ref,
             evidence_kind="visual",
-            source=SourceInterval.from_seconds(0, 10),
+            source=SourceInterval.from_seconds(0, duration_frames / 30),
             confidence=0.95,
             artifact_fingerprint=(str(index + 1) * 64)[:64],
             provenance=f"vision:{ref}",
@@ -69,8 +74,8 @@ def _intent(
         source_output_mapping=SourceOutputTimeMap(segments=(
             EditMapSegment(
                 map_id="edit-001",
-                source=SourceInterval.from_seconds(0, 10),
-                output=OutputInterval(start_frame=0, end_frame=300),
+                source=SourceInterval.from_seconds(0, duration_frames / 30),
+                output=OutputInterval(start_frame=0, end_frame=duration_frames),
             ),
         )),
         evidence_fingerprint="b" * 64,
@@ -137,6 +142,7 @@ def _observation(
 
 
 def test_semantic_target_timeline_selects_single_screen_product_and_group_layouts() -> None:
+    config = CompositionPlannerConfig()
     targets = (
         _target(
             "speaker-target", AttentionTarget.SPEAKER, 0, 120, "speaker-evidence",
@@ -163,6 +169,7 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
 
     plan = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
+        config=config,
     )
 
     assert plan.schema_version == "7D.composition-plan.1"
@@ -177,6 +184,17 @@ def test_semantic_target_timeline_selects_single_screen_product_and_group_layout
     assert all(segment.fallback != "fit_background" for segment in plan.segments)
     assert all(segment.geometry is not None for segment in plan.segments)
     assert all(segment.target_bounds is not None for segment in plan.segments)
+    group_segment = plan.segments[2]
+    member_cores = tuple(
+        _must_keep_core(observation.bounds, config)
+        for observation in observations[-2:]
+    )
+    assert group_segment.target_bounds in member_cores
+    assert any(
+        _subject_safe_area_containment(core, group_segment.crop, config)
+        >= config.minimum_target_containment
+        for core in member_cores
+    )
     assert plan.quality_report.metrics.layout_switch_count == 2
     assert plan.quality_report.metrics.layout_switches_per_minute == 12.0
 
@@ -395,23 +413,112 @@ def test_sparse_target_crop_is_held_without_extending_target_evidence() -> None:
     )
 
     assert [(item.output.start_frame, item.output.end_frame) for item in plan.segments] == [
-        (0, 8), (8, 9), (9, 53), (53, 300),
+        (0, 8), (8, 9), (9, 98), (98, 300),
     ]
     acquired = plan.segments[1]
     held = plan.segments[2]
     released = plan.segments[3]
     assert acquired.target == AttentionTarget.SPEAKER
     assert acquired.evidence_refs == ("speaker-evidence",)
-    assert held.target == AttentionTarget.SPEAKER
-    assert held.target_ref == "speaker-a"
-    assert held.subject_lock_state == "TEMPORARILY_OCCLUDED"
+    assert held.target == AttentionTarget.STABLE_SOURCE
+    assert held.target_ref is None
+    assert held.subject_lock_state == "EVIDENCE_GAP"
     assert held.fallback == "stable_source"
     assert held.crop != NormalizedRect(x=0, y=0, width=1, height=1)
     assert held.geometry is not None
-    assert held.geometry.target_regions
-    assert released.fallback == "stable_source"
+    assert not held.geometry.target_regions
+    assert released.target == AttentionTarget.STABLE_SOURCE
+    assert released.target_ref is None
+    assert released.evidence_refs == ()
+    assert released.fallback == "wider_crop"
     assert released.layout == acquired.layout
+    assert released.layout != LayoutFamily.FIT_BACKGROUND
+    assert held.crop == released.crop
+    assert held.crop.x == pytest.approx(acquired.crop.x, abs=1e-7)
+    assert held.crop.y == pytest.approx(acquired.crop.y, abs=1e-7)
+    assert held.crop.width == pytest.approx(acquired.crop.width, abs=1e-7)
+    assert held.crop.height == pytest.approx(acquired.crop.height, abs=1e-7)
+    assert released.crop.x > 0.4
+    observation_center = observation.bounds.x + observation.bounds.width / 2
+    assert released.crop.x <= observation_center <= released.crop.x + released.crop.width
+    assert not released.geometry.target_regions
+    assert "STALE_TARGET_RELEASED_TO_WIDE_CROP:98" in plan.diagnostics
     assert "SHOT_SUBJECT_LOCK:0:speaker-a" in plan.diagnostics
+
+
+def test_expired_stale_crop_uses_the_next_trusted_character_without_claiming_identity() -> None:
+    targets = (
+        _target(
+            "series-left", AttentionTarget.SPEAKER, 274, 278, "left-evidence",
+            target_ref="coarse-scene-speaker",
+        ),
+        _target(
+            "series-right", AttentionTarget.SPEAKER, 562, 566, "right-evidence",
+            target_ref="coarse-scene-speaker",
+        ),
+    )
+    observations = (
+        _observation(
+            "left-character", 275, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "left-evidence", 0.28,
+        ),
+        _observation(
+            "right-character", 563, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "right-evidence", 0.48,
+        ),
+    )
+    config = CompositionPlannerConfig(subject_occlusion_hold_frames=90)
+
+    plan = build_composition_plan(
+        _intent(targets, duration_frames=700), observations,
+        source_width=854, source_height=428, config=config,
+    )
+
+    released = next(item for item in plan.segments if item.output.start_frame == 365)
+    reacquired = next(item for item in plan.segments if item.output.start_frame == 562)
+    future_center = observations[1].bounds.x + observations[1].bounds.width / 2
+    assert released.target == AttentionTarget.STABLE_SOURCE
+    assert released.target_ref is None
+    assert released.evidence_refs == ()
+    assert released.fallback == "wider_crop"
+    assert released.camera_mode == "GROUP"
+    assert released.camera_phase == "HOLD"
+    assert released.crop.x <= future_center <= released.crop.x + released.crop.width
+    assert released.crop.x == pytest.approx(reacquired.crop.x, abs=1e-7)
+    assert released.crop.width == pytest.approx(reacquired.crop.width, abs=1e-7)
+    assert reacquired.movement_reason == "target_switch"
+    assert plan.quality_report.metrics.jitter_event_count == 0
+    assert plan.quality_report.metrics.max_velocity_per_frame == 0
+    assert "STALE_TARGET_RELEASED_TO_FUTURE_CHARACTER:365" in plan.diagnostics
+
+
+def test_future_character_fallback_never_looks_across_its_observation_scene_cut() -> None:
+    decision = _target(
+        "future-speaker", AttentionTarget.SPEAKER, 190, 210, "future-evidence",
+        target_ref="future-speaker",
+    )
+    observation = _observation(
+        "future-character", 200, AttentionTarget.SPEAKER,
+        "future-speaker", "future-evidence", 0.72,
+    ).model_copy(update={"scene_id": "scene-after-cut"})
+    future = _TargetState(
+        decision=decision,
+        target_ref="future-speaker",
+        bounds=observation.bounds,
+        confidence=observation.effective_confidence,
+        observations=(observation,),
+    )
+    work = (
+        (OutputInterval(start_frame=0, end_frame=100), None),
+        (OutputInterval(start_frame=190, end_frame=210), future),
+    )
+
+    assert _next_character_fallback_state(
+        work, 0, frozenset({0}), CompositionPlannerConfig().enter_confidence,
+    ) == future
+    assert _next_character_fallback_state(
+        work, 0, frozenset({0, 200}), CompositionPlannerConfig().enter_confidence,
+    ) is None
 
 
 def test_sparse_podcast_observations_prefer_speaker_family_without_fit_background() -> None:
@@ -672,11 +779,17 @@ def test_same_target_reframe_waits_for_a_second_spatial_observation() -> None:
 
     plan = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
-        config=CompositionPlannerConfig(minimum_hold_frames=1),
+        config=CompositionPlannerConfig(
+            minimum_hold_frames=1,
+            subject_occlusion_hold_frames=300,
+        ),
     )
 
     by_start = {segment.output.start_frame: segment for segment in plan.segments}
-    assert {item.target_ref for item in by_start.values()} == {"speaker-a"}
+    assert by_start[90].target_ref is None
+    assert by_start[90].fallback == "wider_crop"
+    assert by_start[180].target_ref == "speaker-a"
+    assert "TARGET_REFRAME_CONFIRMED:180" in plan.diagnostics
     assert sum(item.camera_phase == "MOVE" for item in by_start.values()) <= 1
     assert all(item.camera_mode != "TRACKING" for item in by_start.values())
 
@@ -695,12 +808,330 @@ def test_same_target_reframe_does_not_confirm_from_distant_sparse_evidence() -> 
 
     plan = build_composition_plan(
         _intent(targets), observations, source_width=1920, source_height=1080,
-        config=CompositionPlannerConfig(minimum_hold_frames=1),
+        config=CompositionPlannerConfig(
+            minimum_hold_frames=1,
+            subject_occlusion_hold_frames=300,
+        ),
     )
 
     by_start = {segment.output.start_frame: segment for segment in plan.segments}
-    assert {item.target_ref for item in by_start.values()} == {"speaker-a"}
-    assert len({item.crop for item in by_start.values()}) == 1
+    assert by_start[90].target_ref is None
+    assert by_start[180].target_ref is None
+    assert by_start[90].fallback == by_start[180].fallback == "wider_crop"
+    assert all(item.camera_phase == "HOLD" for item in by_start.values())
+    assert plan.quality_report.metrics.target_switch_count == 0
+    assert "TARGET_REFRAME_CONFIRMED:180" not in plan.diagnostics
+
+
+def test_stale_same_ref_reacquisition_immediately_frames_the_new_person() -> None:
+    targets = (
+        _target(
+            "speaker-old", AttentionTarget.SPEAKER, 0, 60, "old-evidence",
+            target_ref="scene-level-speaker",
+        ),
+        _target(
+            "speaker-new", AttentionTarget.SPEAKER, 150, 210, "new-evidence",
+            target_ref="scene-level-speaker",
+        ),
+    )
+    observations = (
+        _observation(
+            "old-person", 30, AttentionTarget.SPEAKER,
+            "scene-level-speaker", "old-evidence", 0.08,
+        ),
+        _observation(
+            "new-person", 180, AttentionTarget.SPEAKER,
+            "scene-level-speaker", "new-evidence", 0.74,
+        ),
+    )
+    config = CompositionPlannerConfig(
+        minimum_hold_frames=240,
+        switch_cooldown_frames=240,
+        subject_occlusion_hold_frames=90,
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations,
+        source_width=1920, source_height=1080, config=config,
+    )
+
+    handoff = next(item for item in plan.segments if item.output.start_frame == 150)
+    assert handoff.target_ref == "scene-level-speaker"
+    assert handoff.movement_reason == "target_switch"
+    assert handoff.subject_lock_state == "SWITCH_CONFIRMED"
+    assert handoff.camera_phase == "HOLD"
+    assert handoff.target_bounds is not None
+    assert _subject_safe_area_containment(
+        handoff.target_bounds, handoff.crop, config,
+    ) >= config.minimum_target_containment
+    new_center = observations[1].bounds.x + observations[1].bounds.width / 2
+    assert handoff.crop.x <= new_center <= handoff.crop.x + handoff.crop.width
+    assert "STALE_TARGET_RELEASED:150" in plan.diagnostics
+    assert "TARGET_REFRAME_HELD:150" not in plan.diagnostics
+
+
+def test_same_position_after_a_long_gap_is_not_a_false_target_switch() -> None:
+    targets = (
+        _target(
+            "speaker-old", AttentionTarget.SPEAKER, 0, 30, "old-evidence",
+            target_ref="scene-level-speaker",
+        ),
+        _target(
+            "speaker-return", AttentionTarget.SPEAKER, 150, 180, "new-evidence",
+            target_ref="scene-level-speaker",
+        ),
+    )
+    observations = (
+        _observation(
+            "old-position", 15, AttentionTarget.SPEAKER,
+            "scene-level-speaker", "old-evidence", 0.30,
+        ),
+        _observation(
+            "same-position", 165, AttentionTarget.SPEAKER,
+            "scene-level-speaker", "new-evidence", 0.30,
+        ),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations,
+        source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(subject_occlusion_hold_frames=90),
+    )
+
+    reacquired = next(item for item in plan.segments if item.output.start_frame == 150)
+    assert reacquired.target_ref == "scene-level-speaker"
+    assert reacquired.movement_reason == "target_acquired"
+    assert plan.quality_report.metrics.target_switch_count == 0
+    assert not any(
+        item.startswith("STALE_TARGET_RELEASED:") for item in plan.diagnostics
+    )
+
+
+def test_conflicting_pending_reframes_keep_the_first_character_crop_until_release() -> None:
+    targets = (
+        _target(
+            "speaker-a", AttentionTarget.SPEAKER, 0, 90, "evidence-a",
+            target_ref="coarse-scene-speaker",
+        ),
+        _target(
+            "speaker-b", AttentionTarget.SPEAKER, 90, 180, "evidence-b",
+            target_ref="coarse-scene-speaker",
+        ),
+        _target(
+            "speaker-c", AttentionTarget.SPEAKER, 180, 270, "evidence-c",
+            target_ref="coarse-scene-speaker",
+        ),
+        _target(
+            "speaker-d", AttentionTarget.SPEAKER, 420, 440, "evidence-d",
+            target_ref="coarse-scene-speaker",
+        ),
+    )
+    observations = (
+        _observation(
+            "person-a", 30, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "evidence-a", 0.08,
+        ),
+        _observation(
+            "person-b", 120, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "evidence-b", 0.62,
+        ),
+        _observation(
+            "person-c", 210, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "evidence-c", 0.32,
+        ),
+        _observation(
+            "person-d", 425, AttentionTarget.SPEAKER,
+            "coarse-scene-speaker", "evidence-d", 0.80,
+        ),
+    )
+    gap_boundary = ResolvedMotionEvent(
+        decision_id="gap-boundary",
+        source=SourceInterval.from_seconds(12, 13),
+        output=OutputInterval(start_frame=360, end_frame=390),
+        confidence=0.9,
+        evidence_refs=("evidence-d",),
+        purpose=MotionPurpose.EVIDENCE_REVEAL,
+        domain=MotionDomain.COMPOSITION,
+        intensity=Intensity.BALANCED,
+    )
+    config = CompositionPlannerConfig(
+        minimum_hold_frames=1,
+        subject_occlusion_hold_frames=300,
+    )
+
+    plan = build_composition_plan(
+        _intent(targets, motion=(gap_boundary,), duration_frames=450), observations,
+        source_width=1920, source_height=1080, config=config,
+    )
+
+    by_start = {segment.output.start_frame: segment for segment in plan.segments}
+    held = tuple(by_start[frame] for frame in (90, 180, 270, 330, 360, 390))
+    assert len({item.crop for item in held}) == 1
+    assert all(item.target_ref is None for item in held)
+    assert all(item.camera_phase == "HOLD" for item in held)
+    person_b_center = observations[1].bounds.x + observations[1].bounds.width / 2
+    assert held[0].crop.x <= person_b_center <= held[0].crop.x + held[0].crop.width
+    assert by_start[420].movement_reason == "target_switch"
+    assert plan.quality_report.metrics.target_switch_count == 1
+    assert "TARGET_REFRAME_CONFLICT_SUPPRESSED:180" in plan.diagnostics
+    assert "PENDING_REFRAME_RELEASED_TO_WIDE_CROP:330" in plan.diagnostics
+
+
+def test_confirmed_target_after_sparse_gap_starts_a_new_static_camera_shot() -> None:
+    targets = (
+        _target(
+            "speaker-a", AttentionTarget.SPEAKER, 0, 30, "evidence-a",
+            target_ref="speaker-a",
+        ),
+        _target(
+            "speaker-b", AttentionTarget.SPEAKER, 150, 180, "evidence-b",
+            target_ref="speaker-b",
+        ),
+    )
+    observations = (
+        _observation(
+            "person-a", 15, AttentionTarget.SPEAKER,
+            "speaker-a", "evidence-a", 0.08,
+        ),
+        _observation(
+            "person-b", 165, AttentionTarget.SPEAKER,
+            "speaker-b", "evidence-b", 0.74,
+        ),
+    )
+
+    plan = build_composition_plan(
+        _intent(targets), observations,
+        source_width=1920, source_height=1080,
+        config=CompositionPlannerConfig(
+            minimum_hold_frames=240, switch_cooldown_frames=240,
+        ),
+    )
+
+    handoff = next(item for item in plan.segments if item.output.start_frame == 150)
+    assert handoff.target_ref == "speaker-b"
+    assert handoff.movement_reason == "target_switch"
+    assert handoff.camera_phase == "HOLD"
+    assert len(handoff.crop_keyframes) == 1
+    assert "SHOT_SUBJECT_LOCK:150:speaker-b" in plan.diagnostics
+    assert "TARGET_SWITCH_TIMELY:150" in plan.diagnostics
+
+
+def test_pending_series_reframe_uses_a_character_bearing_safe_crop() -> None:
+    targets = (
+        _target(
+            "series-old", AttentionTarget.SPEAKER, 0, 60, "series-evidence",
+            target_ref="coarse-scene-speaker",
+        ),
+        _target(
+            "series-new", AttentionTarget.SPEAKER, 98, 102, "series-evidence",
+            target_ref="coarse-scene-speaker",
+        ),
+    )
+    old = _observation(
+        "series-old-face", 32, AttentionTarget.SPEAKER,
+        "coarse-scene-speaker", "series-evidence", 0.45, width=0.32,
+    ).model_copy(update={
+        "bounds": NormalizedRect(x=0.45, y=0.09, width=0.32, height=0.52),
+    })
+    new = _observation(
+        "series-new-face", 99, AttentionTarget.SPEAKER,
+        "coarse-scene-speaker", "series-evidence", 0.21, width=0.32,
+    ).model_copy(update={
+        "bounds": NormalizedRect(x=0.21, y=0.05, width=0.32, height=0.52),
+    })
+    config = CompositionPlannerConfig(subject_occlusion_hold_frames=90)
+
+    plan = build_composition_plan(
+        _intent(targets), (old, new),
+        source_width=854, source_height=428, config=config,
+    )
+
+    pending = next(item for item in plan.segments if item.output.contains(
+        OutputInterval(start_frame=99, end_frame=100),
+    ))
+    pending_core = NormalizedRect(
+        x=0.2772, y=0.0656, width=0.1856, height=0.3224,
+    )
+    assert pending.target == AttentionTarget.STABLE_SOURCE
+    assert pending.fallback == "wider_crop"
+    assert pending.camera_mode == "GROUP"
+    assert pending.camera_phase == "HOLD"
+    assert _subject_safe_area_containment(
+        pending_core, pending.crop, config,
+    ) >= config.minimum_target_containment
+    assert all(item.fallback != "fit_background" for item in plan.segments)
+    assert "PENDING_REFRAME_GROUP_CROP:98" in plan.diagnostics
+
+
+def test_protected_wide_group_is_not_dropped_from_a_speaker_scene() -> None:
+    targets = (
+        _target(
+            "series-speaker", AttentionTarget.SPEAKER, 0, 90, "speaker-evidence",
+            target_ref="series-speaker", layouts=(LayoutFamily.STABLE_SPEAKER,),
+        ),
+        _target(
+            "series-group", AttentionTarget.GROUP, 147, 151, "group-evidence",
+            target_ref="series-group", layouts=(LayoutFamily.WIDE_GROUP,),
+        ),
+    )
+    speaker = _observation(
+        "speaker", 30, AttentionTarget.SPEAKER,
+        "series-speaker", "speaker-evidence", 0.37, width=0.24,
+    )
+    group = _observation(
+        "group", 148, AttentionTarget.GROUP,
+        "series-group", "group-evidence", 0.01, width=0.82,
+    ).model_copy(update={
+        "bounds": NormalizedRect(x=0.01, y=0.22, width=0.82, height=0.62),
+        "confidence": 0.81,
+        "protected": True,
+    })
+    config = CompositionPlannerConfig()
+
+    plan = build_composition_plan(
+        _intent(targets), (speaker, group),
+        source_width=854, source_height=428, config=config,
+    )
+
+    framed = next(item for item in plan.segments if item.output.start_frame == 147)
+    assert framed.target == AttentionTarget.GROUP
+    assert framed.target_ref == "series-group"
+    assert framed.target_bounds is not None
+    assert framed.fallback == "wider_crop"
+    assert _subject_safe_area_containment(
+        framed.target_bounds, framed.crop, config,
+    ) >= config.minimum_target_containment
+    group_center = group.bounds.x + group.bounds.width / 2
+    assert framed.crop.x <= group_center <= framed.crop.x + framed.crop.width
+    assert all(item.fallback != "fit_background" for item in plan.segments)
+
+
+def test_static_top_edge_face_preserves_all_available_headroom() -> None:
+    target = _target(
+        "top-edge-speaker", AttentionTarget.SPEAKER, 0, 90, "edge-evidence",
+        target_ref="top-edge-speaker", layouts=(LayoutFamily.STABLE_SPEAKER,),
+    )
+    observation = _observation(
+        "top-edge-face", 30, AttentionTarget.SPEAKER,
+        "top-edge-speaker", "edge-evidence", 0.28, width=0.32,
+    ).model_copy(update={
+        "bounds": NormalizedRect(x=0.28, y=0.0, width=0.32, height=0.52),
+    })
+    config = CompositionPlannerConfig()
+
+    plan = build_composition_plan(
+        _intent((target,)), (observation,),
+        source_width=854, source_height=428, config=config,
+    )
+
+    framed = next(item for item in plan.segments if item.target_bounds is not None)
+    assert framed.crop.y == 0
+    assert framed.crop.height == 1
+    assert framed.target_bounds is not None
+    assert _subject_safe_area_containment(
+        framed.target_bounds, framed.crop, config,
+    ) >= config.minimum_target_containment
+    assert plan.quality_report.status != "BLOCKED"
 
 
 def test_crop_track_respects_velocity_acceleration_and_reports_safe_geometry() -> None:

@@ -38,7 +38,7 @@ from app.creative_contracts import (
 )
 
 
-COMPOSITION_PLANNER_VERSION = "7K.1.confirmed-target-handoff.1"
+COMPOSITION_PLANNER_VERSION = "7K.2.stale-target-safe-framing.2"
 SPLIT_FACE_CAM_RATIO = 0.35
 
 CompositionFallback = Literal["none", "wider_crop", "stable_source", "fit_background"]
@@ -82,6 +82,12 @@ class CompositionPlannerConfig:
     local_burst_window_frames: int = 90
     maximum_local_layout_switches: int = 1
     target_margin_ratio: float = 0.16
+    # Human headroom is asymmetric in a vertical reframe: horizontal title/
+    # platform chrome needs the wider inset, while a full-height source crop
+    # cannot manufacture 16% of vertical headroom that is absent upstream.
+    # Eight percent keeps a visible head away from the output edge without
+    # forcing an impossible blur/pad escape for ordinary widescreen footage.
+    subject_vertical_safe_margin_ratio: float = 0.08
     # Vision subject bounds often include shoulders or the edge of a shared
     # shot. On a 2:1 source a true 9:16 reframe cannot contain that entire
     # coarse box even when the face/semantic centre is safely preserved.
@@ -123,6 +129,8 @@ class CompositionPlannerConfig:
             raise ValueError("composition local switch limit must be non-negative")
         if not 0 < self.minimum_target_containment <= 1:
             raise ValueError("composition target containment must be normalized and positive")
+        if not 0 <= self.subject_vertical_safe_margin_ratio < 0.5:
+            raise ValueError("composition subject vertical safe margin must be normalized")
         if not 0 < self.same_target_reframe_distance <= 1:
             raise ValueError("composition same-target reframe distance must be normalized and positive")
         if self.same_target_reframe_confirmation_window_frames < 1:
@@ -258,7 +266,10 @@ class CompositionPlanner:
         current: _TargetState | None = None
         held_since = -100_000
         last_switch = -100_000
+        last_seen_frame = -100_000
         last_confirmed: _TargetState | None = None
+        fallback_anchor: NormalizedRect | None = None
+        fallback_anchor_origin: Literal["selected", "pending", "released"] | None = None
         pending_reframe: _TargetState | None = None
         suppressed = 0
         previous_punch = False
@@ -270,11 +281,11 @@ class CompositionPlanner:
             frame = interval.start_frame
             cut = frame in cuts
 
-            # A target may disappear before the minimum hold has elapsed.
-            # Split the otherwise-atomic interval at the exact hold boundary
-            # so a stable crop cannot be kept beyond the configured limit.
-            # Scene/edit-map cuts are hard resets and never inherit this hold.
-            hold_end = held_since + self.config.minimum_hold_frames
+            # Target switch hysteresis and evidence occlusion are separate
+            # clocks.  A crop may bridge a short detector gap, but never live
+            # past the configured evidence lifetime merely because the shot
+            # has no later atomic boundary.
+            hold_end = last_seen_frame + self.config.subject_occlusion_hold_frames
             needs_hold_boundary = (
                 current is not None
                 and not cut
@@ -302,58 +313,76 @@ class CompositionPlanner:
             if cut:
                 current = None
                 last_confirmed = None
+                fallback_anchor = None
+                fallback_anchor_origin = None
                 pending_reframe = None
                 held_since = frame
                 last_switch = frame
+                last_seen_frame = -100_000
                 reason = "scene_reset"
             if candidate is not None and candidate.confidence >= self.config.enter_confidence:
                 if current is None:
-                    if (
-                        last_confirmed is not None
-                        and candidate.key == last_confirmed.key
+                    reference = last_confirmed
+                    requires_confirmation = bool(
+                        reference is not None
+                        and candidate.key == reference.key
                         and _same_target_reframe_requires_confirmation(
-                            candidate, last_confirmed, self.config,
+                            candidate, reference, self.config,
                         )
-                    ):
+                    )
+                    stale_reacquisition = bool(
+                        reference is not None
+                        and _target_state_is_stale(candidate, reference, self.config)
+                    )
+                    confirmed_reframe = bool(
+                        pending_reframe is not None
+                        and pending_reframe.key == candidate.key
+                        and not _same_target_reframe_requires_confirmation(
+                            candidate, pending_reframe, self.config,
+                        )
+                        and _reframe_confirmation_is_timely(
+                            candidate, pending_reframe, self.config,
+                        )
+                    )
+                    if requires_confirmation and not stale_reacquisition and not confirmed_reframe:
+                        current = reference
                         if (
-                            pending_reframe is not None
-                            and pending_reframe.key == candidate.key
-                            and not _same_target_reframe_requires_confirmation(
-                                candidate, pending_reframe, self.config,
-                            )
-                            and _reframe_confirmation_is_timely(
+                            pending_reframe is None
+                            or pending_reframe.key != candidate.key
+                            or not _reframe_confirmation_is_timely(
                                 candidate, pending_reframe, self.config,
                             )
                         ):
-                            selected = candidate
-                            current = candidate
-                            last_confirmed = candidate
-                            pending_reframe = None
-                            held_since = frame
-                            diagnostics.append(f"TARGET_REFRAME_CONFIRMED:{frame}")
-                            if not cut:
-                                reason = "target_acquired"
-                        else:
-                            current = last_confirmed
                             pending_reframe = candidate
-                            held_since = frame
-                            fallback = "stable_source"
-                            reason = "safe_fallback"
-                            hold_reframe = True
-                            diagnostics.append(f"TARGET_REFRAME_HELD:{frame}")
+                        else:
+                            diagnostics.append(f"TARGET_REFRAME_CONFLICT_SUPPRESSED:{frame}")
+                        fallback = "stable_source"
+                        reason = "safe_fallback"
+                        hold_reframe = True
+                        diagnostics.append(f"TARGET_REFRAME_HELD:{frame}")
                     else:
                         selected = candidate
-                        current = candidate
-                        last_confirmed = candidate
-                        pending_reframe = None
-                        held_since = frame
-                        if not cut:
+                        if confirmed_reframe:
+                            diagnostics.append(f"TARGET_REFRAME_CONFIRMED:{frame}")
+                        if (
+                            reference is not None
+                            and _is_explicit_target_handoff(reference, candidate, interval)
+                            and (reference.key != candidate.key or stale_reacquisition)
+                        ):
+                            reason = "target_switch"
+                            diagnostics.append(f"TARGET_SWITCH_TIMELY:{frame}")
+                            if stale_reacquisition:
+                                diagnostics.append(f"STALE_TARGET_RELEASED:{frame}")
+                        elif not cut:
                             reason = "target_acquired"
                 elif candidate.key == current.key:
                     if _same_target_reframe_requires_confirmation(
                         candidate, current, self.config,
                     ):
-                        if (
+                        stale_reacquisition = _target_state_is_stale(
+                            candidate, current, self.config,
+                        )
+                        confirmed_reframe = (
                             pending_reframe is not None
                             and pending_reframe.key == candidate.key
                             and not _same_target_reframe_requires_confirmation(
@@ -362,14 +391,26 @@ class CompositionPlanner:
                             and _reframe_confirmation_is_timely(
                                 candidate, pending_reframe, self.config,
                             )
-                        ):
+                        )
+                        if stale_reacquisition:
                             selected = candidate
-                            current = candidate
-                            last_confirmed = candidate
-                            pending_reframe = None
+                            reason = "target_switch"
+                            diagnostics.append(f"TARGET_SWITCH_TIMELY:{frame}")
+                            diagnostics.append(f"STALE_TARGET_RELEASED:{frame}")
+                        elif confirmed_reframe:
+                            selected = candidate
                             diagnostics.append(f"TARGET_REFRAME_CONFIRMED:{frame}")
                         else:
-                            pending_reframe = candidate
+                            if (
+                                pending_reframe is None
+                                or pending_reframe.key != candidate.key
+                                or not _reframe_confirmation_is_timely(
+                                    candidate, pending_reframe, self.config,
+                                )
+                            ):
+                                pending_reframe = candidate
+                            else:
+                                diagnostics.append(f"TARGET_REFRAME_CONFLICT_SUPPRESSED:{frame}")
                             fallback = "stable_source"
                             reason = "safe_fallback"
                             hold_reframe = True
@@ -396,20 +437,10 @@ class CompositionPlanner:
                         # evidence-backed handoff rather than a speculative
                         # camera ping-pong proposal.
                         selected = candidate
-                        current = candidate
-                        last_confirmed = candidate
-                        pending_reframe = None
-                        held_since = frame
-                        last_switch = frame
                         reason = "target_switch"
                         diagnostics.append(f"TARGET_SWITCH_TIMELY:{frame}")
                     elif hold_ok and cooldown_ok and advantage_ok:
                         selected = candidate
-                        current = candidate
-                        last_confirmed = candidate
-                        pending_reframe = None
-                        held_since = frame
-                        last_switch = frame
                         reason = "target_switch"
                     else:
                         suppressed += 1
@@ -419,15 +450,12 @@ class CompositionPlanner:
             elif current is not None and candidate is not None and candidate.key == current.key:
                 if candidate.confidence >= self.config.exit_confidence:
                     selected = candidate
-                    current = candidate
-                    last_confirmed = candidate
-                    pending_reframe = None
                 else:
                     current = None
             elif (
                 current is not None
                 and not cut
-                and frame - held_since < self.config.minimum_hold_frames
+                and frame - last_seen_frame < self.config.subject_occlusion_hold_frames
             ):
                 # Preserve visual continuity after sparse evidence ends, but do
                 # not extend the semantic target claim.  The emitted segment
@@ -435,32 +463,165 @@ class CompositionPlanner:
                 # is inherited from the last acquired state.
                 fallback = "stable_source"
                 reason = "safe_fallback"
-                hold_reframe = pending_reframe is not None
-            elif pending_reframe is not None and last_confirmed is not None:
-                # Sparse target evidence cannot turn an unconfirmed move into
-                # an eager pan. Keep the last safe crop until the next
-                # corroborating observation or an actual scene reset.
-                current = last_confirmed
-                fallback = "stable_source"
-                reason = "safe_fallback"
                 hold_reframe = True
             else:
                 current = None
+                if (
+                    pending_reframe is not None
+                    and frame - _target_state_last_frame(pending_reframe)
+                    > self.config.same_target_reframe_confirmation_window_frames
+                ):
+                    # The high-confidence proposal was not corroborated as an
+                    # identity switch, but its observed geometry remains a
+                    # safer character-bearing fallback than snapping back to
+                    # a stale person on the opposite side of the frame.
+                    diagnostics.append(f"PENDING_REFRAME_RELEASED_TO_WIDE_CROP:{frame}")
+                    pending_reframe = None
+
+            if selected is not None:
+                current = selected
+                last_confirmed = selected
+                fallback_anchor = selected.bounds
+                fallback_anchor_origin = "selected"
+                pending_reframe = None
+                last_seen_frame = _target_state_last_frame(selected)
+                if reason == "target_switch":
+                    held_since = frame
+                    last_switch = frame
+                elif reason == "target_acquired":
+                    held_since = frame
 
             punch_event = _punch_event(intent, interval, selected)
-            if punch_event is not None:
+            if punch_event is not None and reason not in {"target_switch", "scene_reset"}:
                 reason = "editorial_punch_in"
-            elif previous_punch and selected is not None:
+            elif previous_punch and selected is not None and reason == "none":
                 reason = "punch_out"
             previous_punch = punch_event is not None
 
             if selected is None:
-                if fallback == "stable_source" and current is not None:
-                    crop, _crop_fallback = _target_crop(
-                        current.bounds, source_width, source_height, self.config,
+                if pending_reframe is not None and last_confirmed is not None:
+                    # A short-gap spatial outlier is not allowed to jerk the
+                    # camera, but keeping only the old narrow crop can hide a
+                    # real new character for the whole confirmation window.
+                    # Present the widest legal crop around both proven human
+                    # regions until evidence confirms one side.
+                    group_bounds = _union_rect((
+                        last_confirmed.bounds, pending_reframe.bounds,
+                    ))
+                    crop, _layout, _fallback = _anchored_calm_fallback_crop(
+                        group_bounds, source_width, source_height,
                     )
+                    pending_core = _protected_core(
+                        pending_reframe, crop, self.config,
+                    )
+                    confirmed_core = _protected_core(
+                        last_confirmed, crop, self.config,
+                    )
+                    if (
+                        not _rect_center_is_inside(pending_reframe.bounds, crop)
+                        or _subject_safe_area_containment(
+                            pending_core, crop, self.config,
+                        ) < self.config.minimum_target_containment
+                        or _subject_safe_area_containment(
+                            confirmed_core, crop, self.config,
+                        ) < self.config.minimum_target_containment
+                    ):
+                        # Extremely separated people cannot both fit a true
+                        # fill 9:16 crop. Never choose the empty midpoint:
+                        # retain the newly observed person in the widest legal
+                        # character-bearing crop while semantic identity stays
+                        # pending.
+                        crop, _layout, _fallback = _anchored_calm_fallback_crop(
+                            pending_reframe.bounds,
+                            source_width,
+                            source_height,
+                        )
+                    layout = LayoutFamily.WIDE_GROUP
+                    fallback = "wider_crop"
+                    # Persist the exact wide crop geometry, without adopting
+                    # the pending target's semantic identity. If confirmation
+                    # never arrives, expiry therefore stays calm instead of
+                    # snapping back to the old person.
+                    fallback_anchor = crop
+                    fallback_anchor_origin = "pending"
+                    diagnostics.append(f"PENDING_REFRAME_GROUP_CROP:{frame}")
+                elif fallback == "stable_source" and current is not None:
+                    if current.decision.target in {
+                        AttentionTarget.SPEAKER,
+                        AttentionTarget.SUBJECT,
+                        AttentionTarget.REACTION,
+                        AttentionTarget.GROUP,
+                    }:
+                        crop, _layout, _fallback = _anchored_calm_fallback_crop(
+                            current.bounds, source_width, source_height,
+                        )
+                    else:
+                        crop, _crop_fallback = _target_crop(
+                            current.bounds, source_width, source_height, self.config,
+                        )
                     layout = _layout_for(current, "none")
                     diagnostics.append(f"STABLE_CROP_HELD:{frame}")
+                elif fallback_anchor is not None:
+                    # Once target evidence expires, release its identity and
+                    # evidence refs. If another trusted human observation is
+                    # already known later in this source scene, the evidence-
+                    # free group fallback may use its geometry without adopting
+                    # its identity. This releases a stale side of the frame at
+                    # the occlusion deadline instead of showing empty/blurred
+                    # background until the next sparse observation arrives.
+                    # An expired *pending* proposal keeps its own exact latched
+                    # crop so conflicting proposals cannot create ping-pong.
+                    future_anchor = (
+                        _next_character_fallback_state(
+                            work, index, cuts, self.config.enter_confidence,
+                        )
+                        if (
+                            fallback_anchor_origin == "selected"
+                            and last_confirmed is not None
+                            and last_confirmed.decision.target in {
+                                AttentionTarget.SPEAKER,
+                                AttentionTarget.SUBJECT,
+                                AttentionTarget.REACTION,
+                                AttentionTarget.GROUP,
+                            }
+                        )
+                        else None
+                    )
+                    held_crop, _held_layout, _held_fallback = (
+                        _anchored_calm_fallback_crop(
+                            fallback_anchor, source_width, source_height,
+                        )
+                    )
+                    future_core = (
+                        _protected_core(future_anchor, held_crop, self.config)
+                        if future_anchor is not None else None
+                    )
+                    if (
+                        future_anchor is not None
+                        and future_core is not None
+                        and _subject_safe_area_containment(
+                            future_core, held_crop, self.config,
+                        ) < self.config.minimum_target_containment
+                    ):
+                        fill = _vertical_fill_crop(source_width, source_height)
+                        anchor = (
+                            _group_character_bounds(
+                                future_anchor, fill, self.config,
+                            )
+                            if future_anchor.decision.target == AttentionTarget.GROUP
+                            else future_anchor.bounds
+                        )
+                        crop, layout, fallback = _anchored_calm_fallback_crop(
+                            anchor, source_width, source_height,
+                        )
+                        fallback_anchor = crop
+                        diagnostics.append(
+                            f"STALE_TARGET_RELEASED_TO_FUTURE_CHARACTER:{frame}"
+                        )
+                    else:
+                        crop, layout, fallback = held_crop, _held_layout, _held_fallback
+                    fallback_anchor_origin = "released"
+                    diagnostics.append(f"STALE_TARGET_RELEASED_TO_WIDE_CROP:{frame}")
                 else:
                     crop, layout, fallback = _calm_fallback_crop(source_width, source_height)
                     diagnostics.append(f"LOW_CONFIDENCE_SAFE_FRAME:{frame}")
@@ -470,13 +631,16 @@ class CompositionPlanner:
                     evidence_refs=(), fallback=fallback,
                     reason="scene_reset" if cut else "safe_fallback",
                     punch_event=None,
-                    hold_reframe=hold_reframe,
+                    # Scene-family and virtual-camera lookahead must not turn
+                    # an evidence-free fallback back into a stale semantic
+                    # target. The state machine already chose its safe crop.
+                    hold_reframe=True,
                 ))
                 index += 1
                 continue
 
-            crop, crop_fallback = _target_crop(
-                selected.bounds, source_width, source_height, self.config,
+            crop, crop_fallback = _target_crop_for_state(
+                selected, source_width, source_height, self.config,
             )
             layout = _layout_for(selected, crop_fallback)
             if crop_fallback != "none":
@@ -515,7 +679,10 @@ class CompositionPlanner:
             )
             fallback = item.fallback
             layout = item.layout
-            core_bounds = _must_keep_core(item.state.bounds, self.config) if item.state is not None else None
+            core_bounds = (
+                _protected_core(item.state, item.desired_crop, self.config)
+                if item.state is not None else None
+            )
             track_requires_recovery = (
                 _track_requires_safety_recovery(keyframes, core_bounds, self.config)
                 if item.state else False
@@ -761,8 +928,8 @@ def _lock_scene_layout_families(
             # false fit-background fallback; scene-locked composition permits
             # tracking inside the chosen family, not observation-local zooms.
             scene_crops = [
-                _target_crop(
-                    item.state.bounds, source_width, source_height, config,
+                _target_crop_for_state(
+                    item.state, source_width, source_height, config,
                 )[0]
                 for item in family_evidence if item.state is not None
             ]
@@ -810,12 +977,20 @@ def _lock_scene_layout_families(
             # later target and undo that safety decision.
             crop = (
                 item.desired_crop
-                if item.hold_reframe
+                if item.hold_reframe and family != LayoutFamily.SPLIT
                 else _split_facecam_crop(
                     anchor, source_width, source_height, config,
                 )
                 if family == LayoutFamily.SPLIT else
-                _centered_rect(anchor.bounds, width, height)
+                _centered_rect(
+                    _group_character_bounds(
+                        anchor,
+                        _vertical_fill_crop(source_width, source_height),
+                        config,
+                    ) if anchor.decision.target == AttentionTarget.GROUP else anchor.bounds,
+                    width,
+                    height,
+                )
             )
             retained_state = (
                 item.state
@@ -829,7 +1004,10 @@ def _lock_scene_layout_families(
                 desired_crop=crop,
                 fallback=(
                     item.fallback
-                    if retained_state is not None and item.fallback != "fit_background"
+                    if (
+                        item.fallback != "fit_background"
+                        and (retained_state is not None or item.fallback == "wider_crop")
+                    )
                     else "stable_source" if retained_state is None else "none"
                 ),
                 target=(item.target if retained_state is not None else AttentionTarget.STABLE_SOURCE),
@@ -1048,7 +1226,21 @@ def _state_matches_family(item: _AtomicState, family: LayoutFamily) -> bool:
     if item.state is None:
         return False
     if family == LayoutFamily.STABLE_SPEAKER:
-        return item.target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}
+        # A protected group observation is still human framing evidence.  It
+        # may share the surrounding speaker presentation family, but it must
+        # retain its own bounds so the camera can choose the wider/group-safe
+        # crop instead of silently dropping the people from containment QA.
+        if item.target in {AttentionTarget.SPEAKER, AttentionTarget.SUBJECT}:
+            return True
+        if item.target == AttentionTarget.GROUP:
+            return (
+                any(observation.protected for observation in item.state.observations)
+                or item.state.bounds.width >= 0.5
+            )
+        return (
+            item.target == AttentionTarget.REACTION
+            and any(observation.protected for observation in item.state.observations)
+        )
     if family == LayoutFamily.SINGLE_SUBJECT:
         return item.target == AttentionTarget.SUBJECT
     if family == LayoutFamily.SPLIT:
@@ -1081,7 +1273,9 @@ def _speaker_anchor_within_group(
 
 
 def _adopt_layout_if_safe(item: _AtomicState, donor: _AtomicState) -> _AtomicState | None:
-    if item.punch_event is not None:
+    if item.punch_event is not None or (
+        item.hold_reframe and item.desired_crop != donor.desired_crop
+    ):
         return None
     crop = donor.desired_crop
     if (
@@ -1165,12 +1359,11 @@ def _starts_confirmed_target_handoff(
     face; quick unconfirmed proposals still never reach this point.
     """
 
-    return (
-        current.reason == "target_switch"
-        and previous.state is not None
-        and current.state is not None
-        and previous.state.key != current.state.key
-    )
+    # The immediately preceding interval is commonly an evidence-free gap.
+    # The state machine's admitted ``target_switch`` marker is authoritative;
+    # requiring a non-null adjacent target made the shot planner swallow real
+    # A -> gap -> B handoffs and restore A as the shot lock.
+    return current.reason == "target_switch" and current.state is not None
 
 
 def _plan_one_source_shot(
@@ -1208,10 +1401,6 @@ def _plan_one_source_shot(
     locked_ref = lock.target_ref
     distinct_refs = {item.state.target_ref for item in evidence if item.state is not None}
     group_mode = len(distinct_refs) > 1
-    lock_states = [item for item in evidence if item.state is not None and item.state.target_ref == locked_ref]
-    fallback_state = lock_states[0].state
-    assert fallback_state is not None
-
     template = _vertical_fill_crop(source_width, source_height)
     constraints: list[tuple[float, float, float, float] | None] = []
     normalized: list[_AtomicState] = []
@@ -1219,28 +1408,19 @@ def _plan_one_source_shot(
         state = item.state
         if state is None:
             normalized.append(replace(
-                item, state=fallback_state, target=fallback_state.decision.target,
-                target_ref=locked_ref, confidence=fallback_state.confidence,
-                subject_lock_state="TEMPORARILY_OCCLUDED", hold_reframe=True,
+                item, subject_lock_state="EVIDENCE_GAP", hold_reframe=True,
             ))
             constraints.append(None)
             continue
-        if state.target_ref != locked_ref:
-            # Fast dialogue gets one stable group framing, not a pan ping-pong.
-            normalized.append(replace(
-                item, state=fallback_state, target=fallback_state.decision.target,
-                target_ref=locked_ref, confidence=fallback_state.confidence,
-                layout=LayoutFamily.WIDE_GROUP if group_mode else item.layout,
-                subject_lock_state="SWITCH_PENDING", hold_reframe=True,
-            ))
-            constraints.append(None)
-            continue
-        core = _must_keep_core(state.bounds, config)
+        core = _protected_core(state, template, config)
         feasible = _feasible_crop_center_range(core, template, config)
         normalized.append(replace(
             item,
+            layout=LayoutFamily.WIDE_GROUP if group_mode else item.layout,
             subject_lock_state=(
-                "SWITCH_CONFIRMED" if item.reason == "target_switch" else "LOCKED"
+                "SWITCH_CONFIRMED" if item.reason == "target_switch"
+                else "SWITCH_PENDING" if state.target_ref != locked_ref
+                else "LOCKED"
             ),
             hold_reframe=True,
         ))
@@ -1290,7 +1470,16 @@ def _plan_one_source_shot(
         center_y = _clamp(desired_y, feasible[2], feasible[3])
         crop = _crop_at_center(template, center_x, center_y)
         for index in range(start, end):
-            crops[index] = crop
+            if constraints[index] is not None:
+                crops[index] = crop
+
+    # Evidence-free spans keep the explicit crop chosen by the state machine:
+    # short occlusions hold the last safe person; expired evidence returns to
+    # the calm actual 9:16 group crop.  They never inherit semantic identity
+    # from the first person in the source shot.
+    for index, crop in enumerate(crops):
+        if crop is None:
+            crops[index] = normalized[index].desired_crop
 
     result: list[_AtomicState] = []
     previous_crop: NormalizedRect | None = None
@@ -1300,6 +1489,48 @@ def _plan_one_source_shot(
             "GROUP" if group_mode else "STATIONARY"
         )
         move_from: NormalizedRect | None = None
+        if item.state is None and item.hold_reframe:
+            # The state machine explicitly owns sparse-evidence fallbacks.
+            # A pending wider/group crop must take effect on the first frame;
+            # attempting to pan a four-frame atomic interval used to keep the
+            # stale crop and mark the safe fallback BLOCKED.
+            result.append(replace(
+                item,
+                desired_crop=crop,
+                hold_reframe=True,
+                camera_mode="GROUP" if item.fallback == "wider_crop" else "STATIONARY",
+                camera_phase="HOLD",
+                move_from=None,
+                movement_explanation="evidence-gap safe framing",
+                subject_lock_state="EVIDENCE_GAP",
+            ))
+            previous_crop = crop
+            continue
+        if (
+            previous_crop is not None
+            and item.state is not None
+            and index > 0
+            and normalized[index - 1].state is None
+        ):
+            # Sparse Vision cannot prove a safe continuous camera move across
+            # the evidence gap. Re-acquire on the admitted crop as a static
+            # shot-local reset; this is calmer and cannot pan through an empty
+            # region between two source shots.
+            result.append(replace(
+                item,
+                desired_crop=crop,
+                hold_reframe=True,
+                camera_mode="GROUP" if group_mode else "STATIONARY",
+                camera_phase="HOLD",
+                move_from=None,
+                movement_explanation="static re-acquisition after evidence gap",
+                subject_lock_state=(
+                    item.subject_lock_state
+                    if item.subject_lock_state != "EVIDENCE_GAP" else "ACQUIRE"
+                ),
+            ))
+            previous_crop = crop
+            continue
         if previous_crop is not None:
             distance_x = abs((crop.x + crop.width / 2) - (previous_crop.x + previous_crop.width / 2))
             distance_y = abs((crop.y + crop.height / 2) - (previous_crop.y + previous_crop.height / 2))
@@ -1331,7 +1562,10 @@ def _plan_one_source_shot(
             item, desired_crop=crop, hold_reframe=move_from is None,
             camera_mode=mode, camera_phase=phase, move_from=move_from,
             movement_explanation=("must_keep_core left the inner comfort zone" if move_from is not None else None),
-            subject_lock_state=lock_state if lock_state != "EVIDENCE_GAP" else "ACQUIRE",
+            subject_lock_state=(
+                "EVIDENCE_GAP" if item.state is None
+                else lock_state if lock_state != "EVIDENCE_GAP" else "ACQUIRE"
+            ),
         ))
         previous_crop = crop
     diagnostics = [f"SHOT_SUBJECT_LOCK:{shot[0].output.start_frame}:{locked_ref}"]
@@ -1360,18 +1594,104 @@ def _must_keep_core(bounds: NormalizedRect, config: CompositionPlannerConfig) ->
     )
 
 
+def _protected_core(
+    state: _TargetState,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect:
+    """Return the executable human core for the current presentation.
+
+    Pass-2 group observations are intentionally coarse and may span most of a
+    widescreen frame.  A true fill 9:16 crop cannot contain that whole box.
+    In that case protect a representative central group core at the widest
+    legal crop instead of choosing an empty side crop or a blurred escape.
+    The full group bounds remain available as soft geometry evidence.
+    """
+
+    core = _must_keep_core(state.bounds, config)
+    if state.decision.target != AttentionTarget.GROUP:
+        return core
+    member = _observed_group_character_bounds(state, crop, config)
+    if member is not None:
+        return _must_keep_core(member, config)
+    maximum_width = crop.width * (1 - 2 * config.target_margin_ratio) * 0.98
+    maximum_height = crop.height * (
+        1 - 2 * config.subject_vertical_safe_margin_ratio
+    ) * 0.98
+    width = min(core.width, maximum_width)
+    height = min(core.height, maximum_height)
+    center_x = state.bounds.x + state.bounds.width / 2
+    center_y = state.bounds.y + state.bounds.height / 2
+    return NormalizedRect(
+        x=round(_clamp(center_x - width / 2, 0, 1 - width), 8),
+        y=round(_clamp(center_y - height / 2, 0, 1 - height), 8),
+        width=round(width, 8),
+        height=round(height, 8),
+    )
+
+
+def _observed_group_character_bounds(
+    state: _TargetState,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect | None:
+    """Select a real group member that can occupy a safe portrait crop."""
+
+    maximum_width = crop.width * (1 - 2 * config.target_margin_ratio) * 0.98
+    maximum_height = crop.height * (
+        1 - 2 * config.subject_vertical_safe_margin_ratio
+    ) * 0.98
+    fitting = [
+        observation for observation in state.observations
+        if _must_keep_core(observation.bounds, config).width <= maximum_width
+        and _must_keep_core(observation.bounds, config).height <= maximum_height
+    ]
+    protected = [observation for observation in fitting if observation.protected]
+    candidates = protected or fitting
+    if not candidates:
+        return None
+    selected = max(
+        candidates,
+        key=lambda observation: (
+            observation.effective_confidence,
+            -abs(observation.bounds.x + observation.bounds.width / 2 - 0.5),
+            -observation.frame,
+            observation.observation_id,
+        ),
+    )
+    return selected.bounds
+
+
+def _group_character_bounds(
+    state: _TargetState,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect:
+    return _observed_group_character_bounds(state, crop, config) or state.bounds
+
+
 def _feasible_crop_center_range(
     core: NormalizedRect,
     crop: NormalizedRect,
     config: CompositionPlannerConfig,
 ) -> tuple[float, float, float, float]:
     safe_half_x = crop.width * (0.5 - config.target_margin_ratio)
-    safe_half_y = crop.height * (0.5 - config.target_margin_ratio)
+    safe_half_y = crop.height * (
+        0.5 - config.subject_vertical_safe_margin_ratio
+    )
+    vertical = (
+        (0.5, 0.5)
+        if crop.height >= 1 - 1e-7
+        else (
+            max(crop.height / 2, core.y + core.height - safe_half_y),
+            min(1 - crop.height / 2, core.y + safe_half_y),
+        )
+    )
     return (
         max(crop.width / 2, core.x + core.width - safe_half_x),
         min(1 - crop.width / 2, core.x + safe_half_x),
-        max(crop.height / 2, core.y + core.height - safe_half_y),
-        min(1 - crop.height / 2, core.y + safe_half_y),
+        vertical[0],
+        vertical[1],
     )
 
 
@@ -1524,6 +1844,24 @@ def _candidate_for_interval(
     )
 
 
+def _target_crop_for_state(
+    state: _TargetState,
+    source_width: int,
+    source_height: int,
+    config: CompositionPlannerConfig,
+) -> tuple[NormalizedRect, Literal["none", "wider_crop"]]:
+    if state.decision.target != AttentionTarget.GROUP:
+        return _target_crop(state.bounds, source_width, source_height, config)
+    fill = _vertical_fill_crop(source_width, source_height)
+    member = _observed_group_character_bounds(state, fill, config)
+    if member is None:
+        return _target_crop(state.bounds, source_width, source_height, config)
+    crop, _layout, _fallback = _anchored_calm_fallback_crop(
+        member, source_width, source_height,
+    )
+    return crop, "wider_crop"
+
+
 def _target_crop(
     bounds: NormalizedRect,
     source_width: int,
@@ -1544,6 +1882,15 @@ def _target_crop(
     return _centered_rect(bounds, width, height), "wider_crop"
 
 
+def _rect_center_is_inside(bounds: NormalizedRect, crop: NormalizedRect) -> bool:
+    center_x = bounds.x + bounds.width / 2
+    center_y = bounds.y + bounds.height / 2
+    return (
+        crop.x <= center_x <= crop.x + crop.width
+        and crop.y <= center_y <= crop.y + crop.height
+    )
+
+
 def _same_target_reframe_requires_confirmation(
     candidate: _TargetState,
     reference: _TargetState,
@@ -1552,6 +1899,71 @@ def _same_target_reframe_requires_confirmation(
     """Return true when a same-target observation would visibly jump crop."""
 
     return _target_state_distance(candidate, reference) > config.same_target_reframe_distance
+
+
+def _target_state_last_frame(state: _TargetState) -> int:
+    return max(item.frame for item in state.observations)
+
+
+def _next_character_fallback_state(
+    work: Sequence[tuple[OutputInterval, _TargetState | None]],
+    index: int,
+    cuts: frozenset[int],
+    enter_confidence: float,
+) -> _TargetState | None:
+    """Find the next trusted human geometry without crossing a known cut."""
+
+    human_targets = {
+        AttentionTarget.SPEAKER,
+        AttentionTarget.SUBJECT,
+        AttentionTarget.REACTION,
+        AttentionTarget.GROUP,
+    }
+    current_frame = work[index][0].start_frame
+    next_cut = min((frame for frame in cuts if frame > current_frame), default=None)
+    for interval, candidate in work[index + 1:]:
+        if next_cut is not None and interval.start_frame >= next_cut:
+            return None
+        if candidate is None:
+            continue
+        if (
+            candidate.confidence < enter_confidence
+            or not any(observation.protected for observation in candidate.observations)
+            or (
+                next_cut is not None
+                and any(
+                    observation.frame >= next_cut
+                    for observation in candidate.observations
+                )
+            )
+        ):
+            return None
+        # A screen/product/object decision starts a different presentation
+        # contract. Do not search through it for a later human crop.
+        if candidate.decision.target not in human_targets:
+            return None
+        return candidate
+    return None
+
+
+def _target_state_is_stale(
+    candidate: _TargetState,
+    reference: _TargetState,
+    config: CompositionPlannerConfig,
+) -> bool:
+    """Release geometry whose last trusted observation has expired.
+
+    Production evidence may only expose a coarse scene-level target ref.  A
+    high-confidence subject appearing far away after the occlusion window is
+    therefore a confirmed re-acquisition, not detector jitter that may keep
+    the previous side of the frame indefinitely.
+    """
+
+    return (
+        _same_target_reframe_requires_confirmation(candidate, reference, config)
+        and _target_state_last_frame(candidate) - _target_state_last_frame(reference)
+        >= config.subject_occlusion_hold_frames
+    )
 
 
 def _is_explicit_target_handoff(
@@ -1602,6 +2014,23 @@ def _calm_fallback_crop(
     """Return a calm *actual* 9:16 crop when evidence is temporarily sparse."""
 
     return _vertical_fill_crop(source_width, source_height), LayoutFamily.WIDE_GROUP, "stable_source"
+
+
+def _anchored_calm_fallback_crop(
+    anchor: NormalizedRect,
+    source_width: int,
+    source_height: int,
+) -> tuple[NormalizedRect, LayoutFamily, Literal["wider_crop"]]:
+    """Keep the widest fill crop character-bearing without retaining identity."""
+
+    crop = _vertical_fill_crop(source_width, source_height)
+    center_x = anchor.x + anchor.width / 2
+    center_y = 0.5 if crop.height >= 1 - 1e-7 else anchor.y + anchor.height / 2
+    return (
+        _crop_at_center(crop, center_x, center_y),
+        LayoutFamily.WIDE_GROUP,
+        "wider_crop",
+    )
 
 
 def _vertical_fill_crop(source_width: int, source_height: int) -> NormalizedRect:
@@ -1663,7 +2092,9 @@ def _track_safety_fallbacks(
     last_safe = next((
         segment.crop for segment in reversed(completed)
         if segment.target_ref == item.target_ref
-        and _safe_area_containment(item.state.bounds, segment.crop, config) > 0
+        and _subject_safe_area_containment(
+            _protected_core(item.state, segment.crop, config), segment.crop, config,
+        ) > 0
     ), None)
     if last_safe is not None:
         options.append(("last_safe", last_safe))
@@ -2157,6 +2588,55 @@ def _safe_crop_area(
     )
 
 
+def _subject_safe_crop_area(
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> NormalizedRect:
+    """Return the asymmetric safe inset used for a face/head core."""
+
+    inset_x = min(crop.width * config.target_margin_ratio, crop.width / 2 - 0.0000005)
+    inset_y = min(
+        crop.height * config.subject_vertical_safe_margin_ratio,
+        crop.height / 2 - 0.0000005,
+    )
+    return NormalizedRect(
+        x=round(crop.x + inset_x, 8),
+        y=round(crop.y + inset_y, 8),
+        width=round(crop.width - 2 * inset_x, 8),
+        height=round(crop.height - 2 * inset_y, 8),
+    )
+
+
+def _subject_safe_area_containment(
+    bounds: NormalizedRect,
+    crop: NormalizedRect,
+    config: CompositionPlannerConfig,
+) -> float:
+    safe = _subject_safe_crop_area(crop, config)
+    # When a fill crop already spans the physical top/bottom of the source,
+    # missing upstream headroom cannot be recovered by panning.  Preserve all
+    # available head pixels and relax only that unavailable vertical inset;
+    # horizontal framing remains strict because it is still executable.
+    desired_y = crop.height * config.subject_vertical_safe_margin_ratio
+    top_available = max(0.0, bounds.y - crop.y)
+    bottom_available = max(
+        0.0,
+        crop.y + crop.height - (bounds.y + bounds.height),
+    )
+    top_inset = min(desired_y, top_available) if crop.y <= 1e-7 else desired_y
+    bottom_inset = (
+        min(desired_y, bottom_available)
+        if crop.y + crop.height >= 1 - 1e-7 else desired_y
+    )
+    executable = NormalizedRect(
+        x=safe.x,
+        y=round(crop.y + top_inset, 8),
+        width=safe.width,
+        height=round(crop.height - top_inset - bottom_inset, 8),
+    )
+    return _containment(bounds, executable)
+
+
 def _safe_area_containment(
     bounds: NormalizedRect,
     crop: NormalizedRect,
@@ -2173,7 +2653,7 @@ def _track_minimum_safe_containment(
     """Return the weakest safe-area containment across every crop keyframe."""
 
     return min((
-        _safe_area_containment(bounds, item.crop, config) for item in keyframes
+        _subject_safe_area_containment(bounds, item.crop, config) for item in keyframes
     ), default=1.0)
 
 
@@ -2193,7 +2673,7 @@ def _track_requires_safety_recovery(
     raw = min((_containment(bounds, item.crop) for item in keyframes), default=1.0)
     if raw < config.minimum_target_containment:
         return True
-    return len(keyframes) > 1 and (
+    return (
         _track_minimum_safe_containment(keyframes, bounds, config)
         < config.minimum_target_containment
     )
