@@ -100,6 +100,9 @@ class PipelineCompletion:
     # lifecycle code must not reconstruct success identity from the looser
     # diagnostic report after this boundary.
     validated_results: tuple[ClipResult, ...] = ()
+    # Set only from the report's provider-reported AI usage telemetry.  It is
+    # deliberately separate from the historical estimate above.
+    actual_cost: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +184,15 @@ class PipelineFacade:
             # relying only on a filename heuristic.
             source_metadata.update(artifact.content_profile)
         resolved = resolve_processing_intent(intent, source_metadata)
-        ai_available = not settings.local_test_mode and config.ai.provider != "mock"
+        # Keep the existing product-flow estimator, but expose it to a person
+        # only when this Desktop installation can actually admit an AI call.
+        # The launch path remains the authority that rejects an unusable key.
+        ai_available = (
+            not settings.local_test_mode
+            and resolved.processing_mode != "fast"
+            and config.ai.provider != "mock"
+            and api_key_state(str(config.ai.provider), self.runtime.data) == "configured"
+        )
         tts_available = not settings.local_test_mode and config.tts.provider == "openai"
         pricing = CostPricing(
             input_token_price=config.ai.input_token_price,
@@ -930,6 +941,7 @@ class PipelineFacade:
                 cost_estimate=None,
                 canonical_results=False,
                 legacy_technical_completion=prepared.allow_legacy_artifact_scan,
+                actual_cost=self._actual_ai_cost_from_report(raw, prepared),
             )
         manifest: dict[str, Any] | None = None
         if prepared.run_id:
@@ -1034,11 +1046,11 @@ class PipelineFacade:
                     quality_error,
                 )
             warnings.extend(item for item in quality_warnings if item not in warnings)
-            cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
+            cost = None if prepared.runtime_flags.get("render_only") == "true" else estimate or None
             return PipelineCompletion(
                 prepared.report_path, output_files, warnings, None, None, cost, True,
                 quality_status, tuple(quality_paths), quality_status is None,
-                tuple(registry),
+                tuple(registry), self._actual_ai_cost_from_report(raw, prepared),
             )
         output_files = [final_path]
         for value in raw.get("output_files", []) if isinstance(raw.get("output_files"), list) else []:
@@ -1066,10 +1078,11 @@ class PipelineFacade:
                 quality_error,
             )
         warnings.extend(item for item in quality_warnings if item not in warnings)
-        cost = 0.0 if prepared.runtime_flags.get("render_only") == "true" else estimate or None
+        cost = None if prepared.runtime_flags.get("render_only") == "true" else estimate or None
         return PipelineCompletion(
             prepared.report_path, output_files, warnings, None, None, cost, False,
-            quality_status, tuple(quality_paths), quality_status is None,
+            quality_status, tuple(quality_paths), quality_status is None, (),
+            self._actual_ai_cost_from_report(raw, prepared),
         )
 
     def recovery_completion(self, prepared: PreparedPipelineRun, started_at: str) -> PipelineCompletion | None:
@@ -1442,6 +1455,43 @@ class PipelineFacade:
     @staticmethod
     def _failed_completion(prepared: PreparedPipelineRun, summary: str, details: str) -> PipelineCompletion:
         return PipelineCompletion(prepared.report_path, [], [], summary, details, None)
+
+    @staticmethod
+    def _actual_ai_cost_from_report(
+        report: dict[str, Any], prepared: PreparedPipelineRun,
+    ) -> float | None:
+        """Return a current run's priced provider usage, never a local zero.
+
+        Final-only reports deliberately retain Analysis lineage for auditability.
+        Their copied ``ai_cost`` is historical input, not a new provider call,
+        so a render-only completion must not surface it as a new charge.
+        """
+
+        if prepared.runtime_flags.get("render_only") == "true":
+            return None
+        telemetry = report.get("ai_cost")
+        if not isinstance(telemetry, dict):
+            return None
+        provenance = telemetry.get("provenance")
+        if not isinstance(provenance, dict) or provenance.get("cost_basis") != "provider_reported_token_usage":
+            return None
+        total = telemetry.get("total_cost_usd")
+        if isinstance(total, bool) or not isinstance(total, (int, float)) or total < 0:
+            return None
+        components = [telemetry.get(name) for name in ("semantic", "vision")]
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            requests = component.get("request_count")
+            provider = str(component.get("provider") or "").strip().casefold()
+            if (
+                isinstance(requests, int)
+                and not isinstance(requests, bool)
+                and requests > 0
+                and provider not in {"", "mock", "not-called"}
+            ):
+                return float(total)
+        return None
 
     @staticmethod
     def _validate_quality_gate(

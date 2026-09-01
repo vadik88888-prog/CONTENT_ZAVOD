@@ -1401,7 +1401,9 @@ class DesktopServices:
             pipeline_version="0.1.0", run_kind=RunKind.RENDER_REVISION, parent_run_id=parent_run.run_id,
             changed_settings=changed, invalidated_stages=["production_render"],
         )
-        run.cost_estimate = 0.0
+        # This path cannot make AI calls.  Keep the absent cost distinct from
+        # a made-up $0.00 so the UI can say that AI was not used.
+        run.cost_estimate = None
         self.runs.save(run)
         try:
             prepared = self._with_observability_paths(
@@ -1779,7 +1781,9 @@ class DesktopServices:
         run.error_summary = None
         run.technical_details = None
         run.cost_estimate = completion.cost_estimate
-        run.actual_cost = None  # Local estimates are intentionally never treated as billed cost.
+        # The facade admits only current-run, provider-reported usage here.
+        # A missing value is intentionally not rendered as a fictional zero.
+        run.actual_cost = completion.actual_cost
         run_info = report.get("run", {}) if isinstance(report, dict) else {}
         if run.run_kind == RunKind.ANALYSIS:
             run.status = RunStatus.ANALYSIS_READY

@@ -1449,7 +1449,14 @@ class ProjectScreen(QWidget):
         metrics_layout.setContentsMargins(14, 10, 14, 10)
         self.review_metrics_text = QLabel()
         make_label_shrinkable(self.review_metrics_text)
-        metrics_layout.addWidget(self.review_metrics_text)
+        metrics_layout.addWidget(self.review_metrics_text, 1)
+        # This is a component row rather than an aggregate: a separately owned
+        # ``GPU-сервер`` row can be added beside it later without changing the
+        # AI-cost display or inventing a server price today.
+        self.review_ai_cost = QLabel()
+        self.review_ai_cost.setObjectName("muted")
+        make_label_shrinkable(self.review_ai_cost)
+        metrics_layout.addWidget(self.review_ai_cost)
         review_layout.addWidget(self.review_metrics)
         review_body = QHBoxLayout()
         self._review_body_layout = review_body
@@ -1506,6 +1513,10 @@ class ProjectScreen(QWidget):
         self.final_workspace.setObjectName("finalWorkspace")
         final_layout = QVBoxLayout(self.final_workspace)
         final_layout.setContentsMargins(0, 0, 0, 0)
+        self.final_ai_cost = QLabel()
+        self.final_ai_cost.setObjectName("muted")
+        make_label_shrinkable(self.final_ai_cost)
+        final_layout.addWidget(self.final_ai_cost)
         final_layout.addWidget(self.final_results, 1)
         self._stage_widgets["final"] = self.final_workspace
 
@@ -2295,6 +2306,9 @@ class ProjectScreen(QWidget):
         self.flow_hint.setToolTip(full_text)
 
     def _update_setup_card(self, project: DesktopProject) -> None:
+        # Cost is a launch decision, so keep this concise row visible in the
+        # primary setup flow rather than hiding it in advanced details.
+        self.setup_estimate.setVisible(True)
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source.get("duration") is not None else "пока неизвестна"
         size = self._format_file_size(source.get("size_bytes") or source.get("estimated_size_bytes"))
@@ -2310,7 +2324,13 @@ class ProjectScreen(QWidget):
             "standard": "Подходящий вариант по умолчанию: хороший баланс времени и качества.",
             "maximum": "Тщательнее учитывает контекст и события в кадре. Это займёт больше времени.",
         }[project.settings.processing_mode])
-        if project.analysis_artifact_path:
+        latest = self._latest_run(project)
+        if latest is not None and latest.status in {
+            "completed", "completed_with_warnings", "analysis_ready", "draft_ready", "partially_rendered",
+        }:
+            set_responsive_text(self.setup_deep_help, "Последний запуск завершён.")
+            set_responsive_text(self.setup_estimate, self._actual_ai_cost_text(latest.actual_cost))
+        elif project.analysis_artifact_path:
             saved = project.setup_state.last_estimate
             set_responsive_text(self.setup_deep_help, "Используется сохранённый проверенный анализ.")
             set_responsive_text(self.setup_estimate, self._saved_estimate_text(saved))
@@ -2346,24 +2366,49 @@ class ProjectScreen(QWidget):
         self.run_button.hide()
 
     @staticmethod
-    def _format_cost_range(minimum: object, maximum: object) -> str:
+    def _expected_ai_cost_text(minimum: object, maximum: object, *, unavailable: bool = False) -> str:
         try:
             low, high = float(cast(Any, minimum)), float(cast(Any, maximum))
         except (TypeError, ValueError):
-            return "неизвестна до проверки тарифов"
-        if high < 0.01:
-            return "меньше $0.01"
-        if low < 0.01:
-            return f"до ${high:.2f}"
-        return f"примерно ${low:.2f}–${high:.2f}"
+            return "Ожидаемая стоимость AI пока недоступна" if unavailable else "AI не используется"
+        if low < 0 or high < low:
+            return "Ожидаемая стоимость AI пока недоступна"
+        return f"Ожидаемая стоимость AI ≈ ${low:.2f}–${high:.2f}"
+
+    @staticmethod
+    def _actual_ai_cost_text(actual: object) -> str:
+        if isinstance(actual, bool) or not isinstance(actual, (int, float)) or actual < 0:
+            return "AI не используется"
+        return f"Фактическая стоимость AI: ${actual:.2f}"
+
+    @classmethod
+    def _estimate_ai_cost_text(cls, estimate: object) -> str:
+        minimum = getattr(estimate, "estimated_ai_cost_min", None)
+        maximum = getattr(estimate, "estimated_ai_cost_max", None)
+        note = str(getattr(estimate, "cost_note", ""))
+        return cls._expected_ai_cost_text(
+            minimum,
+            maximum,
+            unavailable="тариф" in note.casefold() and "не заданы" in note.casefold(),
+        )
+
+    @classmethod
+    def _saved_estimate_ai_cost_text(cls, saved: dict[str, Any]) -> str:
+        return cls._expected_ai_cost_text(
+            saved.get("estimated_ai_cost_min"),
+            saved.get("estimated_ai_cost_max"),
+            unavailable=(
+                "тариф" in str(saved.get("cost_note") or "").casefold()
+                and "не заданы" in str(saved.get("cost_note") or "").casefold()
+            ),
+        )
 
     def _setup_estimate_text(self, estimate) -> str:
         minutes = (
             f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
             f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
         )
-        drivers = ", ".join(estimate.cost_drivers[:3]) or "длительность и выбранные настройки"
-        return f"Ориентировочное время: {minutes}. Оно зависит от: {drivers}."
+        return f"Ориентировочное время: {minutes}.\n{self._estimate_ai_cost_text(estimate)}"
 
     def _saved_estimate_text(self, saved: dict) -> str:
         if not isinstance(saved, dict):
@@ -2375,7 +2420,7 @@ class ProjectScreen(QWidget):
             )
         except (KeyError, TypeError, ValueError):
             return "Оценка появится после проверки настроек."
-        return f"Последняя сохранённая оценка: {minutes}."
+        return f"Последняя сохранённая оценка: {minutes}.\n{self._saved_estimate_ai_cost_text(saved)}"
 
     def _primary_action(self) -> None:
         if not self.project:
@@ -5102,10 +5147,21 @@ class ProjectScreen(QWidget):
             layout.addWidget(label)
 
     def _update_estimate(self, project: DesktopProject) -> None:
+        latest = self._latest_run(project)
+        if latest is not None and latest.status in {
+            "completed", "completed_with_warnings", "analysis_ready", "draft_ready", "partially_rendered",
+        }:
+            # Cost rows are intentionally component-shaped: a future
+            # ``GPU-сервер`` row can be appended here once it has its own
+            # verified owner.  Do not create or display a server cost yet.
+            cost_text = self._actual_ai_cost_text(latest.actual_cost)
+            self._set_results_ai_cost_text(cost_text)
+            self._replace_card_text(self.estimate, [cost_text])
+            return
         if project.analysis_artifact_path:
             self._replace_card_text(
                 self.estimate,
-                [self._saved_estimate_text(project.setup_state.last_estimate)],
+                [self._saved_estimate_ai_cost_text(project.setup_state.last_estimate)],
             )
             return
         try:
@@ -5114,17 +5170,21 @@ class ProjectScreen(QWidget):
                 f"около {max(1, round(estimate.estimated_seconds_min / 60))}–"
                 f"{max(1, round(estimate.estimated_seconds_max / 60))} мин"
             )
-            cost = self._format_cost_range(estimate.estimated_ai_cost_min, estimate.estimated_ai_cost_max)
             analysis = "будет использован" if estimate.deep_analysis_resolved else "не потребуется"
             self._replace_card_text(self.estimate, [
                 f"Время: {minutes}",
                 f"Результат: примерно {estimate.estimated_clips_min}–{estimate.estimated_clips_max} ролика(ов)",
                 f"Глубокий анализ: {analysis}",
-                f"Ориентир по стоимости: {cost}",
-                estimate.cost_note,
+                self._estimate_ai_cost_text(estimate),
             ])
         except Exception:
             self._replace_card_text(self.estimate, ["Оценка появится после проверки настроек."])
+
+    def _set_results_ai_cost_text(self, value: str) -> None:
+        """Mirror a concise, user-facing cost component across Results views."""
+
+        for label in (self.review_ai_cost, self.final_ai_cost):
+            set_responsive_text(label, value)
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: str) -> None:

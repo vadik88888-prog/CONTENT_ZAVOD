@@ -609,7 +609,7 @@ def test_render_revision_is_append_only_and_runs_render_stage_only(tmp_path: Pat
     assert revision.run_kind == RunKind.RENDER_REVISION
     assert revision.parent_run_id == parent.run_id
     assert revision.invalidated_stages == ["production_render"]
-    assert revision.cost_estimate == 0.0
+    assert revision.cost_estimate is None
     assert "--production-render-only" in prepared.arguments
     assert "--recompute-production-render" in prepared.arguments
     assert "--transform-script" not in prepared.arguments
