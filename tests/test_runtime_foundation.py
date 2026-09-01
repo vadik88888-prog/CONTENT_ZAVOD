@@ -7,7 +7,7 @@ import sys
 from app import frozen_entrypoint
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.pipeline_facade import PipelineFacade
-from app.runtime import INTERNAL_CLI_SWITCH, RuntimeLayout, default_data_directory
+from app.runtime import DATA_DIRECTORY_ENV, INTERNAL_CLI_SWITCH, RuntimeLayout, default_data_directory
 
 
 def test_source_layout_does_not_depend_on_working_directory(tmp_path: Path, monkeypatch) -> None:
@@ -63,12 +63,19 @@ def test_runtime_tools_are_prepended_without_losing_inherited_path(tmp_path: Pat
 
     assert environment["PATH"].split(os.pathsep) == [str(tools.resolve()), "A", "B"]
     assert environment["TOKEN"] == "kept"
+    assert environment[DATA_DIRECTORY_ENV] == str(layout.data)
 
 
 def test_default_data_directory_prefers_windows_local_app_data(tmp_path: Path) -> None:
     assert default_data_directory({"LOCALAPPDATA": str(tmp_path), "APPDATA": "ignored"}) == (
         tmp_path / "ContentFactoryData"
     )
+
+
+def test_default_data_directory_honors_desktop_worker_override(tmp_path: Path) -> None:
+    data = tmp_path / "canonical-data"
+
+    assert default_data_directory({DATA_DIRECTORY_ENV: str(data), "LOCALAPPDATA": "ignored"}) == data
 
 
 def test_desktop_services_keep_resources_separate_from_writable_data(tmp_path: Path) -> None:

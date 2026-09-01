@@ -62,6 +62,25 @@ def test_frozen_internal_cli_is_gated_before_pipeline_creation(tmp_path: Path, m
     ) == 3
 
 
+@pytest.mark.parametrize("command", ["process", "analyze", "draft", "render"])
+def test_source_cli_uses_runtime_data_for_activation_not_its_engine_cwd(
+    tmp_path: Path, monkeypatch, command: str,
+) -> None:
+    engine_root = tmp_path / "checkout"
+    data = tmp_path / "desktop-data"
+    engine_root.mkdir()
+    monkeypatch.chdir(engine_root)
+    monkeypatch.setattr(cli.RuntimeLayout, "detect", lambda: RuntimeLayout.for_source(engine_root, data=data))
+    seen: list[Path] = []
+    monkeypatch.setattr(cli, "require_processing_license", lambda directory: seen.append(directory))
+    monkeypatch.setattr(cli, "Pipeline", lambda *_args, **_kwargs: pytest.fail("gate should run before Pipeline"))
+
+    with pytest.raises(pytest.fail.Exception):
+        cli.main(_missing_cli_arguments(command))
+
+    assert seen == [data.resolve()]
+
+
 def _services(tmp_path: Path, activation: ActivationService) -> tuple[DesktopServices, object]:
     data = tmp_path / "data"
     source = tmp_path / "source.mp4"

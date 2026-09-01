@@ -8,12 +8,16 @@ from typing import Mapping, Sequence
 
 
 INTERNAL_CLI_SWITCH = "--content-factory-internal-cli"
+DATA_DIRECTORY_ENV = "CONTENT_FACTORY_DATA_DIRECTORY"
 
 
 def default_data_directory(environ: Mapping[str, str] | None = None) -> Path:
     """Return the writable per-user root shared by source and frozen desktop runs."""
 
     values = os.environ if environ is None else environ
+    explicit = values.get(DATA_DIRECTORY_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
     root = values.get("LOCALAPPDATA") or values.get("APPDATA")
     return Path(root) / "ContentFactoryData" if root else Path.home() / ".content-factory"
 
@@ -113,6 +117,10 @@ class RuntimeLayout:
         """Return an inherited environment with bundled tools taking precedence."""
 
         values = dict(os.environ if environ is None else environ)
+        # Source workers run with the checkout as cwd so ``python -m app`` is
+        # importable.  Pass the data root separately: cwd is an engine root,
+        # never an activation-state location.
+        values[DATA_DIRECTORY_ENV] = str(self.data)
         if not self.tools.is_dir():
             return values
         current = values.get("PATH", "")

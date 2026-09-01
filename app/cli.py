@@ -10,6 +10,7 @@ from app.doctor import collect_checks, format_report, has_blocking_checks
 from app.errors import ClipEngineError
 from app.licensing import LicensingError, require_processing_license
 from app.pipeline import Pipeline
+from app.runtime import RuntimeLayout
 from app.utils import read_json
 
 
@@ -193,7 +194,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> int:
+    # ``root`` remains the engine/artifact root.  It is the source checkout
+    # for Desktop's ``python -m app`` child, so it must never double as the
+    # per-user activation directory.
     root = (runtime_root or Path.cwd()).expanduser().resolve()
+    activation_data = (
+        runtime_root.expanduser().resolve()
+        if runtime_root is not None
+        else RuntimeLayout.detect().data
+    )
     _load_dotenv(root)
     arguments = build_parser().parse_args(argv)
     if arguments.command == "doctor":
@@ -208,7 +217,7 @@ def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> 
     try:
         # This is also reached by the frozen internal CLI worker.  It must
         # remain before every Pipeline construction, including isolated modes.
-        require_processing_license(root)
+        require_processing_license(activation_data)
     except LicensingError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 3
