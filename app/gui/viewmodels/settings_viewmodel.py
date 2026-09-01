@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal, Slot
 
 from app.gui.models import DesktopSettings
+from app.feedback_export import FeedbackExportResult
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.services.diagnostic_task import DiagnosticTask
 from app.secure_secrets import ApiKeySaveResult, save_api_key
@@ -59,6 +60,11 @@ class SettingsViewModel(QObject):
             self.settings_changed.emit(self.services.settings)
             QTimer.singleShot(0, self.diagnostics)
         return result
+
+    def export_feedback(self) -> FeedbackExportResult:
+        """Create the local, sendable Friend Beta feedback archive."""
+
+        return self.services.export_feedback_data()
 
     @Slot(object)
     def _diagnostics_finished(self, checks) -> None:

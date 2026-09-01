@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from app.feedback_contracts import OutcomeEventName
 from app.gui.models import DesktopProject, ProcessingPhase, ProcessingSnapshot, ProjectRun, RunKind, RunStatus
 from app.gui.services.background_task import BackgroundTask
 from app.gui.services.desktop_services import DesktopServices
@@ -200,11 +201,15 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
-    def set_review_selection(self, candidate_ids: list[str]) -> None:
+    def set_review_selection(
+        self, candidate_ids: list[str], *, rejection_reasons: dict[str, str] | None = None,
+    ) -> None:
         if not self.project or self.owns_active_job:
             return
         try:
-            self.project = self.services.set_review_selection(self.project, candidate_ids)
+            self.project = self.services.set_review_selection(
+                self.project, candidate_ids, rejection_reasons=rejection_reasons,
+            )
             self.project_changed.emit(self.project)
         except Exception as error:
             self.error_occurred.emit(map_error(error))
@@ -232,13 +237,15 @@ class ProjectViewModel(QObject):
         except Exception as error:
             self.error_occurred.emit(map_error(error))
 
-    def exclude_draft_candidate(self, candidate_id: str) -> None:
+    def exclude_draft_candidate(self, candidate_id: str, *, reason: str = "other") -> None:
         """Persist a candidate-scoped Draft skip/reject decision."""
 
         if not self.project or self.owns_active_job:
             return
         try:
-            self.project = self.services.exclude_draft_candidate(self.project, candidate_id)
+            self.project = self.services.exclude_draft_candidate(
+                self.project, candidate_id, reason=reason,
+            )
             self.project_changed.emit(self.project)
         except Exception as error:
             self.error_occurred.emit(map_error(error))
@@ -281,10 +288,28 @@ class ProjectViewModel(QObject):
         try:
             self.project.last_final_result_id = result_id
             self.services.projects.save(self.project)
+            self.services.record_final_action(self.project, result_id, OutcomeEventName.FINAL_SELECTED)
+            self.services.record_final_action(self.project, result_id, OutcomeEventName.FINAL_SHOWN)
         except Exception as error:
             self.error_occurred.emit(map_error(error))
             return
         self.project_changed.emit(self.project)
+
+    def record_moment_shown(
+        self, candidate_id: str, *, rank: int | None = None, recommended: bool | None = None,
+    ) -> None:
+        if self.project and not self.owns_active_job:
+            self.services.record_moment_shown(
+                self.project, candidate_id, rank=rank, recommended=recommended,
+            )
+
+    def record_draft_shown(self, candidate_id: str, *, rank: int | None = None) -> None:
+        if self.project and not self.owns_active_job:
+            self.services.record_draft_shown(self.project, candidate_id, rank=rank)
+
+    def record_final_action(self, result_id: str, name: OutcomeEventName) -> None:
+        if self.project and not self.owns_active_job:
+            self.services.record_final_action(self.project, result_id, name)
 
     def render_selected(self, candidate_ids: list[str] | None = None) -> None:
         if not self.project:

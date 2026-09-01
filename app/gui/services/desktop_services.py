@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Mapping
 
 from app.analysis_artifact import AnalysisArtifactError
 from app.candidate_review import validate_boundary_override
 from app.clip_results import ClipResult, unique_primary_results
+from app.feedback_contracts import (
+    CreativeEventName,
+    CreativeOverrideScope,
+    EditorialEventName,
+    FeedbackDomain,
+    FeedbackSurface,
+    OutcomeEventName,
+)
+from app.feedback_export import FeedbackExportResult, export_feedback_archive
+from app.feedback_store import (
+    CREATIVE_FEEDBACK_FILE_NAME,
+    EDITORIAL_FEEDBACK_FILE_NAME,
+    OUTCOME_FEEDBACK_FILE_NAME,
+    FeedbackStore,
+)
 from app.gui.models import (
     DesktopProject,
     DesktopSettings,
@@ -65,6 +81,8 @@ class DesktopServices:
     system: SystemService
     runtime: RuntimeLayout | None = None
     _run_projections: RunProjectionCache = field(default_factory=RunProjectionCache, repr=False)
+    _feedback_session_id: str = field(default_factory=lambda: str(uuid.uuid4()), init=False, repr=False)
+    _feedback_stores: dict[tuple[str, str], FeedbackStore] = field(default_factory=dict, init=False, repr=False)
 
     @classmethod
     def create(cls, runtime: RuntimeLayout | Path) -> "DesktopServices":
@@ -95,6 +113,165 @@ class DesktopServices:
 
     def save_settings(self) -> None:
         self.settings_store.save(self.settings)
+
+    def export_feedback_data(self) -> FeedbackExportResult:
+        """Build one local, privacy-bounded archive from all saved projects."""
+
+        return export_feedback_archive(
+            (project.directory for project in self.projects.list()),
+            Path(self.settings.data_directory),
+        )
+
+    def _feedback_store(self, project: DesktopProject, domain: FeedbackDomain) -> FeedbackStore:
+        file_name = {
+            FeedbackDomain.EDITORIAL: EDITORIAL_FEEDBACK_FILE_NAME,
+            FeedbackDomain.CREATIVE: CREATIVE_FEEDBACK_FILE_NAME,
+            FeedbackDomain.OUTCOME: OUTCOME_FEEDBACK_FILE_NAME,
+        }[domain]
+        key = (project.project_id, domain.value)
+        store = self._feedback_stores.get(key)
+        if store is None or store.project_directory != project.directory:
+            store = FeedbackStore(
+                project.directory,
+                session_id=self._feedback_session_id,
+                file_name=file_name,
+            )
+            self._feedback_stores[key] = store
+        return store
+
+    def _record_feedback(
+        self,
+        project: DesktopProject,
+        *,
+        domain: FeedbackDomain,
+        name: str,
+        surface: FeedbackSurface,
+        analysis_id: str | None = None,
+        candidate_id: str | None = None,
+        draft_id: str | None = None,
+        run_id: str | None = None,
+        clip_result_id: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        """Persist feedback best-effort without changing the product action."""
+
+        self._feedback_store(project, domain).record(
+            domain=domain,
+            name=name,
+            project_id=project.project_id,
+            analysis_id=analysis_id,
+            candidate_id=candidate_id,
+            draft_id=draft_id,
+            run_id=run_id,
+            clip_result_id=clip_result_id,
+            surface=surface,
+            payload=payload,
+        )
+
+    def record_moment_shown(
+        self, project: DesktopProject, candidate_id: str, *, rank: int | None = None,
+        recommended: bool | None = None,
+    ) -> None:
+        payload = {
+            **({"rank": rank} if rank is not None else {}),
+            **({"recommended": recommended} if recommended is not None else {}),
+        }
+        self._record_feedback(
+            project, domain=FeedbackDomain.EDITORIAL, name=EditorialEventName.MOMENT_SHOWN.value,
+            surface=FeedbackSurface.MOMENTS, analysis_id=project.analysis_id,
+            candidate_id=candidate_id, payload=payload,
+        )
+
+    def record_moment_selected(self, project: DesktopProject, candidate_id: str) -> None:
+        self._record_feedback(
+            project, domain=FeedbackDomain.EDITORIAL, name=EditorialEventName.MOMENT_SELECTED.value,
+            surface=FeedbackSurface.MOMENTS, analysis_id=project.analysis_id, candidate_id=candidate_id,
+        )
+
+    def record_moment_rejected(self, project: DesktopProject, candidate_id: str, reason: str) -> None:
+        self._record_feedback(
+            project, domain=FeedbackDomain.EDITORIAL, name=EditorialEventName.MOMENT_REJECTED.value,
+            surface=FeedbackSurface.MOMENTS, analysis_id=project.analysis_id, candidate_id=candidate_id,
+            payload={"reason": reason},
+        )
+
+    def record_boundary_changed(
+        self, project: DesktopProject, candidate_id: str, *, boundary: str,
+        old_start: float, old_end: float, new_start: float, new_end: float, delta: float,
+    ) -> None:
+        self._record_feedback(
+            project, domain=FeedbackDomain.EDITORIAL, name=EditorialEventName.BOUNDARY_CHANGED.value,
+            surface=FeedbackSurface.MOMENTS, analysis_id=project.analysis_id, candidate_id=candidate_id,
+            payload={
+                "boundary": boundary,
+                "old_start_seconds": old_start,
+                "old_end_seconds": old_end,
+                "new_start_seconds": new_start,
+                "new_end_seconds": new_end,
+                "delta_seconds": delta,
+            },
+        )
+
+    def record_draft_shown(self, project: DesktopProject, candidate_id: str, *, rank: int | None = None) -> None:
+        self._record_feedback(
+            project, domain=FeedbackDomain.CREATIVE, name=CreativeEventName.DRAFT_SHOWN.value,
+            surface=FeedbackSurface.DRAFTS, analysis_id=project.analysis_id, candidate_id=candidate_id,
+            draft_id=project.draft_id, payload={"rank": rank} if rank is not None else {},
+        )
+
+    def record_draft_approval(self, project: DesktopProject, candidate_id: str, *, approved: bool, reason: str | None = None) -> None:
+        self._record_feedback(
+            project,
+            domain=FeedbackDomain.CREATIVE,
+            name=(CreativeEventName.DRAFT_APPROVED.value if approved else CreativeEventName.DRAFT_REJECTED.value),
+            surface=FeedbackSurface.DRAFTS,
+            analysis_id=project.analysis_id,
+            candidate_id=candidate_id,
+            draft_id=project.draft_id,
+            payload={} if approved else {"reason": reason or "other"},
+        )
+
+    def record_creative_change(
+        self, project: DesktopProject, *, field_name: str, old_value: object, new_value: object,
+        candidate_id: str | None = None,
+    ) -> None:
+        scope = CreativeOverrideScope.DRAFT.value if candidate_id else CreativeOverrideScope.PROJECT.value
+        self._record_feedback(
+            project, domain=FeedbackDomain.CREATIVE, name=CreativeEventName.CREATIVE_OVERRIDE_CHANGED.value,
+            surface=FeedbackSurface.DRAFTS if candidate_id else FeedbackSurface.SETUP,
+            analysis_id=project.analysis_id if candidate_id else None,
+            candidate_id=candidate_id,
+            draft_id=project.draft_id if candidate_id else None,
+            payload={
+                "field": field_name,
+                "scope": scope,
+                "old_value": old_value,
+                "new_value": new_value,
+            },
+        )
+
+    def record_final_created(self, project: DesktopProject, result: ClipResult, run_id: str) -> None:
+        result_id = result.clip_result_id or result.candidate_id
+        for name, payload in (
+            (OutcomeEventName.FINAL_CREATED.value, {}),
+            (OutcomeEventName.FINAL_EXPORTED.value, {"method": "production_render"}),
+        ):
+            self._record_feedback(
+                project, domain=FeedbackDomain.OUTCOME, name=name, surface=FeedbackSurface.FINAL,
+                candidate_id=result.candidate_id, run_id=run_id, clip_result_id=result_id, payload=payload,
+            )
+
+    def record_final_action(self, project: DesktopProject, result_id: str, name: OutcomeEventName) -> None:
+        for run in self.runs_for(project):
+            for result in self.run_projection(run).primary_results:
+                stable_id = result.clip_result_id or result.candidate_id
+                if stable_id != result_id:
+                    continue
+                self._record_feedback(
+                    project, domain=FeedbackDomain.OUTCOME, name=name.value, surface=FeedbackSurface.FINAL,
+                    candidate_id=result.candidate_id, run_id=run.run_id, clip_result_id=stable_id,
+                )
+                return
 
     @property
     def resources_root(self) -> Path:
@@ -235,10 +412,12 @@ class DesktopServices:
         if "subtitle_style" in values and "preset_selection_mode" not in values:
             values = {**values, "preset_selection_mode": "explicit"}
         changed: list[str] = []
+        previous_values: dict[str, object] = {}
         for name, value in values.items():
             if not hasattr(project.settings, name):
                 continue
             if getattr(project.settings, name) != value:
+                previous_values[name] = getattr(project.settings, name)
                 setattr(project.settings, name, value)
                 changed.append(name)
         project.settings.validate()
@@ -298,6 +477,22 @@ class DesktopServices:
             reused = []
         self._refresh_setup_state(project, summary, needs_new_analysis=needs_analysis, reused_stages=reused)
         self.projects.save(project)
+        feedback_fields = {
+            "subtitles_enabled": "subtitles_enabled",
+            "subtitle_style": "subtitle_style",
+            "caption_preset_id": "caption_preset_id",
+            "same_source_broll_allowed": "same_source_broll_allowed",
+            "audio_mode": "audio_mode",
+            "reduced_motion": "reduced_motion",
+        }
+        for name in changed:
+            if name in feedback_fields:
+                self.record_creative_change(
+                    project,
+                    field_name=feedback_fields[name],
+                    old_value=previous_values[name],
+                    new_value=getattr(project.settings, name),
+                )
         return project
 
     def _refresh_setup_state(
@@ -431,9 +626,16 @@ class DesktopServices:
         self.projects.save(project)
         return project
 
-    def set_review_selection(self, project: DesktopProject, candidate_ids: list[str]) -> DesktopProject:
+    def set_review_selection(
+        self,
+        project: DesktopProject,
+        candidate_ids: list[str],
+        *,
+        rejection_reasons: Mapping[str, str] | None = None,
+    ) -> DesktopProject:
         """Persist the user's candidate choice before any draft or render starts."""
 
+        previous_selection = set(project.review_selected_candidate_ids)
         unique = list(dict.fromkeys(str(item) for item in candidate_ids if str(item)))
         unknown = [item for item in unique if item not in project.candidate_states]
         if unknown:
@@ -454,6 +656,11 @@ class DesktopServices:
         if project.status not in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             project.status = ProjectStatus.REVIEWING_CANDIDATES if project.analysis_artifact_path else project.status
         self.projects.save(project)
+        for candidate_id in set(unique) - previous_selection:
+            self.record_moment_selected(project, candidate_id)
+        for candidate_id in previous_selection - set(unique):
+            reason = (rejection_reasons or {}).get(candidate_id, "other")
+            self.record_moment_rejected(project, candidate_id, reason)
         return project
 
     def delete_project(self, project_id: str) -> None:
@@ -873,6 +1080,7 @@ class DesktopServices:
             self._set_candidate_lifecycle(project, candidate_id, approval="rejected", export="pending")
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
+        self.record_draft_approval(project, candidate_id, approved=approved)
         return project
 
     def adjust_candidate_boundary(
@@ -931,6 +1139,16 @@ class DesktopServices:
         if candidate_id not in project.review_selected_candidate_ids:
             project.review_selected_candidate_ids.append(candidate_id)
         self.projects.save(project)
+        self.record_boundary_changed(
+            project,
+            candidate_id,
+            boundary=boundary,
+            old_start=float(start_value),
+            old_end=float(end_value),
+            new_start=float(validation["start"]),
+            new_end=float(validation["end"]),
+            delta=delta_seconds,
+        )
         return project, validation
 
     def update_candidate_creative_override(
@@ -958,11 +1176,21 @@ class DesktopServices:
             "same_source_broll_allowed": project.settings.same_source_broll_allowed,
             "reduced_motion": project.settings.reduced_motion,
         }
+        feedback_changes: list[tuple[str, object, object]] = []
         for name, value in values.items():
+            old_value = override.get(name, defaults[name])
             if value == defaults[name]:
                 override.pop(name, None)
             else:
                 override[name] = value
+            feedback_field = {
+                "creative_style": "subtitle_style",
+                "caption_preset_id": "caption_preset_id",
+                "same_source_broll_allowed": "same_source_broll_allowed",
+                "reduced_motion": "reduced_motion",
+            }.get(name)
+            if feedback_field is not None and old_value != value:
+                feedback_changes.append((feedback_field, old_value, value))
         if override:
             project.candidate_creative_overrides[candidate_id] = override
         else:
@@ -978,6 +1206,11 @@ class DesktopServices:
                 "сохранённый анализ", "Brain/Vision evidence", "границы фрагмента",
             ]
             self.projects.save(project)
+            for field_name, old_value, new_value in feedback_changes:
+                self.record_creative_change(
+                    project, field_name=field_name, old_value=old_value,
+                    new_value=new_value, candidate_id=candidate_id,
+                )
             return project
         self._set_candidate_lifecycle(
             project, candidate_id, draft="pending", approval="pending", export="pending",
@@ -997,10 +1230,15 @@ class DesktopServices:
             "сохранённый анализ", "Brain/Vision evidence", "остальные черновики",
         ]
         self.projects.save(project)
+        for field_name, old_value, new_value in feedback_changes:
+            self.record_creative_change(
+                project, field_name=field_name, old_value=old_value,
+                new_value=new_value, candidate_id=candidate_id,
+            )
         return project
 
     def exclude_draft_candidate(
-        self, project: DesktopProject, candidate_id: str,
+        self, project: DesktopProject, candidate_id: str, *, reason: str = "other",
     ) -> DesktopProject:
         """Exclude exactly one candidate from Draft review and Final hand-off.
 
@@ -1026,6 +1264,7 @@ class DesktopServices:
             )
         project.status = ProjectStatus.REVIEWING_CANDIDATES
         self.projects.save(project)
+        self.record_draft_approval(project, candidate_id, approved=False, reason=reason)
         return project
 
     @staticmethod
@@ -1681,6 +1920,9 @@ class DesktopServices:
         # recovery deterministic if the process stops between these writes.
         self.projects.save(project)
         self.runs.save(run)
+        if run.run_kind == RunKind.SELECTED_RENDER:
+            for result in current_results:
+                self.record_final_created(project, result, run.run_id)
         return run
 
     def _snapshot_engine_paths(self, run: ProjectRun) -> None:

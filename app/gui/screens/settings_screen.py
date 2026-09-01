@@ -119,6 +119,23 @@ class SettingsScreen(QWidget):
         diagnostics.layout().addWidget(self.system_detail)
         layout.addWidget(diagnostics)
 
+        feedback = self._section("Данные для улучшения")
+        feedback_hint = QLabel(
+            "Создаёт один ZIP с событиями выбора и коротким summary. "
+            "Ключи, исходные видео и полный transcript в него не попадают."
+        )
+        feedback_hint.setObjectName("muted")
+        feedback_hint.setWordWrap(True)
+        self.feedback_export_button = QPushButton("Экспортировать данные для улучшения")
+        self.feedback_export_button.clicked.connect(self._export_feedback)
+        self.feedback_export_status = QLabel()
+        self.feedback_export_status.setObjectName("muted")
+        self.feedback_export_status.setWordWrap(True)
+        feedback.layout().addWidget(feedback_hint)
+        feedback.layout().addWidget(self.feedback_export_button)
+        feedback.layout().addWidget(self.feedback_export_status)
+        layout.addWidget(feedback)
+
         version = QLabel(f"Content Factory {__version__}")
         version.setObjectName("muted")
         layout.addWidget(version)
@@ -263,6 +280,21 @@ class SettingsScreen(QWidget):
         result = self.viewmodel.save_api_key(self.api_key.text())
         self.api_key.clear()
         self.api_key_result.setText(result.message)
+
+    def _export_feedback(self) -> None:
+        self.feedback_export_button.setEnabled(False)
+        try:
+            result = self.viewmodel.export_feedback()
+        except OSError:
+            self.feedback_export_status.setText("Не удалось создать ZIP. Проверьте доступ к папке данных и повторите.")
+        else:
+            self.feedback_export_status.setText(
+                f"Создан {result.path.name}: {result.event_count} событий из {result.project_count} проектов. "
+                "Его можно отправить для улучшения Content Factory."
+            )
+            self.feedback_export_status.setToolTip(str(result.path))
+        finally:
+            self.feedback_export_button.setEnabled(True)
 
     def _diagnostics_started(self) -> None:
         self.check_button.setEnabled(False)

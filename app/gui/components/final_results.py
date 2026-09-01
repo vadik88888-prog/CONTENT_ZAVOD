@@ -67,6 +67,9 @@ class FinalResultsWorkspace(QWidget):
     drafts_requested = Signal()
     projects_requested = Signal()
     rerender_requested = Signal(str)
+    final_open_requested = Signal(str)
+    final_reveal_requested = Signal(str)
+    final_marked_used = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -268,6 +271,10 @@ class FinalResultsWorkspace(QWidget):
         self.show_folder_button.setObjectName("showFinalFolder")
         self.show_folder_button.setProperty("finalAction", True)
         self.show_folder_button.clicked.connect(self._show_active_folder)
+        self.mark_used_button = QPushButton("✓  Отметить использованным")
+        self.mark_used_button.setObjectName("secondaryAction")
+        self.mark_used_button.setProperty("finalAction", True)
+        self.mark_used_button.clicked.connect(self._mark_active_used)
         self.rerender_button = QPushButton("↻  Собрать заново")
         self.rerender_button.setObjectName("secondaryAction")
         self.rerender_button.setProperty("finalAction", True)
@@ -275,6 +282,7 @@ class FinalResultsWorkspace(QWidget):
         self.rerender_button.clicked.connect(self._request_rerender)
         self._info_layout.addWidget(self.open_video_button)
         self._info_layout.addWidget(self.show_folder_button)
+        self._info_layout.addWidget(self.mark_used_button)
         self._info_layout.addWidget(self.rerender_button)
         self._info_layout.addStretch()
         self._place_body_panels("standard")
@@ -733,6 +741,7 @@ class FinalResultsWorkspace(QWidget):
         available = output.path.is_file()
         self.open_video_button.setEnabled(available)
         self.show_folder_button.setEnabled(available)
+        self.mark_used_button.setEnabled(available)
         self.rerender_button.setEnabled(bool(output.run_id))
         self.rerender_button.setVisible(output.status != "completed" and bool(output.run_id))
 
@@ -762,12 +771,19 @@ class FinalResultsWorkspace(QWidget):
     def _open_active_video(self) -> None:
         output = self._output_for(self._active_id)
         if output and output.path.is_file():
+            self.final_open_requested.emit(output.result_id)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(output.path)))
 
     def _show_active_folder(self) -> None:
         output = self._output_for(self._active_id)
         if output and output.path.parent.is_dir():
+            self.final_reveal_requested.emit(output.result_id)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(output.path.parent)))
+
+    def _mark_active_used(self) -> None:
+        output = self._output_for(self._active_id)
+        if output and output.path.is_file():
+            self.final_marked_used.emit(output.result_id)
 
     def _request_rerender(self) -> None:
         output = self._output_for(self._active_id)

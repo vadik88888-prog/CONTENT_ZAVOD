@@ -431,6 +431,13 @@ def test_settings_keeps_version_and_sidebar_support_opens_telegram(
         assert screen.advanced_content.isHidden()
         assert any(label.text() == f"Content Factory {__version__}" for label in screen.findChildren(QLabel))
         assert not any("Telegram" in label.text() for label in screen.findChildren(QLabel))
+        assert screen.feedback_export_button.text() == "Экспортировать данные для улучшения"
+
+        screen.feedback_export_button.click()
+        application.processEvents()
+        exports = list((Path(services.settings.data_directory) / "feedback-exports").glob("*.zip"))
+        assert len(exports) == 1
+        assert "Создан content-factory-feedback-" in screen.feedback_export_status.text()
 
         window.help_button.click()
         application.processEvents()

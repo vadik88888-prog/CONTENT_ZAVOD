@@ -26,6 +26,9 @@ from app.utils import utc_now
 
 FEEDBACK_DIRECTORY_NAME = "feedback"
 FEEDBACK_FILE_NAME = "events.v1.jsonl"
+EDITORIAL_FEEDBACK_FILE_NAME = "editorial.v1.jsonl"
+CREATIVE_FEEDBACK_FILE_NAME = "creative.v1.jsonl"
+OUTCOME_FEEDBACK_FILE_NAME = "outcome.v1.jsonl"
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
@@ -59,9 +62,10 @@ class FeedbackStore:
         *,
         session_id: str | None = None,
         clock: Callable[[], str] = utc_now,
+        file_name: str = FEEDBACK_FILE_NAME,
     ) -> None:
         self.project_directory = Path(project_directory)
-        self.path = self.project_directory / FEEDBACK_DIRECTORY_NAME / FEEDBACK_FILE_NAME
+        self.path = self.project_directory / FEEDBACK_DIRECTORY_NAME / file_name
         self.session_id = session_id or str(uuid.uuid4())
         self._clock = clock
         self._lock = _lock_for(self.path)
@@ -222,5 +226,6 @@ def _lock_for(path: Path) -> threading.RLock:
 
 
 __all__ = [
-    "FEEDBACK_DIRECTORY_NAME", "FEEDBACK_FILE_NAME", "FeedbackStore", "FeedbackWriteResult",
+    "CREATIVE_FEEDBACK_FILE_NAME", "EDITORIAL_FEEDBACK_FILE_NAME", "FEEDBACK_DIRECTORY_NAME",
+    "FEEDBACK_FILE_NAME", "OUTCOME_FEEDBACK_FILE_NAME", "FeedbackStore", "FeedbackWriteResult",
 ]

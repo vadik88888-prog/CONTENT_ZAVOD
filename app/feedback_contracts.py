@@ -11,6 +11,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from app.caption_presets import CAPTION_PRESET_DEFINITIONS
+
 
 FEEDBACK_SCHEMA_VERSION = 1
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
@@ -95,8 +97,10 @@ class BoundarySide(StrEnum):
 class CreativeOverrideField(StrEnum):
     SUBTITLES_ENABLED = "subtitles_enabled"
     SUBTITLE_STYLE = "subtitle_style"
+    CAPTION_PRESET_ID = "caption_preset_id"
     SAME_SOURCE_BROLL_ALLOWED = "same_source_broll_allowed"
     AUDIO_MODE = "audio_mode"
+    REDUCED_MOTION = "reduced_motion"
 
 
 class CreativeOverrideScope(StrEnum):
@@ -105,6 +109,7 @@ class CreativeOverrideScope(StrEnum):
 
 
 class FinalExportMethod(StrEnum):
+    PRODUCTION_RENDER = "production_render"
     COPY_TO = "copy_to"
     SYSTEM_SHARE = "system_share"
 
@@ -139,6 +144,7 @@ _EMPTY_PAYLOAD_EVENTS = frozenset({
     OutcomeEventName.FINAL_MARKED_USED.value,
 })
 _SUBTITLE_STYLES = frozenset({"documentary", "clean", "minimal", "dynamic"})
+_CAPTION_PRESET_IDS = frozenset(CAPTION_PRESET_DEFINITIONS)
 _AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
 
 
@@ -378,12 +384,14 @@ def _validate_override_value(field_name: str, value: Any) -> None:
     if field_name in {
         CreativeOverrideField.SUBTITLES_ENABLED.value,
         CreativeOverrideField.SAME_SOURCE_BROLL_ALLOWED.value,
+        CreativeOverrideField.REDUCED_MOTION.value,
     }:
         if not isinstance(value, bool):
             raise FeedbackContractError("Boolean creative override has a non-boolean value.")
         return
     allowed = {
         CreativeOverrideField.SUBTITLE_STYLE.value: _SUBTITLE_STYLES,
+        CreativeOverrideField.CAPTION_PRESET_ID.value: _CAPTION_PRESET_IDS,
         CreativeOverrideField.AUDIO_MODE.value: _AUDIO_MODES,
     }[field_name]
     if not isinstance(value, str) or value not in allowed:

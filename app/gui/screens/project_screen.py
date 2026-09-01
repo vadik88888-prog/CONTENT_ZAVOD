@@ -13,7 +13,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-    QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,7 @@ from app.content_profile_taxonomy import (
     user_overridable_values,
 )
 from app.editorial_profile_policy import evaluate_editorial_candidate
+from app.feedback_contracts import CreativeRejectReason, EditorialRejectReason, OutcomeEventName
 from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.components import (
     CandidateThumbnailLoader, CaptionPresetPicker, CaptionPresetPickerDialog,
@@ -618,6 +619,15 @@ class ProjectScreen(QWidget):
         left.addWidget(self.candidate_review)
         self.final_results = FinalResultsWorkspace()
         self.final_results.output_selected.connect(self._final_output_selected)
+        self.final_results.final_open_requested.connect(
+            lambda result_id: self._record_final_action(result_id, OutcomeEventName.FINAL_OPEN_REQUESTED)
+        )
+        self.final_results.final_reveal_requested.connect(
+            lambda result_id: self._record_final_action(result_id, OutcomeEventName.FINAL_REVEAL_REQUESTED)
+        )
+        self.final_results.final_marked_used.connect(
+            lambda result_id: self._record_final_action(result_id, OutcomeEventName.FINAL_MARKED_USED)
+        )
         self.final_results.create_more_requested.connect(self._create_more_outputs)
         self.final_results.drafts_requested.connect(self._back_to_drafts)
         self.final_results.rerender_requested.connect(self._rerender_final_output)
@@ -3443,6 +3453,9 @@ class ProjectScreen(QWidget):
     def _final_output_selected(self, result_id: str) -> None:
         self.viewmodel.select_final_output(result_id)
 
+    def _record_final_action(self, result_id: str, name: OutcomeEventName) -> None:
+        self.viewmodel.record_final_action(result_id, name)
+
     def _create_more_outputs(self) -> None:
         if not self.project:
             return
@@ -3571,11 +3584,20 @@ class ProjectScreen(QWidget):
         if not self.project or candidate_id not in self._draftable_candidates_by_id:
             return
         selected = list(self.project.review_selected_candidate_ids)
+        rejection_reasons: dict[str, str] | None = None
         if candidate_id in selected:
+            reason = self._choose_feedback_reason(
+                "Почему этот момент не подходит?",
+                "Причина поможет улучшить выбор моментов:",
+                EditorialRejectReason,
+            )
+            if reason is None:
+                return
             selected.remove(candidate_id)
+            rejection_reasons = {candidate_id: reason}
         else:
             selected.append(candidate_id)
-        self._set_review_selection_without_rebuild(selected)
+        self._set_review_selection_without_rebuild(selected, rejection_reasons=rejection_reasons)
 
     def _set_draft_approval(self, candidate_id: str, approved: bool) -> None:
         self.viewmodel.set_draft_approval(candidate_id, approved)
@@ -3584,7 +3606,38 @@ class ProjectScreen(QWidget):
         # One persisted candidate identity owns this action.  Do not compose
         # two UI-side mutations from a potentially refreshed card list: that
         # was prone to routing a skip through a sibling's pending selection.
-        self.viewmodel.exclude_draft_candidate(candidate_id)
+        reason = self._choose_feedback_reason(
+            "Почему этот черновик не подходит?",
+            "Причина поможет улучшить оформление будущих черновиков:",
+            CreativeRejectReason,
+        )
+        if reason is not None:
+            self.viewmodel.exclude_draft_candidate(candidate_id, reason=reason)
+
+    def _choose_feedback_reason(self, title: str, prompt: str, reasons: type) -> str | None:
+        labels = {
+            EditorialRejectReason.WRONG_TOPIC.value: "Не та тема",
+            EditorialRejectReason.WEAK_HOOK.value: "Слабое начало",
+            EditorialRejectReason.NEEDS_CONTEXT.value: "Не хватает контекста",
+            EditorialRejectReason.DUPLICATE.value: "Повторяет другой момент",
+            EditorialRejectReason.BAD_START.value: "Плохое начало фрагмента",
+            EditorialRejectReason.BAD_END.value: "Плохой конец фрагмента",
+            CreativeRejectReason.CAPTIONS.value: "Субтитры",
+            CreativeRejectReason.CROP.value: "Кадрирование",
+            CreativeRejectReason.COMPOSITION.value: "Композиция",
+            CreativeRejectReason.MOTION_PACING.value: "Темп",
+            CreativeRejectReason.BROLL.value: "Дополнительные кадры",
+            CreativeRejectReason.AUDIO.value: "Звук",
+            CreativeRejectReason.VISUAL_STYLE.value: "Стиль оформления",
+            CreativeRejectReason.QUALITY_WARNING.value: "Предупреждение качества",
+            "other": "Другое",
+        }
+        values = [item.value for item in reasons]
+        items = [labels[value] for value in values]
+        selected, accepted = QInputDialog.getItem(self, title, prompt, items, 0, False)
+        if not accepted:
+            return None
+        return values[items.index(selected)]
 
     def _restore_draft(self, candidate_id: str) -> None:
         if not self.project or candidate_id in self.project.review_selected_candidate_ids:
@@ -3624,12 +3677,14 @@ class ProjectScreen(QWidget):
     def _clear_review_selection(self) -> None:
         self._set_review_selection_without_rebuild([])
 
-    def _set_review_selection_without_rebuild(self, candidate_ids: list[str]) -> None:
+    def _set_review_selection_without_rebuild(
+        self, candidate_ids: list[str], *, rejection_reasons: dict[str, str] | None = None,
+    ) -> None:
         if not self.project:
             return
         self._persisting_review_selection = True
         try:
-            self.viewmodel.set_review_selection(candidate_ids)
+            self.viewmodel.set_review_selection(candidate_ids, rejection_reasons=rejection_reasons)
         finally:
             self._persisting_review_selection = False
 
@@ -3773,6 +3828,17 @@ class ProjectScreen(QWidget):
         except (TypeError, ValueError):
             return
         self._bind_source_candidate(candidate, start, end, autoplay=True, force=True)
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if candidate_id:
+            try:
+                rank = self._review_visible_candidate_ids.index(candidate_id)
+            except ValueError:
+                rank = None
+            self.viewmodel.record_moment_shown(
+                candidate_id,
+                rank=rank,
+                recommended=bool(candidate.get("recommended", candidate.get("selected_by_recommendation"))),
+            )
         self._focus_preview_player()
         self._show_candidate_detail(candidate, start, end)
 
@@ -3792,6 +3858,12 @@ class ProjectScreen(QWidget):
                     self.project.directory / "preview-posters" if self.project else None
                 ),
             )
+        if candidate_id:
+            try:
+                rank = self._review_visible_candidate_ids.index(candidate_id)
+            except ValueError:
+                rank = None
+            self.viewmodel.record_draft_shown(candidate_id, rank=rank)
         self._focus_preview_player()
 
     def _show_final_preview(self, path: Path, title: str | None = None, candidate_id: str | None = None) -> None:
@@ -3814,6 +3886,15 @@ class ProjectScreen(QWidget):
         )
         if candidate_id:
             self._persist_active_preview_candidate(candidate_id)
+            result = next(
+                (item for item in self._final_output_records(self.project) if item.candidate_id == candidate_id),
+                None,
+            ) if self.project else None
+            if result is not None:
+                self._record_final_action(
+                    result.clip_result_id or result.candidate_id,
+                    OutcomeEventName.FINAL_SHOWN,
+                )
         self._focus_preview_player()
 
     def _set_active_candidate_binding(
