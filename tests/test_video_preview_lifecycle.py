@@ -54,6 +54,76 @@ def test_rapid_file_selection_is_deferred_and_coalesced(tmp_path: Path, monkeypa
         app.processEvents()
 
 
+def test_hover_demo_switch_keeps_current_media_until_latest_target_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _application()
+    current = tmp_path / "current.mp4"; current.write_bytes(b"current")
+    first_hover = tmp_path / "first-hover.mp4"; first_hover.write_bytes(b"first")
+    latest_hover = tmp_path / "latest-hover.mp4"; latest_hover.write_bytes(b"latest")
+    preview = VideoPreview()
+
+    class DeferredPlayer:
+        def __init__(self) -> None:
+            self.current = QUrl()
+            self.sources: list[QUrl] = []
+            self.stop_calls = 0
+
+        def source(self) -> QUrl:
+            return self.current
+
+        def setSource(self, source: QUrl) -> None:
+            self.current = source
+            self.sources.append(source)
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    deferred = DeferredPlayer()
+    preview._deferred_player = deferred  # type: ignore[assignment]
+    preview._path = current
+    preview._media_ready = True
+    committed: list[tuple[Path, dict]] = []
+    monkeypatch.setattr(
+        preview,
+        "set_file",
+        lambda path, **kwargs: committed.append((Path(path), kwargs)),
+    )
+
+    try:
+        preview.set_file_when_ready(first_hover, presentation="vertical", title="Первое")
+        preview.set_file_when_ready(latest_hover, presentation="vertical", title="Последнее")
+        preview.set_file_when_ready(current, presentation="vertical", title="Текущее")
+        preview.set_file_when_ready(latest_hover, presentation="vertical", title="Последнее")
+        preview.set_file_when_ready(latest_hover, presentation="vertical", title="Последнее")
+
+        assert preview.active_media_path == current
+        assert [Path(url.toLocalFile()) for url in deferred.sources if url.isLocalFile()] == [
+            first_hover, latest_hover, latest_hover,
+        ]
+        assert not committed
+
+        preview._deferred_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+
+        # One stop cancels the no-longer-hovered target; the second commits
+        # the latest one after it has finished loading.
+        assert deferred.stop_calls == 2
+        assert committed == [
+            (latest_hover, {
+                "presentation": "vertical",
+                "title": "Последнее",
+                "source_codec": None,
+                "poster_cache_directory": None,
+                "_preserve_visual": True,
+                "_from_deferred": True,
+            })
+        ]
+    finally:
+        preview.close()
+        preview.deleteLater()
+        app.processEvents()
+
+
 @pytest.mark.parametrize(
     ("show_method", "expected_title"),
     [

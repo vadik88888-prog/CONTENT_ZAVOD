@@ -119,17 +119,9 @@ class SettingsScreen(QWidget):
         diagnostics.layout().addWidget(self.system_detail)
         layout.addWidget(diagnostics)
 
-        support = self._section("Помощь и поддержка")
-        telegram = QLabel("Telegram: @rezvis")
-        telegram.setObjectName("subtitle")
-        self.telegram_button = QPushButton("Написать в Telegram")
-        self.telegram_button.clicked.connect(self._open_telegram)
         version = QLabel(f"Content Factory {__version__}")
         version.setObjectName("muted")
-        support.layout().addWidget(telegram)
-        support.layout().addWidget(self.telegram_button)
-        support.layout().addWidget(version)
-        layout.addWidget(support)
+        layout.addWidget(version)
 
         self.advanced_toggle = QPushButton("Расширенные настройки")
         self.advanced_toggle.setCheckable(True)
@@ -266,10 +258,6 @@ class SettingsScreen(QWidget):
         path = Path(self.viewmodel.settings.data_directory)
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-
-    @staticmethod
-    def _open_telegram() -> None:
-        QDesktopServices.openUrl(QUrl("https://t.me/rezvis"))
 
     def _save_api_key(self) -> None:
         result = self.viewmodel.save_api_key(self.api_key.text())

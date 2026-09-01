@@ -106,6 +106,17 @@ class _DraftPreviewProjection:
     inspector_state: str
 
 
+@dataclass(slots=True)
+class _SetupChoiceGrid:
+    """One visual Settings grid that can reflow without replacing controls."""
+
+    layout: QGridLayout
+    host: QWidget
+    buttons: tuple[QPushButton, ...]
+    maximum_columns: int
+    columns: int = 0
+
+
 def _populate_creative_styles(combo: QComboBox) -> None:
     for label, value in _CREATIVE_STYLE_CHOICES:
         combo.addItem(label, value)
@@ -361,6 +372,8 @@ class ProjectScreen(QWidget):
         setup_choices_layout.setContentsMargins(0, 4, 0, 0)
         setup_choices_layout.setHorizontalSpacing(12)
         setup_choices_layout.setVerticalSpacing(7)
+        self._setup_choices_host = setup_choices
+        self._setup_choices_layout = setup_choices_layout
 
         self.setup_content_profile = QComboBox()
         _populate_content_profile_preset(self.setup_content_profile)
@@ -409,6 +422,7 @@ class ProjectScreen(QWidget):
 
         self._setup_choice_buttons: dict[str, dict[object, QPushButton]] = {}
         self._setup_choice_groups: list[QButtonGroup] = []
+        self._setup_choice_grids: list[_SetupChoiceGrid] = []
 
         profile_section, profile_layout = self._setup_choice_section(
             "Тип контента", "Авто или любой из 15 существующих профилей."
@@ -417,7 +431,8 @@ class ProjectScreen(QWidget):
             (preset.label, preset.id) for preset in CONTENT_PROFILE_PRESETS.values()
         )]
         profile_buttons = self._add_setup_choice_buttons(
-            profile_layout, "profile", profile_values[:5], self.setup_content_profile, columns=5,
+            profile_layout, "profile", profile_values[:5], self.setup_content_profile,
+            columns=3, maximum_columns=5,
         )
         self.setup_profile_more = QWidget()
         more_profile_layout = QGridLayout(self.setup_profile_more)
@@ -425,7 +440,7 @@ class ProjectScreen(QWidget):
         more_profile_layout.setSpacing(7)
         profile_buttons.update(self._add_setup_choice_buttons(
             more_profile_layout, "profile", profile_values[5:], self.setup_content_profile,
-            columns=4, reuse_group=True,
+            columns=2, maximum_columns=4, reuse_group=True,
         ))
         profile_layout.addWidget(self.setup_profile_more)
         self.setup_profile_more.hide()
@@ -774,6 +789,7 @@ class ProjectScreen(QWidget):
             for divider in self._global_step_dividers:
                 divider.setVisible(not compact_actions or show_complete_stepper)
             self._apply_compact_chrome()
+            self._reflow_setup_choice_grids()
             self._reflow_candidate_boundary_controls()
             self._refresh_stage_action_geometry()
             QTimer.singleShot(0, self._refresh_stage_action_geometry)
@@ -856,6 +872,7 @@ class ProjectScreen(QWidget):
                 448 if compact else 540,
             )
         self._apply_compact_chrome()
+        self._reflow_setup_choice_grids()
         self._reflow_candidate_boundary_controls()
         self._review_body_layout.invalidate()
         self._review_body_layout.activate()
@@ -1724,6 +1741,7 @@ class ProjectScreen(QWidget):
         owner: QComboBox,
         *,
         columns: int,
+        maximum_columns: int | None = None,
         reuse_group: bool = False,
     ) -> dict[object, QPushButton]:
         """Expose an existing combo owner as an approved visual choice grid."""
@@ -1737,7 +1755,9 @@ class ProjectScreen(QWidget):
             group.setExclusive(True)
             group.setProperty("choiceKind", kind)
             self._setup_choice_groups.append(group)
-        grid = QGridLayout()
+        host = QWidget()
+        host.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        grid = QGridLayout(host)
         grid.setContentsMargins(0, 2, 0, 0)
         grid.setHorizontalSpacing(7)
         grid.setVerticalSpacing(7)
@@ -1759,13 +1779,93 @@ class ProjectScreen(QWidget):
             buttons[value] = button
         for column in range(columns):
             grid.setColumnStretch(column, 1)
+        host.setFixedHeight(grid.sizeHint().height())
+        self._setup_choice_grids.append(_SetupChoiceGrid(
+            layout=grid,
+            host=host,
+            buttons=tuple(buttons.values()),
+            maximum_columns=maximum_columns or columns,
+            columns=columns,
+        ))
         if isinstance(parent_layout, QGridLayout):
-            parent_layout.addLayout(
-                grid, parent_layout.rowCount(), 0, 1, max(1, parent_layout.columnCount()),
+            parent_layout.addWidget(
+                host, parent_layout.rowCount(), 0, 1, max(1, parent_layout.columnCount()),
             )
         else:
-            parent_layout.addLayout(grid)
+            parent_layout.addWidget(host)
         return buttons
+
+    def _reflow_setup_choice_grids(self) -> None:
+        """Choose readable columns from the current Settings workspace width."""
+
+        if not self.isVisible():
+            return
+        for item in self._setup_choice_grids:
+            # The grid can retain an old wide geometry while Qt is shrinking
+            # the outer scroll host. Use the live viewport as the responsive
+            # constraint, leaving room for the setup-card and section insets.
+            viewport = self.content_scroll.viewport().contentsRect().width()
+            if viewport <= 0:
+                # Before the screen's first layout pass, stale grid geometry
+                # reports a desktop width. Retain the conservative initial
+                # rows until the visible viewport gives a real constraint.
+                continue
+            available = max(1, viewport - 72)
+            if available <= 0:
+                continue
+            spacing = item.layout.horizontalSpacing()
+            minimum = max(button.minimumSizeHint().width() for button in item.buttons)
+            columns = min(
+                item.maximum_columns,
+                max(1, (available + spacing) // (minimum + spacing)),
+            )
+            if columns == item.columns:
+                continue
+            # ``removeWidget`` leaves enough stale grid bookkeeping for Qt
+            # to retain an old row's height during a resize.  Remove the
+            # layout items themselves before laying the same buttons out in
+            # their new cells.
+            while item.layout.count():
+                item.layout.takeAt(0)
+            for index, button in enumerate(item.buttons):
+                item.layout.addWidget(button, index // columns, index % columns)
+            for column in range(item.maximum_columns):
+                item.layout.setColumnStretch(column, 1 if column < columns else 0)
+            item.columns = columns
+            item.layout.invalidate()
+            item.host.setFixedHeight(item.layout.sizeHint().height())
+            # The profile section owns a vertical sequence: its compact grid,
+            # optional extra profiles and the toggle. Recompute every parent
+            # height immediately after adding a grid row so the next widget
+            # cannot retain the previous one-row y-position and overlap it.
+            owner = item.host
+            while owner is not None:
+                owner_layout = owner.layout()
+                if owner_layout is not None:
+                    owner_layout.invalidate()
+                    owner_layout.activate()
+                    if owner is self.setup_profile_more:
+                        owner.setMinimumHeight(owner_layout.sizeHint().height())
+                owner.updateGeometry()
+                if owner is self.content_host:
+                    break
+                owner = owner.parentWidget()
+        self._refresh_setup_choice_container_geometry()
+
+    def _refresh_setup_choice_container_geometry(self) -> None:
+        """Propagate a reflowed profile section to the scrollable workspace."""
+
+        self._setup_choices_layout.invalidate()
+        self._setup_choices_layout.activate()
+        self._setup_choices_host.setMinimumHeight(
+            self._setup_choices_layout.minimumSize().height()
+        )
+        self._setup_choices_host.updateGeometry()
+        content_layout = self.content_host.layout()
+        if content_layout is not None:
+            content_layout.invalidate()
+            content_layout.activate()
+        self.content_host.updateGeometry()
 
     @staticmethod
     def _choose_setup_value(owner: QComboBox, value: object) -> None:
@@ -1775,9 +1875,21 @@ class ProjectScreen(QWidget):
 
     def _set_all_profiles_visible(self, visible: bool) -> None:
         self.setup_profile_more.setVisible(visible)
+        if visible and self.setup_profile_more.layout() is not None:
+            # This child owns a dynamic grid. Reserve its complete first
+            # layout pass before placing the following toggle; Qt otherwise
+            # retains the collapsed height for one paint and lets rows overlap.
+            self.setup_profile_more.setFixedHeight(
+                self.setup_profile_more.layout().sizeHint().height()
+            )
+        elif not visible:
+            self.setup_profile_more.setMinimumHeight(0)
+            self.setup_profile_more.setMaximumHeight(16_777_215)
         self.setup_profile_more_toggle.setText(
             "Скрыть дополнительные" if visible else "Ещё 11 профилей"
         )
+        self._reflow_setup_choice_grids()
+        QTimer.singleShot(0, self._reflow_setup_choice_grids)
 
     def _sync_setup_choice_buttons(self, project: DesktopProject) -> None:
         values = {
@@ -1835,7 +1947,7 @@ class ProjectScreen(QWidget):
                 title=f"{style_label} · {preset.label}: sample недоступен",
             )
             return
-        self.setup_demo_preview.set_file(
+        self.setup_demo_preview.set_file_when_ready(
             path,
             presentation="vertical",
             title=f"{style_label} · {preset.label}",

@@ -9,7 +9,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QPoint, QRect
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton
 
 from app.analysis_artifact import new_analysis_artifact
@@ -348,6 +348,50 @@ def test_visual_creative_controls_hover_preview_without_saving(
         assert len(screen.setup_style_picker.cards) == 4
         assert screen.setup_automatic_composition.text() == "Автоматическое"
         assert not screen.findChildren(QComboBox, "compositionPicker")
+    finally:
+        screen.close()
+        screen.deleteLater()
+        app.processEvents()
+
+
+def test_content_profile_choice_cards_reflow_without_overlap_or_text_clipping(tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _services(tmp_path)
+    screen = ProjectScreen(ProjectViewModel(services))
+
+    try:
+        screen.open(project)
+        screen.setup_profile_more_toggle.setChecked(True)
+        screen.show()
+
+        for width in (604, 720, 960):
+            screen.resize(width, 720)
+            app.processEvents()
+            app.processEvents()
+            buttons = [
+                button for button in screen._setup_choice_buttons["profile"].values()
+                if button.isVisible()
+            ]
+            geometries = [
+                QRect(button.mapTo(screen, QPoint(0, 0)), button.size())
+                for button in buttons
+            ]
+            assert screen.content_scroll.horizontalScrollBar().maximum() == 0, [
+                (button.text(), button.width(), button.minimumSizeHint().width(), button.mapTo(screen, QPoint(0, 0)).x())
+                for button in buttons
+            ]
+            assert all(
+                button.width() >= button.minimumSizeHint().width()
+                for button in buttons
+            )
+            assert not any(
+                first.intersects(second)
+                for index, first in enumerate(geometries)
+                for second in geometries[index + 1:]
+            ), list(zip([button.text() for button in buttons], geometries))
     finally:
         screen.close()
         screen.deleteLater()

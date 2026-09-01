@@ -415,11 +415,13 @@ def test_expanded_settings_fit_compact_shell_and_hostile_paths(tmp_path: Path) -
         application.processEvents()
 
 
-def test_settings_keeps_support_and_key_status_visible_and_opens_telegram(
+def test_settings_keeps_version_and_sidebar_support_opens_telegram(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application = _application()
-    screen = SettingsScreen(SettingsViewModel(_services(tmp_path, project_count=0)))
+    services = _services(tmp_path, project_count=0)
+    screen = SettingsScreen(SettingsViewModel(services))
+    window = MainWindow(services)
     opened: list[QUrl] = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url) or True)
 
@@ -427,15 +429,16 @@ def test_settings_keeps_support_and_key_status_visible_and_opens_telegram(
         assert screen.api_status.text().startswith("Статус ключа")
         assert screen.advanced_toggle.text() == "Расширенные настройки"
         assert screen.advanced_content.isHidden()
-        assert screen.telegram_button.text() == "Написать в Telegram"
-        assert any(label.text() == "Telegram: @rezvis" for label in screen.findChildren(QLabel))
         assert any(label.text() == f"Content Factory {__version__}" for label in screen.findChildren(QLabel))
+        assert not any("Telegram" in label.text() for label in screen.findChildren(QLabel))
 
-        screen.telegram_button.click()
+        window.help_button.click()
         application.processEvents()
 
         assert [url.toString() for url in opened] == ["https://t.me/rezvis"]
     finally:
+        window.close()
+        window.deleteLater()
         screen.close()
         screen.deleteLater()
         application.processEvents()

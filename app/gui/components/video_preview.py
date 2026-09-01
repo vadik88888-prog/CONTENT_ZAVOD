@@ -59,6 +59,17 @@ class _PosterRequest:
     timestamp_seconds: float = 0.05
 
 
+@dataclass(frozen=True, slots=True)
+class _DeferredFileRequest:
+    """A UI-only demo handoff that leaves the current frame on screen."""
+
+    path: Path
+    presentation: str
+    title: str | None
+    source_codec: str | None
+    poster_cache_directory: Path | None
+
+
 class _BoundedVideoWidget(QVideoWidget):
     """A video surface whose native stream size cannot widen the page."""
 
@@ -144,6 +155,11 @@ class VideoPreview(QFrame):
         self._expected_source = QUrl()
         self._media_loading = False
         self._media_load_token: int | None = None
+        self._preserve_poster_during_load = False
+        self._deferred_file: _DeferredFileRequest | None = None
+        self._deferred_player = QMediaPlayer(self)
+        self._deferred_player.mediaStatusChanged.connect(self._deferred_media_status_changed)
+        self._deferred_player.errorOccurred.connect(self._deferred_media_error)
         self._last_audible_volume = 100
         self._proxy_cache_directory = Path(tempfile.gettempdir()) / "content-factory-preview-proxies"
         self._active_proxy: _ProxyRequest | None = None
@@ -349,6 +365,7 @@ class VideoPreview(QFrame):
         # player source, so it cannot leave a stale native frame behind.
         if not preload_active:
             self._cancel_proxy()
+        self._cancel_deferred_file()
         self._cancel_poster()
         if not preload_active:
             self._active_proxy = None
@@ -445,6 +462,7 @@ class VideoPreview(QFrame):
         )
         self.poster.setText("")
         self.poster.setPixmap(pixmap)
+        self._preserve_poster_during_load = False
         self.placeholder.hide()
         self._sync_stage_overlays()
         self.poster.show()
@@ -617,7 +635,11 @@ class VideoPreview(QFrame):
         title: str | None = None,
         source_codec: str | None = None,
         poster_cache_directory: Path | None = None,
+        _preserve_visual: bool = False,
+        _from_deferred: bool = False,
     ) -> None:
+        if not _from_deferred:
+            self._cancel_deferred_file()
         candidate = Path(path) if path else None
         usable_candidate = candidate if self.usable_media_path(candidate) else None
         requested_source = (
@@ -649,6 +671,13 @@ class VideoPreview(QFrame):
         self._range_requires_seek = False
         self._media_ready = reuse_loaded_source
         self._using_proxy = False
+        poster = self.poster.pixmap()
+        self._preserve_poster_during_load = bool(
+            _preserve_visual
+            and self._frame_sink_output
+            and poster is not None
+            and not poster.isNull()
+        )
         self._set_presentation(self._file_presentation(candidate, presentation))
         if title:
             set_responsive_text(self.active_candidate, title)
@@ -695,6 +724,96 @@ class VideoPreview(QFrame):
             self._clear_media()
         if self._path is None:
             self._set_available(False)
+
+    def set_file_when_ready(
+        self,
+        path: str | Path | None,
+        *,
+        presentation: str = "auto",
+        title: str | None = None,
+        source_codec: str | None = None,
+        poster_cache_directory: Path | None = None,
+    ) -> None:
+        """Switch a demo only after its next file is locally ready.
+
+        Hover previews use this UI-only handoff. The visible frame stays in
+        place while a second Qt player prepares the requested MP4, and rapid
+        pointer movement replaces only the pending target. Project state and
+        render inputs are never involved.
+        """
+
+        candidate = Path(path) if path else None
+        if not self.usable_media_path(candidate):
+            self.set_file(
+                path,
+                presentation=presentation,
+                title=title,
+                source_codec=source_codec,
+                poster_cache_directory=poster_cache_directory,
+            )
+            return
+        request = _DeferredFileRequest(
+            path=candidate,
+            presentation=presentation,
+            title=title,
+            source_codec=source_codec,
+            poster_cache_directory=poster_cache_directory,
+        )
+        if self._deferred_file == request:
+            return
+        if self._path == candidate:
+            self._cancel_deferred_file()
+            self._play()
+            return
+        # The first demo has no loaded frame to preserve, so use the existing
+        # source path and let it establish the stable visual layer.
+        if self._path is None or not self._media_ready:
+            self.set_file(
+                candidate,
+                presentation=presentation,
+                title=title,
+                source_codec=source_codec,
+                poster_cache_directory=poster_cache_directory,
+            )
+            return
+        self._deferred_file = request
+        self._deferred_player.setSource(QUrl.fromLocalFile(str(candidate)))
+
+    def _deferred_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        request = self._deferred_file
+        if request is None:
+            return
+        expected = QUrl.fromLocalFile(str(request.path))
+        if self._deferred_player.source() != expected:
+            return
+        if status not in {QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia}:
+            return
+        self._deferred_file = None
+        self._deferred_player.stop()
+        self._deferred_player.setSource(QUrl())
+        self.set_file(
+            request.path,
+            presentation=request.presentation,
+            title=request.title,
+            source_codec=request.source_codec,
+            poster_cache_directory=request.poster_cache_directory,
+            _preserve_visual=True,
+            _from_deferred=True,
+        )
+
+    def _deferred_media_error(self, *_: object) -> None:
+        """Keep the current demo visible if a hover target cannot be prepared."""
+
+        self._cancel_deferred_file()
+
+    def _cancel_deferred_file(self) -> None:
+        self._deferred_file = None
+        try:
+            if self._deferred_player.source().isValid():
+                self._deferred_player.stop()
+                self._deferred_player.setSource(QUrl())
+        except RuntimeError:
+            pass
 
     def set_range(
         self,
@@ -1084,6 +1203,18 @@ class VideoPreview(QFrame):
         self.poster.raise_()
 
     def _show_placeholder(self, message: str) -> None:
+        poster = self.poster.pixmap()
+        if (
+            self._preserve_poster_during_load
+            and poster is not None
+            and not poster.isNull()
+        ):
+            self.video.show()
+            self.placeholder.hide()
+            self._sync_stage_overlays()
+            self.poster.show()
+            self.poster.raise_()
+            return
         self.poster.hide()
         self.video.show()
         set_responsive_text(self.placeholder, message)
@@ -1860,6 +1991,7 @@ class VideoPreview(QFrame):
         self._range_seek_target_ms = None
         self._range_play_pending_token = None
         self._media_ready = False
+        self._preserve_poster_during_load = False
         self.poster.hide()
         self.video.show()
         self.placeholder.show()
@@ -1891,6 +2023,7 @@ class VideoPreview(QFrame):
         self._range_seek_target_ms = None
         self._range_play_pending_token = None
         self._media_ready = False
+        self._preserve_poster_during_load = False
         self.poster.hide()
         set_responsive_text(self.placeholder, message)
         self.placeholder.show()
@@ -1930,6 +2063,7 @@ class VideoPreview(QFrame):
             self.video.setFullScreen(False)
         self._stop_media_load_watchdog()
         self._release_player_source()
+        self._cancel_deferred_file()
         self._cancel_proxy()
         self._cancel_poster()
         super().closeEvent(event)

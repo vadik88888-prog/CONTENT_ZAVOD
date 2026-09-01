@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QPoint, QTimer
+from PySide6.QtCore import QByteArray, QPoint, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -110,7 +111,7 @@ class MainWindow(QMainWindow):
 
         self.help_button = QPushButton("?  Помощь и поддержка")
         self.help_button.setObjectName("nav")
-        self.help_button.clicked.connect(self._show_help)
+        self.help_button.clicked.connect(self._open_support)
         nav.addWidget(self.help_button)
         self.version = QLabel("Локальная версия")
         self.version.setObjectName("muted")
@@ -223,13 +224,9 @@ class MainWindow(QMainWindow):
         for item in (self.projects_button, self.new_button, self.settings_button):
             item.setChecked(item is button)
 
-    def _show_help(self) -> None:
-        QMessageBox.information(
-            self,
-            "Помощь Content Factory",
-            "Выберите длинное видео или публичную ссылку, настройте обработку и подтвердите лучшие моменты. "
-            "Все данные и ролики остаются на этом компьютере.",
-        )
+    @staticmethod
+    def _open_support() -> None:
+        QDesktopServices.openUrl(QUrl("https://t.me/rezvis"))
 
     def _diagnostics_started(self) -> None:
         self.system_status_title.setText("●  Проверка…")

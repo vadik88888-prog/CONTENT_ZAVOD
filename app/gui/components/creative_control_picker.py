@@ -238,7 +238,7 @@ class CreativeStylePickerDialog(QDialog):
         if self.demo_preview.active_media_path == path:
             self.demo_preview._play()
             return
-        self.demo_preview.set_file(path, presentation="vertical", title="Демо оформления")
+        self.demo_preview.set_file_when_ready(path, presentation="vertical", title="Демо оформления")
 
     def _restore_selected_demo(self) -> None:
         self._show_demo(self.selected_style_id)
