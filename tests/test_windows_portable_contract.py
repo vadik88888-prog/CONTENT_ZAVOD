@@ -80,6 +80,23 @@ def test_portable_collects_shiboken_runtime_for_frozen_qt_startup() -> None:
     assert 'SetDllDirectoryW' in hook
 
 
+def test_portable_build_rejects_friend_beta_private_signing_material(tmp_path: Path) -> None:
+    package = tmp_path / "ContentFactory"
+    package.mkdir()
+    (package / "friend_beta_signing.seed").write_bytes(b"never package a signing key")
+
+    try:
+        _build_module()._assert_no_private_signing_material(package)
+    except RuntimeError as error:
+        assert "forbidden Friend Beta signing material" in str(error)
+    else:
+        raise AssertionError("portable build must reject a private signing key")
+
+    (package / "friend_beta_signing.seed").unlink()
+    (package / "public-verification-key.txt").write_text("public only", encoding="utf-8")
+    _build_module()._assert_no_private_signing_material(package)
+
+
 def test_materialized_deno_junction_is_accepted_in_portable_onedir(tmp_path: Path) -> None:
     runtime = tmp_path / "youtube-access-runtime"
     node_modules = runtime / "server" / "node_modules"

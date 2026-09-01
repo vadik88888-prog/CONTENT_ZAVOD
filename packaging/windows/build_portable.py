@@ -155,6 +155,19 @@ def _zip_directory(source: Path, destination: Path) -> int:
     return file_count
 
 
+def _assert_no_private_signing_material(package_root: Path) -> None:
+    """Fail closed if a local Friend Beta signing tool/key reaches the ZIP."""
+
+    forbidden = ("sign_friend_beta_license", "friend_beta_signing.seed", "friend_beta_private")
+    leaked = [
+        str(path.relative_to(package_root))
+        for path in package_root.rglob("*")
+        if path.is_file() and any(token in path.name.casefold() for token in forbidden)
+    ]
+    if leaked:
+        raise RuntimeError("Portable package contains forbidden Friend Beta signing material: " + ", ".join(leaked))
+
+
 def _git_value(root: Path, *arguments: str) -> str:
     completed = subprocess.run(
         ["git", *arguments], cwd=root, check=True, capture_output=True, text=True, encoding="utf-8",
@@ -241,6 +254,7 @@ def main() -> int:
     if missing:
         raise RuntimeError("PyInstaller output is incomplete: " + ", ".join(missing))
     shutil.move(str(collected), str(unpacked))
+    _assert_no_private_signing_material(unpacked)
 
     manifests = unpacked / "manifests"
     licenses = unpacked / "licenses"
@@ -263,6 +277,8 @@ def main() -> int:
         binary_lock_path,
         youtube_access_lock_path,
         root / "app" / "runtime.py",
+        root / "app" / "licensing.py",
+        root / "app" / "gui" / "screens" / "activation_screen.py",
         root / "app" / "frozen_entrypoint.py",
         root / "app" / "source_download.py",
         windows / "THIRD_PARTY_NOTICES.md",

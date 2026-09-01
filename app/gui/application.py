@@ -9,6 +9,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from app.gui.main_window import MainWindow
+from app.gui.screens import ActivationDialog
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.styles import load_theme
 from app.runtime import RuntimeLayout
@@ -235,7 +236,13 @@ def run(
         return 0
 
     try:
-        window = MainWindow(DesktopServices.create(layout))
+        services = DesktopServices.create(layout)
+        # Resolve activation before showing the desktop shell: a copied ZIP
+        # has no access to projects or new processing until it is activated.
+        if not services.activation or not services.activation.status().active:
+            if ActivationDialog(services.activation).exec() != ActivationDialog.DialogCode.Accepted:
+                return 0
+        window = MainWindow(services)
         _main_window = window
         window.show()
         if _pending_instance_activation:

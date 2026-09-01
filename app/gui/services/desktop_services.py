@@ -49,6 +49,7 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.runtime import RuntimeLayout
+from app.licensing import ActivationService
 from app.secure_secrets import load_runtime_secrets
 from app.source_download import (
     cleanup_partial_downloads,
@@ -80,6 +81,7 @@ class DesktopServices:
     pipeline: PipelineFacade
     system: SystemService
     runtime: RuntimeLayout | None = None
+    activation: ActivationService | None = None
     _run_projections: RunProjectionCache = field(default_factory=RunProjectionCache, repr=False)
     _feedback_session_id: str = field(default_factory=lambda: str(uuid.uuid4()), init=False, repr=False)
     _feedback_stores: dict[tuple[str, str], FeedbackStore] = field(default_factory=dict, init=False, repr=False)
@@ -105,6 +107,7 @@ class DesktopServices:
             pipeline=PipelineFacade(layout),
             system=SystemService(layout),
             runtime=layout,
+            activation=ActivationService(layout.data),
         )
         services.recover_interrupted_runs()
         services.recover_ready_analysis_runs()
@@ -692,6 +695,15 @@ class DesktopServices:
                 "На компьютере уже идёт обработка другого проекта. Её можно смотреть в фоне, но второй тяжёлый запуск пока недоступен."
             )
 
+    def _require_active_license(self) -> None:
+        """Block only new work; existing projects and artifacts remain readable."""
+
+        # Hand-built service bundles are used by focused unit tests and do not
+        # represent a launched desktop application.  ``create`` always wires
+        # the real activation boundary before any UI can launch work.
+        if self.activation is not None:
+            self.activation.require_processing()
+
     def presentation(
         self,
         project: DesktopProject,
@@ -774,6 +786,7 @@ class DesktopServices:
             return False
 
     def prepare_run(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_active_license()
         self._require_idle_heavy_job()
         if project.status == ProjectStatus.PROCESSING:
             raise RuntimeError("Этот проект уже обрабатывается.")
@@ -863,6 +876,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_analysis(self, project: DesktopProject) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_active_license()
         self._require_idle_heavy_job()
         reusable_analysis = self._has_reusable_analysis(project)
         if (
@@ -917,6 +931,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_draft(self, project: DesktopProject, candidate_ids: list[str]) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_active_license()
         self._require_idle_heavy_job()
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
@@ -1297,6 +1312,7 @@ class DesktopServices:
     def prepare_selected_render(
         self, project: DesktopProject, candidate_ids: list[str] | None = None,
     ) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_active_license()
         self._require_idle_heavy_job()
         if project.status in {ProjectStatus.ANALYZING, ProjectStatus.PROCESSING, ProjectStatus.RENDERING_SELECTED}:
             raise RuntimeError("Этот проект уже обрабатывается.")
@@ -1361,6 +1377,7 @@ class DesktopServices:
         return run, prepared
 
     def prepare_render_revision(self, project: DesktopProject, parent_run: ProjectRun) -> tuple[ProjectRun, PreparedPipelineRun]:
+        self._require_active_license()
         self._require_idle_heavy_job()
         """Create an immutable export revision from existing production/audio artifacts."""
 

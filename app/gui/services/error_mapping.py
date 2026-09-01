@@ -33,6 +33,14 @@ def redact_secrets(value: object) -> str:
 def map_error(error: object) -> UserFacingError:
     detail = redact_secrets(error)
     lowered = detail.lower()
+    if "лиценз" in lowered or "установите лицензию" in lowered:
+        return UserFacingError(
+            "Требуется активация Friend Beta",
+            detail,
+            "Перезапустите приложение, скопируйте код устройства и установите подписанный файл лицензии.",
+            detail,
+            "friend_beta_license_required",
+        )
     if "no_draft_previews" in lowered or "no candidate draft could be assembled" in lowered:
         return UserFacingError(
             "Не удалось подготовить выбранные черновики",
