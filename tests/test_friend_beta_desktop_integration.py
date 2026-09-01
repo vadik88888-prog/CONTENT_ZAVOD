@@ -150,8 +150,10 @@ def test_settings_manifest_covers_every_current_style_caption_identity() -> None
     assert demo_source["width"] == 1080
     assert demo_source["height"] == 1920
     assert demo_source["fps"] == 30
-    assert demo_source["content"] == "vertical talking head with visible speech and natural hand motion"
-    assert demo_source["license"]["source_asset_id"] == "42323"
+    assert demo_source["content"] == "vertical user-provided packing scene with visible speaking and natural hand motion"
+    assert demo_source["license"]["provider"] == "user-provided"
+    assert demo_source["license"]["source_asset_id"] == "user-video-2026-09-01-13-08-19"
+    assert demo_source["selection"]["start_seconds"] == 14.5
     for identity, item in records.items():
         path = settings_preview_path(*identity)
         assert path is not None and path.is_file()
