@@ -163,6 +163,7 @@ _PRIVATE_SIGNING_PATH_TOKENS = (
 # nothing about signing authority; private PEM/OpenSSH headers are scanned
 # below.  ``.key`` and ``.seed`` remain fail-closed package paths.
 _PRIVATE_SIGNING_SUFFIXES = {".key", ".seed"}
+_PRIVATE_SIGNING_CONTENT_SUFFIXES = {".cfg", ".ini", ".json", ".key", ".pem", ".seed", ".txt", ".yaml", ".yml"}
 _PRIVATE_SIGNING_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
     b"-----BEGIN ED25519 PRIVATE KEY-----",
@@ -176,6 +177,12 @@ def _is_private_signing_path(path: Path) -> bool:
         any(token in name for token in _PRIVATE_SIGNING_PATH_TOKENS)
         or path.suffix.casefold() in _PRIVATE_SIGNING_SUFFIXES
     )
+
+
+def _can_contain_private_pem(path: Path) -> bool:
+    """Limit textual PEM matching to key/config files, never arbitrary binaries."""
+
+    return path.suffix.casefold() in _PRIVATE_SIGNING_CONTENT_SUFFIXES
 
 
 def _assert_no_private_signing_material(
@@ -196,7 +203,7 @@ def _assert_no_private_signing_material(
         raise RuntimeError("Portable package contains forbidden Friend Beta signing material: " + ", ".join(leaked))
     maximum_marker = max(len(marker) for marker in _PRIVATE_SIGNING_MARKERS)
     for path in package_root.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or not _can_contain_private_pem(path):
             continue
         try:
             tail = b""

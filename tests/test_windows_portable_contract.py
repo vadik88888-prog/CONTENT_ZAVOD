@@ -107,11 +107,14 @@ def test_portable_build_rejects_private_key_bytes_and_private_input(tmp_path: Pa
     package = tmp_path / "ContentFactory"
     package.mkdir()
     module = _build_module()
-    (package / "payload.bin").write_bytes(b"prefix-----BEGIN PRIVATE KEY-----suffix")
+    (package / "private-material.pem").write_bytes(b"prefix-----BEGIN PRIVATE KEY-----suffix")
     with pytest.raises(RuntimeError, match="private Friend Beta signing material"):
         module._assert_no_private_signing_material(package)
 
-    (package / "payload.bin").unlink()
+    (package / "private-material.pem").unlink()
+    (package / "library.dll").write_bytes(b"\0prefix-----BEGIN PRIVATE KEY-----suffix")
+    module._assert_no_private_signing_material(package)
+
     private_input = tmp_path / "owner-private.key"
     private_input.write_bytes(b"not a package input")
     with pytest.raises(RuntimeError, match="package input"):
