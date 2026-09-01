@@ -946,7 +946,7 @@ class DesktopServices:
         if candidate_id not in project.candidate_states:
             raise InputValidationError("Момент не найден в этом проекте.")
         allowed = {
-            "creative_style", "caption_preset_id", "composition_strategy",
+            "creative_style", "caption_preset_id",
             "same_source_broll_allowed", "reduced_motion",
         }
         if not values or set(values) - allowed:
@@ -955,7 +955,6 @@ class DesktopServices:
         defaults = {
             "creative_style": project.settings.subtitle_style,
             "caption_preset_id": project.settings.caption_preset_id,
-            "composition_strategy": project.settings.composition_strategy,
             "same_source_broll_allowed": project.settings.same_source_broll_allowed,
             "reduced_motion": project.settings.reduced_motion,
         }

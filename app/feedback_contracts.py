@@ -95,7 +95,6 @@ class BoundarySide(StrEnum):
 class CreativeOverrideField(StrEnum):
     SUBTITLES_ENABLED = "subtitles_enabled"
     SUBTITLE_STYLE = "subtitle_style"
-    COMPOSITION_STRATEGY = "composition_strategy"
     SAME_SOURCE_BROLL_ALLOWED = "same_source_broll_allowed"
     AUDIO_MODE = "audio_mode"
 
@@ -140,9 +139,6 @@ _EMPTY_PAYLOAD_EVENTS = frozenset({
     OutcomeEventName.FINAL_MARKED_USED.value,
 })
 _SUBTITLE_STYLES = frozenset({"documentary", "clean", "minimal", "dynamic"})
-_COMPOSITION_STRATEGIES = frozenset({
-    "safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
-})
 _AUDIO_MODES = frozenset({"original", "original_enhanced", "voiceover", "replace_voice", "mixed"})
 
 
@@ -388,7 +384,6 @@ def _validate_override_value(field_name: str, value: Any) -> None:
         return
     allowed = {
         CreativeOverrideField.SUBTITLE_STYLE.value: _SUBTITLE_STYLES,
-        CreativeOverrideField.COMPOSITION_STRATEGY.value: _COMPOSITION_STRATEGIES,
         CreativeOverrideField.AUDIO_MODE.value: _AUDIO_MODES,
     }[field_name]
     if not isinstance(value, str) or value not in allowed:

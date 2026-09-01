@@ -1,6 +1,6 @@
 from app.gui.components.caption_preset_picker import CaptionPresetPicker, CaptionPresetPickerDialog
 from app.gui.components.creative_control_picker import (
-    CompositionPicker, CompositionPickerDialog, CreativeStylePicker, CreativeStylePickerDialog,
+    CreativeStylePicker, CreativeStylePickerDialog,
 )
 from app.gui.components.candidate_thumbnail import CandidateThumbnailLoader
 from app.gui.components.final_results import FinalOutput, FinalResultsWorkspace
@@ -10,7 +10,7 @@ from app.gui.components.video_drop_zone import VideoDropZone
 from app.gui.components.video_preview import VideoPreview
 
 __all__ = [
-    "CaptionPresetPicker", "CaptionPresetPickerDialog", "CompositionPicker", "CompositionPickerDialog",
+    "CaptionPresetPicker", "CaptionPresetPickerDialog",
     "CreativeStylePicker", "CreativeStylePickerDialog", "CandidateThumbnailLoader", "FinalOutput", "FinalResultsWorkspace",
     "ProcessingProgress", "ProjectPosterLoader", "VideoDropZone", "VideoPreview",
 ]

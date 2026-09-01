@@ -75,8 +75,8 @@ class ProjectOptions:
         self.processing_intent().validate()
         if self.encoder not in {"auto", "cpu", "nvenc"}:
             raise ValueError("Unsupported encoder.")
-        if self.composition_strategy not in {"safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop"}:
-            raise ValueError("Unsupported composition strategy.")
+        if self.composition_strategy != "safe_auto":
+            raise ValueError("Composition is automatic in Friend Beta.")
         if self.caption_preset_id not in CAPTION_PRESET_DEFINITIONS:
             raise ValueError("Unsupported production caption preset.")
         if not all(isinstance(item, bool) for item in (
@@ -256,7 +256,7 @@ class DesktopProject:
             if not candidate_id or not isinstance(override, dict):
                 raise ValueError("Candidate creative override is invalid.")
             unknown = set(override) - {
-                "creative_style", "caption_preset_id", "composition_strategy",
+                "creative_style", "caption_preset_id",
                 "same_source_broll_allowed", "reduced_motion",
             }
             if unknown:
@@ -267,10 +267,6 @@ class DesktopProject:
                 raise ValueError("Candidate creative style is unsupported.")
             if "caption_preset_id" in override and override["caption_preset_id"] not in CAPTION_PRESET_DEFINITIONS:
                 raise ValueError("Candidate caption preset is unsupported.")
-            if "composition_strategy" in override and override["composition_strategy"] not in {
-                "safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
-            }:
-                raise ValueError("Candidate composition strategy is unsupported.")
             if any(
                 name in override and not isinstance(override[name], bool)
                 for name in ("same_source_broll_allowed", "reduced_motion")
@@ -306,6 +302,10 @@ class DesktopProject:
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
+        # Earlier desktop builds exposed manual crop choices that were not
+        # applied by native Creative Preview.  Preserve the field only as the
+        # established automatic engine default; never revive a stale choice.
+        migrated_settings["composition_strategy"] = "safe_auto"
         if "caption_preset_id" not in settings:
             migrated_settings["caption_preset_id"] = default_caption_preset_id_for_legacy_style(
                 settings.get("subtitle_style", "documentary")
@@ -397,9 +397,12 @@ class DesktopProject:
                 if isinstance(item, dict)
             },
             candidate_creative_overrides={
-                str(key): dict(item)
+                str(key): {
+                    str(name): field for name, field in item.items()
+                    if name != "composition_strategy"
+                }
                 for key, item in dict(value.get("candidate_creative_overrides") or {}).items()
-                if isinstance(item, dict)
+                if isinstance(item, dict) and any(name != "composition_strategy" for name in item)
             },
             last_final_result_id=(
                 str(value["last_final_result_id"]) if value.get("last_final_result_id") else None

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
 from app.font_assets import FONT_ASSET_DEFINITIONS
-from app.gui.components import CaptionPresetPickerDialog, CompositionPickerDialog, CreativeStylePickerDialog
+from app.gui.components import CaptionPresetPickerDialog, CreativeStylePickerDialog
 from app.gui.models import DesktopProject, DesktopSettings
 from app.gui.screens.project_screen import ProjectScreen
 from app.gui.services.desktop_project_store import DesktopProjectStore
@@ -151,11 +151,15 @@ def main() -> int:
             _save(screen, output / "settings-creative-style-hover.png")
             screen.setup_style_picker.cards["dynamic"].hover_left.emit("dynamic")
 
-            screen.content_scroll.ensureWidgetVisible(screen.setup_composition_picker, 12, 12)
+            screen.content_scroll.ensureWidgetVisible(screen.setup_automatic_composition_hint, 12, 80)
             _settle(app)
-            if len(screen.setup_composition_picker.cards) != 5:
-                raise AssertionError("Settings does not expose every current composition strategy.")
-            _save(screen, output / "settings-composition-cards.png")
+            if screen.setup_automatic_composition.text() != "Автоматическое":
+                raise AssertionError("Settings does not disclose automatic composition.")
+            if "адаптирует видео под 9:16" not in screen.setup_automatic_composition_hint.text():
+                raise AssertionError("Settings does not explain automatic composition.")
+            if screen.findChild(QWidget, "compositionPicker") is not None:
+                raise AssertionError("Settings still exposes a selectable composition picker.")
+            _save(screen, output / "settings-automatic-composition.png")
 
             dialog = CaptionPresetPickerDialog("editorial_narrow", screen)
             dialog.show()
@@ -174,7 +178,7 @@ def main() -> int:
             print(output / "settings-caption-presets.png")
             print(output / "settings-caption-hover.png")
             print(output / "settings-creative-style-hover.png")
-            print(output / "settings-composition-cards.png")
+            print(output / "settings-automatic-composition.png")
             print(output / "drafts-caption-presets.png")
             dialog.close()
 
@@ -191,18 +195,9 @@ def main() -> int:
             print(output / "drafts-creative-style-cards.png")
             style_dialog.close()
 
-            composition_dialog = CompositionPickerDialog("safe_auto", screen)
-            composition_dialog.show()
-            _settle(app)
-            if len(composition_dialog.picker.cards) != 5:
-                raise AssertionError("Draft composition picker does not expose every current strategy.")
-            _save(composition_dialog, output / "drafts-composition-cards.png")
-            print(output / "drafts-composition-cards.png")
-            composition_dialog.close()
         finally:
             dialog.close() if "dialog" in locals() else None
             style_dialog.close() if "style_dialog" in locals() else None
-            composition_dialog.close() if "composition_dialog" in locals() else None
             screen.preview.suspend()
             screen.setup_demo_preview.suspend()
             screen.close()

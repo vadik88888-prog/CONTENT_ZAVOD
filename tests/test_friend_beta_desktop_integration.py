@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton
 
 from app.analysis_artifact import new_analysis_artifact
 from app.caption_presets import CAPTION_PRESET_DEFINITIONS
@@ -19,7 +19,7 @@ from app.config import load_config
 from app.content_profile_taxonomy import CONTENT_PROFILE_PRESETS
 from app.font_assets import FONT_ASSET_DEFINITIONS, bundled_font_asset_path
 from app.gui.components import (
-    CaptionPresetPickerDialog, CompositionPickerDialog, CreativeStylePickerDialog, VideoPreview,
+    CaptionPresetPickerDialog, CreativeStylePickerDialog, VideoPreview,
 )
 from app.gui.components.project_poster import project_poster_path
 from app.gui.models import DesktopProject, DesktopSettings, ProjectStatus
@@ -259,7 +259,8 @@ def test_settings_exposes_seven_real_font_cards_and_exact_production_mp4(
         assert screen.setup_demo_detail.text() == "Dynamic · Word Pop"
         assert screen.setup_style_picker.selected_option_id == "dynamic"
         assert screen.setup_style_picker.cards["dynamic"].property("selectionTone") == "#FF6846"
-        assert screen.setup_composition_picker.selected_option_id == project.settings.composition_strategy
+        assert screen.setup_automatic_composition.text() == "Автоматическое"
+        assert "адаптирует видео под 9:16" in screen.setup_automatic_composition_hint.text()
         record = next(
             item for item in settings_preview_manifest()["items"]
             if item["creative_style_id"] == project.settings.subtitle_style
@@ -343,38 +344,27 @@ def test_visual_creative_controls_hover_preview_without_saving(
         assert media_calls[-1] == settings_preview_path(*initial)
 
         assert len(screen.setup_style_picker.cards) == 4
-        assert len(screen.setup_composition_picker.cards) == 5
-        assert "система сама удерживает важного" in screen.setup_composition_picker.cards[
-            "safe_auto"
-        ].description.text().casefold()
+        assert screen.setup_automatic_composition.text() == "Автоматическое"
+        assert not screen.findChildren(QComboBox, "compositionPicker")
     finally:
         screen.close()
         screen.deleteLater()
         app.processEvents()
 
 
-def test_draft_visual_style_and_composition_dialogs_expose_only_current_options() -> None:
+def test_draft_visual_style_dialog_exposes_only_current_options() -> None:
     existing = QCoreApplication.instance()
     if existing is not None and not isinstance(existing, QApplication):
         pytest.skip("requires a QApplication process, not an existing QCoreApplication")
     app = QApplication.instance() or QApplication([])
     style_dialog = CreativeStylePickerDialog("documentary", "word_pop")
-    composition_dialog = CompositionPickerDialog("safe_auto")
     try:
         assert set(style_dialog.picker.cards) == {"minimal", "documentary", "dynamic", "clean"}
         style_dialog.picker.choose("dynamic")
         assert style_dialog.selected_style_id == "dynamic"
-        assert set(composition_dialog.picker.cards) == {
-            "safe_auto", "center_crop", "fit_blur_background", "fit_solid_background", "top_crop",
-        }
-        composition_dialog.picker.choose("top_crop")
-        assert composition_dialog.selected_strategy == "top_crop"
-        assert any("ожидать" in label.text().casefold() for label in composition_dialog.findChildren(QLabel))
     finally:
         style_dialog.close()
-        composition_dialog.close()
         style_dialog.deleteLater()
-        composition_dialog.deleteLater()
         app.processEvents()
 
 
@@ -419,26 +409,14 @@ def test_draft_caption_picker_saves_a_pending_override_without_replacing_preview
         def exec(self) -> int:
             return self.DialogCode.Accepted
 
-    class AcceptedCompositionPicker:
-        DialogCode = SimpleNamespace(Accepted=1)
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            self.selected_strategy = "top_crop"
-
-        def exec(self) -> int:
-            return self.DialogCode.Accepted
-
     monkeypatch.setattr("app.gui.screens.project_screen.CreativeStylePickerDialog", AcceptedStylePicker)
-    monkeypatch.setattr("app.gui.screens.project_screen.CompositionPickerDialog", AcceptedCompositionPicker)
     try:
         screen.project = project
         screen._edit_draft_option("candidate-000", "caption_preset_id")
         screen._edit_draft_option("candidate-000", "creative_style")
-        screen._edit_draft_option("candidate-000", "composition_strategy")
         assert project.candidate_creative_overrides["candidate-000"] == {
             "caption_preset_id": "word_pop",
             "creative_style": "dynamic",
-            "composition_strategy": "top_crop",
         }
         assert project.candidate_draft_statuses["candidate-000"] == "pending"
         assert project.candidate_draft_artifacts["candidate-000"] == str(previous)
@@ -505,10 +483,16 @@ def test_legacy_project_caption_migration_follows_existing_creative_family(
     raw = project.to_dict()
     raw["settings"].pop("caption_preset_id", None)
     raw["settings"]["subtitle_style"] = "dynamic"
+    raw["settings"]["composition_strategy"] = "top_crop"
+    raw["candidate_creative_overrides"] = {
+        "candidate-legacy": {"composition_strategy": "fit_blur_background"},
+    }
 
     restored = DesktopProject.from_dict(raw)
 
     assert restored.settings.caption_preset_id == "accent_yellow"
+    assert restored.settings.composition_strategy == "safe_auto"
+    assert "candidate-legacy" not in restored.candidate_creative_overrides
 
 
 def test_candidate_override_invalidates_only_its_draft_and_preserves_analysis(
@@ -537,14 +521,12 @@ def test_candidate_override_invalidates_only_its_draft_and_preserves_analysis(
         "candidate-000",
         creative_style="minimal",
         caption_preset_id="word_pop",
-        composition_strategy="fit_blur_background",
         same_source_broll_allowed=True,
     )
 
     assert project.candidate_creative_overrides["candidate-000"] == {
         "creative_style": "minimal",
         "caption_preset_id": "word_pop",
-        "composition_strategy": "fit_blur_background",
         "same_source_broll_allowed": True,
     }
     assert project.candidate_draft_statuses == {
@@ -599,7 +581,6 @@ def test_candidate_override_is_an_isolated_draft_config_overlay(tmp_path: Path) 
         "candidate-a": {
             "creative_style": "clean",
             "caption_preset_id": "contrast_box",
-            "composition_strategy": "center_crop",
             "same_source_broll_allowed": True,
             "reduced_motion": True,
         }
@@ -610,7 +591,7 @@ def test_candidate_override_is_an_isolated_draft_config_overlay(tmp_path: Path) 
     assert effective is not project
     assert effective.settings.subtitle_style == "clean"
     assert effective.settings.caption_preset_id == "contrast_box"
-    assert effective.settings.composition_strategy == "center_crop"
+    assert effective.settings.composition_strategy == "safe_auto"
     assert effective.settings.same_source_broll_allowed is True
     assert effective.settings.reduced_motion is True
     assert project.settings.subtitle_style == "documentary"
@@ -618,7 +599,7 @@ def test_candidate_override_is_an_isolated_draft_config_overlay(tmp_path: Path) 
     assert PipelineFacade._project_with_candidate_options(project, ["candidate-a", "candidate-b"]) is project
 
 
-def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: Path) -> None:
+def test_advanced_controls_keep_automatic_composition_at_existing_runtime_owner(tmp_path: Path) -> None:
     services, project = _services(tmp_path)
 
     services.update_project_options(
@@ -628,7 +609,6 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
         platform="reels",
         clip_count="5",
         audio_mode="original_enhanced",
-        composition_strategy="fit_blur_background",
         same_source_broll_allowed=True,
         subtitles_enabled=False,
         subtitle_style="dynamic",
@@ -648,7 +628,7 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
     assert persisted.settings.platform == "reels"
     assert persisted.settings.clip_count == "5"
     assert persisted.settings.audio_mode == "original_enhanced"
-    assert persisted.settings.composition_strategy == "fit_blur_background"
+    assert persisted.settings.composition_strategy == "safe_auto"
     assert persisted.settings.same_source_broll_allowed is True
     assert persisted.settings.subtitles_enabled is False
     assert persisted.settings.subtitle_style == "dynamic"
@@ -666,7 +646,7 @@ def test_advanced_controls_persist_and_reach_existing_runtime_owners(tmp_path: P
     assert config.product_flow.caption_preset_version == "2.1.0"
     assert config.product_flow.reduced_motion is True
     assert config.production.audio_mode == "original_enhanced"
-    assert config.production_render.crop_strategy == "fit_blur_background"
+    assert config.production_render.crop_strategy == "safe_auto"
     assert config.production_render.same_source_broll_allowed is True
     assert config.production_render.subtitles_enabled is False
     assert config.production_render.subtitle_style == "dynamic"
@@ -689,7 +669,6 @@ def test_single_candidate_final_reuses_the_draft_override_constraints(
         "candidate-a": {
             "creative_style": "dynamic",
             "caption_preset_id": "word_pop",
-            "composition_strategy": "fit_blur_background",
             "same_source_broll_allowed": False,
             "reduced_motion": True,
         }
@@ -723,7 +702,7 @@ def test_single_candidate_final_reuses_the_draft_override_constraints(
     effective = captured["settings"]
     assert effective.subtitle_style == "dynamic"
     assert effective.caption_preset_id == "word_pop"
-    assert effective.composition_strategy == "fit_blur_background"
+    assert effective.composition_strategy == "safe_auto"
     assert effective.same_source_broll_allowed is False
     assert effective.reduced_motion is True
     assert "--mock-ai" not in prepared.arguments

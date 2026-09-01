@@ -762,7 +762,6 @@ def test_boundary_terminal_failure_requires_boundary_change_before_requeue(tmp_p
         candidate_id,
         creative_style="dynamic",
         caption_preset_id="clean_white",
-        composition_strategy="center_crop",
     )
     assert project.candidate_states[candidate_id] == "draft_failed"
     assert project.candidate_draft_statuses[candidate_id] == "failed"
@@ -774,7 +773,6 @@ def test_boundary_terminal_failure_requires_boundary_change_before_requeue(tmp_p
     assert restored.candidate_creative_overrides[candidate_id] == {
         "creative_style": "dynamic",
         "caption_preset_id": "clean_white",
-        "composition_strategy": "center_crop",
     }
 
     # Restoring the card or calling the service directly cannot create a run.

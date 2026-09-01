@@ -309,7 +309,7 @@ class PipelineFacade:
             values["subtitle_style"] = override["creative_style"]
             values["preset_selection_mode"] = "explicit"
         for name in (
-            "caption_preset_id", "composition_strategy",
+            "caption_preset_id",
             "same_source_broll_allowed", "reduced_motion",
         ):
             if name in override:
@@ -1591,10 +1591,11 @@ class PipelineFacade:
         config.production_render.cache_enabled = options.use_cache
         config.device = settings.device_preference
         apply_resolved_processing_config(config, resolved)
-        # The product preset establishes a safe baseline; a person's explicit
-        # Advanced composition choice is the established production-render
-        # override and must not be overwritten by that baseline.
-        config.production_render.crop_strategy = options.composition_strategy
+        # Friend Beta exposes no manual composition choice. Keep the existing
+        # automatic engine entry point for legacy-compatible renders while
+        # native Creative Preview continues to own its geometry in the
+        # Composition Planner.
+        config.production_render.crop_strategy = "safe_auto"
         # A user can always choose not to reuse existing artifacts.  The product
         # preset controls normal cache policy; this explicit advanced switch wins.
         config.production_render.cache_enabled = options.use_cache and config.production_render.cache_enabled

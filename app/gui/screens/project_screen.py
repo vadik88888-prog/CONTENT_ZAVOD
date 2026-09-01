@@ -30,7 +30,7 @@ from app.editorial_profile_policy import evaluate_editorial_candidate
 from app.font_assets import FONT_ASSET_DEFINITIONS
 from app.gui.components import (
     CandidateThumbnailLoader, CaptionPresetPicker, CaptionPresetPickerDialog,
-    CompositionPicker, CompositionPickerDialog, CreativeStylePicker, CreativeStylePickerDialog,
+    CreativeStylePicker, CreativeStylePickerDialog,
     FinalOutput,
     FinalResultsWorkspace,
     ProcessingProgress,
@@ -466,13 +466,17 @@ class ProjectScreen(QWidget):
         setup_choices_layout.addWidget(caption_section, 2, 0, 1, 2)
 
         composition_section, composition_layout = self._setup_choice_section(
-            "Кадрирование", "Выберите, как существующий движок заполняет вертикальный кадр."
+            "Кадрирование", "Система сама адаптирует видео под 9:16 и удерживает важного человека или объект."
         )
-        self.setup_composition_picker = CompositionPicker(columns=5)
-        self.setup_composition_picker.option_selected.connect(
-            lambda strategy: self.viewmodel.save_options(composition_strategy=str(strategy))
+        self.setup_automatic_composition = QLabel("Автоматическое")
+        self.setup_automatic_composition.setObjectName("setupAutomaticComposition")
+        composition_layout.addWidget(self.setup_automatic_composition)
+        self.setup_automatic_composition_hint = QLabel(
+            "Система сама адаптирует видео под 9:16 и удерживает важного человека или объект."
         )
-        composition_layout.addWidget(self.setup_composition_picker)
+        self.setup_automatic_composition_hint.setObjectName("setupAutomaticCompositionHint")
+        self.setup_automatic_composition_hint.setWordWrap(True)
+        composition_layout.addWidget(self.setup_automatic_composition_hint)
         setup_choices_layout.addWidget(composition_section, 3, 0, 1, 2)
 
         count_section, count_layout = self._setup_choice_section(
@@ -669,17 +673,13 @@ class ProjectScreen(QWidget):
         self.audio_mode.currentIndexChanged.connect(
             lambda _index: self.viewmodel.save_options(audio_mode=str(self.audio_mode.currentData()))
         )
-        settings.addWidget(QLabel("Композиция кадра"))
-        self.composition_strategy = QComboBox()
-        self.composition_strategy.addItem("Авто: сохранить важное", "safe_auto")
-        self.composition_strategy.addItem("По центру", "center_crop")
-        self.composition_strategy.addItem("С размытым фоном", "fit_blur_background")
-        self.composition_strategy.addItem("С однотонным фоном", "fit_solid_background")
-        self.composition_strategy.addItem("Верхняя часть кадра", "top_crop")
-        self.composition_strategy.currentIndexChanged.connect(
-            lambda _index: self.viewmodel.save_options(composition_strategy=str(self.composition_strategy.currentData()))
+        settings.addWidget(QLabel("Кадрирование"))
+        self.automatic_composition = QLabel(
+            "Автоматическое — система адаптирует видео под 9:16 и удерживает важного человека или объект."
         )
-        settings.addWidget(self.composition_strategy)
+        self.automatic_composition.setObjectName("automaticComposition")
+        self.automatic_composition.setWordWrap(True)
+        settings.addWidget(self.automatic_composition)
         self.same_source_broll = QCheckBox(self._SAME_SOURCE_BROLL_TEXT)
         self.same_source_broll.setToolTip(
             "Разрешает использовать только подходящие фрагменты из загруженного видео. "
@@ -1644,7 +1644,6 @@ class ProjectScreen(QWidget):
         self.setup_editorial_intent.blockSignals(False)
         self._set_combo_data(self.content_profile_preset, project.settings.content_profile_preset)
         self._set_combo_data(self.audio_mode, project.settings.audio_mode)
-        self._set_combo_data(self.composition_strategy, project.settings.composition_strategy)
         self.same_source_broll.blockSignals(True)
         self.same_source_broll.setChecked(project.settings.same_source_broll_allowed)
         self.same_source_broll.blockSignals(False)
@@ -1797,7 +1796,6 @@ class ProjectScreen(QWidget):
                 button.blockSignals(False)
         self.setup_style_picker.set_selected(project.settings.subtitle_style)
         self.setup_caption_picker.set_selected(project.settings.caption_preset_id)
-        self.setup_composition_picker.set_selected(project.settings.composition_strategy)
         hidden_profiles = list(CONTENT_PROFILE_PRESETS)[4:]
         if project.settings.content_profile_preset in hidden_profiles:
             self.setup_profile_more_toggle.setChecked(True)
@@ -4006,18 +4004,10 @@ class ProjectScreen(QWidget):
         override = self.project.candidate_creative_overrides.get(candidate_id, {})
         style_id = str(override.get("creative_style", self.project.settings.subtitle_style))
         caption_id = str(override.get("caption_preset_id", self.project.settings.caption_preset_id))
-        crop_id = str(override.get("composition_strategy", self.project.settings.composition_strategy))
         broll = bool(override.get(
             "same_source_broll_allowed", self.project.settings.same_source_broll_allowed,
         ))
         style_labels = {value: label for label, value in _CREATIVE_STYLE_CHOICES}
-        crop_labels = {
-            "safe_auto": "Авто — сохранить важное",
-            "center_crop": "По центру",
-            "fit_blur_background": "С размытым фоном",
-            "fit_solid_background": "С однотонным фоном",
-            "top_crop": "Верхняя часть кадра",
-        }
         caption = CAPTION_PRESET_DEFINITIONS.get(caption_id)
         panel = QFrame()
         panel.setObjectName("draftInspector")
@@ -4037,7 +4027,11 @@ class ProjectScreen(QWidget):
         rows = (
             ("Монтаж", style_labels.get(style_id, style_id), "creative_style"),
             ("Субтитры", caption.label if caption else caption_id, "caption_preset_id"),
-            ("Кадрирование", crop_labels.get(crop_id, crop_id), "composition_strategy"),
+            (
+                "Кадрирование",
+                "Автоматическое\nСистема сама адаптирует видео под 9:16 и удерживает важного человека или объект.",
+                None,
+            ),
         )
         for row, (label, value, option) in enumerate(rows):
             name = QLabel(label)
@@ -4048,19 +4042,20 @@ class ProjectScreen(QWidget):
             current.setObjectName("draftInspectorValue")
             current.setWordWrap(True)
             current.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            change = QPushButton("Изменить")
-            change.setObjectName(f"draftChange-{option}-{candidate_id}")
-            change.setProperty("secondaryAction", True)
-            change.setMinimumWidth(88)
-            change.setToolTip(
-                "Сохранит pending-изменение только для этого черновика; render не начнётся автоматически."
-            )
-            change.clicked.connect(
-                lambda _checked=False, cid=candidate_id, key=option: self._edit_draft_option(cid, key)
-            )
             label_row = 2 + row * 2
             grid.addWidget(name, label_row, 0)
-            grid.addWidget(change, label_row, 1)
+            if option is not None:
+                change = QPushButton("Изменить")
+                change.setObjectName(f"draftChange-{option}-{candidate_id}")
+                change.setProperty("secondaryAction", True)
+                change.setMinimumWidth(88)
+                change.setToolTip(
+                    "Сохранит pending-изменение только для этого черновика; render не начнётся автоматически."
+                )
+                change.clicked.connect(
+                    lambda _checked=False, cid=candidate_id, key=option: self._edit_draft_option(cid, key)
+                )
+                grid.addWidget(change, label_row, 1)
             grid.addWidget(current, label_row + 1, 0, 1, 2)
         broll_row = 2 + len(rows) * 2
         broll_toggle = QCheckBox("Дополнительные кадры из этого видео")
@@ -4133,15 +4128,6 @@ class ProjectScreen(QWidget):
             value = picker.selected_preset_id
             if value and value != current:
                 self.viewmodel.revise_draft(candidate_id, caption_preset_id=value)
-            return
-        elif option == "composition_strategy":
-            current = override.get(option, self.project.settings.composition_strategy)
-            picker = CompositionPickerDialog(str(current), self)
-            if picker.exec() != picker.DialogCode.Accepted:
-                return
-            value = picker.selected_strategy
-            if value and value != current:
-                self.viewmodel.revise_draft(candidate_id, composition_strategy=value)
             return
         elif option == "same_source_broll_allowed":
             title = "Дополнительные кадры из этого видео"
@@ -4657,11 +4643,11 @@ class ProjectScreen(QWidget):
         self.production_button.setDisabled(active or blocked or not selected_drafts_exist)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
-            self.audio_mode, self.composition_strategy, self.same_source_broll,
+            self.audio_mode, self.same_source_broll,
             self.subtitles, self.subtitle_style, self.cache,
             self.setup_editorial_intent, self.content_profile_preset,
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
-            self.setup_style_picker, self.setup_caption_picker, self.setup_composition_picker,
+            self.setup_style_picker, self.setup_caption_picker,
         ):
             widget.setDisabled(active)
         for buttons in self._setup_choice_buttons.values():

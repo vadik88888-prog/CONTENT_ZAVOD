@@ -49,34 +49,6 @@ CREATIVE_STYLE_OPTIONS = (
     ),
 )
 
-COMPOSITION_OPTIONS = (
-    VisualControlOption(
-        "safe_auto", "Авто — сохранить важное",
-        "Система сама удерживает важного человека или объект в безопасном 9:16.",
-        "◎  9:16", "#FF6846",
-    ),
-    VisualControlOption(
-        "center_crop", "По центру",
-        "Стабильная вертикальная обрезка вокруг центра исходного кадра.",
-        "│  ЦЕНТР  │", "#A7F3D0",
-    ),
-    VisualControlOption(
-        "fit_blur_background", "С размытым фоном",
-        "Полный кадр остаётся видимым, а свободное место заполняет мягкий фон.",
-        "░  КАДР  ░", "#93C5FD",
-    ),
-    VisualControlOption(
-        "fit_solid_background", "С однотонным фоном",
-        "Полный кадр на спокойном однотонном фоне без отвлекающих краёв.",
-        "■  КАДР  ■", "#D8B4FE",
-    ),
-    VisualControlOption(
-        "top_crop", "Верхняя часть кадра",
-        "Приоритет верхней части: лицо, экран или заголовок остаются в 9:16.",
-        "⌜  ВЕРХ  ⌝", "#FDE68A",
-    ),
-)
-
 # Fail fast if presentation gets ahead of the persisted production registry.
 assert {item.option_id for item in CREATIVE_STYLE_OPTIONS} == set(CREATIVE_PRESET_DEFINITIONS)
 
@@ -201,12 +173,6 @@ class CreativeStylePicker(VisualControlPicker):
         self.setObjectName("creativeStylePicker")
 
 
-class CompositionPicker(VisualControlPicker):
-    def __init__(self, *, columns: int, parent: QWidget | None = None) -> None:
-        super().__init__(COMPOSITION_OPTIONS, columns=columns, parent=parent)
-        self.setObjectName("compositionPicker")
-
-
 class CreativeStylePickerDialog(QDialog):
     """Draft-local style selection with bundled, production-rendered hover demos."""
 
@@ -284,40 +250,3 @@ class CreativeStylePickerDialog(QDialog):
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.demo_preview.suspend()
         super().closeEvent(event)
-
-
-class CompositionPickerDialog(QDialog):
-    def __init__(self, current_strategy: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Кадрирование")
-        self.setModal(True)
-        self.resize(820, 600)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-        title = QLabel("Кадрирование")
-        title.setObjectName("dialogTitle")
-        layout.addWidget(title)
-        copy = QLabel(
-            "Выберите, как этот черновик заполняет вертикальный кадр. Изменение будет ожидать «Пересоздать черновик»."
-        )
-        copy.setObjectName("muted")
-        copy.setWordWrap(True)
-        layout.addWidget(copy)
-        self.picker = CompositionPicker(columns=2, parent=self)
-        self.picker.set_selected(current_strategy)
-        layout.addWidget(self.picker)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        self.save_button = QPushButton("Сохранить выбор")
-        self.save_button.setObjectName("primary")
-        buttons.addButton(self.save_button, QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        if cancel is not None:
-            cancel.setText("Отмена")
-        buttons.rejected.connect(self.reject)
-        self.save_button.clicked.connect(self.accept)
-        layout.addWidget(buttons)
-
-    @property
-    def selected_strategy(self) -> str:
-        return self.picker.selected_option_id or ""

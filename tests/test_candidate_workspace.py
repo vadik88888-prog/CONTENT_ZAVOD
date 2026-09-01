@@ -1009,7 +1009,7 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
             button for button in screen.findChildren(QPushButton)
             if button.objectName().startswith("draftChange-")
         ]
-        assert len(change_buttons) == 3
+        assert len(change_buttons) == 2
         assert all(
             button.contentsRect().width()
             >= button.fontMetrics().horizontalAdvance(button.text())
@@ -1036,6 +1036,11 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
             QPushButton,
             "draftChange-creative_style-candidate-recommended",
         ) is not None
+        assert screen.findChild(
+            QPushButton,
+            "draftChange-composition_strategy-candidate-recommended",
+        ) is None
+        assert any(label.text().startswith("Автоматическое") for label in inspector_values)
 
         watch = screen.findChild(
             QPushButton, "draft-preview-candidate-candidate-recommended",
