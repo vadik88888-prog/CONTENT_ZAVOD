@@ -159,7 +159,10 @@ _PRIVATE_SIGNING_PATH_TOKENS = (
     "sign_friend_beta_license", "friend_beta_signing", "friend-beta-signing",
     "friend_beta_private", "friend-beta-private",
 )
-_PRIVATE_SIGNING_SUFFIXES = {".key", ".pem", ".seed"}
+# Public CA bundles commonly use ``.pem``.  Their extension alone says
+# nothing about signing authority; private PEM/OpenSSH headers are scanned
+# below.  ``.key`` and ``.seed`` remain fail-closed package paths.
+_PRIVATE_SIGNING_SUFFIXES = {".key", ".seed"}
 _PRIVATE_SIGNING_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
     b"-----BEGIN ED25519 PRIVATE KEY-----",

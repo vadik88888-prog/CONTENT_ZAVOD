@@ -98,6 +98,10 @@ def test_portable_build_rejects_friend_beta_private_signing_material(tmp_path: P
     (package / "public-verification-key.txt").write_text("public only", encoding="utf-8")
     _build_module()._assert_no_private_signing_material(package)
 
+    (package / "public-verification-key.txt").unlink()
+    (package / "cacert.pem").write_text("public CA certificate", encoding="utf-8")
+    _build_module()._assert_no_private_signing_material(package)
+
 
 def test_portable_build_rejects_private_key_bytes_and_private_input(tmp_path: Path) -> None:
     package = tmp_path / "ContentFactory"
