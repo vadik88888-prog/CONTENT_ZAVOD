@@ -740,7 +740,7 @@ class DesktopServices:
         """Resolve the existing pipeline's setup choices for a view-model."""
 
         _intent, resolved, estimate = self.pipeline.plan_processing(project, self.settings)
-        return resolved, calibrate_processing_estimate(estimate, self.runs_for(project))
+        return resolved, calibrate_processing_estimate(estimate, self.runs_for(project), resolved)
 
     def refresh_setup_estimate(self, project: DesktopProject) -> DesktopProject:
         """Refresh the durable preflight when a project is opened again."""
@@ -800,7 +800,7 @@ class DesktopServices:
             analysis_fingerprint=None,
         )
         intent, resolved, estimate = self.pipeline.plan_processing(analysis_project, self.settings)
-        estimate = calibrate_processing_estimate(estimate, self.runs_for(project))
+        estimate = calibrate_processing_estimate(estimate, self.runs_for(project), resolved)
         run = self.runs.create(
             project,
             settings_snapshot={
@@ -890,6 +890,7 @@ class DesktopServices:
             analysis_fingerprint=None,
         )
         intent, resolved, estimate = self.pipeline.plan_processing(analysis_project, self.settings)
+        estimate = calibrate_processing_estimate(estimate, self.runs_for(project), resolved)
         run = self.runs.create(
             project,
             settings_snapshot={

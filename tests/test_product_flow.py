@@ -189,32 +189,59 @@ def test_vision_auto_reads_effective_contract_for_all_15_profiles(
 
 def test_estimate_is_a_range_and_does_not_invent_local_ai_cost() -> None:
     resolved = resolve_processing_intent(ProcessingIntent(processing_mode="standard", clip_count="3"), _metadata())
+    fast = resolve_processing_intent(ProcessingIntent(processing_mode="fast", clip_count="1"), _metadata())
     local = estimate_processing(resolved, _metadata(), paid_ai_available=False)
     paid = estimate_processing(resolved, _metadata(), paid_ai_available=True)
+    paid_fast = estimate_processing(fast, _metadata(), paid_ai_available=True)
     longer = estimate_processing(resolved, _metadata(duration=1800.0), paid_ai_available=True)
 
     assert local.estimated_ai_cost_min is None and local.estimated_ai_cost_max is None
+    assert paid_fast.estimated_ai_cost_min is None and paid_fast.estimated_ai_cost_max is None
     assert paid.estimated_seconds_min < paid.estimated_seconds_max
     assert paid.estimated_ai_cost_min is not None
     assert longer.estimated_seconds_min > paid.estimated_seconds_min
 
 
-def test_cost_preview_uses_active_tariffs_and_explains_its_drivers() -> None:
+def test_cost_preview_uses_pricing_owner_and_covers_semantic_and_vision_usage() -> None:
     resolved = resolve_processing_intent(
-        ProcessingIntent(processing_mode="maximum", deep_analysis="on", clip_count="5", audio_mode="voiceover"),
-        _metadata(),
+        ProcessingIntent(processing_mode="standard", deep_analysis="on", clip_count="3"),
+        _metadata(duration=1081.761),
     )
-    low_tariff = CostPricing(0.0000001, 0.000001, 5.0, ai_available=True, tts_available=True)
-    high_tariff = CostPricing(0.0000005, 0.000005, 25.0, ai_available=True, tts_available=True)
+    admission_low = CostPricing(0.0000001, 0.000001, ai_available=True)
+    admission_high = CostPricing(0.0000005, 0.000005, ai_available=True)
 
-    low = estimate_processing(resolved, _metadata(), paid_ai_available=True, pricing=low_tariff)
-    high = estimate_processing(resolved, _metadata(), paid_ai_available=True, pricing=high_tariff)
+    low = estimate_processing(resolved, _metadata(duration=1081.761), paid_ai_available=True, pricing=admission_low)
+    high = estimate_processing(resolved, _metadata(duration=1081.761), paid_ai_available=True, pricing=admission_high)
 
     assert low.estimated_ai_cost_min is not None
-    assert high.estimated_ai_cost_max is not None
-    assert high.estimated_ai_cost_max > low.estimated_ai_cost_max
+    assert low.estimated_ai_cost_min == high.estimated_ai_cost_min
+    assert low.estimated_ai_cost_max == high.estimated_ai_cost_max
+    assert low.estimated_ai_cost_min <= 0.129702 <= low.estimated_ai_cost_max
     assert any("кадр" in item for item in high.cost_drivers)
-    assert "тариф" in high.cost_note.lower()
+    assert "Semantic" in high.cost_note
+
+
+def test_cost_preview_omits_vision_when_deep_analysis_is_off_or_pricing_is_unknown() -> None:
+    metadata = _metadata(duration=1081.761)
+    with_vision = resolve_processing_intent(
+        ProcessingIntent(processing_mode="standard", deep_analysis="on", clip_count="3"), metadata,
+    )
+    without_vision = resolve_processing_intent(
+        ProcessingIntent(processing_mode="standard", deep_analysis="off", clip_count="3"), metadata,
+    )
+    vision = estimate_processing(with_vision, metadata, paid_ai_available=True)
+    speech_only = estimate_processing(without_vision, metadata, paid_ai_available=True)
+    unknown = estimate_processing(
+        without_vision,
+        metadata,
+        paid_ai_available=True,
+        pricing=CostPricing(None, None, ai_available=True, provider="unknown", model="unknown"),
+    )
+
+    assert vision.estimated_ai_cost_max is not None
+    assert speech_only.estimated_ai_cost_max is not None
+    assert vision.estimated_ai_cost_max > speech_only.estimated_ai_cost_max
+    assert unknown.estimated_ai_cost_min is None and unknown.estimated_ai_cost_max is None
 
 
 def test_auto_recommendation_uses_available_content_signals_and_stays_conservative_when_unknown() -> None:
@@ -418,6 +445,35 @@ def test_estimate_calibrates_from_persisted_completed_run_history() -> None:
 
     assert calibrated.confidence == "calibrated"
     assert calibrated.estimated_seconds_max != base.estimated_seconds_max
+
+
+def test_cost_estimate_calibrates_from_similar_provider_telemetry() -> None:
+    metadata = _metadata(duration=1081.761)
+    resolved = resolve_processing_intent(
+        ProcessingIntent(processing_mode="standard", deep_analysis="on", clip_count="3"), metadata,
+    )
+    base = estimate_processing(resolved, metadata, paid_ai_available=True)
+    history = [
+        SimpleNamespace(
+            status="analysis_ready",
+            run_kind="analysis",
+            actual_cost=0.129702,
+            settings_snapshot={
+                "product_flow": {
+                    "resolved_config": resolved.to_dict(),
+                    "estimate": base.to_dict(),
+                },
+            },
+        ),
+    ]
+
+    calibrated = calibrate_processing_estimate(base, history, resolved)
+
+    assert calibrated.confidence == "calibrated"
+    assert calibrated.estimated_ai_cost_min is not None
+    assert calibrated.estimated_ai_cost_max is not None
+    assert calibrated.estimated_ai_cost_min <= 0.129702 <= calibrated.estimated_ai_cost_max
+    assert "сверён" in calibrated.cost_note
 
 
 def test_legacy_project_migrates_to_product_flow_defaults(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ service and pipeline stage.
 from __future__ import annotations
 
 import re
+from math import ceil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -33,6 +34,7 @@ from app.creative_policy import (
     recommend_preset_family,
     resolve_preset_family,
 )
+from app.ai_cost import calculate_ai_cost_telemetry
 
 
 PROCESSING_MODES = frozenset({"fast", "standard", "maximum"})
@@ -298,11 +300,12 @@ class ProcessingEstimate:
 
 @dataclass(frozen=True, slots=True)
 class CostPricing:
-    """Configured provider tariffs used by the preflight estimate.
+    """Inputs required to price a preflight projection with the cost owner.
 
-    This is deliberately a small value object instead of a UI constant.  The
-    desktop obtains it from the active engine configuration, so changing a
-    provider tariff changes the estimate before the next run.
+    ``input_token_price`` and ``output_token_price`` remain here solely for
+    backwards-compatible admission configuration.  They are deliberately not
+    used for a customer-facing cost: the provider-pricing owner is the sole
+    source for both the projected and provider-reported amounts.
     """
 
     input_token_price: float | None
@@ -310,14 +313,142 @@ class CostPricing:
     tts_cost_per_1m_characters: float | None = None
     ai_available: bool = True
     tts_available: bool = False
+    provider: str = "openai"
+    model: str = "gpt-5.6-terra"
+    vision_enabled: bool = True
+    vision_pass1_batch_size: int = 3
+    vision_pass2_min_frames: int = 3
+    vision_pass2_max_frames: int = 7
+    vision_pass2_max_candidates: int = 4
+    vision_standard_max_frames: int = 12
+    vision_maximum_max_frames: int = 32
+    vision_prompt_input_tokens: int = 700
+    vision_low_detail_input_tokens_per_frame: int = 300
+    vision_high_detail_input_tokens_per_frame: int = 900
 
     @property
     def can_estimate_ai(self) -> bool:
-        return self.ai_available and self.input_token_price is not None and self.output_token_price is not None
+        return self.ai_available
 
     @property
     def can_estimate_tts(self) -> bool:
         return self.tts_available and self.tts_cost_per_1m_characters is not None
+
+
+def _projected_usage(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    pricing: CostPricing,
+    source: str,
+) -> dict[str, Any]:
+    """Build an expected usage record; pricing stays in ``app.ai_cost``."""
+
+    return {
+        "provider": pricing.provider,
+        "model": pricing.model,
+        "input_tokens": max(0, int(input_tokens)),
+        "output_tokens": max(0, int(output_tokens)),
+        "request_count": max(0, int(request_count)),
+        "usage_source": source,
+    }
+
+
+def _vision_projection(
+    resolved: ResolvedProcessingConfig,
+    *,
+    minutes: float,
+    pricing: CostPricing,
+    upper_bound: bool,
+) -> list[dict[str, Any]]:
+    """Project the already-admitted Vision PASS 1/PASS 2 request envelope.
+
+    The values model the established bounded frame plans.  They do not reserve
+    budget and do not influence Vision admission or execution.
+    """
+
+    if not resolved.deep_analysis.resolved or not pricing.vision_enabled:
+        return []
+    frame_cap = (
+        pricing.vision_maximum_max_frames
+        if resolved.processing_mode == "maximum"
+        else pricing.vision_standard_max_frames
+    )
+    frames_per_minute = 4.5 if resolved.processing_mode == "maximum" else 2.5
+    expected_pass1_frames = min(frame_cap, max(2, int(ceil(minutes * frames_per_minute))))
+    pass1_frames = expected_pass1_frames if upper_bound else max(2, int(ceil(expected_pass1_frames * 0.7)))
+    pass1_calls = int(ceil(pass1_frames / max(1, pricing.vision_pass1_batch_size)))
+    # Provider responses historically use far fewer tokens than the configured
+    # response ceiling.  Keep a broad envelope rather than presenting that
+    # ceiling as a likely bill.
+    output_per_call = 650 if upper_bound else 300
+    records = [_projected_usage(
+        pass1_calls * pricing.vision_prompt_input_tokens
+        + pass1_frames * pricing.vision_low_detail_input_tokens_per_frame,
+        pass1_calls * output_per_call,
+        pass1_calls,
+        pricing,
+        "preflight_projection.vision.pass1",
+    )]
+    if not upper_bound:
+        return records
+    # PASS 2 is candidate-bounded and may not be reached, so it belongs only
+    # in the upper end of the honest preflight range.
+    pass2_candidates = min(resolved.clip_count, pricing.vision_pass2_max_candidates)
+    pass2_frames = max(pricing.vision_pass2_min_frames, pricing.vision_pass2_max_frames)
+    pass2_calls_per_candidate = int(ceil(pass2_frames / min(3, pass2_frames)))
+    records.append(_projected_usage(
+        pass2_candidates * (
+            pass2_calls_per_candidate * pricing.vision_prompt_input_tokens
+            + pass2_frames * pricing.vision_high_detail_input_tokens_per_frame
+        ),
+        pass2_candidates * pass2_calls_per_candidate * output_per_call,
+        pass2_candidates * pass2_calls_per_candidate,
+        pricing,
+        "preflight_projection.vision.pass2",
+    ))
+    return records
+
+
+def _projected_ai_cost_range(
+    resolved: ResolvedProcessingConfig,
+    *,
+    minutes: float,
+    pricing: CostPricing,
+) -> tuple[float, float] | None:
+    """Price expected Semantic and, when selected, Vision usage via its owner."""
+
+    semantic_min = _projected_usage(
+        2_800 + ceil(minutes * 720) + resolved.shortlist_size * 180,
+        resolved.shortlist_size * 80 + resolved.clip_count * 60,
+        1,
+        pricing,
+        "preflight_projection.semantic",
+    )
+    semantic_max = _projected_usage(
+        4_200 + ceil(minutes * 1_180) + resolved.shortlist_size * 220,
+        resolved.shortlist_size * 210 + resolved.clip_count * 150,
+        1,
+        pricing,
+        "preflight_projection.semantic",
+    )
+    minimum = calculate_ai_cost_telemetry(
+        semantic_min,
+        _vision_projection(resolved, minutes=minutes, pricing=pricing, upper_bound=False),
+        source_duration_seconds=minutes * 60,
+        default_provider=pricing.provider,
+        default_model=pricing.model,
+    ).get("total_cost_usd")
+    maximum = calculate_ai_cost_telemetry(
+        semantic_max,
+        _vision_projection(resolved, minutes=minutes, pricing=pricing, upper_bound=True),
+        source_duration_seconds=minutes * 60,
+        default_provider=pricing.provider,
+        default_model=pricing.model,
+    ).get("total_cost_usd")
+    if not isinstance(minimum, (int, float)) or not isinstance(maximum, (int, float)):
+        return None
+    return round(float(minimum), 4), round(max(float(minimum), float(maximum)), 4)
 
 
 def resolve_deep_analysis(requested: str, source_metadata: dict[str, Any] | None = None) -> DeepAnalysisDecision:
@@ -528,10 +659,9 @@ def estimate_processing(
         base_seconds *= 0.62
     estimate_min = max(20, int(round(base_seconds * 0.75)))
     estimate_max = max(estimate_min + 15, int(round(base_seconds * 1.35)))
-    # The UI receives configured provider tariffs through ``pricing``.  The
-    # fallback keeps the public pure function useful for existing callers while
-    # retaining the same defaults as AIConfig.  It is never used by the desktop
-    # preflight, which always passes the active configuration explicitly.
+    # The fallback keeps the public pure function useful for callers outside
+    # Desktop.  The pricing itself is never read from these admission values:
+    # ``app.ai_cost`` owns the current provider/model tariff table.
     active_pricing = pricing or CostPricing(
         input_token_price=0.00000025,
         output_token_price=0.000002,
@@ -546,31 +676,18 @@ def estimate_processing(
         cost_drivers.append("дополнительный разбор кадров")
 
     cost_min = cost_max = None
-    if active_pricing.can_estimate_ai:
-        # These are bounded request-volume assumptions, not prices.  Tariffs
-        # themselves are always taken from AppConfig.  They track the existing
-        # candidate limits and shortlist sizes resolved above, so the estimate
-        # changes when a product mode actually changes pipeline work.
-        input_per_minute = {"fast": 220, "standard": 420, "maximum": 720}[resolved.processing_mode]
-        output_per_shortlist = {"fast": 42, "standard": 78, "maximum": 120}[resolved.processing_mode]
-        output_per_clip = {"fast": 120, "standard": 230, "maximum": 360}[resolved.processing_mode]
-        input_tokens = minutes * input_per_minute + resolved.shortlist_size * 55
-        output_tokens = resolved.shortlist_size * output_per_shortlist + resolved.clip_count * output_per_clip
-        if resolved.deep_analysis.resolved:
-            input_tokens += minutes * 260
-            output_tokens += resolved.clip_count * 75
-        base_cost = input_tokens * float(active_pricing.input_token_price) + output_tokens * float(active_pricing.output_token_price)
-        cost_min, cost_max = base_cost * 0.72, base_cost * 1.36
-        if resolved.audio_mode in {"voiceover", "replace_voice", "mixed"} and active_pricing.can_estimate_tts:
-            narration_chars_min = resolved.clip_count * resolved.platform.target_duration_seconds * 9
-            narration_chars_max = resolved.clip_count * resolved.platform.target_duration_seconds * 18
-            tts_rate = float(active_pricing.tts_cost_per_1m_characters)
-            cost_min += narration_chars_min * tts_rate / 1_000_000
-            cost_max += narration_chars_max * tts_rate / 1_000_000
-            cost_drivers.append("выбранный способ озвучки")
-        cost_min, cost_max = round(cost_min, 4), round(max(cost_min, cost_max), 4)
-        cost_note = "Диапазон рассчитан по тарифам, указанным в текущих настройках, и объёму работы до запуска."
-    elif paid_ai_available:
+    if active_pricing.can_estimate_ai and resolved.processing_mode != "fast":
+        projected_costs = _projected_ai_cost_range(
+            resolved,
+            minutes=minutes,
+            pricing=active_pricing,
+        )
+        if projected_costs is not None:
+            cost_min, cost_max = projected_costs
+            cost_note = "Диапазон учитывает ожидаемые вызовы Semantic и, при включённом разборе кадров, Vision."
+        else:
+            cost_note = "Тарифы для текущего сервиса не заданы, поэтому стоимость до запуска не показываем."
+    elif paid_ai_available and resolved.processing_mode != "fast":
         cost_note = "Тарифы для текущего сервиса не заданы, поэтому стоимость до запуска не показываем."
     else:
         cost_note = "Платные обращения в этом запуске не используются."
@@ -594,45 +711,87 @@ def estimate_processing(
     )
 
 
-def calibrate_processing_estimate(estimate: ProcessingEstimate, runs: list[Any]) -> ProcessingEstimate:
+def calibrate_processing_estimate(
+    estimate: ProcessingEstimate,
+    runs: list[Any],
+    resolved: ResolvedProcessingConfig | None = None,
+) -> ProcessingEstimate:
     """Adjust a new estimate only from persisted comparable completed runs."""
 
     ratios: list[float] = []
+    observed_costs: list[float] = []
     for run in runs:
-        if str(getattr(run, "status", "")) not in {"completed", "completed_with_warnings"}:
-            continue
         snapshot = getattr(run, "settings_snapshot", {})
         if not isinstance(snapshot, dict):
             continue
         previous = snapshot.get("product_flow", {})
         if not isinstance(previous, dict):
             continue
+        previous_resolved = previous.get("resolved_config", {})
+        if resolved is not None and isinstance(previous_resolved, dict) and previous_resolved:
+            previous_deep_analysis = previous_resolved.get("deep_analysis")
+            previous_deep_resolved = (
+                bool(previous_deep_analysis.get("resolved"))
+                if isinstance(previous_deep_analysis, dict)
+                else False
+            )
+            if (
+                str(previous_resolved.get("processing_mode")) != resolved.processing_mode
+                or previous_deep_resolved != resolved.deep_analysis.resolved
+            ):
+                continue
         previous_estimate = previous.get("estimate", {})
         if not isinstance(previous_estimate, dict):
             continue
-        try:
-            started = datetime.fromisoformat(str(getattr(run, "started_at")))
-            finished = datetime.fromisoformat(str(getattr(run, "finished_at")))
-            actual = (finished - started).total_seconds()
-            midpoint = (float(previous_estimate["estimated_seconds_min"]) + float(previous_estimate["estimated_seconds_max"])) / 2
-        except (KeyError, TypeError, ValueError):
-            continue
-        if 5 <= actual <= 24 * 3600 and midpoint > 0:
-            ratios.append(max(0.55, min(1.9, actual / midpoint)))
-    if len(ratios) < 2:
+        status = str(getattr(run, "status", ""))
+        if status in {"completed", "completed_with_warnings"}:
+            try:
+                started = datetime.fromisoformat(str(getattr(run, "started_at")))
+                finished = datetime.fromisoformat(str(getattr(run, "finished_at")))
+                actual = (finished - started).total_seconds()
+                midpoint = (
+                    float(previous_estimate["estimated_seconds_min"])
+                    + float(previous_estimate["estimated_seconds_max"])
+                ) / 2
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                if 5 <= actual <= 24 * 3600 and midpoint > 0:
+                    ratios.append(max(0.55, min(1.9, actual / midpoint)))
+        if (
+            status in {"analysis_ready", "completed", "completed_with_warnings"}
+            and str(getattr(run, "run_kind", "full")) in {"analysis", "full"}
+            and isinstance(getattr(run, "actual_cost", None), (int, float))
+            and float(run.actual_cost) > 0
+        ):
+            observed_costs.append(float(run.actual_cost))
+    if len(ratios) < 2 and not observed_costs:
         return estimate
-    factor = sum(ratios[-8:]) / min(8, len(ratios))
-    low = max(15, int(round(estimate.estimated_seconds_min * factor * 0.9)))
-    high = max(low + 15, int(round(estimate.estimated_seconds_max * factor * 1.1)))
+    if len(ratios) >= 2:
+        factor = sum(ratios[-8:]) / min(8, len(ratios))
+        low = max(15, int(round(estimate.estimated_seconds_min * factor * 0.9)))
+        high = max(low + 15, int(round(estimate.estimated_seconds_max * factor * 1.1)))
+    else:
+        low, high = estimate.estimated_seconds_min, estimate.estimated_seconds_max
+    cost_min, cost_max = estimate.estimated_ai_cost_min, estimate.estimated_ai_cost_max
+    cost_note = estimate.cost_note
+    if observed_costs and cost_min is not None and cost_max is not None:
+        # A completed run is provider telemetry, not a proxy token estimate.
+        # Preserve a deliberately broad envelope around it so one prior run
+        # cannot turn the next estimate into a false promise.
+        cost_min = round(min(float(cost_min), min(observed_costs) * 0.75), 4)
+        cost_max = round(max(float(cost_max), max(observed_costs) * 1.35), 4)
+        cost_note = f"{cost_note} Диапазон сверён с {len(observed_costs)} похожим(и) завершённым(и) запуском(ами).".strip()
+    calibration_count = max(len(ratios), len(observed_costs))
     return ProcessingEstimate(
         estimated_seconds_min=low, estimated_seconds_max=high,
-        estimated_ai_cost_min=estimate.estimated_ai_cost_min, estimated_ai_cost_max=estimate.estimated_ai_cost_max,
+        estimated_ai_cost_min=cost_min, estimated_ai_cost_max=cost_max,
         estimated_clips_min=estimate.estimated_clips_min, estimated_clips_max=estimate.estimated_clips_max,
         deep_analysis_resolved=estimate.deep_analysis_resolved, cached_stages=estimate.cached_stages,
         confidence="calibrated",
-        assumptions=(*estimate.assumptions, f"Оценка откалибрована по {len(ratios)} завершённым запускам этого приложения."),
+        assumptions=(*estimate.assumptions, f"Оценка откалибрована по {calibration_count} похожим завершённым запускам этого приложения."),
         cost_drivers=estimate.cost_drivers,
-        cost_note=estimate.cost_note,
+        cost_note=cost_note,
     )
 
 

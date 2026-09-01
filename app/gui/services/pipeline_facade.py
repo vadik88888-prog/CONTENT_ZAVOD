@@ -200,6 +200,18 @@ class PipelineFacade:
             tts_cost_per_1m_characters=config.tts.cost_per_1m_characters,
             ai_available=ai_available,
             tts_available=tts_available,
+            provider=config.ai.provider,
+            model=config.ai.model,
+            vision_enabled=config.vision.enabled,
+            vision_pass1_batch_size=config.vision.pass1_batch_size,
+            vision_pass2_min_frames=config.vision.pass2_min_frames,
+            vision_pass2_max_frames=config.vision.pass2_max_frames,
+            vision_pass2_max_candidates=config.vision.pass2_max_candidates,
+            vision_standard_max_frames=config.vision.standard_max_frames,
+            vision_maximum_max_frames=config.vision.maximum_max_frames,
+            vision_prompt_input_tokens=config.vision.prompt_input_tokens,
+            vision_low_detail_input_tokens_per_frame=config.vision.low_detail_input_tokens_per_frame,
+            vision_high_detail_input_tokens_per_frame=config.vision.high_detail_input_tokens_per_frame,
         )
         estimate = estimate_processing(
             resolved,
