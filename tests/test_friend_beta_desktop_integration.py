@@ -147,9 +147,11 @@ def test_settings_manifest_covers_every_current_style_caption_identity() -> None
     assert source_path.is_file()
     assert stable_file_hash(source_path) == demo_source["sha256"]
     assert demo_source["duration_seconds"] == 10
-    assert demo_source["width"] == 540
-    assert demo_source["height"] == 960
+    assert demo_source["width"] == 1080
+    assert demo_source["height"] == 1920
     assert demo_source["fps"] == 30
+    assert demo_source["content"] == "vertical talking head with visible speech and natural hand motion"
+    assert demo_source["license"]["source_asset_id"] == "42323"
     for identity, item in records.items():
         path = settings_preview_path(*identity)
         assert path is not None and path.is_file()

@@ -165,7 +165,16 @@ def main() -> int:
             dialog.show()
             _settle(app)
             dialog.picker.choose("word_pop")
-            _settle(app)
+            expected_dialog_demo = settings_preview_path("documentary", "word_pop")
+            _wait_for(app, lambda: (
+                dialog.demo_preview.active_media_path == expected_dialog_demo
+                and dialog.demo_preview.poster.pixmap() is not None
+                and not dialog.demo_preview.poster.pixmap().isNull()
+                and dialog.demo_preview.poster.isVisible()
+                and dialog.demo_preview.player.position() > 100
+                and dialog.demo_preview.player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            ))
             if dialog.selected_preset_id != "word_pop":
                 raise AssertionError("Draft picker did not retain the selected pending preset.")
             if len(dialog.picker.cards) != len(CAPTION_PRESET_DEFINITIONS):

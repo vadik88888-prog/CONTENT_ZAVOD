@@ -673,7 +673,7 @@ def test_semantic_motion_only_uses_brain_events_and_keeps_non_events_static() ->
     assert plan.backend_id == "libass"
     assert plan.font_manifest is not None and plan.font_manifest.file_sha256
     assert plan.typography is not None
-    assert plan.typography.token_id == "caption-preset:accent_yellow:2.1.0"
+    assert plan.typography.token_id == "caption-preset:accent_yellow:2.2.0"
     assert any(cue.beat_role == BeatRole.HOOK and cue.primitive_id == "slide" for cue in plan.cues)
     assert any(cue.beat_role == BeatRole.PAYOFF and cue.primitive_id == "scale" for cue in plan.cues)
     emphasized = [cue for cue in plan.cues if cue.emphasis is not None]

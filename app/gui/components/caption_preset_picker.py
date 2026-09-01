@@ -32,19 +32,36 @@ def _caption_font(preset_id: str) -> QFont:
     if path.is_file():
         QFontDatabase.addApplicationFont(str(path))
     font = QFont(asset.render_family)
-    font.setWeight(QFont.Weight.Bold if asset.weight == "bold" else QFont.Weight.Light)
-    font.setPointSize(13 if preset.display_mode == "single_spoken_word" else 11)
+    font.setWeight(
+        QFont.Weight.Bold if asset.weight_class >= 600
+        else QFont.Weight.Light if asset.weight_class <= 300
+        else QFont.Weight.Normal
+    )
+    font.setPointSize(max(10, round(8 + preset.font_size_ratio * 120)))
     return font
 
 
 def _sample_text(preset: CaptionPresetDefinition) -> str:
+    """Show the same primary/highlight relationship as the compiled caption."""
+
     if preset.display_mode == "single_spoken_word":
-        return "СИЛЬНАЯ"
+        return f'<span style="color:{preset.highlight_color}">СИЛЬНАЯ</span>'
     if preset.uppercase_emphasis:
-        return "СИЛЬНАЯ\nМЫСЛЬ"
+        return (
+            f'<span style="color:{preset.text_color}">СИЛЬНАЯ</span><br>'
+            f'<span style="color:{preset.highlight_color}">МЫСЛЬ</span>'
+        )
     if preset.motion_profile_id == "semantic_karaoke":
-        return "Очень важная мысль"
-    return "Сильная мысль"
+        return (
+            f'<span style="color:{preset.text_color}">Очень важная </span>'
+            f'<span style="color:{preset.highlight_color}">мысль</span>'
+        )
+    if preset.semantic_bold:
+        return (
+            f'<span style="color:{preset.text_color}">Проверяйте</span><br>'
+            f'<b style="color:{preset.highlight_color}">факты</b>'
+        )
+    return f'<span style="color:{preset.text_color}">Сильная мысль</span>'
 
 
 class CaptionPresetCard(QFrame):
@@ -90,6 +107,7 @@ class CaptionPresetCard(QFrame):
         sample_layout.setContentsMargins(9, 7, 9, 7)
         self.sample = QLabel(_sample_text(preset))
         self.sample.setObjectName("captionPresetSampleText")
+        self.sample.setTextFormat(Qt.TextFormat.RichText)
         self.sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sample.setWordWrap(True)
         self.sample.setFont(_caption_font(preset.preset_id))
@@ -133,14 +151,14 @@ class CaptionPresetCard(QFrame):
         selection = "#FF6846"
         border = selection if selected else "#3B4048"
         sample_background = preset.background_color if preset.background_mode == "opaque_box" else "#101216"
-        font_weight = "700" if preset.font_weight == "bold" else "300"
+        font_weight = str(FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].weight_class)
         self.setStyleSheet(
             f"QFrame#captionPresetCard {{ background: {'#251A17' if selected else background}; border: {2 if selected else 1}px solid {border}; border-radius: 9px; }}"
             "QFrame#captionPresetCard:hover { border-color: " + accent + "; }"
             "QLabel#captionPresetCardTitle { color: #F1F4F8; font-size: 12px; font-weight: 700; background: transparent; border: 0; }"
             f"QLabel#captionPresetCardBadge {{ color: {selection if selected else accent}; font-size: 11px; font-weight: 700; background: transparent; border: 0; }}"
             f"QFrame#captionPresetSample {{ background: {sample_background}; border: 0; border-radius: 6px; }}"
-            f"QLabel#captionPresetSampleText {{ color: {accent}; font-family: '{FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].render_family}'; font-weight: {font_weight}; background: transparent; border: 0; }}"
+            f"QLabel#captionPresetSampleText {{ color: {preset.text_color}; font-family: '{FONT_ASSET_DEFINITIONS[preset.preferred_font_asset_id].render_family}'; font-weight: {font_weight}; background: transparent; border: 0; }}"
         )
 
 

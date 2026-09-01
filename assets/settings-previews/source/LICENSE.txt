@@ -1,0 +1,13 @@
+Canonical Friend Beta Settings demo source
+
+Title: Portrait of an influencer talking to the camera
+Source asset: Mixkit #42323
+Asset page: https://mixkit.co/free-stock-video/portrait-of-an-influencer-talking-to-the-camera-42323/
+License: Mixkit Stock Video Free License
+License terms: https://mixkit.co/license/#videoFree
+
+This repository contains a ten-second, 30 fps derivative of the Full HD
+1080×1920 download. It is used solely as the bundled talking-head source for
+Settings caption-preset demonstrations. The source visibly includes speech and
+natural hand movement; no stock or generative footage is available to the
+editing pipeline itself.

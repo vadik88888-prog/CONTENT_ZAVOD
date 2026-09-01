@@ -2,13 +2,14 @@ from __future__ import annotations
 
 """Versioned Tier 1 caption policies backed by bundled static font faces."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 
 CAPTION_PRESET_REGISTRY_VERSION = "production.captions.2"
 CAPTION_PRESET_VERSION = "2.0.0"
 CAPTION_CALIBRATED_PRESET_VERSION = "2.1.0"
+CAPTION_REFINED_PRESET_VERSION = "2.2.0"
 CAPTION_PRESET_OVERRIDE_PREFIX = "caption-preset:"
 
 CaptionPresetId = Literal[
@@ -72,7 +73,11 @@ class CaptionPresetDefinition:
         ))))
 
 
-CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
+# Keep the shipping 2.0/2.1 policies available for previously compiled plans.
+# The current policies below deliberately make every existing preset legible as
+# a distinct visual identity in both the picker demo and real Draft/Final
+# compilation.
+_PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
     "clean_white": CaptionPresetDefinition(
         preset_id="clean_white", preset_version=CAPTION_PRESET_VERSION, label="Clean",
         style_family="clean", legacy_style_id="clean",
@@ -156,6 +161,77 @@ CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
 }
 
 
+CAPTION_PRESET_DEFINITIONS: dict[CaptionPresetId, CaptionPresetDefinition] = {
+    "clean_white": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["clean_white"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        font_size_ratio=0.037,
+        line_height=1.16,
+        outline_width_ratio=0.00078,
+        shadow_ratio=0.00078,
+        max_width_ratio=0.82,
+    ),
+    "minimal_light": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["minimal_light"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        font_size_ratio=0.029,
+        line_height=1.26,
+        outline_width_ratio=0.0,
+        shadow_ratio=0.0,
+        max_width_ratio=0.70,
+        allowed_primitives=("static",),
+    ),
+    "accent_yellow": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["accent_yellow"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        # This is also the safe default for legacy emphasis-family intent.
+        # Keep its proven fitting geometry; the retained Oswald, uppercase
+        # semantic yellow and dynamic treatment already form its identity.
+        font_size_ratio=0.043,
+        line_height=1.08,
+        outline_width_ratio=0.00208,
+        shadow_ratio=0.00104,
+        max_width_ratio=0.84,
+    ),
+    "editorial_narrow": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["editorial_narrow"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        font_size_ratio=0.036,
+        line_height=1.08,
+        outline_width_ratio=0.0,
+        # Preserve the established default Draft fitting envelope; the
+        # editorial distinction is its narrow face, semantic bold companion
+        # and paper-like background, not a narrower semantic layout policy.
+        max_width_ratio=0.84,
+        background_mode="opaque_box",
+        background_color="#17212B",
+        background_opacity=0.88,
+        box_padding_ratio=0.014,
+    ),
+    "karaoke_yellow": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["karaoke_yellow"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        font_size_ratio=0.042,
+        line_height=1.10,
+        outline_width_ratio=0.00234,
+        shadow_ratio=0.00104,
+        max_width_ratio=0.80,
+    ),
+    "contrast_box": replace(
+        _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["contrast_box"],
+        preset_version=CAPTION_REFINED_PRESET_VERSION,
+        font_size_ratio=0.038,
+        line_height=1.12,
+        background_opacity=0.90,
+        box_padding_ratio=0.014,
+        max_width_ratio=0.78,
+    ),
+    # Word Pop is already visually successful and intentionally remains on its
+    # calibrated 2.1.0 token.
+    "word_pop": _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS["word_pop"],
+}
+
+
 # Old tokens remain readable for persisted CaptionPlans. New compilation always
 # resolves through the current definitions above.
 _LEGACY_PRESETS = {
@@ -192,13 +268,17 @@ _LEGACY_PRESETS = {
         semantic_pop_scale_keyframes=item.semantic_pop_scale_keyframes,
         reduced_motion_semantic_scale=item.reduced_motion_semantic_scale,
     )
-    for preset_id, item in CAPTION_PRESET_DEFINITIONS.items()
+    for preset_id, item in _PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS.items()
     if preset_id != "word_pop"
 }
 
 CAPTION_PRESET_VERSIONS: dict[tuple[CaptionPresetId, str], CaptionPresetDefinition] = {
     (item.preset_id, item.preset_version): item
-    for item in (*_LEGACY_PRESETS.values(), *CAPTION_PRESET_DEFINITIONS.values())
+    for item in (
+        *_LEGACY_PRESETS.values(),
+        *_PRE_REFINEMENT_CAPTION_PRESET_DEFINITIONS.values(),
+        *CAPTION_PRESET_DEFINITIONS.values(),
+    )
 }
 CURRENT_CAPTION_PRESET_VERSIONS: dict[CaptionPresetId, str] = {
     item.preset_id: item.preset_version for item in CAPTION_PRESET_DEFINITIONS.values()

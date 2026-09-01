@@ -54,17 +54,17 @@ def test_caption_presets_have_stable_versioned_tokens_and_valid_font_assets() ->
     }
     tokens = {item.token_id for item in CAPTION_PRESET_DEFINITIONS.values()}
     assert len(tokens) == len(CAPTION_PRESET_DEFINITIONS)
-    assert len(CAPTION_PRESET_VERSIONS) == 13
+    assert len(CAPTION_PRESET_VERSIONS) == 19
     assert {
         item.preset_id: item.preset_version
         for item in CAPTION_PRESET_DEFINITIONS.values()
     } == {
-        "clean_white": "2.0.0",
-        "minimal_light": "2.1.0",
-        "accent_yellow": "2.1.0",
-        "editorial_narrow": "2.1.0",
-        "karaoke_yellow": "2.0.0",
-        "contrast_box": "2.0.0",
+        "clean_white": "2.2.0",
+        "minimal_light": "2.2.0",
+        "accent_yellow": "2.2.0",
+        "editorial_narrow": "2.2.0",
+        "karaoke_yellow": "2.2.0",
+        "contrast_box": "2.2.0",
         "word_pop": "2.1.0",
     }
     assert all(
@@ -83,14 +83,14 @@ def test_final_visual_calibration_changes_only_the_four_approved_policies() -> N
     word_pop = CAPTION_PRESET_DEFINITIONS["word_pop"]
 
     assert (minimal.font_size_ratio, minimal.outline_width_ratio, minimal.shadow_ratio) == (
-        0.036, 0.00105, 0.00039,
+        0.029, 0.0, 0.0,
     )
     assert minimal.preferred_font_asset_id == "font.commissioner.light"
     assert minimal.font_weight == "normal"
     assert impact.font_size_ratio == 0.043
     assert impact.preferred_font_asset_id == "font.oswald.bold"
     assert (impact.text_color, impact.highlight_color) == ("#FFFFFF", "#FFD54A")
-    assert (editorial.font_size_ratio, editorial.outline_width_ratio) == (0.040, 0.00105)
+    assert (editorial.font_size_ratio, editorial.outline_width_ratio) == (0.036, 0.0)
     assert editorial.font_asset_ids == (
         "font.pt-sans-narrow.regular", "font.pt-sans-narrow.bold",
     )
@@ -103,11 +103,27 @@ def test_final_visual_calibration_changes_only_the_four_approved_policies() -> N
     assert word_pop.semantic_pop_scale_keyframes == (84, 118, 100)
 
 
+def test_current_caption_presets_keep_seven_visually_distinct_identities() -> None:
+    presets = CAPTION_PRESET_DEFINITIONS
+
+    assert len({item.preferred_font_asset_id for item in presets.values()}) == 7
+    assert presets["clean_white"].motion_profile_id == "semantic_fade"
+    assert presets["minimal_light"].allowed_primitives == ("static",)
+    assert presets["minimal_light"].font_size_ratio < presets["clean_white"].font_size_ratio
+    assert presets["accent_yellow"].uppercase_emphasis is True
+    assert presets["accent_yellow"].highlight_color == "#FFD54A"
+    assert presets["editorial_narrow"].semantic_bold is True
+    assert presets["editorial_narrow"].background_color == "#17212B"
+    assert presets["karaoke_yellow"].allowed_primitives == ("static", "karaoke")
+    assert presets["contrast_box"].background_mode == "opaque_box"
+    assert presets["word_pop"].display_mode == "single_spoken_word"
+
+
 def test_locked_caption_policies_remain_byte_stable() -> None:
     expected = {
-        "clean_white": "4be7f555674812f677b9ff40d951dedbe4ccd31fb10f5307a01e8d9d6a194e4a",
-        "karaoke_yellow": "a4039798dbf35a485b55511838ff400a2586bf9b36331ce3a12f66c50745ccb7",
-        "contrast_box": "c22b083731a91fcacd180b7c4a976594c4303bf8dc2196d20206eafb65ae68b8",
+        "clean_white": "c09a3ec772466b4ed7023dd1672ae68b7b474a21baca75cfc6fb0f30925366ee",
+        "karaoke_yellow": "87ac65be1c63610b8af8a0b04b1b9bf716fbd30aa2a757bf57dd2e8b8d96595a",
+        "contrast_box": "39bec9e5e3eb6d87e28e29f2d45dacbc7d75b3148a2b16d08afbff1346d9dc0d",
     }
     for preset_id, digest in expected.items():
         payload = json.dumps(

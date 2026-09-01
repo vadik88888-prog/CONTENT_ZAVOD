@@ -45,10 +45,17 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "assets" / "settings-previews"
 FPS = 30
 DURATION_SECONDS = 10
-WIDTH = 540
-HEIGHT = 960
-SOURCE_IMAGE = OUTPUT / "source" / "studio-creator-v1.png"
-SOURCE_VIDEO = OUTPUT / "source" / "studio-creator-v1.mp4"
+WIDTH = 1080
+HEIGHT = 1920
+SOURCE_VIDEO = OUTPUT / "source" / "talking-head-v2.mp4"
+SOURCE_LICENSE = {
+    "provider": "Mixkit",
+    "asset_url": "https://mixkit.co/free-stock-video/portrait-of-an-influencer-talking-to-the-camera-42323/",
+    "license_url": "https://mixkit.co/license/#videoFree",
+    "license": "Mixkit Stock Video Free License",
+    "source_asset_id": "42323",
+    "source_title": "Portrait of an influencer talking to the camera",
+}
 WORDS = (
     "СИЛЬНАЯ", "МЫСЛЬ", "СТАНОВИТСЯ", "ЯСНОЙ", "КОГДА",
     "ЕЁ", "МОЖНО", "СРАЗУ", "ПОКАЗАТЬ", "В КАДРЕ",
@@ -165,23 +172,10 @@ def build() -> dict[str, Any]:
         raise FileNotFoundError("ffmpeg")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     items: list[dict[str, Any]] = []
-    if not SOURCE_IMAGE.is_file():
-        raise FileNotFoundError(f"Missing canonical Settings demo source image: {SOURCE_IMAGE}")
+    if not SOURCE_VIDEO.is_file():
+        raise FileNotFoundError(f"Missing canonical Settings demo source video: {SOURCE_VIDEO}")
     with tempfile.TemporaryDirectory(prefix="friend-beta-settings-preview-") as raw_temp:
         temp = Path(raw_temp)
-        SOURCE_VIDEO.parent.mkdir(parents=True, exist_ok=True)
-        _run([
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-loop", "1", "-framerate", str(FPS), "-i", str(SOURCE_IMAGE),
-            "-t", str(DURATION_SECONDS),
-            "-vf", (
-                "scale=604:1074,"
-                "crop=540:960:x='32+12*sin(2*PI*t/10)':y='52+15*cos(2*PI*t/10)',"
-                f"fps={FPS},format=yuv420p"
-            ),
-            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-movflags", "+faststart", str(SOURCE_VIDEO),
-        ])
         source_sha256 = stable_file_hash(SOURCE_VIDEO)
         for style_id in CREATIVE_PRESET_DEFINITIONS:
             style = creative_preset_definition(style_id)
@@ -212,7 +206,7 @@ def build() -> dict[str, Any]:
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-i", str(SOURCE_VIDEO), "-vf", _ass_filter(ass, fonts),
                     "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
-                    "-b:v", "420k", "-maxrate", "520k", "-bufsize", "840k",
+                    "-crf", "18", "-maxrate", "3200k", "-bufsize", "6400k",
                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an",
                     str(destination),
                 ])
@@ -246,8 +240,8 @@ def build() -> dict[str, Any]:
         "demo_source": {
             "path": SOURCE_VIDEO.relative_to(OUTPUT).as_posix(),
             "sha256": source_sha256,
-            "image_path": SOURCE_IMAGE.relative_to(OUTPUT).as_posix(),
-            "image_sha256": stable_file_hash(SOURCE_IMAGE),
+            "content": "vertical talking head with visible speech and natural hand motion",
+            "license": SOURCE_LICENSE,
             "duration_seconds": DURATION_SECONDS,
             "width": WIDTH,
             "height": HEIGHT,

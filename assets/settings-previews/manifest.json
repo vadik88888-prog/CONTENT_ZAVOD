@@ -1,19 +1,26 @@
 {
   "schema_version": "friend-beta.settings-preview.2",
-  "created_at": "2026-08-31T21:53:25.387352+00:00",
+  "created_at": "2026-09-01T09:42:34.540945+00:00",
   "generator": "packaging/generate_settings_previews.py",
   "provider_calls": 0,
   "brain_rerun": false,
   "vision_rerun": false,
   "render_owner": "compile_native_creative_plan + write_caption_plan_ass + bundled fonts + libass",
   "demo_source": {
-    "path": "source/studio-creator-v1.mp4",
-    "sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
-    "image_path": "source/studio-creator-v1.png",
-    "image_sha256": "2afea2cfda12858d89b3bcebbdfe266dc2c9576959913de8dacb9b8da54e216e",
+    "path": "source/talking-head-v2.mp4",
+    "sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
+    "content": "vertical talking head with visible speech and natural hand motion",
+    "license": {
+      "provider": "Mixkit",
+      "asset_url": "https://mixkit.co/free-stock-video/portrait-of-an-influencer-talking-to-the-camera-42323/",
+      "license_url": "https://mixkit.co/license/#videoFree",
+      "license": "Mixkit Stock Video Free License",
+      "source_asset_id": "42323",
+      "source_title": "Portrait of an influencer talking to the camera"
+    },
     "duration_seconds": 10,
-    "width": 540,
-    "height": 960,
+    "width": 1080,
+    "height": 1920,
     "fps": 30
   },
   "items": [
@@ -21,8 +28,8 @@
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "clean_white",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:clean_white:2.2.0",
       "font_asset_ids": [
         "font.manrope.bold"
       ],
@@ -46,20 +53,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "7885cddcecea3ba365df79e38af844f5b9f54496332ecd420e1afbf93903fd72",
-      "parity_signature": "fe9ed2812f6ffb27b07398998d1c428247413a57b851ec34da586c56f11657e2",
+      "compiled_plan_hash": "2816f24aa2b64659ab9b939adfdaf983b0e1447668303ecfb9fdc513a8d77d64",
+      "parity_signature": "1cf71cb2d537150630cf9cf8e5148eb6b736769a8c4830e6c439688e0765d46f",
       "path": "minimal/clean_white.mp4",
-      "sha256": "cc98a430cec6cb964239d94c5e9cf547e2bfd6edf2ea35a521cedfcca5c2dbbb",
-      "size_bytes": 338864,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "241a5ab28b7f371ef60c37bf2922ac618a6867807b455f718a4d7c84c4817441",
+      "size_bytes": 4203381,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "minimal_light",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:minimal_light:2.2.0",
       "font_asset_ids": [
         "font.commissioner.light"
       ],
@@ -83,20 +90,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "ccef2ae61ef1263665845dd686369dd557a7b30dae5c72acc277e989383db258",
-      "parity_signature": "b250fb7eb6bb96d5f7021eb51ead60d8dc377154cb2a6d66661953111f8cc96f",
+      "compiled_plan_hash": "9bd31994e0879d9a7fa2d258a81378e2a64b619a47f8d114b5f9bf23525d3a65",
+      "parity_signature": "f97f6b3ddaac6af06d87a94312637d0904a22af57c918514c68e33a64b83bbc3",
       "path": "minimal/minimal_light.mp4",
-      "sha256": "ffc45c399edd2dbb8ff7c6139ec47ff1dac9644bbe3ba85e04874a9b73df9586",
-      "size_bytes": 337139,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "917c7131d2413b13d927335b08f780a5ee937ff1804e546b7583450da9d563a0",
+      "size_bytes": 4205515,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "accent_yellow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.2.0",
       "font_asset_ids": [
         "font.oswald.bold"
       ],
@@ -120,20 +127,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "4bacddaaa27be39db3cb1c62b4caa171e8ccb1e9553f5b1adbc9c94a8b8c9668",
-      "parity_signature": "b341c382e29e00a58ea1c9172ed37ed88b74b246b7bfd835ed15c33d21859262",
+      "compiled_plan_hash": "7ea4f3acb76928aa44324c5c18eede93b342f37405d6b1875bb18cb41f876b2f",
+      "parity_signature": "3d030aa793925e57998bf9c7f8302c1be9d9a9522c83bafb8f17c842259d9ad9",
       "path": "minimal/accent_yellow.mp4",
-      "sha256": "722e27df2ff21c140519c2ef8603c31c5e727f78a09f1d8e0958c66815ea4b9b",
-      "size_bytes": 337907,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "4e4dbf2d4d155b855b6ec2d67bc8b39a4a06a380cbbf3cf88294474cdab5a688",
+      "size_bytes": 4204683,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "editorial_narrow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.2.0",
       "font_asset_ids": [
         "font.pt-sans-narrow.regular",
         "font.pt-sans-narrow.bold"
@@ -169,20 +176,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "4e7ff513e00c3c555e3fd9696ae89dbadcabc29a6511efbc971b85d1d9798fef",
-      "parity_signature": "4edd90610f69cebd4d8737f3f3056568a3b39f5bb350e18dbe43208c3585dfe2",
+      "compiled_plan_hash": "45d598d57dec6c87027587ebe74a0b1dacbe616e69fb7e3e91eb7f39ea2f7306",
+      "parity_signature": "08fd88c3e8c3148d02dd6b9a4fe136e2758ef72ff010e48c5d3e176514fa9792",
       "path": "minimal/editorial_narrow.mp4",
-      "sha256": "a68881274b220de2895421ec11aaee25c68c4fb543fee6c3d05d65fbeb138258",
-      "size_bytes": 336388,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "cba4fe734fb04b6b7e45676d5cc8b8190de7d8d9cf49c63947166bf2cea2b193",
+      "size_bytes": 4205321,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "karaoke_yellow",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.2.0",
       "font_asset_ids": [
         "font.golos-text.bold"
       ],
@@ -206,20 +213,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "c1b01e4099d18efef69acc1c936678060c3ff118762e53e6165884996bf63d84",
-      "parity_signature": "f0c89aab167dc5fa7a06ab25fc3a42d0ffddd8ce60ab9eaa82dafb0d83f0a043",
+      "compiled_plan_hash": "42d207682764757e6b0071139162760554a2c7ae7db3932a0c99dfa5589b1439",
+      "parity_signature": "6ff771c5f5067f640a80e78b6ee2006abf6ee83cb07244ecef6df1e08aea4ac0",
       "path": "minimal/karaoke_yellow.mp4",
-      "sha256": "4356b2679359032da05032943a0400bb1e862b2cbe68973e96586c775b7c4ca8",
-      "size_bytes": 342723,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "8cbbf52e3514bb1585e452e07c29fce11d1b9ee2deec6eef01f6e613a4e15254",
+      "size_bytes": 4206197,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "minimal",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "contrast_box",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:contrast_box:2.2.0",
       "font_asset_ids": [
         "font.rubik.semibold"
       ],
@@ -243,12 +250,12 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "37957faa5b684533b05d35e80ba7eb082ae6139aaa72852e5d7acb7ca1e5edb8",
-      "parity_signature": "e8ef269f3654348d212bb4bf9df622eb60801204a660f08d65c25d725cc718ed",
+      "compiled_plan_hash": "4df92a35ee94bb4d38646308d8f73c42ace411bcb773d3336f0cd06df0f4e01f",
+      "parity_signature": "95d8684d03ce66677163ce4cdafddcdd6cb0759cd6a3e6a82741d7e6d0ad0f1d",
       "path": "minimal/contrast_box.mp4",
-      "sha256": "d8ebdccfd1bf3cebcbd0e5688fa581b9c1c3b71ff9d4c1af1949b03c3246faae",
-      "size_bytes": 341111,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "1efe442d5362a6c680d5bd8960850c5fca8b1c4bffe82ff019ea2b49891b2859",
+      "size_bytes": 4207099,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
@@ -280,20 +287,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "7258fa71ec132cae7cc8fc17a2f64b1d464bca9f8423c6d6a184b5086fb55621",
-      "parity_signature": "37c1dc90bc738d89f435b54e3f55b69f929bcefeed4188db2bb4edbb07a957fc",
+      "compiled_plan_hash": "a9ae61e0681878f017d1cb0e0ed6fea4cb1c59cfb41b002c6ed484f31e304a45",
+      "parity_signature": "cc8c3a7368f94eeb1a8a622d36845a7a684510173ee1dfdf0293273ccdcc0f75",
       "path": "minimal/word_pop.mp4",
-      "sha256": "8378851f311eb1421e4c340061fba81a53ba22ff602980c40aab2196aa1656ae",
-      "size_bytes": 375795,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "4cf5df77b33ebf4a8b2c76d76316bd71e586118a3996e08f3e09704f029a2f67",
+      "size_bytes": 4200200,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "clean_white",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:clean_white:2.2.0",
       "font_asset_ids": [
         "font.manrope.bold"
       ],
@@ -317,20 +324,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "682092087290769ab764b3ff649242b67e3f600f9701f1483f9347ba21d0c84f",
-      "parity_signature": "2b61114ba96bbdd13a7e70600ba471470716895ba39ef7ce32a02e941eacd82f",
+      "compiled_plan_hash": "c93e058cada4b5dc5171cef696cb0beb173aab570cc90971128c0d74f1f3ad1a",
+      "parity_signature": "209bf84be3ce4f1f7792318a36bd55622f03a00da4b7b6eaf89d898e77b7ea61",
       "path": "documentary/clean_white.mp4",
-      "sha256": "418b3052debf496dbc2f4c297dfdae601e7d9e6e8fc0cff1d801eb5cdb2e5b40",
-      "size_bytes": 336438,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "36e15f8bc3b13d78578e176d9f730fedf5efb8b599f0904d6d3b0e9557c15121",
+      "size_bytes": 4202208,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "minimal_light",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:minimal_light:2.2.0",
       "font_asset_ids": [
         "font.commissioner.light"
       ],
@@ -354,20 +361,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "63af3255487afef8bdfd258b0704fbd6e9fd89ad0e4fbd323de3c4514ea074d9",
-      "parity_signature": "17b924d1f6298fd6aff692232e760da3193f03999a327b5187206a41d36565d1",
+      "compiled_plan_hash": "2c5e11bc3efcfca88e217dfb9bbf165025663bf4a903410b7cc8921a57a4f874",
+      "parity_signature": "e705c94a228dd39a4f4a7759f00040e90933e9a98372704f935fe9ef0cdb8867",
       "path": "documentary/minimal_light.mp4",
-      "sha256": "3c53a08fa9c5601e2395b91a4137f4dab39797691ccd6fa0f36daabdc6a8ea84",
-      "size_bytes": 340403,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "f73df4e9398ad918ee1d68e6516cbb483ab048896b45a87ee3c3d26ebb5fa2b3",
+      "size_bytes": 4198193,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "accent_yellow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.2.0",
       "font_asset_ids": [
         "font.oswald.bold"
       ],
@@ -391,20 +398,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "66f3a1fd0a536a78b01667b15843d62cda61fbefbd08c69b8ca89fe016f55200",
-      "parity_signature": "69f03c352e443abb6852c0fa90e81173a74f2af4911ef7755be6ceb36d9e4776",
+      "compiled_plan_hash": "8cf9bee0f5f68b982d0787485251508efa1e84d612a1b99665dcd742e2153973",
+      "parity_signature": "dc1205605150a5c04af62bea8c5a908972c319d6eaf5a944a0ee9c809bf2786f",
       "path": "documentary/accent_yellow.mp4",
-      "sha256": "3c86aed894c7c3216514226558f97a84407bf9bcdd83b595ac6826d3ad6399df",
-      "size_bytes": 339575,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "a88c2004fe038c626d6bc2a03fec470a610f7f9e6838be2c702d4ed20396960e",
+      "size_bytes": 4204876,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "editorial_narrow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.2.0",
       "font_asset_ids": [
         "font.pt-sans-narrow.regular",
         "font.pt-sans-narrow.bold"
@@ -440,20 +447,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "fd99df53aeae009d998f7aca6384902c7cce56694c1db91c7232b260b3c22303",
-      "parity_signature": "88b3d1ab625ad70a7fbee991b7b73b1049b90893899aa3664c99a180d740a1c9",
+      "compiled_plan_hash": "b2e8dbf1dccaf00f73f33ffb22974852933d1cd494fc45f60440ce0aa0ff5d11",
+      "parity_signature": "970376d5543ea55bd0c6a2eb4b9ac049dbdefdd289802d8e3f4491ca7debcf77",
       "path": "documentary/editorial_narrow.mp4",
-      "sha256": "fccfbfb31144410b1ed1804561467249d234bef412003611deb61d152e2b7afe",
-      "size_bytes": 335846,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "f4134204e9894789f093fbd1878d5398d7f306a08a68b12fcbf5bb19f514a41d",
+      "size_bytes": 4203368,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "karaoke_yellow",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.2.0",
       "font_asset_ids": [
         "font.golos-text.bold"
       ],
@@ -477,20 +484,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "b0fef1940a7d244ad4bfff6a39f688c8ea8e2964fdb2753613d84262334f0451",
-      "parity_signature": "67aafbd1cae09c88e2307b6bc2f4429f1cc4d994a503895a4b2c3f14afcb9c67",
+      "compiled_plan_hash": "c11cd9e7ea3e75249cc9eaa8a52b65a22ff6174f5270f2b85e0c51dd4a54ca76",
+      "parity_signature": "d01ea406b198ba10c5f9d41b80d9679485be6efb6bd82287d0992eba4afe7fe9",
       "path": "documentary/karaoke_yellow.mp4",
-      "sha256": "277d189a342624b96565aad6a34182bcde1eaf756972517b9d3504d80bf87a2b",
-      "size_bytes": 344114,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "1279489b20c4df6e97d69c8c25e32c4ce71cb0ac034e30ed94b01c411d789196",
+      "size_bytes": 4203262,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "documentary",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "contrast_box",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:contrast_box:2.2.0",
       "font_asset_ids": [
         "font.rubik.semibold"
       ],
@@ -514,12 +521,12 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "2b714b33e5aad66aed06203045bdb6085b34cbec842147d92b68f53cf226abc2",
-      "parity_signature": "0bf9310d8413d2a3d785dfff0a625031655da26fb9acf4f8706d4745d6fd0e53",
+      "compiled_plan_hash": "1706cc352f30bad6d22a07d81ddfc427f435f53a4aa75da1adc5e9930c46ef2d",
+      "parity_signature": "500cfe0442c88350c5ea600fd3d36820db8c3902a78cb1799fcc4ceca6b1862c",
       "path": "documentary/contrast_box.mp4",
-      "sha256": "986be267b1a0497b94a6eae57c48b509b2d16ec8f78437d5d4077beb28a724b2",
-      "size_bytes": 338040,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "003c87359b3de3044521fc947331aab7389fb833984dc9f80fcb5f4f36aa8e5e",
+      "size_bytes": 4203880,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
@@ -551,20 +558,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "726b71accd3e7dbebf27719df729ecc74806376afc97dc19a778a1cc5212331a",
-      "parity_signature": "83bfc033b39c274bcf71f6f0d1b3f077ab06c32dfd58aec73fdffbe3251cc2bf",
+      "compiled_plan_hash": "c46c89f368a751805498c841652a9365982baad59562a6e3a92ff86ed2a2b411",
+      "parity_signature": "d9e9f6c02ccbd7b06e44af3df3ad2d4bed63ed497bffa82f437de74ceff16e1a",
       "path": "documentary/word_pop.mp4",
-      "sha256": "34cbf2c299f0195f7622b053871dba139049ccd5cf1356a342ae9a0d0e63d2c8",
-      "size_bytes": 373934,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "28b419a5a0089e38e161e9a538dea6145a2cce88e69f0a69bc479bcdeff86bb4",
+      "size_bytes": 4206042,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "clean_white",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:clean_white:2.2.0",
       "font_asset_ids": [
         "font.manrope.bold"
       ],
@@ -588,20 +595,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "279d16c2b56260b594a37343f6c8bd94485dcf66cc2e7fe0f3775f2537adf809",
-      "parity_signature": "e4ea79df74515c31663acfcc81676bed959c87335ffbe6d680d4bbf2e225c5df",
+      "compiled_plan_hash": "4753b400924ed49d25d8f5a0e3f1269b4c73f410da6b6269f2ca90a08891b018",
+      "parity_signature": "41474cbc130fbdf6bc978141af4e958557014300ae267c7968ed31420411bc8f",
       "path": "dynamic/clean_white.mp4",
-      "sha256": "d29a948d2ab15ff6b1eb6b15423d208de7c728d106abc92353b25d39c1e3a750",
-      "size_bytes": 334833,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "15bbed42d5244e275f1dacb2a7f7ced7619492df886ddba1657c29594166717d",
+      "size_bytes": 4204874,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "minimal_light",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:minimal_light:2.2.0",
       "font_asset_ids": [
         "font.commissioner.light"
       ],
@@ -625,20 +632,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "fb3c950cc1b118130927d71115c14f851a4003edd6a638f357375dae1a2ca841",
-      "parity_signature": "8fd41da61c9349c7641c5bc9f42d418e528d093ed6985740abf6356018e42ad3",
+      "compiled_plan_hash": "0669a1c4383f3b2f0c08b9f388e236f8b106185520d6f49514c332f153ed1526",
+      "parity_signature": "1279853698af662e29efe630ffbfddbcf28d8c25799ae7c225d9a0e7fe0fb956",
       "path": "dynamic/minimal_light.mp4",
-      "sha256": "c8099f4183d5bac4879fd4d81b2b9369db75231cd61ed32a0239294715bb7b29",
-      "size_bytes": 340044,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "2ae68a4ef49f64df6ba0983f42842d9401b9202793646cc5e3fd809e0352622e",
+      "size_bytes": 4206400,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "accent_yellow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.2.0",
       "font_asset_ids": [
         "font.oswald.bold"
       ],
@@ -662,20 +669,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "c12b74db409acbc6f497ed9c3a8bcbfdd71c77a89f84edc30775f56a53d96d06",
-      "parity_signature": "05129b5bd1a5c81f78f8bfab6553ba0ef31a10a6d1cc7ad57a1df3531004aea6",
+      "compiled_plan_hash": "1f3a4f68b5b938c620d38fbd8f01f475d04e252e8d83e20398008de26d01e829",
+      "parity_signature": "66a7a3222bb3cf600eb859010395ae70a944bc2a9762c37c3088738fdf42468a",
       "path": "dynamic/accent_yellow.mp4",
-      "sha256": "bd837336fcc2d836c94010710cc9487e08b63cad4e377a3671be3c7e6ff20173",
-      "size_bytes": 341750,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "c3f0b3c378b870ed2503d6395247bed15b8b5734725abe82151aa284da532792",
+      "size_bytes": 4202128,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "editorial_narrow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.2.0",
       "font_asset_ids": [
         "font.pt-sans-narrow.regular",
         "font.pt-sans-narrow.bold"
@@ -711,20 +718,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "4077480e2df83d7a1fae9941ec7ef7ed6b0289c0f13cb513d5fa6d703e339f1a",
-      "parity_signature": "02ffd835bf80b471791bfc0766222a84fd2ecd64438f9420ffd3294dd7a62031",
+      "compiled_plan_hash": "6b17514cde8c30cf6fac1156a74f3724c0866b3052508a1cf924bed7f2eb552e",
+      "parity_signature": "ce205210a799ac13f3688831162d980b7362f6346e1e95f3f33bdd691517fd03",
       "path": "dynamic/editorial_narrow.mp4",
-      "sha256": "cafc65221bb5cb76832d03f4216d4e7d3dc2da649a953378faa688b5cc630a10",
-      "size_bytes": 335519,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "09f9d1dc2c0438b0880578173afe49bd70923e49c5c6d3577dc979be3e8dbf4e",
+      "size_bytes": 4205131,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "karaoke_yellow",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.2.0",
       "font_asset_ids": [
         "font.golos-text.bold"
       ],
@@ -748,20 +755,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "aaa0fdb4b2960f0f2bf9f5bbe0b47f8a9c6a15ee409ee39d78d4889c9f833ddf",
-      "parity_signature": "a3ee57af306c7252a1771a794774cc2a12cc9eabcf3d226741e8a7ee0cc32c98",
+      "compiled_plan_hash": "cf296464d740b39a36d331f64d3139b94ba86ac14798828c06c0f55e82f4fade",
+      "parity_signature": "6d377ba0bb820879dbfe8c7ed8bc21e9546948a848eaa9621c86c6859d50f73a",
       "path": "dynamic/karaoke_yellow.mp4",
-      "sha256": "a976e5addf87632865ee2e51d79ef6c00176ca19d492bf66a1232b1466ded9fb",
-      "size_bytes": 338433,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "35c3363b2bf81ea2173a5a13cfee191da37829f96f0b94a8788af168cee35840",
+      "size_bytes": 4204247,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "dynamic",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "contrast_box",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:contrast_box:2.2.0",
       "font_asset_ids": [
         "font.rubik.semibold"
       ],
@@ -785,12 +792,12 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "43e1fa6e490bc7bdc171d5e83c052234bbb25c420d3253de553a5dfe968d5612",
-      "parity_signature": "435c76b2dd4d2691ed36e27376abd39a646f7bb3a18fb2d13008d19f770a9f1c",
+      "compiled_plan_hash": "38d07a6a39dbb08a4f93e4748dccdf0ea5e7155086d6073772c51383cf0df53a",
+      "parity_signature": "a9cfaf97c3324d968165d99a7eb889d3f54d4d6ce5dab38726f9d791130d0099",
       "path": "dynamic/contrast_box.mp4",
-      "sha256": "dce72e234a529506831b4834e7a522851e4ba1955fbadee8eb0f7265f9cfd6cd",
-      "size_bytes": 335470,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "b5462a6f873e0fbfede43ae2009cf82eeaf87d2fe4462f74bc4d8b83fc42d380",
+      "size_bytes": 4205028,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
@@ -822,20 +829,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "330ebdc05ebf5bd4c64734893269a54d637636972ee9a2c258359ff9da1d1b26",
-      "parity_signature": "083f4699a6e6f6ad347f9a7791fdc17d16795da416128798966747960b865a72",
+      "compiled_plan_hash": "d3b72bb01054227946a1a0719922fc370db631b555c00f7983a51cfeb2ceb9f6",
+      "parity_signature": "c9a9489a6b5ab65166decd140fd087282bbc07b429a725d0ba393b9664477bf1",
       "path": "dynamic/word_pop.mp4",
-      "sha256": "cfcd721ea715161a73996f8845aeb5658c650de50e8225b13be1549bbc1e8c9d",
-      "size_bytes": 372180,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "61d6a06c5d7db53fb3808894e9d7bbd4ad10fcd5459a68594fe45e8810ffcf86",
+      "size_bytes": 4203396,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "clean_white",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:clean_white:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:clean_white:2.2.0",
       "font_asset_ids": [
         "font.manrope.bold"
       ],
@@ -859,20 +866,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "6641c81833ec4969cb5c6a4f161a0d6c014d12356cb63a4085cb2f9e1a69af40",
-      "parity_signature": "2f1364ba0a2fc211fab3b71c2734a81531c72ff14783bb8821c4ad277a310f33",
+      "compiled_plan_hash": "d438ea552758f595afcfa9dc6184729fd3dcb050d4ecb8b76f3ac1d7f2da1db7",
+      "parity_signature": "81c391b9b1a11e0e3ea9a73df6d6f9fc8dc13e79d1dd926ea4fca87cc41f9bc4",
       "path": "clean/clean_white.mp4",
-      "sha256": "3b408b1c14aa7992d89a638defdadbb9c3045802088cdd62c26c5b050711764d",
-      "size_bytes": 336473,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "51c21790e811dc21fe54a3e008eb3220594e76076bb9ff794c873d06c57006e9",
+      "size_bytes": 4204631,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "minimal_light",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:minimal_light:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:minimal_light:2.2.0",
       "font_asset_ids": [
         "font.commissioner.light"
       ],
@@ -896,20 +903,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "167b40dba2f82e5de28992f45deadf27240c9c4d240388a972566e839f71d7b3",
-      "parity_signature": "80ab1c70e8efbc53445de9baae344f0c643b9b6d10e5e8484442736739855603",
+      "compiled_plan_hash": "eb6afc5b9916734699b111a71a24703a4ba3723e513b44c34adf652420370f1a",
+      "parity_signature": "00636c6d0b56a6625156c2fe00f915836cb7adf906089807fe9ec19895624cff",
       "path": "clean/minimal_light.mp4",
-      "sha256": "df66dc54ac52b918cff362be546374a1db7e6230e3ca77c22bf69c9c59031508",
-      "size_bytes": 339061,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "d7e44548865f9a5f0b151a8f1144d5e4187cd508c7f0b2615e2240be2087ee25",
+      "size_bytes": 4205138,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "accent_yellow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:accent_yellow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:accent_yellow:2.2.0",
       "font_asset_ids": [
         "font.oswald.bold"
       ],
@@ -933,20 +940,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "fa6a5e4bcdf1740fd2716f7e0dcbf2200c48cb129877c4334229564ada3ed366",
-      "parity_signature": "f052e3d3db88d5426432a19e35543314edf25137fd6c8a88b0d29762a260f565",
+      "compiled_plan_hash": "89a26a509987106a15bf61026f19753b5c547c59404030d93c70e3132dbf27ec",
+      "parity_signature": "8e7daa855fd3dfed63b9d8002983d12c5bb069aeec95f0ba3b084aebb79131a7",
       "path": "clean/accent_yellow.mp4",
-      "sha256": "b809d32e74c098d0e0d1f9603d7cc03acd08b08acf57edd112e06b80638b9a0f",
-      "size_bytes": 335218,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "1f1aa16a279d0bbb50e0607d5d7269efe7d7edfc8da149ede9737a92849ae7d7",
+      "size_bytes": 4205868,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "editorial_narrow",
-      "caption_preset_version": "2.1.0",
-      "caption_token_id": "caption-preset:editorial_narrow:2.1.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:editorial_narrow:2.2.0",
       "font_asset_ids": [
         "font.pt-sans-narrow.regular",
         "font.pt-sans-narrow.bold"
@@ -982,20 +989,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "cf59eeddbccf435940b3c73b199ce090c2baa9e6c66080e0ee3754dc854ad530",
-      "parity_signature": "e93267fb9cf26206e427e1f9cfd75be15ee930efb1fa1edc55e89b48129831b3",
+      "compiled_plan_hash": "907570b685b0b0208fba7a8a4b43b1ceb614aac67abd9fd46f9a454e222b1090",
+      "parity_signature": "c83470323a6ac2915ab55dc786e029f3b14aaf4f00586fa6eab261ce7b26fcb7",
       "path": "clean/editorial_narrow.mp4",
-      "sha256": "d1e0c29007dd134ff17b5c5d4d70e2ce7278047fb93df47aa3aaf8f6ff2b6cbb",
-      "size_bytes": 340750,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "3d837da9f4ee8f0c0e0766eb763b80ac386998c6f34b3a662af622850df9ce73",
+      "size_bytes": 4205062,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "karaoke_yellow",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:karaoke_yellow:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:karaoke_yellow:2.2.0",
       "font_asset_ids": [
         "font.golos-text.bold"
       ],
@@ -1019,20 +1026,20 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "a9d8cb1c655038c58693853db5d4582a46f99ea05b23fbf27ab8116619e92fab",
-      "parity_signature": "9623ff8b2235ac92657e4dae10d6f4072bfa9d4d47953c338624499a423bb261",
+      "compiled_plan_hash": "f7ffa35ffdd89656cd9e705f37b0693e4c5c62c798de674d6fabd57a95b9712f",
+      "parity_signature": "aad22f67a5a18fce9696222307e08f634c597fa053e176da5e7643bb54aea94b",
       "path": "clean/karaoke_yellow.mp4",
-      "sha256": "bbf1b08200a6e38128907db97ebe76661c7261919a40f6149b613a6cf81205bc",
-      "size_bytes": 341299,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "2fc0163ac9db8472be8351fe11364a9dc005b2b4347c856236b3cdef13417409",
+      "size_bytes": 4204686,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
       "creative_style_id": "clean",
       "creative_style_version": "1.0.0",
       "caption_preset_id": "contrast_box",
-      "caption_preset_version": "2.0.0",
-      "caption_token_id": "caption-preset:contrast_box:2.0.0",
+      "caption_preset_version": "2.2.0",
+      "caption_token_id": "caption-preset:contrast_box:2.2.0",
       "font_asset_ids": [
         "font.rubik.semibold"
       ],
@@ -1056,12 +1063,12 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "9bdbc386b0eac1e77241b7de8fdde35aee9b9d8db3c1e29d141e0a618f9e12e6",
-      "parity_signature": "710c9abcb4e40aa548e9f97fbfd198df82f650a54f41b60b3cbf25bf07c7d90e",
+      "compiled_plan_hash": "a798c4f14aaf1e631f6f7f2da019c4ee6a57e6746ac7a64f7faaf055a4ae732a",
+      "parity_signature": "7fb2a83098f783bba3fedc0b1d1578bdd24f84265b70cf1da968bb712cecc645",
       "path": "clean/contrast_box.mp4",
-      "sha256": "94df372d86374f829e905a4436f30445e236f7aaad20db9b042dda9f62c6cbda",
-      "size_bytes": 340333,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "b20febb7099f8e04aa522b127c31b705b2dbf1c3fedec4c4ee3e2fbac50ac652",
+      "size_bytes": 4196319,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     },
     {
@@ -1093,12 +1100,12 @@
         "deployment_status": "bundled",
         "fallback_used": false
       },
-      "compiled_plan_hash": "2d3889491d814e412f0c1b9e2bf2607f1b3bdac15d0aa0112498b629f1853dd7",
-      "parity_signature": "f7eaf6f5d7d0a358ac320b0a31bfbf1094c9ad11b81e30ef11f55c1360c960cc",
+      "compiled_plan_hash": "3674ce4f2d2bd48b3eaa98bbdbcdbd825c0d9ecd690e92ab2d0c091ab0630ebd",
+      "parity_signature": "dff8d635c98893ec0edd4a0a297d9ace976d2912e04a35b38423d1d49254a99c",
       "path": "clean/word_pop.mp4",
-      "sha256": "b79244985ab982804607e8d5057142bb9793c8226a306422e09adca6b1e6af48",
-      "size_bytes": 372919,
-      "demo_source_sha256": "bbe6ad2153bbefc5f75765ce5be3277fc34bdb8ffe35809e4e82acc2673c42fe",
+      "sha256": "45d10148eec8a3a28cd412000d4a47d81903ccf6f651f1473c0764698bb22072",
+      "size_bytes": 4200244,
+      "demo_source_sha256": "3ca659679927a0085ca0a05935751974d250319f160567515ef2b014c6ea2e6a",
       "duration_seconds": 10
     }
   ]
