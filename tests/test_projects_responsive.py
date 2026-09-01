@@ -8,9 +8,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QPoint
+from PySide6.QtCore import QCoreApplication, QPoint, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QBoxLayout, QFrame, QLabel, QPushButton
 
+from app import __version__
 from app.gui.main_window import MainWindow
 from app.gui.models import DesktopSettings, RunStatus
 from app.gui.screens.onboarding_screen import OnboardingDialog
@@ -385,7 +387,6 @@ def test_expanded_settings_fit_compact_shell_and_hostile_paths(tmp_path: Path) -
 
     try:
         screen.advanced_toggle.setChecked(True)
-        screen.diagnostics_toggle.setChecked(True)
         screen.diagnostics.setPlainText("ОШИБКА_" * 300)
         screen.resize(588, 420)
         screen.show()
@@ -408,6 +409,32 @@ def test_expanded_settings_fit_compact_shell_and_hostile_paths(tmp_path: Path) -
 
         assert screen.data_directory.toolTip() == services.settings.data_directory
         assert screen.config_path.toolTip() == services.settings.config_path
+    finally:
+        screen.close()
+        screen.deleteLater()
+        application.processEvents()
+
+
+def test_settings_keeps_support_and_key_status_visible_and_opens_telegram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = _application()
+    screen = SettingsScreen(SettingsViewModel(_services(tmp_path, project_count=0)))
+    opened: list[QUrl] = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url) or True)
+
+    try:
+        assert screen.api_status.text().startswith("Статус ключа")
+        assert screen.advanced_toggle.text() == "Расширенные настройки"
+        assert screen.advanced_content.isHidden()
+        assert screen.telegram_button.text() == "Написать в Telegram"
+        assert any(label.text() == "Telegram: @rezvis" for label in screen.findChildren(QLabel))
+        assert any(label.text() == f"Content Factory {__version__}" for label in screen.findChildren(QLabel))
+
+        screen.telegram_button.click()
+        application.processEvents()
+
+        assert [url.toString() for url in opened] == ["https://t.me/rezvis"]
     finally:
         screen.close()
         screen.deleteLater()

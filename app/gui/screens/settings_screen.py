@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import load_config
-from app.doctor import format_report
+from app import __version__
+from app.doctor import format_report, summarize_checks
 from app.gui.responsive import make_label_shrinkable, set_responsive_text
 from app.gui.viewmodels import SettingsViewModel
 from app.secure_secrets import key_configured
@@ -42,7 +42,7 @@ class SettingsScreen(QWidget):
         header.setSpacing(3)
         title = QLabel("Настройки")
         title.setObjectName("title")
-        subtitle = QLabel("Управляйте хранением проектов и локальной работой приложения.")
+        subtitle = QLabel("Основные настройки, проверка системы и помощь — в одном месте.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         header.addWidget(title)
@@ -59,16 +59,32 @@ class SettingsScreen(QWidget):
         layout.setContentsMargins(0, 0, 2, 6)
         layout.setSpacing(12)
 
-        overview = self._section("Работа на этом компьютере")
-        self.system_detail = QLabel()
-        self.system_detail.setObjectName("subtitle")
-        make_label_shrinkable(self.system_detail)
-        private_note = QLabel("Проекты, исходные видео и готовые ролики не отправляются в облако из этого приложения.")
-        private_note.setObjectName("muted")
-        make_label_shrinkable(private_note)
-        overview.layout().addWidget(self.system_detail)
-        overview.layout().addWidget(private_note)
-        layout.addWidget(overview)
+        self.api_section = self._section("API-ключ")
+        self.api_status = QLabel()
+        self.api_status.setObjectName("subtitle")
+        make_label_shrinkable(self.api_status)
+        key_note = QLabel("Значение ключа остаётся скрытым и не сохраняется в настройках или истории запусков.")
+        key_note.setObjectName("muted")
+        make_label_shrinkable(key_note)
+        self.key_setup_toggle = QPushButton("Настроить API-ключ")
+        self.key_setup_toggle.setCheckable(True)
+        self.key_setup_toggle.toggled.connect(self._set_api_setup_visible)
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("Новый API-ключ — значение останется скрытым")
+        self.api_key.setClearButtonEnabled(True)
+        self.save_key_button = QPushButton("Сохранить ключ локально")
+        self.save_key_button.clicked.connect(self._save_api_key)
+        self.api_key_result = QLabel()
+        self.api_key_result.setObjectName("muted")
+        make_label_shrinkable(self.api_key_result)
+        self.api_section.layout().addWidget(self.api_status)
+        self.api_section.layout().addWidget(key_note)
+        self.api_section.layout().addWidget(self.key_setup_toggle)
+        self.api_section.layout().addWidget(self.api_key)
+        self.api_section.layout().addWidget(self.save_key_button)
+        self.api_section.layout().addWidget(self.api_key_result)
+        layout.addWidget(self.api_section)
 
         general = self._section("Хранение проектов")
         location_hint = QLabel("Выберите папку, где Content Factory хранит проекты, историю запусков и результаты.")
@@ -89,9 +105,35 @@ class SettingsScreen(QWidget):
         general.layout().addLayout(data_actions)
         layout.addWidget(general)
 
+        diagnostics = self._section("Проверка системы")
+        diagnostics_hint = QLabel("Проверьте, что всё готово к обработке видео. Подробности доступны в расширенных настройках.")
+        diagnostics_hint.setObjectName("muted")
+        make_label_shrinkable(diagnostics_hint)
+        self.check_button = QPushButton("Проверить систему")
+        self.check_button.clicked.connect(self.viewmodel.diagnostics)
+        self.system_detail = QLabel("Проверка ещё не запускалась.")
+        self.system_detail.setObjectName("subtitle")
+        make_label_shrinkable(self.system_detail)
+        diagnostics.layout().addWidget(diagnostics_hint)
+        diagnostics.layout().addWidget(self.check_button)
+        diagnostics.layout().addWidget(self.system_detail)
+        layout.addWidget(diagnostics)
+
+        support = self._section("Помощь и поддержка")
+        telegram = QLabel("Telegram: @rezvis")
+        telegram.setObjectName("subtitle")
+        self.telegram_button = QPushButton("Написать в Telegram")
+        self.telegram_button.clicked.connect(self._open_telegram)
+        version = QLabel(f"Content Factory {__version__}")
+        version.setObjectName("muted")
+        support.layout().addWidget(telegram)
+        support.layout().addWidget(self.telegram_button)
+        support.layout().addWidget(version)
+        layout.addWidget(support)
+
         self.advanced_toggle = QPushButton("Расширенные настройки")
         self.advanced_toggle.setCheckable(True)
-        self.advanced_toggle.setToolTip("Параметры подключения, производительности и локального тестового режима")
+        self.advanced_toggle.setToolTip("Параметры движка, производительности, тестового режима и подробной диагностики")
         self.advanced_toggle.toggled.connect(self._set_advanced_visible)
         layout.addWidget(self.advanced_toggle)
 
@@ -137,53 +179,20 @@ class SettingsScreen(QWidget):
         process.layout().addWidget(cache_info)
         advanced_layout.addWidget(process)
 
-        self.ai_section = self._section("Подключённые сервисы")
-        self.ai_info = QLabel()
-        make_label_shrinkable(self.ai_info)
-        self.ai_info.setObjectName("subtitle")
-        note = QLabel("Ключи не отображаются и не сохраняются в настройках или истории запусков.")
-        note.setObjectName("muted")
-        make_label_shrinkable(note)
-        self.ai_section.layout().addWidget(self.ai_info)
-        self.ai_section.layout().addWidget(note)
-        self.api_key = QLineEdit()
-        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("Новый API-ключ — значение останется скрытым")
-        self.api_key.setClearButtonEnabled(True)
-        self.save_key_button = QPushButton("Сохранить ключ локально")
-        self.save_key_button.clicked.connect(self._save_api_key)
-        self.api_key_result = QLabel()
-        self.api_key_result.setObjectName("muted")
-        make_label_shrinkable(self.api_key_result)
-        self.ai_section.layout().addWidget(self.api_key)
-        self.ai_section.layout().addWidget(self.save_key_button)
-        self.ai_section.layout().addWidget(self.api_key_result)
-        advanced_layout.addWidget(self.ai_section)
-        self.advanced_content.hide()
-        layout.addWidget(self.advanced_content)
-
-        self.diagnostics_toggle = QPushButton("Диагностика и поддержка")
-        self.diagnostics_toggle.setCheckable(True)
-        self.diagnostics_toggle.setToolTip("Проверить компоненты обработки видео и доступность настроенных сервисов")
-        self.diagnostics_toggle.toggled.connect(self._set_diagnostics_visible)
-        layout.addWidget(self.diagnostics_toggle)
-
-        self.diagnostics_content = self._section("Проверка системы")
-        diagnostics_hint = QLabel("Если что-то не запускается, выполните проверку и используйте результат для поддержки.")
-        diagnostics_hint.setObjectName("muted")
-        make_label_shrinkable(diagnostics_hint)
-        self.check_button = QPushButton("Проверить систему")
-        self.check_button.clicked.connect(self.viewmodel.diagnostics)
+        raw_diagnostics = self._section("Подробности проверки")
+        raw_hint = QLabel("Технический отчёт для самостоятельной диагностики или передачи в поддержку.")
+        raw_hint.setObjectName("muted")
+        make_label_shrinkable(raw_hint)
         self.diagnostics = QPlainTextEdit()
         self.diagnostics.setReadOnly(True)
         self.diagnostics.setMinimumHeight(150)
         self.diagnostics.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.diagnostics.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.diagnostics_content.layout().addWidget(diagnostics_hint)
-        self.diagnostics_content.layout().addWidget(self.check_button)
-        self.diagnostics_content.layout().addWidget(self.diagnostics)
-        self.diagnostics_content.hide()
-        layout.addWidget(self.diagnostics_content)
+        raw_diagnostics.layout().addWidget(raw_hint)
+        raw_diagnostics.layout().addWidget(self.diagnostics)
+        advanced_layout.addWidget(raw_diagnostics)
+        self.advanced_content.hide()
+        layout.addWidget(self.advanced_content)
         layout.addStretch()
 
         scroll.setWidget(host)
@@ -198,9 +207,12 @@ class SettingsScreen(QWidget):
         self.advanced_content.setVisible(visible)
         self.advanced_toggle.setText("Скрыть расширенные настройки" if visible else "Расширенные настройки")
 
-    def _set_diagnostics_visible(self, visible: bool) -> None:
-        self.diagnostics_content.setVisible(visible)
-        self.diagnostics_toggle.setText("Скрыть диагностику" if visible else "Диагностика и поддержка")
+    def _set_api_setup_visible(self, visible: bool) -> None:
+        configurable = self.viewmodel.ai_provider() in {"openai", "gemini"}
+        show = configurable and visible
+        self.api_key.setVisible(show)
+        self.save_key_button.setVisible(show)
+        self.key_setup_toggle.setText("Скрыть настройку ключа" if show else "Настроить API-ключ")
 
     def _render(self, settings) -> None:
         self.data_directory.setText(settings.data_directory)
@@ -214,37 +226,20 @@ class SettingsScreen(QWidget):
         self.local_test.blockSignals(True)
         self.local_test.setChecked(settings.local_test_mode)
         self.local_test.blockSignals(False)
-        self.system_detail.setText(
-            "Локальный тестовый режим включён." if settings.local_test_mode
-            else "Локальная обработка готова к работе."
-        )
-        config_path = Path(settings.config_path) if settings.config_path else self.viewmodel.services.resources_root / "config.example.yaml"
-        try:
-            config = load_config(config_path)
-            effective_provider = "mock" if settings.local_test_mode else config.ai.provider
-            key = (
-                "не требуется"
-                if effective_provider == "mock"
-                else "настроен"
-                if key_configured(effective_provider, self.viewmodel.services.system.data_root)
-                else "не настроен"
-            )
-            set_responsive_text(
-                self.ai_info,
-                f"AI: {effective_provider} · {config.ai.model}\n"
-                f"Озвучка: {config.tts.provider} · {config.tts.model}\n"
-                f"Статус ключа: {key}",
-            )
-            configurable = effective_provider in {"openai", "gemini"}
-            self.api_key.setVisible(configurable)
-            self.save_key_button.setVisible(configurable)
-        except Exception:
-            set_responsive_text(
-                self.ai_info,
-                "Выберите корректный файл конфигурации, чтобы увидеть используемые параметры.",
-            )
-            self.api_key.hide()
-            self.save_key_button.hide()
+        provider = self.viewmodel.ai_provider()
+        if provider is None:
+            self.api_status.setText("Статус ключа недоступен. Проверьте расширенные настройки.")
+        elif provider == "mock":
+            self.api_status.setText("Статус ключа: не требуется в локальном тестовом режиме.")
+        elif key_configured(provider, self.viewmodel.services.system.data_root):
+            self.api_status.setText("Статус ключа: настроен.")
+        else:
+            self.api_status.setText("Статус ключа: не настроен.")
+        configurable = provider in {"openai", "gemini"}
+        self.key_setup_toggle.setVisible(configurable)
+        if not configurable:
+            self.key_setup_toggle.setChecked(False)
+        self._set_api_setup_visible(self.key_setup_toggle.isChecked())
 
     def _save(self) -> None:
         self.viewmodel.settings.config_path = self.config_path.text().strip() or None
@@ -272,6 +267,10 @@ class SettingsScreen(QWidget):
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
+    @staticmethod
+    def _open_telegram() -> None:
+        QDesktopServices.openUrl(QUrl("https://t.me/rezvis"))
+
     def _save_api_key(self) -> None:
         result = self.viewmodel.save_api_key(self.api_key.text())
         self.api_key.clear()
@@ -280,11 +279,14 @@ class SettingsScreen(QWidget):
     def _diagnostics_started(self) -> None:
         self.check_button.setEnabled(False)
         self.check_button.setText("Проверяем…")
+        self.system_detail.setText("Проверка выполняется в фоне. Интерфейс остаётся доступным.")
         self.diagnostics.setPlainText("Диагностика выполняется в фоне; интерфейс остаётся доступным.")
 
     def _diagnostics_ready(self, checks) -> None:
+        summary = summarize_checks(checks)
         self.check_button.setEnabled(True)
         self.check_button.setText("Проверить снова")
+        self.system_detail.setText(summary.detail)
         self.diagnostics.setPlainText(format_report(checks))
 
     @staticmethod
