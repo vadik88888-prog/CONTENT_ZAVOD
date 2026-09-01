@@ -135,6 +135,16 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
     stage_evidence: dict[str, object] = {}
     screen = window.project_screen
     if stage == "settings":
+        count_section = screen.setup_count_section
+        estimate_row = screen.setup_estimate_row
+        count_origin = count_section.mapTo(screen.setup_card, QPoint(0, 0))
+        estimate_origin = estimate_row.mapTo(screen.setup_card, QPoint(0, 0))
+        if estimate_origin.y() < count_origin.y() + count_section.height():
+            raise AssertionError(
+                "Settings estimate overlaps the requested clip-count choices: "
+                f"count_bottom={count_origin.y() + count_section.height()}, "
+                f"estimate_top={estimate_origin.y()}"
+            )
         caption_cards = screen.setup_caption_picker.cards
         caption_fonts = {
             preset_id: card.sample.font().family()
@@ -175,6 +185,7 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
             "creative_style_version": asset["creative_style_version"],
             "font_asset_ids": asset["font_asset_ids"],
             "source_project_poster_visible": not screen.setup_source_poster.pixmap().isNull(),
+            "estimate_below_clip_count": True,
         }
         if not stage_evidence["source_project_poster_visible"]:
             raise AssertionError("Source summary does not show the persisted project poster")
@@ -259,7 +270,12 @@ def _screen_metrics(window: MainWindow, stage: str) -> dict[str, object]:
                 "Moments boundary controls are outside the first viewport: "
                 f"origin_y={boundary_origin.y()}, "
                 f"height={boundary_controls.height()}, "
-                f"viewport_height={preview_viewport.height()}"
+                f"viewport_height={preview_viewport.height()}, "
+                f"preview_y={screen.review_preview_panel.mapTo(preview_viewport, QPoint(0, 0)).y()}, "
+                f"preview_height={screen.review_preview_panel.height()}, "
+                f"media_height={screen.preview.media_stage.height()}, "
+                f"transport_height={screen.preview.controls_host.height()}, "
+                f"project_screen_width={screen.width()}"
             )
         stage_evidence = {
             "active_candidate_id": screen._active_candidate_id,
@@ -390,7 +406,6 @@ def _save_stage(
     if content_scroll is not None and content_scroll.isVisibleTo(window):
         content_scroll.verticalScrollBar().setValue(0)
         _settle(application, turns=3)
-    metrics[stage] = _screen_metrics(window, stage)
     destination = output / f"{stage}-{label}.png"
     native_screen = window.screen() or application.primaryScreen()
     if native_screen is None:
@@ -398,6 +413,7 @@ def _save_stage(
     pixmap = native_screen.grabWindow(int(window.winId()))
     if pixmap.isNull() or not pixmap.save(str(destination)):
         raise RuntimeError(f"Could not capture {destination}")
+    metrics[stage] = _screen_metrics(window, stage)
     metrics[stage]["screenshot"] = str(destination.resolve())
     metrics[stage]["screenshot_pixels"] = [pixmap.width(), pixmap.height()]
 

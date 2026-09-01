@@ -678,7 +678,13 @@ class VideoPreview(QFrame):
             and poster is not None
             and not poster.isNull()
         )
-        self._set_presentation(self._file_presentation(candidate, presentation))
+        requested_presentation = self._file_presentation(candidate, presentation)
+        # A prepared Settings demo keeps one fixed 9:16 frame. Reapplying the
+        # same presentation for every hover invalidated Qt's layout during the
+        # two-player handoff and could visibly move the right rail. Only a
+        # genuine source↔vertical transition owns presentation geometry.
+        if requested_presentation != self._presentation:
+            self._set_presentation(requested_presentation)
         if title:
             set_responsive_text(self.active_candidate, title)
             self.active_candidate.show()

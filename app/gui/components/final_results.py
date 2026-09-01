@@ -447,7 +447,11 @@ class FinalResultsWorkspace(QWidget):
             # Preserve the complete video, status and transport controls in
             # the first viewport.  Metadata/warnings keep their own scroll;
             # fixed actions remain reachable below that scroll surface.
-            frame_size = (184, 327)
+            # The native 1366×850 audit leaves 581 px for this body.  The
+            # former 327 px frame put the transport 20 px behind the sticky
+            # action bar, so use the same compact-but-readable phone frame
+            # that keeps every primary player control visible.
+            frame_size = (172, 306)
             body_height = 420
 
         self._thumbnail_size = thumbnail_size

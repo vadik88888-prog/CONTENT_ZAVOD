@@ -75,6 +75,17 @@ def _save(widget: QWidget, target: Path) -> None:
         raise RuntimeError(f"Could not save native screenshot: {target}")
 
 
+def _demo_geometry(screen: ProjectScreen) -> tuple[int, int, int, int, int, int]:
+    """Return the fixed Settings demo geometry in screen coordinates."""
+
+    preview = screen.setup_demo_preview
+    point = preview.mapTo(screen, QPoint(0, 0))
+    return (
+        point.x(), point.y(), preview.width(), preview.height(),
+        preview.media_stage.width(), preview.media_stage.height(),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -124,32 +135,48 @@ def main() -> int:
                 raise AssertionError("Selected Settings caption card is not orange.")
             _save(screen, output / "settings-caption-presets.png")
 
-            before_hover = (project.settings.subtitle_style, project.settings.caption_preset_id)
-            cards["accent_yellow"].hovered.emit("accent_yellow")
-            expected_hover = settings_preview_path(before_hover[0], "accent_yellow")
-            _wait_for(app, lambda: (
-                screen.setup_demo_preview.active_media_path == expected_hover
-                and screen.setup_demo_preview.poster.isVisible()
-                and screen.setup_demo_preview.player.position() > 100
-            ))
-            if (project.settings.subtitle_style, project.settings.caption_preset_id) != before_hover:
-                raise AssertionError("Caption hover persisted a Settings choice.")
-            _save(screen, output / "settings-caption-hover.png")
-            cards["accent_yellow"].hover_left.emit("accent_yellow")
+            baseline_geometry = _demo_geometry(screen)
+            if screen.setup_demo_preview.poster.pixmap() is None or screen.setup_demo_preview.poster.pixmap().isNull():
+                raise AssertionError("Settings demo has no visible frame before hover checks.")
 
-            screen.setup_style_picker.cards["dynamic"].hovered.emit("dynamic")
-            expected_style = settings_preview_path("dynamic", "word_pop")
-            _wait_for(app, lambda: (
-                screen.setup_demo_preview.active_media_path == expected_style
-                and screen.setup_demo_preview.poster.pixmap() is not None
-                and not screen.setup_demo_preview.poster.pixmap().isNull()
-                and screen.setup_demo_preview.poster.isVisible()
-                and screen.setup_demo_preview.player.position() > 100
-            ))
-            if project.settings.subtitle_style != before_hover[0]:
-                raise AssertionError("Creative-style hover persisted a Settings choice.")
+            before_hover = (project.settings.subtitle_style, project.settings.caption_preset_id)
+            for preset_id, card in cards.items():
+                card.hovered.emit(preset_id)
+                if screen.setup_demo_preview.poster.pixmap() is None or screen.setup_demo_preview.poster.pixmap().isNull() or not screen.setup_demo_preview.poster.isVisible():
+                    raise AssertionError(f"Caption hover cleared the Settings demo frame: {preset_id}")
+                expected_hover = settings_preview_path(before_hover[0], preset_id)
+                _wait_for(app, lambda expected=expected_hover: (
+                    screen.setup_demo_preview.active_media_path == expected
+                    and screen.setup_demo_preview.poster.pixmap() is not None
+                    and not screen.setup_demo_preview.poster.pixmap().isNull()
+                    and screen.setup_demo_preview.poster.isVisible()
+                    and screen.setup_demo_preview.player.position() > 100
+                ))
+                if _demo_geometry(screen) != baseline_geometry:
+                    raise AssertionError(f"Caption hover changed Settings demo geometry: {preset_id}")
+                if (project.settings.subtitle_style, project.settings.caption_preset_id) != before_hover:
+                    raise AssertionError("Caption hover persisted a Settings choice.")
+                card.hover_left.emit(preset_id)
+            _save(screen, output / "settings-caption-hover.png")
+
+            for style_id, card in screen.setup_style_picker.cards.items():
+                card.hovered.emit(style_id)
+                if screen.setup_demo_preview.poster.pixmap() is None or screen.setup_demo_preview.poster.pixmap().isNull() or not screen.setup_demo_preview.poster.isVisible():
+                    raise AssertionError(f"Style hover cleared the Settings demo frame: {style_id}")
+                expected_style = settings_preview_path(style_id, "word_pop")
+                _wait_for(app, lambda expected=expected_style: (
+                    screen.setup_demo_preview.active_media_path == expected
+                    and screen.setup_demo_preview.poster.pixmap() is not None
+                    and not screen.setup_demo_preview.poster.pixmap().isNull()
+                    and screen.setup_demo_preview.poster.isVisible()
+                    and screen.setup_demo_preview.player.position() > 100
+                ))
+                if _demo_geometry(screen) != baseline_geometry:
+                    raise AssertionError(f"Style hover changed Settings demo geometry: {style_id}")
+                if project.settings.subtitle_style != before_hover[0]:
+                    raise AssertionError("Creative-style hover persisted a Settings choice.")
+                card.hover_left.emit(style_id)
             _save(screen, output / "settings-creative-style-hover.png")
-            screen.setup_style_picker.cards["dynamic"].hover_left.emit("dynamic")
 
             screen.content_scroll.ensureWidgetVisible(screen.setup_automatic_composition_hint, 12, 80)
             _settle(app)

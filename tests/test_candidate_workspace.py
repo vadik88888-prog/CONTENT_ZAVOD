@@ -1420,8 +1420,8 @@ def test_review_workspace_stacks_before_laptop_cards_can_overflow(
 
         assert screen._compact_stage_layout is compact
         if compact:
-            assert screen.review_preview_panel.y() > screen.review_list_panel.y()
-            assert screen.review_inspector_panel.y() > screen.review_preview_panel.y()
+            assert screen.review_preview_panel.y() < screen.review_inspector_panel.y()
+            assert screen.review_list_panel.y() > screen.review_inspector_panel.y()
         else:
             assert screen.review_preview_panel.y() == screen.review_list_panel.y()
         assert screen.review_list_scroll.horizontalScrollBar().maximum() == 0
@@ -1509,7 +1509,11 @@ def test_compact_review_reflows_candidate_actions_and_boundary_controls(tmp_path
         controls = screen.candidate_detail.findChild(QWidget, "candidateBoundaryControls")
         assert controls is not None
         assert isinstance(controls.layout(), QGridLayout)
-        assert controls.layout().columnCount() == 4
+        boundary_positions = [
+            controls.layout().getItemPosition(index)[1]
+            for index in range(controls.layout().count())
+        ]
+        assert max(boundary_positions) == 3
         detail_layout = screen.candidate_detail.layout()
         controls_index = next(
             index for index in range(detail_layout.count())
@@ -1969,7 +1973,7 @@ def test_moments_keep_quality_risks_selectable_at_catalogue_scale(
         screen.content_scroll.verticalScrollBar().setValue(0)
         for _ in range(6):
             app.processEvents()
-        assert screen.preview.media_stage.maximumHeight() == 310
+        assert screen.preview.media_stage.maximumHeight() == 280
         viewport = screen.content_scroll.viewport()
         transport_origin = screen.preview.controls_host.mapTo(viewport, QPoint(0, 0))
         assert transport_origin.y() >= 0

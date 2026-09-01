@@ -498,6 +498,8 @@ class ProjectScreen(QWidget):
         count_section, count_layout = self._setup_choice_section(
             "Количество роликов", "Это рекомендация; после анализа можно выбрать любые доступные моменты."
         )
+        count_section.setObjectName("setupClipCountSection")
+        self.setup_count_section = count_section
         count_values = [
             (self.setup_clip_count.itemText(index), self.setup_clip_count.itemData(index))
             for index in range(self.setup_clip_count.count())
@@ -509,6 +511,21 @@ class ProjectScreen(QWidget):
         setup_choices_layout.setColumnStretch(0, 1)
         setup_choices_layout.setColumnStretch(1, 1)
         setup_layout.addWidget(setup_choices)
+
+        # Keep the launch estimate in its own row.  It is deliberately close
+        # to the requested count, but it must never paint over the final
+        # choice card when labels wrap at laptop widths.
+        self.setup_estimate_row = QWidget()
+        self.setup_estimate_row.setObjectName("setupEstimateRow")
+        estimate_layout = QVBoxLayout(self.setup_estimate_row)
+        estimate_layout.setContentsMargins(0, 6, 0, 4)
+        estimate_layout.setSpacing(0)
+        self.setup_estimate = QLabel()
+        self.setup_estimate.setObjectName("muted")
+        make_label_shrinkable(self.setup_estimate)
+        estimate_layout.addWidget(self.setup_estimate)
+        setup_layout.addWidget(self.setup_estimate_row)
+        self.setup_estimate_row.hide()
 
         # These compatibility controls retain their public attributes for
         # persisted tests.  Their visible owners live in the collapsed
@@ -549,11 +566,6 @@ class ProjectScreen(QWidget):
         make_label_shrinkable(self.setup_count_help)
         setup_layout.addWidget(self.setup_count_help)
         self.setup_count_help.hide()
-        self.setup_estimate = QLabel()
-        self.setup_estimate.setObjectName("muted")
-        make_label_shrinkable(self.setup_estimate)
-        setup_layout.addWidget(self.setup_estimate)
-        self.setup_estimate.hide()
         self.setup_change = QLabel()
         self.setup_change.setObjectName("muted")
         make_label_shrinkable(self.setup_change)
@@ -799,6 +811,8 @@ class ProjectScreen(QWidget):
             for divider in self._global_step_dividers:
                 divider.setVisible(not compact_actions or show_complete_stepper)
             self._apply_compact_chrome()
+            self._reflow_review_panel_order()
+            self._apply_review_preview_frame_bounds()
             self._reflow_setup_choice_grids()
             self._reflow_candidate_boundary_controls()
             self._refresh_stage_action_geometry()
@@ -868,20 +882,9 @@ class ProjectScreen(QWidget):
             self.setup_summary.setMinimumWidth(250)
             self.setup_summary.setMaximumWidth(330)
         self.processing_summary.setMaximumWidth(16_777_215)
-        # Give Creative Preview visual priority at ordinary desktop widths,
-        # while keeping the complete player and its controls above the sticky
-        # CTA on short Windows viewports.  Tall desktop windows retain the
-        # larger approved-reference stage.
-        if short_stage:
-            self.preview.set_source_frame_height_bounds(200, 310)
-            self.preview.set_vertical_frame_size(188, 334)
-        else:
-            self.preview.set_source_frame_height_bounds(260, 420)
-            self.preview.set_vertical_frame_size(
-                252 if compact else 304,
-                448 if compact else 540,
-            )
+        self._apply_review_preview_frame_bounds()
         self._apply_compact_chrome()
+        self._reflow_review_panel_order()
         self._reflow_setup_choice_grids()
         self._reflow_candidate_boundary_controls()
         self._review_body_layout.invalidate()
@@ -897,6 +900,75 @@ class ProjectScreen(QWidget):
             self._update_candidate_review(self.project)
             self._apply_compact_chrome()
             self._refresh_stage_action_geometry()
+
+    def _reflow_review_panel_order(self) -> None:
+        """Put the active Moments player before a long compact catalogue.
+
+        At 1180×800 the one-column fallback intentionally has one outer
+        scrollbar.  Keeping the candidate list first put the real player and
+        its transport thousands of pixels below the first viewport.  Drafts
+        retain their review-first order; only Moments promotes its primary
+        source preview and boundary controls.
+        """
+
+        preview_first = bool(
+            self._compact_stage_layout and self._flow_step == "candidates"
+        )
+        desired = (
+            (self.review_preview_panel, 5),
+            (self.review_inspector_panel, 3),
+            (self.review_list_panel, 3),
+        ) if preview_first else (
+            (self.review_list_panel, 3),
+            (self.review_preview_panel, 5),
+            (self.review_inspector_panel, 3),
+        )
+        current = tuple(
+            self._review_body_layout.itemAt(index).widget()
+            for index in range(self._review_body_layout.count())
+        )
+        if current == tuple(panel for panel, _stretch in desired):
+            return
+        for panel, _stretch in desired:
+            self._review_body_layout.removeWidget(panel)
+        for panel, stretch in desired:
+            self._review_body_layout.addWidget(panel, stretch)
+        self._review_body_layout.invalidate()
+        self._review_body_layout.activate()
+
+    def _uses_compact_moments_control_grid(self) -> bool:
+        """Whether a compact Moments shell can use its full direct control rail."""
+
+        return bool(
+            self._compact_stage_layout
+            and self._flow_step == "candidates"
+            and self.width() >= 860
+        )
+
+    def _apply_review_preview_frame_bounds(self) -> None:
+        """Apply review-player geometry after both resize and flow changes."""
+
+        if self._short_stage_layout:
+            # At a real 1366×850 Windows shell the stage must leave the whole
+            # source transport in the first viewport.  310 px made its last
+            # row fall behind the sticky action bar; this remains a readable
+            # landscape frame while restoring that primary interaction.
+            if self._uses_compact_moments_control_grid():
+                # A compact desktop shell still has enough width for the
+                # complete boundary rail, but not enough height for a tall
+                # source frame above it.  Preserve the full player and every
+                # direct adjustment in the first viewport.
+                self.preview.set_source_frame_height_bounds(110, 140)
+            else:
+                self.preview.set_source_frame_height_bounds(180, 280)
+            self.preview.set_vertical_frame_size(188, 334)
+            return
+        self.preview.set_source_frame_height_bounds(260, 420)
+        compact = self._compact_stage_layout
+        self.preview.set_vertical_frame_size(
+            252 if compact else 304,
+            448 if compact else 540,
+        )
 
     def _apply_compact_chrome(self, global_step: str | None = None) -> None:
         """Keep the current route and actions readable without tall chrome."""
@@ -1310,6 +1382,11 @@ class ProjectScreen(QWidget):
         self.setup_demo_preview.setObjectName("settingsProductionPreview")
         self.setup_demo_preview.set_vertical_frame_size(270, 480)
         self.setup_demo_preview.set_frame_sink_output(True)
+        # Hover changes the sample identity, never the right-rail geometry.
+        # Fix the title row and detail row to two readable lines so a longer
+        # style/preset label cannot make Settings jump while the next MP4 is
+        # warming up behind the visible frame.
+        self.setup_demo_preview.active_candidate.setFixedHeight(40)
         self.setup_demo_preview.controls_host.hide()
         self.setup_demo_preview.player.setLoops(QMediaPlayer.Loops.Infinite)
         self.setup_demo_preview.player.mediaStatusChanged.connect(
@@ -1322,6 +1399,7 @@ class ProjectScreen(QWidget):
         self.setup_demo_detail.setObjectName("setupDemoDetail")
         self.setup_demo_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setup_demo_detail.setWordWrap(True)
+        self.setup_demo_detail.setFixedHeight(40)
         self.setup_summary.layout().addWidget(self.setup_demo_detail)
         example_note = QLabel("Канонический production sample · без обработки вашего видео")
         example_note.setObjectName("muted")
@@ -2291,6 +2369,9 @@ class ProjectScreen(QWidget):
         if step != "settings" or active:
             self._set_advanced_visible(False)
         self._apply_compact_chrome(global_step)
+        self._reflow_review_panel_order()
+        self._apply_review_preview_frame_bounds()
+        self._reflow_candidate_boundary_controls()
         self._refresh_stage_action_geometry()
         QTimer.singleShot(0, self._refresh_stage_action_geometry)
         self._queue_drafts_workspace_geometry()
@@ -2309,6 +2390,7 @@ class ProjectScreen(QWidget):
         # Cost is a launch decision, so keep this concise row visible in the
         # primary setup flow rather than hiding it in advanced details.
         self.setup_estimate.setVisible(True)
+        self.setup_estimate_row.setVisible(True)
         source = project.source_metadata
         duration = format_seconds(source.get("duration")) if source.get("duration") is not None else "пока неизвестна"
         size = self._format_file_size(source.get("size_bytes") or source.get("estimated_size_bytes"))
@@ -4076,7 +4158,8 @@ class ProjectScreen(QWidget):
             "AVAILABLE": "Доступен: можно выбрать и сделать черновик.",
             "BLOCKED": "Только просмотр: черновик недоступен.",
         }.get(editorial_state, "Можно просмотреть исходный фрагмент.")
-        lines = [
+        compact_moments = self._uses_compact_moments_control_grid()
+        lines = [] if compact_moments else [
             str(candidate.get("title") or "Момент"),
             f"{format_seconds(start)}–{format_seconds(end)} · {format_seconds(end - start)}",
             state_copy,
@@ -4120,23 +4203,28 @@ class ProjectScreen(QWidget):
             return
         heading = self.candidate_detail.layout().itemAt(0).widget()
         if isinstance(heading, QLabel):
-            heading.setText("Оформление черновика" if workflow_step == "drafts" else "О моменте")
+            heading.setText(
+                "Оформление черновика" if workflow_step == "drafts"
+                else ("Границы фрагмента" if compact_moments else "О моменте")
+            )
         if workflow_step == "drafts" and candidate_id:
             self._append_draft_inspector(candidate_id, start, end)
-        boundary_heading = QLabel("Границы фрагмента")
-        boundary_heading.setObjectName("inspectorSectionTitle")
-        self.candidate_detail.layout().addWidget(boundary_heading)
-        boundary_copy = QLabel("Подвиньте начало или конец. Повторный анализ не запускается.")
-        boundary_copy.setObjectName("muted")
-        boundary_copy.setWordWrap(True)
-        self.candidate_detail.layout().addWidget(boundary_copy)
+        if not compact_moments:
+            boundary_heading = QLabel("Границы фрагмента")
+            boundary_heading.setObjectName("inspectorSectionTitle")
+            self.candidate_detail.layout().addWidget(boundary_heading)
+            boundary_copy = QLabel("Подвиньте начало или конец. Повторный анализ не запускается.")
+            boundary_copy.setObjectName("muted")
+            boundary_copy.setProperty("candidateBoundaryCopy", True)
+            boundary_copy.setWordWrap(True)
+            self.candidate_detail.layout().addWidget(boundary_copy)
         controls = QWidget()
         controls.setObjectName("candidateBoundaryControls")
         grid = QGridLayout(controls)
         grid.setContentsMargins(0, 4, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(6)
-        columns = 2 if self._compact_stage_layout else 4
+        columns = 8 if compact_moments else (2 if self._compact_stage_layout else 4)
         for index, (full_text, compact_text, boundary, delta) in enumerate((
             ("Начало −1 с", "Н −1", "start", -1.0),
             ("Начало −0.5 с", "Н −½", "start", -0.5),
@@ -4205,7 +4293,7 @@ class ProjectScreen(QWidget):
         )
         if not buttons:
             return
-        columns = 2 if self._compact_stage_layout else 4
+        columns = 8 if self._uses_compact_moments_control_grid() else (2 if self._compact_stage_layout else 4)
         for button in buttons:
             grid.removeWidget(button)
         for index, button in enumerate(buttons):
@@ -4215,8 +4303,18 @@ class ProjectScreen(QWidget):
                 else button.property("boundaryCompactText")
             ))
             grid.addWidget(button, index // columns, index % columns)
-        for column in range(4):
+        for column in range(8):
             grid.setColumnStretch(column, 1 if column < columns else 0)
+        boundary_copy = next(
+            (
+                label
+                for label in self.candidate_detail.findChildren(QLabel)
+                if label.property("candidateBoundaryCopy")
+            ),
+            None,
+        )
+        if isinstance(boundary_copy, QLabel):
+            boundary_copy.setVisible(columns != 8)
         controls.updateGeometry()
         self._refresh_candidate_detail_geometry()
 
