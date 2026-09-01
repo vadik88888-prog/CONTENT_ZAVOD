@@ -49,7 +49,7 @@ from app.gui.services.settings_store import SettingsStore
 from app.gui.services.system_service import SystemService
 from app.product_flow import calibrate_processing_estimate
 from app.runtime import RuntimeLayout
-from app.licensing import ActivationService
+from app.licensing import ActivationService, LicenseStatus, require_processing_license
 from app.secure_secrets import load_runtime_secrets
 from app.source_download import (
     cleanup_partial_downloads,
@@ -698,11 +698,29 @@ class DesktopServices:
     def _require_active_license(self) -> None:
         """Block only new work; existing projects and artifacts remain readable."""
 
+        self.require_processing_access()
+
+    def require_processing_access(self) -> None:
+        """Apply the canonical licence gate before any desktop-side launch."""
+
         # Hand-built service bundles are used by focused unit tests and do not
         # represent a launched desktop application.  ``create`` always wires
         # the real activation boundary before any UI can launch work.
         if self.activation is not None:
-            self.activation.require_processing()
+            require_processing_license(
+                self.activation.data_directory, public_key_b64=self.activation.public_key_b64,
+            )
+
+    def license_status(self) -> LicenseStatus:
+        """Return access state for presentation only; execution uses the gate above."""
+
+        if self.activation is None:
+            return LicenseStatus(True, "test", "Лицензия активна.")
+        return self.activation.status()
+
+    @property
+    def processing_available(self) -> bool:
+        return self.license_status().active
 
     def presentation(
         self,

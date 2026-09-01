@@ -8,6 +8,7 @@ from pathlib import Path
 from app.config import load_config
 from app.doctor import collect_checks, format_report, has_blocking_checks
 from app.errors import ClipEngineError
+from app.licensing import LicensingError, require_processing_license
 from app.pipeline import Pipeline
 from app.utils import read_json
 
@@ -204,6 +205,13 @@ def main(argv: list[str] | None = None, *, runtime_root: Path | None = None) -> 
         checks = collect_checks(root, config)
         print(format_report(checks))
         return 2 if has_blocking_checks(checks) else 0
+    try:
+        # This is also reached by the frozen internal CLI worker.  It must
+        # remain before every Pipeline construction, including isolated modes.
+        require_processing_license(root)
+    except LicensingError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 3
     if arguments.command == "analyze":
         try:
             config = load_config(arguments.config)

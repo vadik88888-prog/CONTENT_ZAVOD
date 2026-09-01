@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.doctor import DoctorReadiness, summarize_checks
-from app.gui.screens import OnboardingDialog, ProjectScreen, ProjectsScreen, SettingsScreen
+from app.gui.screens import ActivationDialog, OnboardingDialog, ProjectScreen, ProjectsScreen, SettingsScreen
 from app.gui.services.desktop_services import DesktopServices
 from app.gui.viewmodels import ProjectViewModel, ProjectsViewModel, SettingsViewModel
 
@@ -89,6 +89,24 @@ class MainWindow(QMainWindow):
         nav.addSpacing(7)
         nav.addWidget(self.projects_button)
         nav.addWidget(self.settings_button)
+        self.activation_status = QFrame()
+        self.activation_status.setObjectName("activationStatus")
+        activation_layout = QVBoxLayout(self.activation_status)
+        activation_layout.setContentsMargins(12, 11, 12, 11)
+        activation_layout.setSpacing(5)
+        self.activation_title = QLabel()
+        self.activation_title.setObjectName("activationStatusTitle")
+        self.activation_title.setWordWrap(True)
+        self.activation_detail = QLabel()
+        self.activation_detail.setObjectName("muted")
+        self.activation_detail.setWordWrap(True)
+        self.activation_button = QPushButton("Активировать")
+        self.activation_button.setObjectName("primary")
+        self.activation_button.clicked.connect(self._activate_license)
+        activation_layout.addWidget(self.activation_title)
+        activation_layout.addWidget(self.activation_detail)
+        activation_layout.addWidget(self.activation_button)
+        nav.addWidget(self.activation_status)
         nav.addStretch()
 
         self.system_status = QFrame()
@@ -147,6 +165,7 @@ class MainWindow(QMainWindow):
         self.settings_viewmodel.diagnostics_started.connect(self._diagnostics_started)
         self.settings_viewmodel.diagnostics_ready.connect(self._diagnostics_ready)
         layout.addWidget(self.stack, 1)
+        self._refresh_activation_state()
         self._restore_last_screen()
         self._apply_sidebar_layout()
         QTimer.singleShot(0, self._fit_to_available_screen)
@@ -181,6 +200,32 @@ class MainWindow(QMainWindow):
         self.show_projects()
         self._set_selected(self.new_button)
         self.projects_screen.focus_source()
+
+    def _activate_license(self) -> None:
+        if self.services.activation is None:
+            return
+        if ActivationDialog(self.services.activation, self).exec() == QDialog.DialogCode.Accepted:
+            self._refresh_activation_state()
+
+    def _refresh_activation_state(self) -> None:
+        status = self.services.license_status()
+        if status.active:
+            title = "●  Лицензия активна"
+            detail = "Обработка доступна на этом устройстве"
+        elif status.code == "expired":
+            title = "▲  Срок доступа закончился"
+            detail = "Проекты и готовые ролики доступны только для просмотра"
+        else:
+            title = "▲  Требуется активация"
+            detail = "Проекты доступны для просмотра; новая обработка заблокирована"
+        self.activation_title.setText(title)
+        self.activation_detail.setText(detail)
+        self.activation_title.setToolTip(status.message)
+        self.activation_detail.setToolTip(status.message)
+        self.activation_button.setVisible(not status.active)
+        self.new_button.setDisabled(not status.active)
+        if hasattr(self, "project_screen"):
+            self.project_screen.refresh_license_state()
 
     def _restore_last_screen(self) -> None:
         if self.services.settings.last_screen == "project" and self.services.settings.last_open_project_id:

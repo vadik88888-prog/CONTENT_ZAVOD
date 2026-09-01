@@ -4914,6 +4914,7 @@ class ProjectScreen(QWidget):
     def _processing_changed(self, snapshot: ProcessingSnapshot) -> None:
         active = snapshot.phase in {"preparing", "running", "cancelling"}
         blocked = self.viewmodel.blocked_by_other_project
+        license_active = self.viewmodel.services.processing_available
         if active and self.project:
             latest = self._latest_run(self.project)
             run_kind = self.viewmodel.run.run_kind if self.viewmodel.run else (latest.run_kind if latest else RunKind.FULL)
@@ -4946,6 +4947,7 @@ class ProjectScreen(QWidget):
             snapshot.phase,
             snapshot.stage,
             blocked,
+            license_active,
             self.project.project_id if self.project else None,
         )
         # Telemetry can reveal a wrapped long-stage warning without changing
@@ -4958,8 +4960,8 @@ class ProjectScreen(QWidget):
         self._processing_structure_key = structure_key
         self._update_processing_stages(snapshot)
         self._refresh_processing_geometry()
-        self.run_button.setDisabled(active or blocked)
-        self.setup_start_button.setDisabled(active or blocked)
+        self.run_button.setDisabled(active or blocked or not license_active)
+        self.setup_start_button.setDisabled(active or blocked or not license_active)
         has_draft_choice = bool(
             self.project
             and (
@@ -4970,13 +4972,13 @@ class ProjectScreen(QWidget):
                 or self._recommended_candidate_ids()
             )
         )
-        self.draft_button.setDisabled(active or blocked or not has_draft_choice)
+        self.draft_button.setDisabled(active or blocked or not license_active or not has_draft_choice)
         self.view_all_button.setDisabled(active)
         selected_drafts_exist = bool(self.project and self.project.selected_candidate_ids) and all(
             Path(self.project.candidate_draft_artifacts.get(candidate_id, "")).is_file()
             for candidate_id in self.project.selected_candidate_ids
         ) if self.project else False
-        self.production_button.setDisabled(active or blocked or not selected_drafts_exist)
+        self.production_button.setDisabled(active or blocked or not license_active or not selected_drafts_exist)
         for widget in (
             self.processing_mode, self.deep_analysis, self.platform, self.clip_count,
             self.audio_mode, self.same_source_broll,
@@ -4985,11 +4987,13 @@ class ProjectScreen(QWidget):
             self.setup_processing_mode, self.setup_deep_analysis, self.setup_platform, self.setup_clip_count,
             self.setup_style_picker, self.setup_caption_picker,
         ):
-            widget.setDisabled(active)
+            widget.setDisabled(active or not license_active)
         for buttons in self._setup_choice_buttons.values():
             for button in buttons.values():
-                button.setDisabled(active)
-        heavy_hint = self._other_project_job_hint() if blocked else ""
+                button.setDisabled(active or not license_active)
+        heavy_hint = self._other_project_job_hint() if blocked else (
+            "Требуется активная лицензия Friend Beta." if not license_active else ""
+        )
         for button in (self.run_button, self.setup_start_button):
             button.setToolTip(heavy_hint)
         for button in (self.draft_button, self.production_button):
@@ -5024,6 +5028,12 @@ class ProjectScreen(QWidget):
             self._update_download_card(self.project)
             self._update_stage_context(self.project)
             self._apply_flow_visibility(self.project, presentation=presentation)
+
+    def refresh_license_state(self) -> None:
+        """Reconcile visible processing controls after local activation changes."""
+
+        self._processing_structure_key = None
+        self._processing_changed(self.viewmodel.snapshot)
 
     def _other_project_job_hint(self) -> str:
         owner = self.viewmodel.active_project_name or "другом проекте"

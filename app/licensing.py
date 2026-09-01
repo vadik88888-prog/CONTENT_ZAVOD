@@ -272,6 +272,18 @@ def default_admin_key_path() -> Path:
     return admin_key_directory() / "friend_beta_signing.seed"
 
 
+def require_processing_license(
+    data_directory: Path, *, public_key_b64: str = PUBLIC_VERIFICATION_KEY_B64,
+) -> LicenseStatus:
+    """The one executable permission boundary for every local processing path."""
+
+    activation = ActivationService(data_directory, public_key_b64=public_key_b64)
+    status = activation.status()
+    if not status.active:
+        raise LicensingError(status.message + " Установите лицензию, чтобы запустить новую обработку.")
+    return status
+
+
 class ActivationService:
     """Owns only activation state; it never touches project data or engine state."""
 
@@ -357,9 +369,7 @@ class ActivationService:
             return LicenseStatus(False, "invalid", "Не удалось установить файл лицензии.")
 
     def require_processing(self) -> None:
-        status = self.status()
-        if not status.active:
-            raise LicensingError(status.message + " Установите лицензию, чтобы запустить новую обработку.")
+        require_processing_license(self.data_directory, public_key_b64=self.public_key_b64)
 
 
 def create_signed_license(seed: bytes, device_code: str, expires_at: datetime, *, issued_at: datetime | None = None) -> dict[str, Any]:
@@ -381,5 +391,5 @@ __all__ = [
     "ActivationService", "DEVICE_CODE_PREFIX", "LICENSE_FILE", "LicenseStatus", "LicensingError",
     "PUBLIC_VERIFICATION_KEY_B64", "admin_key_directory", "create_signed_license",
     "default_admin_key_path", "device_code_from_secret", "generate_signing_seed", "normalize_device_code",
-    "public_key_from_seed", "sign_message", "verify_message",
+    "public_key_from_seed", "require_processing_license", "sign_message", "verify_message",
 ]

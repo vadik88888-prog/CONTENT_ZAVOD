@@ -357,6 +357,11 @@ class ProjectViewModel(QObject):
             self.project_changed.emit(self.project)
 
     def _can_start_heavy_job(self, *, error_code: str = "heavy_job_already_active") -> bool:
+        try:
+            self.services.require_processing_access()
+        except Exception as error:
+            self.error_occurred.emit(map_error(error))
+            return False
         if not self.active:
             return True
         owner = self.active_project_name or "другом проекте"

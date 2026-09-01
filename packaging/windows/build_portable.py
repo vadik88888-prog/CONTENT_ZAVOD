@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version as distribution_version
@@ -155,10 +156,36 @@ def _zip_directory(source: Path, destination: Path) -> int:
     return file_count
 
 
-def _assert_no_private_signing_material(package_root: Path) -> None:
-    """Fail closed if a local Friend Beta signing tool/key reaches the ZIP."""
+def _private_signing_material() -> tuple[bytes, ...]:
+    """Return local signing bytes only for a non-reporting package leak check."""
+
+    from app.licensing import default_admin_key_path
+
+    key_path = default_admin_key_path()
+    if not key_path.is_file():
+        return ()
+    try:
+        raw = key_path.read_bytes().strip()
+        decoded = base64.b64decode(raw, validate=True)
+    except (OSError, ValueError):
+        # A malformed local key must never be treated as safe package input.
+        return (raw,) if "raw" in locals() and raw else (b"__invalid_friend_beta_signing_key__",)
+    return tuple(item for item in (raw, decoded) if item)
+
+
+def _assert_no_private_signing_material(
+    package_root: Path, *, package_inputs: tuple[Path, ...] = (),
+) -> None:
+    """Fail closed if private Friend Beta signing material reaches inputs/output."""
 
     forbidden = ("sign_friend_beta_license", "friend_beta_signing.seed", "friend_beta_private")
+    from app.licensing import default_admin_key_path
+
+    private_root = default_admin_key_path().parent.resolve(strict=False)
+    for path in package_inputs:
+        resolved = path.expanduser().resolve(strict=False)
+        if any(token in resolved.name.casefold() for token in forbidden) or resolved.is_relative_to(private_root):
+            raise RuntimeError("Portable package input contains forbidden Friend Beta signing material.")
     leaked = [
         str(path.relative_to(package_root))
         for path in package_root.rglob("*")
@@ -166,6 +193,23 @@ def _assert_no_private_signing_material(package_root: Path) -> None:
     ]
     if leaked:
         raise RuntimeError("Portable package contains forbidden Friend Beta signing material: " + ", ".join(leaked))
+    markers = (b"-----BEGIN PRIVATE KEY-----", b"-----BEGIN ED25519 PRIVATE KEY-----", *_private_signing_material())
+    if not markers:
+        return
+    maximum_marker = max(len(marker) for marker in markers)
+    for path in package_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            tail = b""
+            with path.open("rb") as package_file:
+                while chunk := package_file.read(1024 * 1024):
+                    data = tail + chunk
+                    if any(marker and marker in data for marker in markers):
+                        raise RuntimeError("Portable package contains private Friend Beta signing material.")
+                    tail = data[-(maximum_marker - 1):]
+        except OSError as error:
+            raise RuntimeError(f"Could not inspect portable package file: {path}") from error
 
 
 def _git_value(root: Path, *arguments: str) -> str:
@@ -284,6 +328,7 @@ def main() -> int:
         windows / "THIRD_PARTY_NOTICES.md",
         windows / "licenses" / "LICENSE-deno-MIT.txt",
     ]
+    _assert_no_private_signing_material(unpacked, package_inputs=tuple(source_inputs))
     build_info = {
         "schema_version": 1,
         "artifact": ARTIFACT_NAME,
