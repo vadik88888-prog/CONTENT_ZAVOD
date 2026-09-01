@@ -2,27 +2,43 @@ from __future__ import annotations
 
 import platform
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.config import AppConfig
+from app.cuda_runtime import probe_cuda_runtime
 from app.errors import DependencyError, StageError
 from app.models import Segment, Word
 from app.utils import write_json
 
 
-def transcription_settings(config: AppConfig) -> tuple[str, str]:
+@dataclass(frozen=True, slots=True)
+class TranscriptionRuntimeSettings:
+    device: str
+    compute_type: str
+    fallback_reason: str | None = None
+
+
+def resolve_transcription_runtime(config: AppConfig) -> TranscriptionRuntimeSettings:
+    """Choose an ASR device only after checking the usable CUDA runtime."""
+
     if config.device == "cpu":
-        return "cpu", "int8"
-    if config.device == "cuda":
-        return "cuda", config.compute_type if config.compute_type != "auto" else "float16"
-    try:
-        import ctranslate2
-        if ctranslate2.get_cuda_device_count() > 0:
-            return "cuda", config.compute_type if config.compute_type != "auto" else "float16"
-    except (ImportError, RuntimeError):
-        pass
-    return "cpu", "int8"
+        return TranscriptionRuntimeSettings("cpu", "int8")
+
+    cuda = probe_cuda_runtime()
+    if cuda.usable:
+        compute_type = config.compute_type if config.compute_type != "auto" else "float16"
+        return TranscriptionRuntimeSettings("cuda", compute_type)
+
+    # This also applies to an explicit CUDA preference: a partial runtime is
+    # not an executable CUDA path, and CPU int8 is the defined safe fallback.
+    return TranscriptionRuntimeSettings("cpu", "int8", cuda.fallback_reason)
+
+
+def transcription_settings(config: AppConfig) -> tuple[str, str]:
+    runtime = resolve_transcription_runtime(config)
+    return runtime.device, runtime.compute_type
 
 
 def transcribe(
@@ -39,12 +55,13 @@ def transcribe(
             "faster-whisper не установлен. Выполните: pip install -r requirements.txt"
         ) from error
     started = time.perf_counter()
-    device, compute_type = transcription_settings(config)
+    selected_runtime = resolve_transcription_runtime(config)
+    device, compute_type = selected_runtime.device, selected_runtime.compute_type
     attempts = [(device, compute_type)]
     if config.device == "auto" and device == "cuda":
         attempts.append(("cpu", "int8"))
     errors: list[str] = []
-    fallback_reason: str | None = None
+    fallback_reason = selected_runtime.fallback_reason
     segments: list[Segment] = []
     words: list[Word] = []
     info: Any = None
@@ -90,6 +107,7 @@ def transcribe(
             )
             raise StageError(f"Не удалось распознать речь: {error}. {advice}") from error
     runtime = time.perf_counter() - started
+    transcription_duration_seconds = round(runtime, 3)
     data = {
         "source_id": source_id,
         "language": getattr(info, "language", config.language),
@@ -100,11 +118,13 @@ def transcribe(
         "model": config.whisper_model,
         "runtime": {
             "device": device,
+            "selected_device": device,
             "compute_type": compute_type,
             "platform": platform.platform(),
             "fallback_reason": fallback_reason,
+            "transcription_duration_seconds": transcription_duration_seconds,
         },
-        "processing_duration_seconds": round(runtime, 3),
+        "processing_duration_seconds": transcription_duration_seconds,
         "empty_transcript": not bool(segments),
     }
     write_json(destination, data)

@@ -2,6 +2,20 @@ from app.config import AppConfig
 from app.doctor import Check, _cuda_check, collect_checks, format_report
 
 
+def test_cuda_check_warns_when_cuda_device_has_an_incomplete_runtime(monkeypatch) -> None:
+    from app.cuda_runtime import CudaRuntimeProbe
+
+    monkeypatch.setattr(
+        "app.doctor.probe_cuda_runtime",
+        lambda: CudaRuntimeProbe(1, False, "CUDA runtime incomplete: required cublas64_12.dll is unavailable"),
+    )
+
+    check = _cuda_check()
+
+    assert check.status == "warn"
+    assert "cublas64_12.dll" in check.detail
+
+
 def test_doctor_report_is_encodable_in_cp1251() -> None:
     report = format_report([Check("Python", "ok", "3.11")])
 

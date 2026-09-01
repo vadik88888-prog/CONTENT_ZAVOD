@@ -13,6 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from app.config import AppConfig
+from app.cuda_runtime import probe_cuda_runtime
 from app.runtime import RuntimeLayout
 from app.source_download import find_deno_executable, find_ytdlp_executable
 from app.subprocess_utils import UTF8_REPLACE_TEXT
@@ -94,25 +95,13 @@ def _nvidia_checks() -> list[Check]:
 
 def _cuda_check() -> Check:
     action = "Оставьте устройство в режиме «Автоматически»/CPU или установите совместимые CUDA-компоненты."
-    try:
-        import ctranslate2
-    except ImportError:
-        return Check(
-            "CUDA",
-            "warn",
-            "Проверка CUDA недоступна без CTranslate2; обработка сможет использовать CPU.",
-            action,
-        )
-    try:
-        count = ctranslate2.get_cuda_device_count()
-    except Exception:
-        return Check("CUDA", "warn", "CTranslate2 не смог подтвердить доступность CUDA.", action)
-    if count:
-        return Check("CUDA", "ok", f"CTranslate2 видит CUDA-устройств: {count}.")
+    probe = probe_cuda_runtime()
+    if probe.usable:
+        return Check("CUDA", "ok", f"CTranslate2 и CUDA runtime готовы; устройств: {probe.device_count}.")
     return Check(
         "CUDA",
         "warn",
-        "CTranslate2 не видит доступную CUDA; faster-whisper будет использовать CPU.",
+        f"{probe.fallback_reason}; faster-whisper сразу будет использовать CPU int8.",
         action,
     )
 
