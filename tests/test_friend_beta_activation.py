@@ -9,6 +9,7 @@ import pytest
 from app.licensing import (
     ActivationService,
     LicensingError,
+    PUBLIC_VERIFICATION_KEY_B64,
     create_signed_license,
     device_code_from_secret,
     generate_signing_seed,
@@ -30,6 +31,13 @@ def _activation(tmp_path, name: str, public_key: bytes) -> ActivationService:
         tmp_path / name,
         public_key_b64=base64.b64encode(public_key).decode("ascii"),
     )
+
+
+def test_embedded_friend_beta_public_verification_key_is_owner_key() -> None:
+    """Guard the shipped verifier without ever introducing a signing secret."""
+
+    assert PUBLIC_VERIFICATION_KEY_B64 == "B79Yrkl16ObLNHikXMN3NyRV89t801gBEZ5kNmO0m2g="
+    assert len(base64.b64decode(PUBLIC_VERIFICATION_KEY_B64, validate=True)) == 32
 
 
 def test_ed25519_matches_rfc8032_test_vector() -> None:

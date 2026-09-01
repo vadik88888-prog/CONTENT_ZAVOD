@@ -29,7 +29,7 @@ DEVICE_IDENTITY_FILE = "device.identity"
 LICENSE_FILE = "friend-beta-license.json"
 
 # This is intentionally a verification key, not a signing key.
-PUBLIC_VERIFICATION_KEY_B64 = "5B/57yqSumkvzWeMp2NcbUfkhddsdsBQOPu2jrl64Ks="
+PUBLIC_VERIFICATION_KEY_B64 = "B79Yrkl16ObLNHikXMN3NyRV89t801gBEZ5kNmO0m2g="
 
 
 class LicensingError(ValueError):

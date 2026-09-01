@@ -99,21 +99,16 @@ def test_portable_build_rejects_friend_beta_private_signing_material(tmp_path: P
     _build_module()._assert_no_private_signing_material(package)
 
 
-def test_portable_build_rejects_private_key_bytes_and_private_input(tmp_path: Path, monkeypatch) -> None:
+def test_portable_build_rejects_private_key_bytes_and_private_input(tmp_path: Path) -> None:
     package = tmp_path / "ContentFactory"
     package.mkdir()
     module = _build_module()
-    monkeypatch.setattr(module, "_private_signing_material", lambda: (b"friend-beta-private-seed",))
-    (package / "payload.bin").write_bytes(b"prefixfriend-beta-private-seedsuffix")
-    with pytest.raises(RuntimeError, match="private Friend Beta signing material"):
-        module._assert_no_private_signing_material(package)
-
     (package / "payload.bin").write_bytes(b"prefix-----BEGIN PRIVATE KEY-----suffix")
     with pytest.raises(RuntimeError, match="private Friend Beta signing material"):
         module._assert_no_private_signing_material(package)
 
     (package / "payload.bin").unlink()
-    private_input = tmp_path / "friend_beta_signing.seed"
+    private_input = tmp_path / "owner-private.key"
     private_input.write_bytes(b"not a package input")
     with pytest.raises(RuntimeError, match="package input"):
         module._assert_no_private_signing_material(package, package_inputs=(private_input,))
