@@ -131,6 +131,72 @@ def test_settings_keeps_gameplay_above_fold_and_discloses_long_tail_profiles(
         screen.close()
 
 
+def test_profile_expand_reflows_all_lower_setup_sections_after_resize(tmp_path: Path) -> None:
+    existing = QCoreApplication.instance()
+    if existing is not None and not isinstance(existing, QApplication):
+        pytest.skip("requires a QApplication process, not an existing QCoreApplication")
+    app = QApplication.instance() or QApplication([])
+    services, project = _workspace(tmp_path)
+    project.status = ProjectStatus.SOURCE_READY
+    project.analysis_artifact_path = None
+    project.analysis_id = None
+    project.analysis_fingerprint = None
+    services.projects.save(project)
+    screen = ProjectScreen(ProjectViewModel(services))
+
+    def assert_lower_sections_do_not_overlap() -> None:
+        widgets = (
+            screen.setup_profile_more_toggle,
+            screen.setup_automatic_composition,
+            screen.setup_automatic_composition_hint,
+            screen.setup_count_section,
+        )
+        positions = [widget.mapTo(screen, QPoint(0, 0)).y() for widget in widgets]
+        assert all(
+            positions[index] + widgets[index].height() <= positions[index + 1]
+            for index in range(len(widgets) - 1)
+        )
+        assert positions[-1] + widgets[-1].height() <= (
+            screen._setup_choices_host.mapTo(screen, QPoint(0, 0)).y()
+            + screen._setup_choices_host.height()
+        )
+        choices_bottom = (
+            screen._setup_choices_host.mapTo(screen, QPoint(0, 0)).y()
+            + screen._setup_choices_host.height()
+        )
+        for trailing_widget in (screen.setup_estimate_row, screen.setup_advanced_toggle):
+            if trailing_widget.isVisible():
+                assert trailing_widget.mapTo(screen, QPoint(0, 0)).y() >= choices_bottom
+
+    try:
+        screen.resize(760, 720)
+        screen.open(project)
+        screen.show()
+        app.processEvents()
+        QTest.qWait(80)
+        assert_lower_sections_do_not_overlap()
+
+        screen.setup_profile_more_toggle.click()
+        QTest.qWait(80)
+        assert screen.setup_profile_more.isVisible()
+        assert_lower_sections_do_not_overlap()
+
+        screen.resize(560, 720)
+        QTest.qWait(80)
+        assert_lower_sections_do_not_overlap()
+
+        screen.setup_profile_more_toggle.click()
+        QTest.qWait(80)
+        assert screen.setup_profile_more.isHidden()
+        assert_lower_sections_do_not_overlap()
+
+        screen.resize(760, 720)
+        QTest.qWait(80)
+        assert_lower_sections_do_not_overlap()
+    finally:
+        screen.close()
+
+
 def test_candidate_workspace_has_persistent_selection_and_disabled_delivery_cta(tmp_path: Path, monkeypatch) -> None:
     # A few non-UI tests intentionally initialise QCoreApplication first. Qt
     # cannot upgrade that singleton to QApplication in the same process; doing

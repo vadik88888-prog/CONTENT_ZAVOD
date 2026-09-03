@@ -1944,8 +1944,6 @@ class ProjectScreen(QWidget):
                 if owner_layout is not None:
                     owner_layout.invalidate()
                     owner_layout.activate()
-                    if owner is self.setup_profile_more:
-                        owner.setMinimumHeight(owner_layout.sizeHint().height())
                 owner.updateGeometry()
                 if owner is self.content_host:
                     break
@@ -1955,17 +1953,40 @@ class ProjectScreen(QWidget):
     def _refresh_setup_choice_container_geometry(self) -> None:
         """Propagate a reflowed profile section to the scrollable workspace."""
 
+        more_layout = self.setup_profile_more.layout()
+        if more_layout is not None:
+            # ``setFixedHeight`` on expansion otherwise survives as an old
+            # minimum in the parent grid.  Resolve the optional profile rows
+            # first, including an explicit zero-height collapsed state, then
+            # calculate every following Setup section from that same pass.
+            self.setup_profile_more.setFixedHeight(
+                more_layout.sizeHint().height() if self.setup_profile_more.isVisible() else 0
+            )
         self._setup_choices_layout.invalidate()
         self._setup_choices_layout.activate()
-        self._setup_choices_host.setMinimumHeight(
-            self._setup_choices_layout.minimumSize().height()
-        )
-        self._setup_choices_host.updateGeometry()
-        content_layout = self.content_host.layout()
-        if content_layout is not None:
-            content_layout.invalidate()
-            content_layout.activate()
-        self.content_host.updateGeometry()
+        self._setup_choices_host.setFixedHeight(self._setup_choices_layout.sizeHint().height())
+        setup_layout = self.setup_card.layout()
+        if setup_layout is not None:
+            setup_layout.invalidate()
+            setup_layout.activate()
+            # ``setup_card`` is the immediate owner of the profile grid and
+            # of the estimate/Advanced siblings below it.  Its stale outer
+            # geometry is what caused the visual overlap after expansion.
+            self.setup_card.setMinimumHeight(setup_layout.sizeHint().height())
+        # The estimate row and Advanced toggle are siblings after
+        # ``setupChoices`` inside ``setup_card``.  Updating only the scroll
+        # host skips that parent layout, leaving those siblings at their
+        # collapsed y-position and painting over the lower choice sections.
+        owner: QWidget | None = self._setup_choices_host
+        while owner is not None:
+            owner_layout = owner.layout()
+            if owner_layout is not None:
+                owner_layout.invalidate()
+                owner_layout.activate()
+            owner.updateGeometry()
+            if owner is self.content_host:
+                break
+            owner = owner.parentWidget()
 
     @staticmethod
     def _choose_setup_value(owner: QComboBox, value: object) -> None:
@@ -1975,20 +1996,12 @@ class ProjectScreen(QWidget):
 
     def _set_all_profiles_visible(self, visible: bool) -> None:
         self.setup_profile_more.setVisible(visible)
-        if visible and self.setup_profile_more.layout() is not None:
-            # This child owns a dynamic grid. Reserve its complete first
-            # layout pass before placing the following toggle; Qt otherwise
-            # retains the collapsed height for one paint and lets rows overlap.
-            self.setup_profile_more.setFixedHeight(
-                self.setup_profile_more.layout().sizeHint().height()
-            )
-        elif not visible:
-            self.setup_profile_more.setMinimumHeight(0)
-            self.setup_profile_more.setMaximumHeight(16_777_215)
         self.setup_profile_more_toggle.setText(
             "Скрыть дополнительные" if visible else "Ещё 11 профилей"
         )
+        self._refresh_setup_choice_container_geometry()
         self._reflow_setup_choice_grids()
+        QTimer.singleShot(0, self._refresh_setup_choice_container_geometry)
         QTimer.singleShot(0, self._reflow_setup_choice_grids)
 
     def _sync_setup_choice_buttons(self, project: DesktopProject) -> None:
