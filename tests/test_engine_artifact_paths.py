@@ -94,19 +94,50 @@ def test_engine_publishes_absolute_paths_in_index_and_state(tmp_path: Path) -> N
     source.write_bytes(b"source")
     pipeline = Pipeline(tmp_path, AppConfig(), run_id="run-with-$-characters", project_id="project-paths")
     _source, work_directory, output_directory = pipeline._prepare_source(str(source), None)
-    tracker = StageTracker(work_directory / "state.json")
+    assert pipeline.run_work_directory is not None
+    tracker = StageTracker(pipeline.run_work_directory / "state.json")
 
     pipeline._publish_run_paths(tracker, work_directory, output_directory)
     metadata = find_run_artifact_metadata(
         tmp_path, run_id=pipeline.run_id, project_id="project-paths",
         preferred_path=run_metadata_path(tmp_path, pipeline.run_id),
     )
-    state = read_json(work_directory / "state.json")
+    state = read_json(pipeline.run_work_directory / "state.json")
 
     assert metadata is not None
-    assert metadata["paths"]["state_path"] == str((work_directory / "state.json").resolve())
+    assert metadata["paths"]["state_path"] == str((pipeline.run_work_directory / "state.json").resolve())
+    assert metadata["paths"]["heartbeat_path"] == str((pipeline.run_work_directory / "heartbeat.json").resolve())
     assert metadata["paths"]["report_path"] == str((output_directory / "report.json").resolve())
     assert state["run"]["paths"] == metadata["paths"]
+
+
+def test_same_source_runs_publish_distinct_progress_state_and_heartbeat_paths(tmp_path: Path) -> None:
+    """Desktop must never bind one run to a sibling run's live progress."""
+
+    source = tmp_path / "same-source.mp4"
+    source.write_bytes(b"source")
+    first = Pipeline(tmp_path, AppConfig(), run_id="run-a", project_id="project-a")
+    second = Pipeline(tmp_path, AppConfig(), run_id="run-b", project_id="project-a")
+
+    for pipeline in (first, second):
+        _source, work_directory, output_directory = pipeline._prepare_source(str(source), None)
+        assert pipeline.run_work_directory is not None
+        pipeline._publish_run_paths(
+            StageTracker(pipeline.run_work_directory / "state.json"),
+            work_directory,
+            output_directory,
+        )
+
+    first_metadata = find_run_artifact_metadata(tmp_path, run_id="run-a", project_id="project-a")
+    second_metadata = find_run_artifact_metadata(tmp_path, run_id="run-b", project_id="project-a")
+
+    assert first_metadata is not None and second_metadata is not None
+    for path_name in ("state_path", "heartbeat_path"):
+        first_path = Path(first_metadata["paths"][path_name])
+        second_path = Path(second_metadata["paths"][path_name])
+        assert first_path != second_path
+        assert first_path.parent == first.run_work_directory
+        assert second_path.parent == second.run_work_directory
 
 
 def test_new_desktop_run_does_not_scan_unrelated_legacy_reports(tmp_path: Path, monkeypatch) -> None:

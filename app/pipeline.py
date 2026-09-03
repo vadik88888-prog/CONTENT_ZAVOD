@@ -1458,11 +1458,16 @@ class Pipeline:
         a run recoverable when the separate lookup record was not retained.
         """
 
+        # Source-level caches intentionally live in ``work_directory``, but
+        # progress/liveness belongs to exactly one invocation.  Publishing the
+        # cache root here would make Desktop observe a sibling run's stale
+        # state.json and heartbeat.json.
+        assert self.run_work_directory is not None
         metadata = make_run_artifact_metadata(
             engine_root=self.root,
             run_id=self.run_id,
             project_id=self.project_id,
-            work_directory=work_directory,
+            work_directory=self.run_work_directory,
             output_directory=output_directory,
         )
         tracker.set_run_metadata(metadata)
@@ -1471,11 +1476,12 @@ class Pipeline:
     def _publish_completed_run_paths(self, result: PipelineResult) -> None:
         """Update the engine metadata with terminal artifacts and report paths."""
 
+        assert self.run_work_directory is not None
         metadata = make_run_artifact_metadata(
             engine_root=self.root,
             run_id=self.run_id,
             project_id=self.project_id,
-            work_directory=result.work_directory,
+            work_directory=self.run_work_directory,
             output_directory=result.output_directory,
             report_path=result.report_path,
             analysis_artifact_path=result.analysis_path,
@@ -1485,7 +1491,7 @@ class Pipeline:
             terminal_status=result.terminal_status,
         )
         write_run_artifact_metadata(self.root, metadata)
-        state_path = result.work_directory / "state.json"
+        state_path = self.run_work_directory / "state.json"
         state = read_json(state_path, {})
         if isinstance(state, dict):
             state["run"] = metadata
