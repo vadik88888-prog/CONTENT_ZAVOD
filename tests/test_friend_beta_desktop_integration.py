@@ -664,6 +664,7 @@ def test_advanced_controls_keep_automatic_composition_at_existing_runtime_owner(
         preset_selection_mode="explicit",
         reduced_motion=True,
         use_cache=False,
+        speech_language="ru",
     )
 
     persisted = services.projects.load(project.project_id)
@@ -684,6 +685,8 @@ def test_advanced_controls_keep_automatic_composition_at_existing_runtime_owner(
     assert persisted.settings.preset_selection_mode == "explicit"
     assert persisted.settings.reduced_motion is True
     assert persisted.settings.use_cache is False
+    assert persisted.settings.speech_language == "ru"
+    assert config.language == "ru"
     assert config.product_flow.processing_mode == "maximum"
     assert config.product_flow.deep_analysis_requested == "on"
     assert config.product_flow.deep_analysis_resolved is True

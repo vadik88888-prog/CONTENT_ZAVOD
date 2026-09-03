@@ -150,6 +150,40 @@ def test_url_download_keeps_owner_while_another_project_is_open(tmp_path: Path, 
     assert not viewmodel.active
 
 
+def test_low_confidence_language_requires_choice_before_analysis_and_persists_it(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    services = _services(tmp_path)
+    project = _project(services, tmp_path, "Язык речи")
+    viewmodel = ProjectViewModel(services)
+    viewmodel.open(project)
+    viewmodel._launching = True
+    viewmodel._bind_job(project, ProcessingSnapshot(
+        ProcessingPhase.PREPARING, stage="language_probe", message="Определяем язык речи",
+    ))
+    choices: list[object] = []
+    launches: list[tuple[str, str]] = []
+    viewmodel.language_choice_required.connect(choices.append)
+    monkeypatch.setattr(
+        viewmodel, "_start_prepared_job",
+        lambda mode, owner: launches.append((mode, owner.settings.speech_language)),
+    )
+
+    viewmodel._language_probe_ready("analysis", project, SimpleNamespace(
+        language="lt", confidence=0.369, is_confident=False,
+    ))
+
+    assert len(choices) == 1
+    assert launches == []
+    assert not viewmodel.active
+    assert viewmodel.snapshot.message == "Нужно выбрать язык речи"
+
+    viewmodel.choose_speech_language("ru")
+
+    assert launches == [("analysis", "ru")]
+    assert services.projects.load(project.project_id).settings.speech_language == "ru"
+
+
 def test_processing_rows_do_not_overlap_after_dynamic_state_is_revealed(tmp_path: Path) -> None:
     app = _application()
     _services_value, viewmodel, owner, _other, _run, _prepared = _active_context(tmp_path)

@@ -33,6 +33,7 @@ class ProjectViewModel(QObject):
     log_received = Signal(str)
     run_finished = Signal(object)
     project_persisted = Signal(str)
+    language_choice_required = Signal(object)
 
     def __init__(self, services: DesktopServices, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -47,6 +48,8 @@ class ProjectViewModel(QObject):
         self._started_at: float | None = None
         self._after_download = "process"
         self._source_probe_task: BackgroundTask | None = None
+        self._language_probe_task: BackgroundTask | None = None
+        self._pending_language_choice: tuple[str, DesktopProject, object] | None = None
         self._finalization_task: BackgroundTask | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
@@ -68,7 +71,10 @@ class ProjectViewModel(QObject):
 
     @property
     def active(self) -> bool:
-        return self._launching or self.runner.active or self.source_downloader.busy
+        return (
+            self._launching or self.runner.active or self.source_downloader.busy
+            or self._language_probe_task is not None
+        )
 
     @property
     def active_project_id(self) -> str | None:
@@ -127,7 +133,7 @@ class ProjectViewModel(QObject):
             self._start_source_download()
             return
         try:
-            self._start_prepared_job("full")
+            self._start_with_language_guard("full")
         except Exception as error:
             self._launching = False
             self.error_occurred.emit(map_error(error))
@@ -145,7 +151,7 @@ class ProjectViewModel(QObject):
             self._start_source_download()
             return
         try:
-            self._start_prepared_job("analysis")
+            self._start_with_language_guard("analysis")
         except Exception as error:
             self._launching = False
             self.error_occurred.emit(map_error(error))
@@ -390,6 +396,64 @@ class ProjectViewModel(QObject):
         self._emit_owner_processing()
         self.runner.start(self.prepared)
 
+    def _start_with_language_guard(self, mode: str, project: DesktopProject | None = None) -> None:
+        owner = project or self.project
+        if owner is None:
+            raise RuntimeError("Проект не открыт.")
+        if owner.settings.speech_language != "auto":
+            self._start_prepared_job(mode, owner)
+            return
+        self._bind_job(owner, ProcessingSnapshot(
+            ProcessingPhase.PREPARING, stage="language_probe", message="Определяем язык речи",
+        ))
+        self._emit_owner_project()
+        self._emit_owner_processing()
+        task = BackgroundTask(lambda: self.services.probe_spoken_language(owner))
+        task.result_ready.connect(lambda result, selected_mode=mode, selected_owner=owner: self._language_probe_ready(
+            selected_mode, selected_owner, result,
+        ))
+        task.error_raised.connect(self._language_probe_failed)
+        self._language_probe_task = task
+        task.start()
+
+    def _language_probe_ready(self, mode: str, owner: DesktopProject, result: object) -> None:
+        self._language_probe_task = None
+        if getattr(result, "is_confident", False):
+            try:
+                self._start_prepared_job(mode, owner)
+            except Exception as error:
+                self._language_probe_failed(error)
+            return
+        self._pending_language_choice = (mode, owner, result)
+        self._job_snapshot = ProcessingSnapshot(message="Нужно выбрать язык речи")
+        self._emit_owner_processing()
+        self._launching = False
+        self.language_choice_required.emit(result)
+
+    def _language_probe_failed(self, error: object) -> None:
+        self._language_probe_task = None
+        self._launching = False
+        self.error_occurred.emit(map_error(error))
+        self._release_job()
+
+    def choose_speech_language(self, language: str) -> None:
+        pending = self._pending_language_choice
+        self._pending_language_choice = None
+        if pending is None or language not in {"ru", "en"}:
+            return
+        mode, owner, _probe = pending
+        try:
+            owner = self.services.update_project_options(owner, speech_language=language)
+            self._job_project = owner
+            self._launching = True
+            self._start_prepared_job(mode, owner)
+        except Exception as error:
+            self._language_probe_failed(error)
+
+    def cancel_speech_language_choice(self) -> None:
+        self._pending_language_choice = None
+        self._release_job()
+
     def _bind_job(self, project: DesktopProject, snapshot: ProcessingSnapshot) -> None:
         self._job_project = project
         self._job_snapshot = snapshot
@@ -543,10 +607,10 @@ class ProjectViewModel(QObject):
         try:
             if next_action == "analysis":
                 self._launching = True
-                self._start_prepared_job("analysis", self._job_project)
+                self._start_with_language_guard("analysis", self._job_project)
             elif next_action == "process":
                 self._launching = True
-                self._start_prepared_job("full", self._job_project)
+                self._start_with_language_guard("full", self._job_project)
             else:
                 self._release_job()
         except Exception as error:

@@ -70,11 +70,16 @@ class ProjectOptions:
     encoder: str = "auto"
     use_cache: bool = True
     recompute_all: bool = False
+    # Auto remains the default. A manual RU/EN decision is durable because it
+    # changes ASR evidence and must survive a restart or retry.
+    speech_language: str = "auto"
 
     def validate(self) -> None:
         self.processing_intent().validate()
         if self.encoder not in {"auto", "cpu", "nvenc"}:
             raise ValueError("Unsupported encoder.")
+        if self.speech_language not in {"auto", "ru", "en"}:
+            raise ValueError("Unsupported speech language.")
         if self.composition_strategy != "safe_auto":
             raise ValueError("Composition is automatic in Friend Beta.")
         if self.caption_preset_id not in CAPTION_PRESET_DEFINITIONS:
@@ -300,6 +305,7 @@ class DesktopProject:
             "editorial_intent", "content_profile_preset", "profile_format_override", "profile_editorial_mode_override",
             "profile_domain_override", "profile_traits_override",
             "same_source_broll_allowed", "encoder", "use_cache", "recompute_all",
+            "speech_language",
         }
         migrated_settings = {key: item for key, item in settings.items() if key in supported_settings}
         # Earlier desktop builds exposed manual crop choices that were not

@@ -498,6 +498,12 @@ class DesktopServices:
                 )
         return project
 
+    def probe_spoken_language(self, project: DesktopProject):
+        """Run only the bounded Whisper language probe before Analysis exists."""
+
+        self._require_active_license()
+        return self.pipeline.probe_spoken_language(project, self.settings)
+
     def _refresh_setup_state(
         self,
         project: DesktopProject,
@@ -857,6 +863,7 @@ class DesktopServices:
                     "encoder": project.settings.encoder,
                     "use_cache": project.settings.use_cache,
                     "recompute_all": project.settings.recompute_all,
+                    "speech_language": project.settings.speech_language,
                 },
                 "product_flow": {
                     "user_intent": intent.to_dict(),

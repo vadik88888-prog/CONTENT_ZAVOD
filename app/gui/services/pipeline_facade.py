@@ -30,6 +30,7 @@ from app.quality_report import QUALITY_REPORT_SCHEMA_VERSION, aggregate_quality_
 from app.runtime import RuntimeLayout
 from app.secure_secrets import api_key_state
 from app.utils import read_json, safe_name, stable_file_hash
+from app.transcription import LanguageDetection, detect_spoken_language
 
 
 STATE_PERSISTENCE_WARNING = "Ролики созданы, но не удалось сохранить служебное состояние"
@@ -277,6 +278,17 @@ class PipelineFacade:
              "processing_mode": resolved.processing_mode, "platform": resolved.platform.platform},
             source_duration_seconds=_source_duration_seconds(project),
         )
+
+    def probe_spoken_language(
+        self, project: DesktopProject, settings: DesktopSettings,
+    ) -> LanguageDetection:
+        """Use Whisper's bounded language probe before launching Analysis."""
+
+        source_path = validate_video_path(project.source)
+        config = load_config(self._base_config(settings))
+        _intent, resolved, _estimate = self.plan_processing(project, settings)
+        self._apply_project_options(config, project, settings, resolved)
+        return detect_spoken_language(source_path, config)
 
     def prepare_draft(
         self, project: DesktopProject, run: ProjectRun, settings: DesktopSettings, candidate_ids: list[str],
@@ -1641,6 +1653,7 @@ class PipelineFacade:
 
         options = project.settings
         options.validate()
+        config.language = None if options.speech_language == "auto" else options.speech_language
         config.transformation.enabled = True
         config.production.enabled = True
         config.tts.enabled = True

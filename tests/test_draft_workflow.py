@@ -414,12 +414,16 @@ def test_same_source_broll_is_explicit_opt_in_in_runtime_config(tmp_path: Path) 
     services, project, _source = _services(tmp_path)
     assert project.settings.same_source_broll_allowed is False
 
-    services.update_project_options(project, same_source_broll_allowed=True)
-    _run, prepared = services.prepare_analysis(project)
+    services.update_project_options(
+        project, same_source_broll_allowed=True, speech_language="ru",
+    )
+    run, prepared = services.prepare_analysis(project)
     runtime = load_config(prepared.runtime_config_path)
 
     assert project.settings.same_source_broll_allowed is True
     assert runtime.production_render.same_source_broll_allowed is True
+    assert runtime.language == "ru"
+    assert run.settings_snapshot["project_options"]["speech_language"] == "ru"
 
 
 def test_approved_render_enables_the_required_delivery_stages() -> None:

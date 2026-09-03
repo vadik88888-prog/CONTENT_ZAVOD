@@ -13,6 +13,44 @@ from app.models import Segment, Word
 from app.utils import write_json
 
 
+SUPPORTED_SPEECH_LANGUAGES = frozenset({"ru", "en"})
+LANGUAGE_DETECTION_MIN_CONFIDENCE = 0.80
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageDetection:
+    language: str
+    confidence: float
+
+    @property
+    def is_confident(self) -> bool:
+        return (
+            self.language in SUPPORTED_SPEECH_LANGUAGES
+            and self.confidence >= LANGUAGE_DETECTION_MIN_CONFIDENCE
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "detected_language": self.language,
+            "confidence": self.confidence,
+            "minimum_confidence": LANGUAGE_DETECTION_MIN_CONFIDENCE,
+            "supported_languages": sorted(SUPPORTED_SPEECH_LANGUAGES),
+            "is_confident": self.is_confident,
+        }
+
+
+class LanguageSelectionRequired(StageError):
+    """Auto language detection is too uncertain for a full ASR pass."""
+
+    def __init__(self, detection: LanguageDetection) -> None:
+        self.detection = detection
+        super().__init__(
+            "Не удалось уверенно определить язык речи "
+            f"(вариант: {detection.language}, уверенность: {detection.confidence:.0%}). "
+            "Выберите русский или английский и повторите анализ."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptionRuntimeSettings:
     device: str
@@ -41,6 +79,31 @@ def transcription_settings(config: AppConfig) -> tuple[str, str]:
     return runtime.device, runtime.compute_type
 
 
+def detect_spoken_language(audio_path: Path, config: AppConfig) -> LanguageDetection:
+    """Run only Whisper's bounded language probe, never a full transcript."""
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as error:
+        raise DependencyError(
+            "faster-whisper не установлен. Выполните: pip install -r requirements.txt"
+        ) from error
+    runtime = resolve_transcription_runtime(config)
+    model = WhisperModel(
+        config.whisper_model, device=runtime.device, compute_type=runtime.compute_type,
+    )
+    return _detect_language(model, audio_path)
+
+
+def _detect_language(model: Any, audio_path: Path) -> LanguageDetection:
+    from faster_whisper.audio import decode_audio
+
+    language, confidence, _all = model.detect_language(
+        audio=decode_audio(str(audio_path), sampling_rate=16000), vad_filter=True,
+    )
+    return LanguageDetection(str(language), float(confidence))
+
+
 def transcribe(
     audio_path: Path,
     source_id: str,
@@ -65,14 +128,22 @@ def transcribe(
     segments: list[Segment] = []
     words: list[Word] = []
     info: Any = None
+    language_detection: LanguageDetection | None = None
+    requested_language = config.language or "auto"
     for current_device, current_compute_type in attempts:
         try:
             model = WhisperModel(
                 config.whisper_model, device=current_device, compute_type=current_compute_type
             )
+            effective_language = config.language
+            if effective_language is None:
+                language_detection = _detect_language(model, audio_path)
+                if not language_detection.is_confident:
+                    raise LanguageSelectionRequired(language_detection)
+                effective_language = language_detection.language
             segments_iterator, info = model.transcribe(
                 str(audio_path),
-                language=config.language,
+                language=effective_language,
                 word_timestamps=True,
                 vad_filter=True,
             )
@@ -98,6 +169,8 @@ def transcribe(
             device, compute_type = current_device, current_compute_type
             break
         except Exception as error:
+            if isinstance(error, LanguageSelectionRequired):
+                raise
             errors.append(str(error))
             if current_device == "cuda" and len(attempts) > 1:
                 fallback_reason = str(error)
@@ -116,6 +189,17 @@ def transcribe(
         "segments": [segment.to_dict() for segment in segments],
         "words": [word.to_dict() for word in words],
         "model": config.whisper_model,
+        "language_detection": {
+            "requested_language": requested_language,
+            "resolution": "auto_confident" if language_detection else "manual",
+            **(language_detection.to_dict() if language_detection else {
+                "detected_language": getattr(info, "language", config.language),
+                "confidence": getattr(info, "language_probability", None),
+                "minimum_confidence": LANGUAGE_DETECTION_MIN_CONFIDENCE,
+                "supported_languages": sorted(SUPPORTED_SPEECH_LANGUAGES),
+                "is_confident": True,
+            }),
+        },
         "runtime": {
             "device": device,
             "selected_device": device,

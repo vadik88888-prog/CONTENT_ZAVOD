@@ -3,9 +3,11 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import AppConfig
 from app.cuda_runtime import CudaRuntimeProbe
-from app.transcription import transcribe
+from app.transcription import LanguageDetection, LanguageSelectionRequired, transcribe
 
 
 def test_auto_device_retries_on_cpu_when_cuda_initialization_fails(tmp_path, monkeypatch) -> None:
@@ -24,7 +26,7 @@ def test_auto_device_retries_on_cpu_when_cuda_initialization_fails(tmp_path, mon
     audio.write_bytes(b"audio")
 
     transcript = transcribe(
-        audio, "source", 1, AppConfig(device="auto"), tmp_path / "transcript.json"
+        audio, "source", 1, AppConfig(device="auto", language="en"), tmp_path / "transcript.json"
     )
 
     assert transcript["runtime"]["device"] == "cpu"
@@ -59,7 +61,7 @@ def test_incomplete_cuda_runtime_uses_cpu_before_creating_whisper_model(tmp_path
     audio.write_bytes(b"audio")
 
     transcript = transcribe(
-        audio, "source", 1, AppConfig(device="auto"), tmp_path / "transcript.json"
+        audio, "source", 1, AppConfig(device="auto", language="en"), tmp_path / "transcript.json"
     )
 
     assert created_devices == ["cpu"]
@@ -85,8 +87,90 @@ def test_explicit_cuda_also_uses_cpu_when_its_runtime_is_incomplete(tmp_path, mo
     audio.write_bytes(b"audio")
 
     transcript = transcribe(
-        audio, "source", 1, AppConfig(device="cuda"), tmp_path / "transcript.json"
+        audio, "source", 1, AppConfig(device="cuda", language="en"), tmp_path / "transcript.json"
     )
 
     assert transcript["runtime"]["device"] == "cpu"
     assert transcript["runtime"]["fallback_reason"].startswith("CUDA runtime incomplete")
+
+
+def test_low_confidence_auto_language_stops_before_full_transcription(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, *_args, **_kwargs):
+            calls.append("transcribe")
+            return iter([]), SimpleNamespace(language="lt", language_probability=0.369)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel))
+    monkeypatch.setattr(
+        "app.transcription._detect_language",
+        lambda *_args: LanguageDetection("lt", 0.369),
+    )
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+
+    with pytest.raises(LanguageSelectionRequired) as error:
+        transcribe(audio, "source", 1, AppConfig(language=None, device="cpu"), tmp_path / "transcript.json")
+
+    assert error.value.detection.language == "lt"
+    assert calls == []
+    assert not (tmp_path / "transcript.json").exists()
+
+
+def test_confident_auto_language_uses_probe_result_and_persists_telemetry(tmp_path, monkeypatch) -> None:
+    observed: list[str | None] = []
+
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, _audio_path, language, word_timestamps, vad_filter):
+            observed.append(language)
+            assert word_timestamps is True and vad_filter is True
+            return iter([]), SimpleNamespace(language="ru", language_probability=1.0)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel))
+    monkeypatch.setattr(
+        "app.transcription._detect_language",
+        lambda *_args: LanguageDetection("ru", 0.96),
+    )
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+
+    transcript = transcribe(audio, "source", 1, AppConfig(language=None, device="cpu"), tmp_path / "transcript.json")
+
+    assert observed == ["ru"]
+    assert transcript["language_detection"] == {
+        "requested_language": "auto", "resolution": "auto_confident",
+        "detected_language": "ru", "confidence": 0.96,
+        "minimum_confidence": 0.80, "supported_languages": ["en", "ru"],
+        "is_confident": True,
+    }
+
+
+def test_manual_language_is_retained_in_transcript_telemetry(tmp_path, monkeypatch) -> None:
+    class FakeWhisperModel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def transcribe(self, _audio_path, language, word_timestamps, vad_filter):
+            assert language == "ru"
+            assert word_timestamps is True and vad_filter is True
+            return iter([]), SimpleNamespace(language="ru", language_probability=1.0)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel))
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+
+    transcript = transcribe(audio, "source", 1, AppConfig(language="ru", device="cpu"), tmp_path / "transcript.json")
+
+    assert transcript["language_detection"] == {
+        "requested_language": "ru", "resolution": "manual",
+        "detected_language": "ru", "confidence": 1.0,
+        "minimum_confidence": 0.80, "supported_languages": ["en", "ru"],
+        "is_confident": True,
+    }

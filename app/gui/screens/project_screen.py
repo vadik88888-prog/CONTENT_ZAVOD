@@ -760,6 +760,7 @@ class ProjectScreen(QWidget):
         self.viewmodel.runs_changed.connect(self._queue_runs_changed)
         self.viewmodel.processing_changed.connect(self._processing_changed)
         self.viewmodel.error_occurred.connect(self._error)
+        self.viewmodel.language_choice_required.connect(self._choose_speech_language)
         self._compact_stage_layout: bool | None = None
         self._compact_action_layout: bool | None = None
         self._short_stage_layout: bool | None = None
@@ -2508,6 +2509,29 @@ class ProjectScreen(QWidget):
         if not self.project:
             return
         self.viewmodel.start_analysis()
+
+    def _choose_speech_language(self, detection: object) -> None:
+        language = str(getattr(detection, "language", "") or "unknown")
+        confidence = getattr(detection, "confidence", None)
+        confidence_text = f" ({float(confidence):.0%})" if isinstance(confidence, (int, float)) else ""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Выберите язык речи")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText("Автоматическое определение языка недостаточно уверенно.")
+        dialog.setInformativeText(
+            f"Предположительный язык: {language}{confidence_text}. "
+            "Полная расшифровка не запускалась. Выберите язык речи для анализа."
+        )
+        russian = dialog.addButton("Русский", QMessageBox.ButtonRole.AcceptRole)
+        english = dialog.addButton("English", QMessageBox.ButtonRole.AcceptRole)
+        cancel = dialog.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is russian:
+            self.viewmodel.choose_speech_language("ru")
+        elif dialog.clickedButton() is english:
+            self.viewmodel.choose_speech_language("en")
+        elif dialog.clickedButton() is cancel:
+            self.viewmodel.cancel_speech_language_choice()
 
     def _analysis_artifact(self, project: DesktopProject) -> dict[str, Any]:
         if not project.analysis_artifact_path:
