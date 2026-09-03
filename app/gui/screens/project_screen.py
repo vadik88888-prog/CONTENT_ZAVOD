@@ -14,7 +14,7 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.analysis_artifact import candidate_is_draftable
@@ -342,6 +342,7 @@ class ProjectScreen(QWidget):
         self.setup_card = self._card("Настройка")
         self.setup_card.setObjectName("setup-card")
         setup_layout = self.setup_card.layout()
+        setup_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.setup_source = QLabel()
         self.setup_source.setObjectName("muted")
         make_label_shrinkable(self.setup_source)
@@ -1964,15 +1965,7 @@ class ProjectScreen(QWidget):
             )
         self._setup_choices_layout.invalidate()
         self._setup_choices_layout.activate()
-        self._setup_choices_host.setFixedHeight(self._setup_choices_layout.sizeHint().height())
-        setup_layout = self.setup_card.layout()
-        if setup_layout is not None:
-            setup_layout.invalidate()
-            setup_layout.activate()
-            # ``setup_card`` is the immediate owner of the profile grid and
-            # of the estimate/Advanced siblings below it.  Its stale outer
-            # geometry is what caused the visual overlap after expansion.
-            self.setup_card.setMinimumHeight(setup_layout.sizeHint().height())
+        self._setup_choices_host.setMinimumHeight(self._setup_choices_layout.sizeHint().height())
         # The estimate row and Advanced toggle are siblings after
         # ``setupChoices`` inside ``setup_card``.  Updating only the scroll
         # host skips that parent layout, leaving those siblings at their
@@ -1987,6 +1980,14 @@ class ProjectScreen(QWidget):
             if owner is self.content_host:
                 break
             owner = owner.parentWidget()
+        content_layout = self.content_host.layout()
+        if content_layout is not None:
+            # Let the scroll area's actual content owner request its new
+            # natural height.  A minimum here is recalculated on both expand
+            # and collapse; pinning the nested Setup card itself made the
+            # whole screen stay artificially tall.
+            self.content_host.setMinimumHeight(content_layout.sizeHint().height())
+            self.content_host.updateGeometry()
 
     @staticmethod
     def _choose_setup_value(owner: QComboBox, value: object) -> None:
