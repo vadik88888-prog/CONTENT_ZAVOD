@@ -925,6 +925,7 @@ def test_failed_draft_exposes_retry_skip_and_log_without_raw_engine_diagnostics(
     monkeypatch.setattr(VideoPreview, "show_source", lambda *_args, **_kwargs: None)
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    monkeypatch.setattr(screen, "_choose_feedback_reason", lambda *_args: "captions")
 
     try:
         screen.open(project)
@@ -1061,6 +1062,7 @@ def test_ready_draft_needs_an_explicit_confirm_or_reject_before_production(tmp_p
     )
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    monkeypatch.setattr(screen, "_choose_feedback_reason", lambda *_args: "captions")
 
     try:
         screen.open(project)
@@ -1220,6 +1222,7 @@ def test_persisted_drafts_override_stale_moments_route_and_final_cta_wins(tmp_pa
     monkeypatch.setattr(viewmodel, "build_drafts", lambda ids: launches.append(list(ids)))
     screen = ProjectScreen(viewmodel)
     monkeypatch.setattr(screen._thumbnail_loader, "request", lambda **_kwargs: Path("thumbnail.jpg"))
+    monkeypatch.setattr(screen, "_choose_feedback_reason", lambda *_args: "captions")
 
     try:
         screen.open(project)

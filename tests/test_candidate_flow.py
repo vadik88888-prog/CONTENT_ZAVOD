@@ -148,6 +148,7 @@ def test_cli_returns_nonzero_for_reported_zero_output(tmp_path: Path, monkeypatc
             return result
 
     monkeypatch.setattr("app.cli.load_config", lambda _path: AppConfig())
+    monkeypatch.setattr("app.cli.require_processing_license", lambda _data: None)
     monkeypatch.setattr("app.cli.Pipeline", FakePipeline)
 
     assert main(["process", "--input", str(tmp_path / "pubg_source.webm")]) == 2

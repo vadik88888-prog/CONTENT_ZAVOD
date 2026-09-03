@@ -1575,7 +1575,11 @@ def test_native_creative_decisions_change_rendered_output_end_to_end(tmp_path: P
         encoding="utf-8-sig"
     )
     assert "CaptionPlan: 7C.caption-plan.1" in rendered_ass
-    assert "\\fad(" in rendered_ass
+    # The fixture has phrase-only timing, so the native caption plan must
+    # retain its deterministic static safety fallback instead of inventing a
+    # word-timed fade animation.
+    assert all(cue.primitive_id == "static" for cue in compiled.caption_plan.cues)
+    assert "\\fad(" not in rendered_ass
     assert preview.metadata.compiled_plan_hash == final.metadata.compiled_plan_hash == compiled.plan_hash
     assert preview.metadata.parity_signature == final.metadata.parity_signature == compiled.parity_signature
     assert Path(calm.result.output_file or "").read_bytes() != Path(final.result.output_file or "").read_bytes()

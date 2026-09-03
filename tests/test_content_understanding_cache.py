@@ -937,6 +937,7 @@ def test_all_invalid_approved_plans_persist_terminal_report_before_render_cli_ex
     stale["draft_production_plan"]["envelope"]["input_fingerprints"]["analysis_sha256"] = "0" * 64
     write_json(draft.draft_path, artifact)
     monkeypatch.setattr("app.cli.load_config", lambda _path: AppConfig(score_threshold=0))
+    monkeypatch.setattr("app.cli.require_processing_license", lambda _data: None)
     monkeypatch.chdir(tmp_path)
 
     run_id = "all-invalid-approved-render"

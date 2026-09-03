@@ -94,6 +94,9 @@ def test_viewmodel_rejects_duplicate_launch_before_qprocess_becomes_active(monke
     run = services.runs.create(project, {}, {"path": str(project.source)}, "0.1.0")
     prepared = _prepared(tmp_path, ["-u", "-c", "print('later')"])
     calls: list[bool] = []
+    project.settings.speech_language = "ru"
+    services.projects.save(project)
+    monkeypatch.setattr(DesktopServices, "require_processing_access", lambda _self: None)
     monkeypatch.setattr(DesktopServices, "prepare_run", lambda _self, _project: (calls.append(True) or (run, prepared)))
     viewmodel = ProjectViewModel(services)
     viewmodel.open(project)
