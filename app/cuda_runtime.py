@@ -3,8 +3,14 @@ from __future__ import annotations
 """Bounded CUDA-runtime checks shared by transcription and diagnostics."""
 
 import ctypes
+import os
 import platform
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+_WINDOWS_DLL_DIRECTORY_HANDLES: dict[Path, Any] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +41,39 @@ def required_cuda_libraries() -> tuple[str, ...]:
 def _load_cuda_library(library: str) -> None:
     loader = getattr(ctypes, "WinDLL", ctypes.CDLL)
     loader(library)
+
+
+def _windows_cuda_bin_directory() -> Path | None:
+    """Return CUDA_PATH/bin when it is a usable Windows CUDA installation."""
+
+    cuda_path = os.environ.get("CUDA_PATH")
+    if not cuda_path:
+        return None
+    cuda_bin = Path(cuda_path) / "bin"
+    return cuda_bin if cuda_bin.is_dir() else None
+
+
+def _add_windows_dll_directory(directory: Path) -> None:
+    """Keep CUDA's directory in the process DLL search path for CTranslate2 too."""
+
+    if directory in _WINDOWS_DLL_DIRECTORY_HANDLES:
+        return
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is not None:
+        _WINDOWS_DLL_DIRECTORY_HANDLES[directory] = add_dll_directory(str(directory))
+
+
+def _cuda_library_load_target(library: str) -> str:
+    """Prefer the configured CUDA installation over an ambient DLL search path."""
+
+    if platform.system() == "Windows":
+        cuda_bin = _windows_cuda_bin_directory()
+        if cuda_bin is not None:
+            _add_windows_dll_directory(cuda_bin)
+            candidate = cuda_bin / library
+            if candidate.is_file():
+                return str(candidate)
+    return library
 
 
 def probe_cuda_runtime() -> CudaRuntimeProbe:
@@ -71,7 +110,7 @@ def probe_cuda_runtime() -> CudaRuntimeProbe:
     libraries = required_cuda_libraries()
     for library in libraries:
         try:
-            _load_cuda_library(library)
+            _load_cuda_library(_cuda_library_load_target(library))
         except OSError as error:
             return CudaRuntimeProbe(
                 device_count=device_count,
