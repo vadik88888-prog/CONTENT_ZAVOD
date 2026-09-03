@@ -286,17 +286,15 @@ def main() -> int:
 
     collected = dist_path / "ContentFactory"
     executable = collected / "ContentFactory.exe"
-    # The optional BGutil/mweb provider is intentionally not staged into the
-    # portable package: on current YouTube it rejects public videos that the
-    # pinned yt-dlp executable can ingest normally.  Keep this tolerant for
-    # older build caches, but never require it for the portable artifact.
     staged_youtube_runtime = collected / "_internal" / "youtube-access-runtime"
-    if staged_youtube_runtime.is_dir():
-        _restore_deno_junctions(staged_youtube_runtime)
+    _restore_deno_junctions(staged_youtube_runtime)
     required = [
         executable,
         collected / "_internal" / "config.example.yaml",
         collected / "_internal" / "app" / "gui" / "styles" / "theme.qss",
+        staged_youtube_runtime / "runtime.json",
+        staged_youtube_runtime / "yt-dlp-plugins" / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_script.py",
+        staged_youtube_runtime / "server" / "src" / "generate_once.ts",
         *(collected / "_internal" / "tools" / str(item["name"]) for item in verified_binaries),
     ]
     missing = [str(path) for path in required if not path.is_file()]

@@ -76,7 +76,18 @@ def main() -> int:
     executable = portable / "ContentFactory.exe"
     config = portable / "_internal" / "config.example.yaml"
     deno = portable / "_internal" / "tools" / "deno.exe"
-    if not executable.is_file() or not config.is_file() or not deno.is_file():
+    youtube_runtime = portable / "_internal" / "youtube-access-runtime"
+    required_youtube_runtime_files = (
+        youtube_runtime / "runtime.json",
+        youtube_runtime / "yt-dlp-plugins" / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_script.py",
+        youtube_runtime / "server" / "src" / "generate_once.ts",
+    )
+    if (
+        not executable.is_file()
+        or not config.is_file()
+        or not deno.is_file()
+        or any(not path.is_file() for path in required_youtube_runtime_files)
+    ):
         raise RuntimeError("Freshly extracted portable folder is incomplete.")
     environment = dict(os.environ)
     environment.update({
@@ -200,6 +211,13 @@ if (-not $process.HasExited) {{
             "exit_code": deno_check.returncode,
             "seconds": round(deno_seconds, 3),
             "version_line": deno_output.splitlines()[0],
+        },
+        "youtube_access_runtime": {
+            "path": str(youtube_runtime.relative_to(portable)).replace("\\", "/"),
+            "required_files": [
+                str(path.relative_to(portable)).replace("\\", "/")
+                for path in required_youtube_runtime_files
+            ],
         },
         "frozen_cli": {
             "exit_code": cli.returncode,
