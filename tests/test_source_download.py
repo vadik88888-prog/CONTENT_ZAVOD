@@ -120,10 +120,17 @@ def test_youtube_mweb_provider_contract_is_pinned_and_never_uses_cookies(tmp_pat
         runtime_cache_directory=str(tmp_path / "cache"),
     )
 
-    arguments = build_ytdlp_download_arguments(
+    initial_arguments = build_ytdlp_download_arguments(
         capabilities, "https://www.youtube.com/watch?v=_PCWk_GD9c4", tmp_path,
     )
-    environment = capabilities.process_environment({"PATH": "C:/portable/tools"})
+    fallback_arguments = build_ytdlp_download_arguments(
+        capabilities, "https://www.youtube.com/watch?v=_PCWk_GD9c4", tmp_path,
+        use_po_token_fallback=True,
+    )
+    environment = capabilities.process_environment(
+        {"PATH": "C:/portable/tools"},
+        use_po_token_fallback=True,
+    )
 
     assert BGUTIL_PROVIDER_VERSION == "1.3.2"
     assert [
@@ -131,12 +138,106 @@ def test_youtube_mweb_provider_contract_is_pinned_and_never_uses_cookies(tmp_pat
         "--remote-components", "ejs:github",
         "--extractor-args", "youtube:player_client=mweb",
         "--extractor-args", f"youtubepot-bgutilscript:server_home={server_home}",
-    ] == arguments[4:12]
+    ] == fallback_arguments[4:12]
+    assert "youtube:player_client=mweb" not in initial_arguments
+    assert "--plugin-dirs" not in initial_arguments
     assert environment["XDG_CACHE_HOME"] == str((tmp_path / "cache").resolve())
     assert environment["DENO_DIR"] == str((tmp_path / "cache" / "deno").resolve())
     assert (tmp_path / "cache" / "bgutil-ytdlp-pot-provider").is_dir()
-    assert not any("cookie" in argument.casefold() for argument in arguments)
-    assert not any(argument in {"-f", "--format", "--remux-video", "--merge-output-format"} for argument in arguments)
+    assert not any("cookie" in argument.casefold() for argument in fallback_arguments)
+    assert not any(
+        argument in {"-f", "--format", "--remux-video", "--merge-output-format"}
+        for argument in fallback_arguments
+    )
+
+
+def test_non_qt_inspect_retries_with_provider_only_after_po_token_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    plugin_directory = tmp_path / "plugins"
+    server_home = tmp_path / "server"
+    capabilities = YtDlpCapabilities(
+        "yt-dlp.exe",
+        "deno.exe",
+        po_token_provider=True,
+        plugin_directory=str(plugin_directory),
+        po_token_server_home=str(server_home),
+        runtime_cache_directory=str(tmp_path / "cache"),
+    )
+
+    class FirstResult:
+        returncode = 1
+        stdout = ""
+        stderr = "ERROR: This client requires a PO Token"
+
+    class FallbackResult:
+        returncode = 0
+        stdout = '{"title":"Public video","duration":12,"ext":"mp4"}'
+        stderr = ""
+
+    results = iter((FirstResult(), FallbackResult()))
+
+    def fake_run(arguments, **_kwargs):
+        calls.append(arguments)
+        return next(results)
+
+    monkeypatch.setattr(download_module.subprocess, "run", fake_run)
+
+    metadata = YtDlpSource(capabilities=capabilities).inspect("https://example.test/video")
+
+    assert metadata.title == "Public video"
+    assert len(calls) == 2
+    assert "youtube:player_client=mweb" not in calls[0]
+    assert "youtube:player_client=mweb" in calls[1]
+
+
+def test_non_qt_download_retries_with_provider_only_after_po_token_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sources"
+    target.mkdir()
+    downloaded = target / "video.mp4"
+    downloaded.write_bytes(b"video")
+    calls: list[list[str]] = []
+    capabilities = YtDlpCapabilities(
+        "yt-dlp.exe",
+        "deno.exe",
+        po_token_provider=True,
+        plugin_directory=str(tmp_path / "plugins"),
+        po_token_server_home=str(tmp_path / "server"),
+        runtime_cache_directory=str(tmp_path / "cache"),
+    )
+
+    class FakeProcess:
+        def __init__(self, stdout: str, stderr: str, exit_code: int) -> None:
+            self.stdout = io.StringIO(stdout)
+            self.stderr = io.StringIO(stderr)
+            self._exit_code = exit_code
+
+        def wait(self, timeout=None):
+            return self._exit_code
+
+        def poll(self):
+            return self._exit_code
+
+    processes = iter((
+        FakeProcess("", "ERROR: This client requires a PO Token\n", 1),
+        FakeProcess(f"{downloaded}\n", "", 0),
+    ))
+
+    def fake_popen(arguments, **_kwargs):
+        calls.append(arguments)
+        return next(processes)
+
+    monkeypatch.setattr(download_module.subprocess, "Popen", fake_popen)
+
+    assert YtDlpSource(capabilities=capabilities).download("https://example.test/video", target) == downloaded.resolve()
+    assert len(calls) == 2
+    assert "youtube:player_client=mweb" not in calls[0]
+    assert "youtube:player_client=mweb" in calls[1]
 
 
 def test_inspect_parses_only_stdout_and_retains_stderr_warning(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -407,6 +508,46 @@ def test_qt_service_uses_shared_contract(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert received == [build_ytdlp_inspect_arguments(capabilities, "https://example.test/video")]
     assert service.process.program() == "yt-dlp.exe"
+
+
+def test_qt_service_retries_with_provider_only_after_po_token_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    QCoreApplication.instance() or QCoreApplication([])
+    capabilities = YtDlpCapabilities(
+        "yt-dlp.exe",
+        "deno.exe",
+        po_token_provider=True,
+        plugin_directory=str(tmp_path / "plugins"),
+        po_token_server_home=str(tmp_path / "server"),
+        runtime_cache_directory=str(tmp_path / "cache"),
+    )
+    service = URLSourceService()
+    service._capabilities = capabilities
+    service._mode = "metadata"
+    service._url = "https://example.test/video"
+    service._stderr_chunks = ["ERROR: This client requires a PO Token\n"]
+    starts: list[tuple[list[str], bool]] = []
+    monkeypatch.setattr(
+        service,
+        "_start",
+        lambda arguments, *, use_po_token_fallback=False: starts.append(
+            (arguments, use_po_token_fallback),
+        ),
+    )
+
+    service._finished(1, QProcess.ExitStatus.NormalExit)
+
+    assert starts == [(
+        build_ytdlp_inspect_arguments(
+            capabilities,
+            "https://example.test/video",
+            use_po_token_fallback=True,
+        ),
+        True,
+    )]
+    assert service.busy
 
 
 def test_qt_url_service_releases_its_windows_job_on_terminal_state(monkeypatch) -> None:

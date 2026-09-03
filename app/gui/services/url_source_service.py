@@ -18,6 +18,7 @@ from app.source_download import (
     normalize_ytdlp_diagnostics,
     parse_download_progress,
     parse_url_metadata,
+    should_retry_with_po_token_fallback,
     sanitize_public_url_for_diagnostics,
     validate_public_video_url,
     YtDlpCapabilities,
@@ -72,6 +73,7 @@ class URLSourceService(QObject):
         self._stdout_lines: list[str] = []
         self._stdout_pending = ""
         self._capabilities: YtDlpCapabilities | None = None
+        self._using_po_token_fallback = False
         self.last_diagnostics = ""
         self.last_failure: URLDownloadFailure | None = None
         self._cancel_requested = False
@@ -140,17 +142,22 @@ class URLSourceService(QObject):
         self._process_id = 0
         self._release_process_job()
         self.process.setProgram(capabilities.executable)
-        # Keep the BGutil/Deno cache under Content Factory's writable runtime
-        # area.  The exact environment is also used by the non-Qt source
-        # adapter, so there is no second YouTube downloader contract.
-        environment = QProcessEnvironment.systemEnvironment()
-        for key, value in capabilities.process_environment().items():
-            environment.insert(key, value)
-        self.process.setProcessEnvironment(environment)
+        self._using_po_token_fallback = False
         self.busy_changed.emit(True)
         return safe_url
 
-    def _start(self, arguments: list[str]) -> None:
+    def _start(self, arguments: list[str], *, use_po_token_fallback: bool = False) -> None:
+        assert self._capabilities is not None
+        # The Qt and non-Qt adapters receive exactly the same child-only
+        # environment. BGutil's Deno cache is enabled only for the bounded
+        # fallback attempt, never for an ordinary public YouTube request.
+        environment = QProcessEnvironment.systemEnvironment()
+        for key, value in self._capabilities.process_environment(
+            use_po_token_fallback=use_po_token_fallback,
+        ).items():
+            environment.insert(key, value)
+        self.process.setProcessEnvironment(environment)
+        self._using_po_token_fallback = use_po_token_fallback
         self.process.setArguments(arguments)
         self.process.start()
 
@@ -217,10 +224,10 @@ class URLSourceService(QObject):
         mode, url, directory = self._mode, self._url, self._target_directory
         if mode is None:
             return
-        self._mode = self._url = None
         self._cancel_kill_timer.stop()
-        self.busy_changed.emit(False)
         if self._cancel_requested:
+            self._mode = self._url = None
+            self.busy_changed.emit(False)
             if directory:
                 cleanup_partial_downloads(directory)
             self.cancelled.emit()
@@ -229,10 +236,21 @@ class URLSourceService(QObject):
             if directory:
                 cleanup_partial_downloads(directory)
             failure = classify_ytdlp_failure(self.last_diagnostics or stdout)
+            if (
+                self._capabilities is not None
+                and not self._using_po_token_fallback
+                and should_retry_with_po_token_fallback(self._capabilities, failure)
+            ):
+                self._retry_with_po_token_fallback(mode, url, directory)
+                return
+            self._mode = self._url = None
+            self.busy_changed.emit(False)
             if mode == "download" and url:
                 self._record_failure(url, exit_code, failure.reason.value, self.last_diagnostics)
             self.failed.emit(str(failure))
             return
+        self._mode = self._url = None
+        self.busy_changed.emit(False)
         try:
             if mode == "metadata" and url:
                 self.metadata_ready.emit(parse_url_metadata(url, stdout).to_dict())
@@ -258,6 +276,39 @@ class URLSourceService(QObject):
             raise ValueError("Неподдерживаемое состояние загрузки.")
         except Exception as error:
             self.failed.emit(str(error))
+
+    def _retry_with_po_token_fallback(
+        self,
+        mode: str,
+        url: str | None,
+        directory: Path | None,
+    ) -> None:
+        if self._capabilities is None or url is None:
+            return
+        self._mode = mode
+        self._url = url
+        self._target_directory = directory
+        self._stdout_chunks = []
+        self._stderr_chunks = []
+        self._stdout_lines = []
+        self._stdout_pending = ""
+        self.last_diagnostics = ""
+        self._reported_process_error = False
+        if mode == "metadata":
+            arguments = build_ytdlp_inspect_arguments(
+                self._capabilities,
+                url,
+                use_po_token_fallback=True,
+            )
+        else:
+            assert directory is not None
+            arguments = build_ytdlp_download_arguments(
+                self._capabilities,
+                url,
+                directory,
+                use_po_token_fallback=True,
+            )
+        self._start(arguments, use_po_token_fallback=True)
 
     def _record_failure(
         self, url: str, exit_code: int | None, reason: str, diagnostics: str,

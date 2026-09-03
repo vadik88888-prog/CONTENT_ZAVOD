@@ -129,14 +129,20 @@ class YtDlpCapabilities:
     def javascript_runtime_available(self) -> bool:
         return bool(self.deno_executable)
 
-    def common_arguments(self) -> list[str]:
+    @property
+    def po_token_fallback_available(self) -> bool:
+        return bool(
+            self.po_token_provider and self.plugin_directory and self.po_token_server_home
+        )
+
+    def common_arguments(self, *, use_po_token_fallback: bool = False) -> list[str]:
         # Ignoring ambient yt-dlp config is intentional: a user-level config
         # must not silently opt this public-only application into browser
         # cookies, authentication, a downloader, or a format/remux override.
         arguments = ["--ignore-config", "--no-playlist"]
         if self.deno_executable:
             arguments.extend(["--js-runtimes", f"deno:{self.deno_executable}"])
-        if self.po_token_provider and self.plugin_directory and self.po_token_server_home:
+        if use_po_token_fallback and self.po_token_fallback_available:
             # The provider is bundled and pinned with the application.  It
             # mints public-session PO Tokens through Deno; it never receives
             # browser cookies or a user-supplied token.
@@ -150,12 +156,15 @@ class YtDlpCapabilities:
         return arguments
 
     def process_environment(
-        self, environ: Mapping[str, str] | None = None,
+        self,
+        environ: Mapping[str, str] | None = None,
+        *,
+        use_po_token_fallback: bool = False,
     ) -> dict[str, str]:
         """Return the child-only cache environment for the bundled provider."""
 
         values = dict(os.environ if environ is None else environ)
-        if not (self.po_token_provider and self.runtime_cache_directory):
+        if not (use_po_token_fallback and self.po_token_fallback_available and self.runtime_cache_directory):
             return values
         cache_root = Path(self.runtime_cache_directory).expanduser().resolve()
         # BGutil grants Deno write access only to this exact child path.  It
@@ -270,11 +279,16 @@ def detect_ytdlp_capabilities(executable: str | None = None) -> YtDlpCapabilitie
     )
 
 
-def build_ytdlp_inspect_arguments(capabilities: YtDlpCapabilities, url: str) -> list[str]:
+def build_ytdlp_inspect_arguments(
+    capabilities: YtDlpCapabilities,
+    url: str,
+    *,
+    use_po_token_fallback: bool = False,
+) -> list[str]:
     """Return the canonical metadata command arguments (program excluded)."""
 
     return [
-        *capabilities.common_arguments(),
+        *capabilities.common_arguments(use_po_token_fallback=use_po_token_fallback),
         "--skip-download",
         "--dump-single-json",
         url,
@@ -282,13 +296,17 @@ def build_ytdlp_inspect_arguments(capabilities: YtDlpCapabilities, url: str) -> 
 
 
 def build_ytdlp_download_arguments(
-    capabilities: YtDlpCapabilities, url: str, destination: Path,
+    capabilities: YtDlpCapabilities,
+    url: str,
+    destination: Path,
+    *,
+    use_po_token_fallback: bool = False,
 ) -> list[str]:
     """Return the canonical download arguments without changing yt-dlp format selection."""
 
     output_template = str(destination / YTDLP_OUTPUT_TEMPLATE)
     return [
-        *capabilities.common_arguments(),
+        *capabilities.common_arguments(use_po_token_fallback=use_po_token_fallback),
         "--newline",
         "--no-colors",
         "--no-overwrites",
@@ -407,6 +425,18 @@ def describe_public_url_failure(output: str) -> str:
     return str(classify_ytdlp_failure(output))
 
 
+def should_retry_with_po_token_fallback(
+    capabilities: YtDlpCapabilities,
+    failure: YtDlpSourceError,
+) -> bool:
+    """Permit one provider retry only for yt-dlp's explicit PO Token response."""
+
+    return (
+        capabilities.po_token_fallback_available
+        and failure.reason == YtDlpFailureReason.PO_TOKEN_REQUIRED
+    )
+
+
 class YtDlpSource:
     """A process-only adapter. It never reads browser cookies or invokes a shell."""
 
@@ -427,7 +457,28 @@ class YtDlpSource:
     def inspect(self, url: str) -> URLMetadata:
         safe_url = validate_public_video_url(url)
         executable = self._require_executable()
-        command = [executable, *build_ytdlp_inspect_arguments(self.capabilities, safe_url)]
+        try:
+            return self._inspect_once(executable, safe_url)
+        except YtDlpSourceError as failure:
+            if not should_retry_with_po_token_fallback(self.capabilities, failure):
+                raise
+            return self._inspect_once(executable, safe_url, use_po_token_fallback=True)
+
+    def _inspect_once(
+        self,
+        executable: str,
+        safe_url: str,
+        *,
+        use_po_token_fallback: bool = False,
+    ) -> URLMetadata:
+        command = [
+            executable,
+            *build_ytdlp_inspect_arguments(
+                self.capabilities,
+                safe_url,
+                use_po_token_fallback=use_po_token_fallback,
+            ),
+        ]
         self.last_diagnostics = ""
         try:
             result = subprocess.run(
@@ -435,7 +486,9 @@ class YtDlpSource:
                 capture_output=True,
                 timeout=90,
                 check=False,
-                env=self.capabilities.process_environment(),
+                env=self.capabilities.process_environment(
+                    use_po_token_fallback=use_po_token_fallback,
+                ),
                 **UTF8_REPLACE_TEXT,
             )
             stdout = str(getattr(result, "stdout", "") or "")
@@ -471,14 +524,48 @@ class YtDlpSource:
         executable = self._require_executable()
         destination = target_directory.expanduser().resolve()
         destination.mkdir(parents=True, exist_ok=True)
-        command = [executable, *build_ytdlp_download_arguments(self.capabilities, safe_url, destination)]
+        try:
+            return self._download_once(executable, safe_url, destination, on_progress, cancel_event)
+        except YtDlpSourceError as failure:
+            if not should_retry_with_po_token_fallback(self.capabilities, failure):
+                raise
+            return self._download_once(
+                executable,
+                safe_url,
+                destination,
+                on_progress,
+                cancel_event,
+                use_po_token_fallback=True,
+            )
+
+    def _download_once(
+        self,
+        executable: str,
+        safe_url: str,
+        destination: Path,
+        on_progress: ProgressCallback | None,
+        cancel_event: threading.Event | None,
+        *,
+        use_po_token_fallback: bool = False,
+    ) -> Path:
+        command = [
+            executable,
+            *build_ytdlp_download_arguments(
+                self.capabilities,
+                safe_url,
+                destination,
+                use_po_token_fallback=use_po_token_fallback,
+            ),
+        ]
         self.last_diagnostics = ""
         try:
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=self.capabilities.process_environment(),
+                env=self.capabilities.process_environment(
+                    use_po_token_fallback=use_po_token_fallback,
+                ),
                 **UTF8_REPLACE_TEXT,
             )
         except OSError as error:
