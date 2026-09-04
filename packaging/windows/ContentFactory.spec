@@ -81,10 +81,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    # Keep standard handles available to the internal CLI started by QProcess.
-    # The console bootloader hides a console it owns before the Qt shell starts.
-    console=True,
-    hide_console="hide-early",
+    # A windowed bootloader must not allocate a terminal for a normal GUI
+    # launch. The entrypoint restores QProcess-provided stdout/stderr only for
+    # the private internal CLI switch.
+    console=False,
     disable_windowed_traceback=False,
 )
 collect = COLLECT(

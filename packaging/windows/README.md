@@ -45,7 +45,8 @@ Outputs:
 The executable starts the desktop by default. Its private
 `--content-factory-internal-cli` switch is reserved for child processes created
 by the desktop runtime; it dispatches the established CLI inside the same exe.
-The spec uses the console bootloader with `hide_console="hide-early"` so the Qt
-launch does not leave a console visible while QProcess workers retain usable
-stdout/stderr. The entrypoint calls `multiprocessing.freeze_support()` before
+The spec uses PyInstaller's windowed bootloader so a normal double-click opens
+only the Qt desktop window. For the private internal CLI switch, the entrypoint
+restores QProcess-provided stdout/stderr pipes before importing the CLI, without
+attaching a console. It also calls `multiprocessing.freeze_support()` before
 application imports.

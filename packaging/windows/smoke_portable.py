@@ -144,6 +144,22 @@ def main() -> int:
     escaped_portable = str(portable).replace("'", "''")
     native_script = f"""
 $ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ContentFactoryConsoleProbe {{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AttachConsole(uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeConsole();
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+}}
+'@
 $process = Start-Process -FilePath '{escaped_executable}' -WorkingDirectory '{escaped_portable}' -PassThru
 $visible = $false
 $title = ''
@@ -166,6 +182,18 @@ if ($visible -and -not $process.HasExited) {{
     $process.Refresh()
     $survivedSettle = -not $process.HasExited
 }}
+$consoleAttached = $false
+$consoleWindowHandle = 0
+if (-not $process.HasExited) {{
+    # Detach PowerShell first: AttachConsole can then determine whether the
+    # launched GUI owns or inherited any console, even if it was hidden.
+    [void][ContentFactoryConsoleProbe]::FreeConsole()
+    $consoleAttached = [ContentFactoryConsoleProbe]::AttachConsole([uint32]$process.Id)
+    if ($consoleAttached) {{
+        $consoleWindowHandle = [int64][ContentFactoryConsoleProbe]::GetConsoleWindow()
+        [void][ContentFactoryConsoleProbe]::FreeConsole()
+    }}
+}}
 if (-not $process.HasExited) {{
     $closeRequested = $process.CloseMainWindow()
     if (-not $process.WaitForExit(5000)) {{ Stop-Process -Id $process.Id -Force; $process.WaitForExit() }}
@@ -176,6 +204,8 @@ if (-not $process.HasExited) {{
     window_title = $title
     window_handle = $handle
     survived_settle = $survivedSettle
+    console_attached = $consoleAttached
+    console_window_handle = $consoleWindowHandle
     close_requested = $closeRequested
     exited = $process.HasExited
 }} | ConvertTo-Json -Compress
@@ -199,8 +229,9 @@ if (-not $process.HasExited) {{
         not native_result.get("window_visible")
         or native_result.get("window_title") != "Content Factory"
         or not native_result.get("survived_settle")
+        or native_result.get("console_attached")
     ):
-        raise RuntimeError(f"Native Content Factory window was not observed: {native_result}")
+        raise RuntimeError(f"Native Content Factory GUI/console check failed: {native_result}")
 
     report["status"] = "smoke_passed"
     report["smoke"] = {

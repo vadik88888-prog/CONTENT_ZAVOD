@@ -197,11 +197,13 @@ def test_cli_uses_explicit_runtime_root_instead_of_current_directory(
     assert seen == [data.resolve(), data.resolve()]
 
 
-def test_windows_spec_preserves_worker_stdio_and_early_freeze_support() -> None:
+def test_windows_spec_uses_windowed_bootloader_and_restores_worker_stdio() -> None:
     root = Path(__file__).resolve().parents[1]
     spec = (root / "packaging" / "windows" / "ContentFactory.spec").read_text(encoding="utf-8")
     entrypoint = (root / "packaging" / "windows" / "desktop_entrypoint.py").read_text(encoding="utf-8")
 
-    assert "console=True" in spec
-    assert 'hide_console="hide-early"' in spec
+    assert "console=False" in spec
+    assert "hide_console" not in spec
+    assert "_restore_internal_cli_stdio" in entrypoint
+    assert "msvcrt.open_osfhandle" in entrypoint
     assert entrypoint.index("freeze_support()") < entrypoint.index("from app.frozen_entrypoint import main")

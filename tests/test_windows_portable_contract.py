@@ -72,6 +72,8 @@ def test_fresh_zip_smoke_requires_deno_runtime_and_doctor_capability() -> None:
     assert '"youtube_access_runtime"' in smoke
     assert 'smoke_settings["ai"]["provider"] = "mock"' in smoke
     assert '$null -ne $process.MainWindowHandle' in smoke
+    assert "AttachConsole" in smoke
+    assert 'native_result.get("console_attached")' in smoke
 
 
 def test_portable_collects_shiboken_runtime_for_frozen_qt_startup() -> None:
