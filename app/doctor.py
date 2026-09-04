@@ -69,9 +69,15 @@ class DoctorSummary:
 
 
 def _run(arguments: list[str]) -> str | None:
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     try:
         result = subprocess.run(
-            arguments, check=True, capture_output=True, timeout=10, **UTF8_REPLACE_TEXT
+            arguments,
+            check=True,
+            capture_output=True,
+            timeout=10,
+            creationflags=creationflags,
+            **UTF8_REPLACE_TEXT,
         )
     except (OSError, subprocess.SubprocessError):
         return None

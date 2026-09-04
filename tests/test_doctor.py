@@ -1,5 +1,29 @@
 from app.config import AppConfig
-from app.doctor import Check, _cuda_check, collect_checks, format_report
+from app.doctor import Check, _cuda_check, _run, collect_checks, format_report
+
+
+def test_doctor_child_processes_use_no_window_on_windows(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class Result:
+        stdout = "ok"
+
+    def fake_run(arguments, **kwargs):
+        observed["arguments"] = arguments
+        observed.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr("app.doctor.sys.platform", "win32")
+    monkeypatch.setattr(
+        "app.doctor.subprocess.CREATE_NO_WINDOW",
+        0x08000000,
+        raising=False,
+    )
+    monkeypatch.setattr("app.doctor.subprocess.run", fake_run)
+
+    assert _run(["tool.exe", "--version"]) == "ok"
+    assert observed["creationflags"] == 0x08000000
+    assert observed["capture_output"] is True
 
 
 def test_cuda_check_warns_when_cuda_device_has_an_incomplete_runtime(monkeypatch) -> None:
